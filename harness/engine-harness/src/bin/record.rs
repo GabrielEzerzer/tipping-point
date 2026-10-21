@@ -6,7 +6,7 @@
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -29,12 +29,13 @@ struct Args {
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
+    // From this crate's manifest, not the cwd: `harness/fixtures/recorded/` is the one place
+    // `.gitignore` keeps recordings out of the repo and the replay test looks.
     let mut parsed = Args {
         seconds: 60,
-        out: PathBuf::from(format!(
-            "harness/fixtures/recorded/depth-{}.jsonl",
-            now_ms()
-        )),
+        out: Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/recorded")
+            .join(format!("depth-{}.jsonl", now_ms())),
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -104,7 +105,8 @@ async fn record(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Inbound::Connected { attempt } => eprintln!("connected (attempt {attempt})"),
                 Inbound::ConnectFailed { error } => eprintln!("connect failed: {error}"),
-                Inbound::Disconnected { reason } => {
+                Inbound::Disconnected { reason, dropped_before } => {
+                    dropped += dropped_before;
                     disconnects += 1;
                     eprintln!("disconnected: {reason} (the recording now has a gap)");
                 }

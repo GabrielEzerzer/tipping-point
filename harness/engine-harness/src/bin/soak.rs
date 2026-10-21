@@ -6,7 +6,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -22,10 +22,13 @@ struct Args {
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
+    // From this crate's manifest, so the log lands in the ignored `harness/out/` from any cwd.
     let mut parsed = Args {
         duration: Duration::from_hours(24),
         report_every: Duration::from_hours(1),
-        out: PathBuf::from(format!("harness/out/soak-{}.log", now_ms())),
+        out: Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../out")
+            .join(format!("soak-{}.log", now_ms())),
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {

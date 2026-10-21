@@ -15,6 +15,7 @@ use super::{Scales, Symbol};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
     pub frames: u64,
+    /// Frames [`Feed::on_text`] returned an error for, whatever the reason.
     pub parse_errors: u64,
     pub depth_events: u64,
     pub trades: u64,
@@ -28,6 +29,7 @@ pub struct Stats {
     pub snapshots_too_old: u64,
     pub backpressure_resyncs: u64,
     pub reconnect_resyncs: u64,
+    pub bad_frame_resyncs: u64,
     /// Applied updates that left the book crossed (logged, never asserted).
     pub crossed: u64,
 }
@@ -50,6 +52,9 @@ pub enum FeedError {
     Message(#[from] MessageError),
     #[error(transparent)]
     Decimal(#[from] DecimalError),
+    /// A depth update did not convert at its symbol's scales; the symbol's book was dropped.
+    #[error("{symbol} depth update lost, book invalidated: {error}")]
+    BadDepth { symbol: Symbol, error: DecimalError },
     #[error("no scales for symbol {0:?}")]
     UnknownSymbol(String),
 }
@@ -111,23 +116,37 @@ impl Feed {
 
     /// Feeds the text of one stream frame.
     ///
+    /// A depth update that does not convert at its symbol's scales is lost, which breaks that
+    /// symbol's update chain, so its book is invalidated ([`ResyncReason::BadFrame`]) before the
+    /// error comes back.
+    ///
     /// # Errors
-    /// Returns an error when the frame cannot be parsed or names a symbol without scales; the
-    /// parse-error counter is bumped either way.
+    /// Returns an error when the frame cannot be parsed or converted, or names a symbol without
+    /// scales. Every error bumps the parse-error counter.
     pub fn on_text(&mut self, text: &str) -> Result<Event, FeedError> {
         self.stats.frames += 1;
-        let frame = match parse_frame(text) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.stats.parse_errors += 1;
-                return Err(error.into());
-            }
-        };
-        match frame.data {
+        let event = self.route(text);
+        if event.is_err() {
+            self.stats.parse_errors += 1;
+        }
+        event
+    }
+
+    fn route(&mut self, text: &str) -> Result<Event, FeedError> {
+        match parse_frame(text)?.data {
             Payload::Depth(raw) => {
                 self.stats.depth_events += 1;
                 let scales = self.scales_for(&raw.symbol)?;
-                let update = scales.depth_update(&raw)?;
+                let update = match scales.depth_update(&raw) {
+                    Ok(update) => update,
+                    Err(error) => {
+                        self.invalidate(&raw.symbol, ResyncReason::BadFrame);
+                        return Err(FeedError::BadDepth {
+                            symbol: raw.symbol,
+                            error,
+                        });
+                    }
+                };
                 let sync = self.syncs.entry(raw.symbol.clone()).or_default();
                 let outcome = sync.on_event(update);
                 let crossed = sync.book().is_some_and(Book::is_crossed);
@@ -157,13 +176,10 @@ impl Feed {
         let snapshot = scales.snapshot(&parse_snapshot(body)?)?;
         let sync = self.syncs.entry(symbol.to_owned()).or_default();
         let installed = sync.on_snapshot(&snapshot);
-        let crossed = sync.book().is_some_and(Book::is_crossed);
-        for outcome in installed.drained {
+        // The install is counted under `snapshots`; a failed install is the resync among the
+        // replayed updates, so counting those counts it exactly once.
+        for (outcome, crossed) in installed.drained {
             self.count(outcome, crossed);
-        }
-        // The install itself is already counted under `snapshots`; only its failure counts.
-        if let Outcome::NeedsResync(_) = installed.outcome {
-            self.count(installed.outcome, false);
         }
         Ok(installed.outcome)
     }
@@ -191,18 +207,25 @@ impl Feed {
     /// Throws away every book for a reason the stream cannot show (reconnect, backpressure).
     /// Returns the symbols that actually lost a book.
     pub fn invalidate_all(&mut self, reason: ResyncReason) -> Vec<Symbol> {
-        let mut lost = Vec::new();
-        for (symbol, sync) in &mut self.syncs {
-            let had_book = sync.book().is_some();
-            let _ = sync.invalidate(reason);
-            if had_book {
-                lost.push(symbol.clone());
-            }
-        }
-        for _ in &lost {
+        let symbols: Vec<Symbol> = self.syncs.keys().cloned().collect();
+        symbols
+            .into_iter()
+            .filter(|symbol| self.invalidate(symbol, reason))
+            .collect()
+    }
+
+    /// Throws away one symbol's book and buffer. True when there was a book to lose, which is
+    /// the only case counted as a resync.
+    fn invalidate(&mut self, symbol: &str, reason: ResyncReason) -> bool {
+        let Some(sync) = self.syncs.get_mut(symbol) else {
+            return false;
+        };
+        let had_book = sync.book().is_some();
+        let _ = sync.invalidate(reason);
+        if had_book {
             self.count(Outcome::NeedsResync(reason), false);
         }
-        lost
+        had_book
     }
 
     fn scales_for(&self, symbol: &str) -> Result<Scales, FeedError> {
@@ -229,6 +252,7 @@ impl Feed {
                     ResyncReason::SnapshotTooOld { .. } => self.stats.snapshots_too_old += 1,
                     ResyncReason::Backpressure => self.stats.backpressure_resyncs += 1,
                     ResyncReason::Reconnect => self.stats.reconnect_resyncs += 1,
+                    ResyncReason::BadFrame => self.stats.bad_frame_resyncs += 1,
                 }
             }
         }
@@ -327,6 +351,75 @@ mod tests {
             feed.on_text(&other),
             Err(FeedError::UnknownSymbol(s)) if s == "DOGEUSDT"
         ));
+        assert_eq!(feed.stats().parse_errors, 2);
+    }
+
+    /// Synced at `u = 12` with a bid of 100.0 x 1.
+    fn synced_feed() -> Result<Feed, FeedError> {
+        let mut feed = feed();
+        feed.on_text(&depth(10, 12, 9, "[]", "[]"))?;
+        feed.on_snapshot(
+            "BTCUSDT",
+            r#"{"lastUpdateId":11,"bids":[["100.0","1.000"]],"asks":[["101.0","1.000"]]}"#,
+        )?;
+        assert!(feed.sync("BTCUSDT").is_some_and(BookSync::is_synced));
+        Ok(feed)
+    }
+
+    #[test]
+    fn a_depth_frame_that_does_not_convert_drops_the_book() -> Result<(), FeedError> {
+        let mut feed = synced_feed()?;
+        // Deletes the 100.0 bid, but 100.05 is finer than the one-decimal tick: unconvertible.
+        let bad = depth(
+            13,
+            13,
+            12,
+            r#"[["100.0","0.000"],["100.05","1.000"]]"#,
+            "[]",
+        );
+        assert!(matches!(
+            feed.on_text(&bad),
+            Err(FeedError::BadDepth { symbol, .. }) if symbol == "BTCUSDT"
+        ));
+        assert!(
+            feed.book("BTCUSDT").is_none(),
+            "the stale bid must not survive"
+        );
+        assert!(!feed.sync("BTCUSDT").is_some_and(BookSync::is_synced));
+        let stats = feed.stats();
+        assert_eq!(stats.parse_errors, 1);
+        assert_eq!((stats.resyncs, stats.bad_frame_resyncs), (1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_too_old_snapshot_counts_one_resync() -> Result<(), FeedError> {
+        let mut feed = feed();
+        feed.on_text(&depth(20, 22, 19, "[]", "[]"))?;
+        let outcome = feed.on_snapshot("BTCUSDT", r#"{"lastUpdateId":10,"bids":[],"asks":[]}"#)?;
+        assert!(matches!(
+            outcome,
+            Outcome::NeedsResync(ResyncReason::SnapshotTooOld { .. })
+        ));
+        let stats = feed.stats();
+        assert_eq!((stats.resyncs, stats.snapshots_too_old), (1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn crosses_are_counted_per_replayed_update() -> Result<(), FeedError> {
+        let mut feed = feed();
+        feed.on_text(&depth(10, 12, 9, "[]", "[]"))?; // bridge
+        feed.on_text(&depth(13, 13, 12, r#"[["102.0","1.000"]]"#, "[]"))?; // crosses 101.0
+        feed.on_text(&depth(14, 14, 13, r#"[["102.0","0.000"]]"#, "[]"))?; // clears
+        feed.on_text(&depth(15, 15, 14, r#"[["101.5","1.000"]]"#, "[]"))?; // crosses again
+        feed.on_snapshot(
+            "BTCUSDT",
+            r#"{"lastUpdateId":11,"bids":[["100.0","1.000"]],"asks":[["101.0","1.000"]]}"#,
+        )?;
+        assert_eq!(feed.stats().applied, 4);
+        assert_eq!(feed.stats().crossed, 2);
+        Ok(())
     }
 
     #[test]

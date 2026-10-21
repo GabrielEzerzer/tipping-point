@@ -8,7 +8,7 @@ use thiserror::Error;
 use super::decimal::step_decimals;
 use super::{Scales, Symbol};
 
-/// Default base URL of the USD-M futures REST API.
+/// Base URL of the USD-M futures REST API.
 pub const BASE_URL: &str = "https://fapi.binance.com";
 
 /// Snapshot depth to ask for; 1000 is the deepest the endpoint serves (weight 20).
@@ -31,7 +31,6 @@ pub enum RestError {
 #[derive(Debug, Clone)]
 pub struct Rest {
     client: reqwest::Client,
-    base_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,26 +54,15 @@ struct Filter {
 }
 
 impl Rest {
-    /// A client against the production base URL.
+    /// A client against [`BASE_URL`].
     ///
     /// # Errors
     /// Returns an error when the TLS-backed HTTP client cannot be built.
     pub fn new() -> Result<Self, RestError> {
-        Self::with_base_url(BASE_URL)
-    }
-
-    /// A client against any base URL (a stub server in tests).
-    ///
-    /// # Errors
-    /// Returns an error when the TLS-backed HTTP client cannot be built.
-    pub fn with_base_url(base_url: &str) -> Result<Self, RestError> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("tipping-point-engine/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self {
-            client,
-            base_url: base_url.trim_end_matches('/').to_owned(),
-        })
+        Ok(Self { client })
     }
 
     /// Reads tick and lot sizes for the given symbols from `/fapi/v1/exchangeInfo`.
@@ -112,7 +100,7 @@ impl Rest {
     }
 
     async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<String, RestError> {
-        let url = format!("{}{path}", self.base_url);
+        let url = format!("{BASE_URL}{path}");
         let response = self.client.get(&url).query(query).send().await?;
         let status = response.status();
         let body = response.text().await?;

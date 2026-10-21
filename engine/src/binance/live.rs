@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, interval, sleep, sleep_until};
 
 use super::Symbol;
-use super::feed::{Event, Feed};
+use super::feed::{Event, Feed, FeedError};
 use super::rest::{Rest, RestError};
 use super::sync::{Outcome, ResyncReason};
 use super::ws::{self, Inbound};
@@ -220,7 +220,11 @@ fn handle_depth(
                 error: &error,
             });
         }
-        Inbound::Disconnected { reason } => {
+        Inbound::Disconnected {
+            reason,
+            dropped_before,
+        } => {
+            note_dropped(Stream::Depth, dropped_before, stats, on_event);
             stats.depth_reconnects += 1;
             on_event(LiveEvent::Disconnected {
                 stream: Stream::Depth,
@@ -232,25 +236,34 @@ fn handle_depth(
             text,
             dropped_before,
         } => {
-            if dropped_before > 0 {
-                stats.depth_frames_dropped += dropped_before;
-                on_event(LiveEvent::FramesDropped {
-                    stream: Stream::Depth,
-                    count: dropped_before,
-                });
+            if note_dropped(Stream::Depth, dropped_before, stats, on_event) {
                 invalidate(feed, ResyncReason::Backpressure, synced, on_event);
             }
-            if let Ok(Event::Depth {
-                symbol, outcome, ..
-            }) = feed.on_text(&text)
-            {
-                if let Outcome::NeedsResync(reason) = outcome {
+            match feed.on_text(&text) {
+                Ok(Event::Depth {
+                    symbol, outcome, ..
+                }) => {
+                    if let Outcome::NeedsResync(reason) = outcome {
+                        on_event(LiveEvent::Resync {
+                            symbol: &symbol,
+                            reason,
+                        });
+                    }
+                    note_sync_change(&symbol, feed, synced, on_event);
+                }
+                // The feed already dropped this symbol's book.
+                Err(FeedError::BadDepth { symbol, .. }) => {
                     on_event(LiveEvent::Resync {
                         symbol: &symbol,
-                        reason,
+                        reason: ResyncReason::BadFrame,
                     });
+                    note_sync_change(&symbol, feed, synced, on_event);
                 }
-                note_sync_change(&symbol, feed, synced, on_event);
+                // Unreadable, so it may have been any symbol's update: trust no book.
+                Err(FeedError::Message(_)) => {
+                    invalidate(feed, ResyncReason::BadFrame, synced, on_event);
+                }
+                Ok(Event::Trade(_)) | Err(FeedError::Decimal(_) | FeedError::UnknownSymbol(_)) => {}
             }
         }
     }
@@ -274,7 +287,11 @@ fn handle_trades(
                 error: &error,
             });
         }
-        Inbound::Disconnected { reason } => {
+        Inbound::Disconnected {
+            reason,
+            dropped_before,
+        } => {
+            note_dropped(Stream::Trades, dropped_before, stats, on_event);
             stats.trade_reconnects += 1;
             on_event(LiveEvent::Disconnected {
                 stream: Stream::Trades,
@@ -285,16 +302,28 @@ fn handle_trades(
             text,
             dropped_before,
         } => {
-            if dropped_before > 0 {
-                stats.trade_frames_dropped += dropped_before;
-                on_event(LiveEvent::FramesDropped {
-                    stream: Stream::Trades,
-                    count: dropped_before,
-                });
-            }
+            note_dropped(Stream::Trades, dropped_before, stats, on_event);
             let _ = feed.on_text(&text);
         }
     }
+}
+
+/// Counts and reports frames a reader dropped. True when there were any.
+fn note_dropped(
+    stream: Stream,
+    count: u64,
+    stats: &mut LiveStats,
+    on_event: &mut impl FnMut(LiveEvent<'_>),
+) -> bool {
+    if count == 0 {
+        return false;
+    }
+    match stream {
+        Stream::Depth => stats.depth_frames_dropped += count,
+        Stream::Trades => stats.trade_frames_dropped += count,
+    }
+    on_event(LiveEvent::FramesDropped { stream, count });
+    true
 }
 
 fn invalidate(
@@ -347,4 +376,145 @@ pub fn utc_clock() -> String {
         secs / 60 % 60,
         secs % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::binance::Scales;
+
+    const SYMBOL: &str = "BTCUSDT";
+
+    fn frame(first: u64, last: u64, prev: u64, dropped_before: u64) -> Inbound {
+        Inbound::Text {
+            text: format!(
+                r#"{{"stream":"btcusdt@depth@100ms","data":{{"e":"depthUpdate","E":1,"T":1,"s":"BTCUSDT","U":{first},"u":{last},"pu":{prev},"b":[["100.0","1.000"]],"a":[]}}}}"#
+            ),
+            dropped_before,
+        }
+    }
+
+    /// The loop's state around one feed, plus every resync it reported.
+    struct LiveLoop {
+        feed: Feed,
+        stats: LiveStats,
+        synced: BTreeSet<Symbol>,
+        resyncs: Vec<(Symbol, ResyncReason)>,
+    }
+
+    impl LiveLoop {
+        /// BTCUSDT synced at `u = 12`, reached the way the loop reaches it.
+        fn synced() -> Self {
+            let scales = Scales {
+                price_decimals: 1,
+                qty_decimals: 3,
+            };
+            let mut live = Self {
+                feed: Feed::new(BTreeMap::from([(SYMBOL.to_owned(), scales)])),
+                stats: LiveStats::default(),
+                synced: BTreeSet::new(),
+                resyncs: Vec::new(),
+            };
+            live.depth(frame(10, 12, 9, 0));
+            let body =
+                r#"{"lastUpdateId":11,"bids":[["99.0","1.000"]],"asks":[["101.0","1.000"]]}"#;
+            assert_eq!(
+                live.feed.on_snapshot(SYMBOL, body).ok(),
+                Some(Outcome::Applied)
+            );
+            note_sync_change(SYMBOL, &live.feed, &mut live.synced, &mut |_: LiveEvent<
+                '_,
+            >| {});
+            assert!(live.synced.contains(SYMBOL));
+            live
+        }
+
+        fn depth(&mut self, inbound: Inbound) {
+            let resyncs = &mut self.resyncs;
+            let mut on_event = |event: LiveEvent<'_>| {
+                if let LiveEvent::Resync { symbol, reason } = event {
+                    resyncs.push((symbol.to_owned(), reason));
+                }
+            };
+            handle_depth(
+                inbound,
+                &mut self.feed,
+                &mut self.stats,
+                &mut self.synced,
+                &mut on_event,
+            );
+        }
+
+        fn has_book(&self) -> bool {
+            self.feed.book(SYMBOL).is_some()
+        }
+    }
+
+    #[test]
+    fn frames_dropped_under_backpressure_drop_the_book() {
+        let mut live = LiveLoop::synced();
+        // This update chains (pu = 12), so only the drop count says frames were lost.
+        live.depth(frame(13, 13, 12, 1));
+        assert!(!live.has_book());
+        assert_eq!(live.stats.depth_frames_dropped, 1);
+        assert_eq!(
+            live.resyncs,
+            vec![(SYMBOL.to_owned(), ResyncReason::Backpressure)]
+        );
+        assert!(live.synced.is_empty());
+    }
+
+    #[test]
+    fn a_reconnect_drops_the_book_and_asks_for_a_fresh_snapshot() {
+        let mut live = LiveLoop::synced();
+        live.depth(Inbound::Disconnected {
+            reason: "no frames for 30s".to_owned(),
+            dropped_before: 2,
+        });
+        assert!(!live.has_book());
+        assert_eq!(live.stats.depth_reconnects, 1);
+        assert_eq!(
+            live.stats.depth_frames_dropped, 2,
+            "drops just before it count"
+        );
+        assert_eq!(
+            live.resyncs,
+            vec![(SYMBOL.to_owned(), ResyncReason::Reconnect)]
+        );
+
+        // On the new connection even an update that would have chained waits for a snapshot.
+        live.depth(frame(13, 13, 12, 0));
+        assert!(!live.has_book());
+        assert_eq!(live.feed.snapshots_due(), vec![SYMBOL.to_owned()]);
+    }
+
+    #[test]
+    fn a_depth_frame_that_does_not_convert_unsyncs_its_symbol() {
+        let mut live = LiveLoop::synced();
+        let finer_than_the_tick = r#"{"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":1,"T":1,"s":"BTCUSDT","U":13,"u":13,"pu":12,"b":[["100.05","1.000"]],"a":[]}}"#;
+        live.depth(Inbound::Text {
+            text: finer_than_the_tick.to_owned(),
+            dropped_before: 0,
+        });
+        assert!(!live.has_book());
+        assert!(live.synced.is_empty());
+        assert_eq!(
+            live.resyncs,
+            vec![(SYMBOL.to_owned(), ResyncReason::BadFrame)]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_depth_frame_drops_every_book() {
+        let mut live = LiveLoop::synced();
+        live.depth(Inbound::Text {
+            text: "not json".to_owned(),
+            dropped_before: 0,
+        });
+        assert!(!live.has_book());
+        assert_eq!(
+            live.resyncs,
+            vec![(SYMBOL.to_owned(), ResyncReason::BadFrame)]
+        );
+    }
 }

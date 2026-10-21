@@ -57,8 +57,9 @@ pub struct SnapshotOutcome {
     /// arrives), `NeedsResync` when the buffered updates could not be joined to it, and
     /// `DroppedStale` when the machine was not waiting for a snapshot.
     pub outcome: Outcome,
-    /// One outcome per buffered update, in the order they were replayed.
-    pub drained: Vec<Outcome>,
+    /// One `(outcome, crossed)` per buffered update, in the order they were replayed; `crossed`
+    /// is whether the book was crossed right after that update.
+    pub drained: Vec<(Outcome, bool)>,
 }
 
 /// Why a resync became necessary.
@@ -72,6 +73,8 @@ pub enum ResyncReason {
     Backpressure,
     /// The socket reconnected, so frames were missed.
     Reconnect,
+    /// A depth update could not be read, so it was lost and the update chain is broken.
+    BadFrame,
 }
 
 /// Buffered updates beyond this are the oldest, least useful ones; dropping them at worst makes
@@ -162,8 +165,14 @@ impl BookSync {
         self.state = State::Bridging {
             snapshot_id: snapshot.last_update_id,
         };
-        let drained: Vec<Outcome> = buffered.into_iter().map(|u| self.on_event(u)).collect();
-        let first_failure = drained.iter().find_map(|o| match o {
+        let drained: Vec<(Outcome, bool)> = buffered
+            .into_iter()
+            .map(|u| {
+                let outcome = self.on_event(u);
+                (outcome, self.book().is_some_and(Book::is_crossed))
+            })
+            .collect();
+        let first_failure = drained.iter().find_map(|(o, _)| match o {
             Outcome::NeedsResync(reason) => Some(*reason),
             _ => None,
         });
