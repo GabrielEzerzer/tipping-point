@@ -1,0 +1,5 @@
+{"kind":"scales","scales":{"BTCUSDT":{"price_decimals":1,"qty_decimals":3}}}
+{"kind":"frame","t_ms":1,"text":"{\"stream\":\"btcusdt@depth@100ms\",\"data\":{\"e\":\"depthUpdate\",\"E\":1,\"T\":1,\"s\":\"BTCUSDT\",\"U\":100,\"u\":102,\"pu\":99,\"b\":[[\"50000.0\",\"1.000\"]],\"a\":[[\"50001.0\",\"2.000\"]]}}"}
+{"kind":"frame","t_ms":2,"text":"{\"stream\":\"btcusdt@depth@100ms\",\"data\":{\"e\":\"depthUpdate\",\"E\":2,\"T\":2,\"s\":\"BTCUSDT\",\"U\":103,\"u\":105,\"pu\":102,\"b\":[[\"49999.0\",\"0.500\"]],\"a\":[]}}"}
+{"kind":"snapshot","t_ms":3,"symbol":"BTCUSDT","body":"{\"lastUpdateId\":104,\"E\":3,\"T\":3,\"bids\":[[\"50000.0\",\"1.000\"],[\"49998.0\",\"3.000\"]],\"asks\":[[\"50001.0\",\"2.000\"],[\"50002.0\",\"1.000\"]]}"}
+{"kind":"frame","t_ms":4,"text":"{\"stream\":\"btcusdt@depth@100ms\",\"data\":{\"e\":\"depthUpdate\",\"E\":4,\"T\":4,\"s\":\"BTCUSDT\",\"U\":106,\"u\":106,\"pu\":105,\"b\":[[\"50000.0\",\"0.000\"]],\"a\":[[\"50001.0\",\"1.500\"]]}}"}
