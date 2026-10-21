@@ -11,10 +11,10 @@ Written last. The question, what we did, the headline result, and why it matters
 ## 1. Introduction
 
 - **The problem:** systems that tip suddenly, and why early warning matters.
-- **What existing warning statistics do,** and where they fall short.
-- **Our question:** do warnings read from a learned world model come earlier or more reliably than classic ones?
-- **Contributions,** as two or three bullets.
-- **What we do not claim,** for example being first at latent-space warnings.
+- **The gap:** learned early-warning signals are claimed on synthetic data without ground truth; nothing forces them to be right.
+- **Our claim:** finite-size scaling on Ising, where Tc and the exponents are exact, is a falsification test any learned early-warning signal must pass.
+- **Contributions,** as two or three bullets: the test, its result on JEPA latent signals and on the classic indicators, and the same pre-registered protocol applied to markets.
+- **What we do not claim:** being first at latent-space warnings (Fang & Li 2025 and others); that latent warnings beat classic indicators on Ising (that is the question, not the premise); anything about the agent layer or the app.
 
 ## 2. Background and related work
 
@@ -27,21 +27,23 @@ Written last. The question, what we did, the headline result, and why it matters
 ## 3. Method
 
 - The world model: what it is, why one per domain, and how collapse is prevented.
-- The warning signals we read from it.
-- The baselines it must beat.
+- The warning signals we read from it: prediction-error surprise, latent variance, latent AC1.
+- The falsification test: finite-size scaling as ground truth, plus linear probes for magnetisation and susceptibility.
+- The classic raw-signal indicators, tested under the same protocol.
 - The scoring protocol: what was fixed in advance, the surrogate tests, ROC, lead time, false alarms.
 - The key design decisions and why we made them.
 
-## 4. Experiment 1: Ising, "did it learn the physics?"
+## 4. Experiment 1: Ising, the falsification test
 
-- The setup.
-- The results: do the warnings peak at the critical point, and do they scale with system size?
+- The setup: all-temperature training is primary; the held-out Tc band is the ablation.
+- The results: does the latent signal obey finite-size scaling? Which signals peak at the critical point, and which are monotone in T?
 - What the model's internals encode (the probes and their controls).
 - Ablations.
 - What failed or surprised us.
 
 ## 5. Experiment 2: Markets
 
+- The protocol applied to markets; reported either way.
 - The data and the events (regime shifts, liquidation cascades).
 - Warning results against the classic signals, across assets.
 - The backtest against plain volatility targeting.
@@ -49,7 +51,7 @@ Written last. The question, what we did, the headline result, and why it matters
 
 ## 6. Triage benchmark: Jev
 
-May move to the appendix, depending on page count.
+Included only if Jev beats a threshold rule at #32; otherwise it stays an app feature and leaves the paper. May move to the appendix, depending on page count.
 
 - Does a decision model add anything over a threshold rule?
 - How repeatable is it, how strong is its option-order bias, and does it judge better from words or from numbers?
@@ -64,6 +66,7 @@ Short; may move to the appendix.
 ## 8. Discussion and limitations
 
 - When the learned signals help, and when they don't.
+- What a fail would mean for the field: learned early-warning claims made without ground truth.
 - Honest limits: two domains, major coins only, live-period length.
 - Future work: one shared model, and other domains such as seizures.
 
