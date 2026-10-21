@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="2" time="0.152" timestamp="2026-10-21T13:01:31.877972+01:00" hostname="Gabi"><testcase classname="python.tipping_point.tests.test_broken" name="test_deliberately_fails" time="0.001"><failure message="AssertionError: assert 'nope' == 1">def test_deliberately_fails() -&gt; None:
+        x: int = "nope"
+&gt;       assert x == 1
+E       AssertionError: assert 'nope' == 1
+
+python\tipping_point\tests\test_broken.py:4: AssertionError</failure></testcase><testcase classname="python.tipping_point.tests.test_smoke" name="test_package_imports" time="0.001" /></testsuite></testsuites>

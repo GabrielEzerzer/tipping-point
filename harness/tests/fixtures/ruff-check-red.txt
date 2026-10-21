@@ -1,0 +1,32 @@
+I001 [*] Import block is un-sorted or un-formatted
+ --> python\tipping_point\tests\test_broken.py:1:1
+  |
+1 | import os
+  | ^^^^^^^^^
+2 | def test_deliberately_fails() -> None:
+3 |     x: int = "nope"
+  |
+help: Organize imports
+  |
+1 | import os
+2 +
+3 +
+4 | def test_deliberately_fails() -> None:
+  |
+
+F401 [*] `os` imported but unused
+ --> python\tipping_point\tests\test_broken.py:1:8
+  |
+1 | import os
+  |        ^^
+2 | def test_deliberately_fails() -> None:
+3 |     x: int = "nope"
+  |
+help: Remove unused import: `os`
+  |
+  - import os
+1 | def test_deliberately_fails() -> None:
+  |
+
+Found 2 errors.
+[*] 2 fixable with `--fix`.

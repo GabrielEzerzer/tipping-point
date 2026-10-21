@@ -1,0 +1,13 @@
+    Checking engine v0.1.0 (C:\Users\gabri\Desktop\personal-os\vault\personal\projects\tipping-point\.worktrees\20-scaffold\engine)
+error: variable does not need to be mutable
+  --> engine\src\lib.rs:26:27
+   |
+26 |     fn unused_mut() { let mut x = 1; let _ = x; }
+   |                           ----^
+   |                           |
+   |                           help: remove this `mut`
+   |
+   = note: `-D unused-mut` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(unused_mut)]`
+
+error: could not compile `engine` (lib test) due to 1 previous error

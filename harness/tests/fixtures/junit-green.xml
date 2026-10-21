@@ -1,0 +1,1 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" time="0.048" timestamp="2026-10-21T13:01:26.059934+01:00" hostname="Gabi"><testcase classname="python.tipping_point.tests.test_smoke" name="test_package_imports" time="0.001" /></testsuite></testsuites>

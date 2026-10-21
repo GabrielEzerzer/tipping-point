@@ -1,0 +1,15 @@
+Diff in \\?\C:\Users\gabri\Desktop\personal-os\vault\personal\projects\tipping-point\.worktrees\20-scaffold\engine\src\lib.rs:20:
+ mod deliberate {
+     #[test]
+     fn deliberately_fails() {
+[31m-        assert_eq!(1 + 1, 3,"deliberate");
+[0m[32m+        assert_eq!(1 + 1, 3, "deliberate");
+[0m     }
+     #[allow(dead_code)]
+[31m-    fn unused_mut() { let mut x = 1; let _ = x; }
+[0m[32m+    fn unused_mut() {
+[0m[32m+        let mut x = 1;
+[0m[32m+        let _ = x;
+[0m[32m+    }
+[0m }
+ 

@@ -1,0 +1,10 @@
+unformatted: File would be reformatted
+ --> python\tipping_point\tests\test_broken.py:2:1
+  |
+1 | import os
+2 +
+3 +
+4 | def test_deliberately_fails() -> None:
+  |
+
+1 file would be reformatted, 6 files already formatted
