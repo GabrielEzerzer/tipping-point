@@ -1,5 +1,7 @@
 //! Tipping Point engine: streaming critical-transition detection.
 
+pub mod binance;
+
 /// Crate version, exposed so the scaffold has something to test.
 #[must_use]
 pub fn version() -> &'static str {
