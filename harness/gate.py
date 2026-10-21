@@ -197,10 +197,10 @@ class LegResult:
 
 
 def run_leg(leg: Leg) -> LegResult:
-    if leg.name == "pytest":
-        JUNIT.unlink(missing_ok=True)  # a stale report must never vouch for this run
     start = time.perf_counter()
     try:
+        if leg.name == "pytest":
+            JUNIT.unlink(missing_ok=True)  # a stale report must never vouch for this run
         proc = subprocess.run(
             leg.argv,
             cwd=ROOT,
@@ -212,7 +212,7 @@ def run_leg(leg: Leg) -> LegResult:
         )
     except FileNotFoundError:
         verdict, returncode = judge_missing_tool(leg.argv[0]), None
-    except OSError as exc:
+    except OSError as exc:  # also a stale JUnit report that cannot be deleted (held open)
         verdict, returncode = Verdict(False, f"tool could not start: {exc}"), None
     else:
         returncode = proc.returncode

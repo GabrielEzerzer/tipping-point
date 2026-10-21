@@ -262,3 +262,25 @@ def test_non_utf8_junit_is_red_not_a_crash(monkeypatch) -> None:
     result = gate.run_leg(leg)
     assert result.verdict == "RED"
     assert "judge crashed" in result.verdict_source
+
+
+def test_undeletable_stale_junit_is_red_and_the_rest_still_run(tmp_path, monkeypatch) -> None:
+    def held_open(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(13, "held open by another process", str(self))
+
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "JUNIT", tmp_path / "pytest-junit.xml")
+    monkeypatch.setattr(Path, "unlink", held_open)
+    monkeypatch.setattr(
+        gate,
+        "LEGS",
+        [
+            gate.Leg("pytest", [sys.executable, "-c", "pass"], gate._judge_pytest_from_disk),
+            _python_leg("last", "print('All checks passed!')"),
+        ],
+    )
+    assert gate.main([]) == 1
+    (record,) = tmp_path.glob("gate-*.json")
+    rows = json.loads(record.read_text(encoding="utf-8"))
+    assert [(r["leg"], r["verdict"]) for r in rows] == [("pytest", "RED"), ("last", "GREEN")]
+    assert "held open by another process" in rows[0]["verdict_source"]
