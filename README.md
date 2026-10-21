@@ -9,7 +9,26 @@ Open-source framework for detecting critical transitions in live data streams: a
 - `python/tipping_point/` — the Python package (src layout), a member of the root uv workspace (`pyproject.toml`).
 - `app/` — the Tauri desktop app (not yet started).
 - `paper/` — the paper.
-- `harness/` — supporting code that verifies the rest: the gate and its tests. Outside both workspaces.
+- `harness/` — supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
+  a Cargo workspace member holding the engine's recorder and soak binaries (production code never
+  depends on it).
+
+## Binance ingest
+
+`engine/src/binance/` keeps a correct local order book for BTCUSDT and ETHUSDT from the USD-M
+depth stream (snapshot plus diffs, sequence-gap detection, resync, backpressure) and reads aggTrades.
+The sync logic is a pure state machine (`sync.rs`) behind a multi-symbol `feed.rs`; the network
+layer (`ws.rs`, `rest.rs`, `live.rs`) is thin around it.
+
+```sh
+cargo run -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
+cargo run -p engine-harness --bin record -- --seconds 60    # raw frames + snapshots → harness/fixtures/recorded/ (gitignored)
+cargo run -p engine-harness --bin soak -- --hours 24        # gaps/resyncs/reconnects/drops per hour → harness/out/
+```
+
+Recorded fixtures are never committed; `engine/tests/replay.rs` replays any present locally and skips
+otherwise. The committed tests use synthetic streams (`engine/tests/fixtures/synthetic/`) and
+generated ones (property tests and fault injection in `engine/tests/`).
 
 ## Running the gate
 

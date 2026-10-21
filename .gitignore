@@ -6,3 +6,6 @@ __pycache__/
 .ruff_cache/
 harness/out/
 .worktrees/
+
+# raw Binance recordings stay local: the repo goes public and republishing book data is a licensing risk (#4)
+harness/fixtures/recorded/
