@@ -1,0 +1,132 @@
+"""Protocols are pure functions of the integer sweep index, with exact boundaries and saves."""
+
+import itertools
+import random
+
+import pytest
+from tipping_point.ising import exact, protocol
+from tipping_point.ising.protocol import Burst, Fixed, Ramp, Staircase
+
+
+def _answers(schedule: protocol.Schedule, steps: list[int]) -> list[tuple]:
+    return [
+        (
+            s,
+            schedule.temperatures(s),
+            schedule.segment(s),
+            schedule.phase(s),
+            schedule.records_stats(s),
+        )
+        for s in steps
+    ]
+
+
+def _assert_pure(schedule: protocol.Schedule) -> None:
+    """Asking about steps in a random order, or on a rebuilt copy, gives the same answers."""
+    steps = list(range(1, schedule.total + 1))
+    forward = _answers(schedule, steps)
+    shuffled = steps[:]
+    random.Random(0).shuffle(shuffled)
+    assert sorted(_answers(schedule, shuffled)) == forward
+    rebuilt = protocol.from_json(schedule.to_json())
+    assert _answers(rebuilt, steps) == forward and rebuilt.frames == schedule.frames
+
+
+def test_grid_runs_hot_to_cold_with_one_point_next_to_tc() -> None:
+    """The 40-point grid the staircase walks, and the one point that sits 4.5e-5 above Tc."""
+    assert len(protocol.GRID) == 40
+    assert protocol.GRID[0] == 3.5 and protocol.GRID[-1] == 1.5
+    assert all(a > b for a, b in zip(protocol.GRID, protocol.GRID[1:], strict=False))
+    nearest = min(protocol.GRID, key=lambda T: abs(T - exact.TC))
+    assert nearest - exact.TC == pytest.approx(4.5e-5, abs=1e-6)
+
+
+def test_dwell_is_20_and_100_tau_with_floors() -> None:
+    assert protocol.dwell(1.0) == (500, 2000)
+    assert protocol.dwell(300.0) == (6000, 30000)
+    assert protocol.dwell(30.125) == (603, 3013)  # rounded up, never short
+
+
+def test_staircase_plateaus_tile_the_run() -> None:
+    """Catches gaps or overlaps between plateaus and a dwell that ignores tau."""
+    taus = [1.0, 40.0, 3.0]
+    s = Staircase(taus, temperatures=(3.5, 2.3, 1.5), warmup=1000, saves=10)
+    assert s.therm == [1500, 800, 500] and s.meas == [2000, 4000, 2000]
+    assert s.starts == [1, 3501, 8301] and s.total == 10800
+    assert s.temperatures(3500) == (3.5,) and s.temperatures(3501) == (2.3,)
+    assert s.phase(s.meas_starts[1] - 1) == 0 and s.phase(s.meas_starts[1]) == 1
+    assert s.temperatures(s.total) == (1.5,) and s.segment(s.total) == 2
+    _assert_pure(s)
+
+
+def test_staircase_bursts_sit_inside_measurement_windows() -> None:
+    """Catches configs saved during thermalisation, overlapping bursts, or frames off-stride."""
+    burst = Burst(frames=8, stride=3)
+    s = Staircase([1.0, 50.0], temperatures=(3.0, 2.0), saves=20, burst=burst)
+    by_burst: dict[int, list[int]] = {}
+    for step, (b, f) in sorted(s.frames.items()):
+        j = s.segment(step)
+        assert s.phase(step) == 1 and step < s.starts[j] + s.therm[j] + s.meas[j]
+        by_burst.setdefault(b, []).append(step)
+        assert f == len(by_burst[b]) - 1
+    assert len(by_burst) == 40  # 20 per plateau, numbered across the run
+    for steps in by_burst.values():
+        assert [b - a for a, b in itertools.pairwise(steps)] == [3] * 7
+    starts = sorted(steps[0] for steps in by_burst.values())
+    assert min(b - a for a, b in itertools.pairwise(starts)) >= burst.span
+
+
+def test_short_windows_save_fewer_bursts_rather_than_overlap() -> None:
+    s = Staircase([1.0], temperatures=(3.0,), min_meas=100, saves=200, burst=Burst(stride=2))
+    assert len(s.frames) == (100 // 16) * 8
+
+
+def test_ramp_temperature_is_computed_from_the_sweep_index() -> None:
+    """Catches an accumulated temperature (drifts) and an off-by-one at either end of the ramp."""
+    r = Ramp(rate=1000, pre=1000, hold=1000)
+    assert (r.t0, r.t1, r.total) == (1000, 3000, 4000)
+    assert r.temperatures(1) == (3.5,) and r.temperatures(1000) == (3.5,)
+    assert r.temperatures(1001) == (3.5 - 1 / 1000,)
+    for step in (1001, 1777, 2999):
+        assert r.temperatures(step) == (3.5 - (step - 1000) / 1000,)
+    assert r.temperatures(3000) == (1.5,) and r.temperatures(4000) == (1.5,)
+    assert [r.phase(t) for t in (1000, 1001, 3000, 3001)] == [0, 1, 1, 2]
+    _assert_pure(r)
+
+
+def test_ramp_crosses_tc_exactly_at_t_c() -> None:
+    """t_c is where the bath crosses Tc; lead times are measured against it."""
+    r = Ramp(rate=1000)
+    assert r.t_c == 1000 + 1000 * (3.5 - exact.TC)
+    before, after = int(r.t_c), int(r.t_c) + 1
+    assert r.temperatures(before)[0] > exact.TC > r.temperatures(after)[0]
+
+
+def test_ramp_saves_a_burst_every_0_005_of_cooling() -> None:
+    """400 save points per ramp when the rate allows; never outside the ramp; never overlapping."""
+    r = Ramp(rate=4000)  # 0.005 of cooling = 20 sweeps > a burst's 8
+    starts = sorted(step for step, (_, f) in r.frames.items() if f == 0)
+    assert len(starts) == 400
+    assert {b - a for a, b in itertools.pairwise(starts)} == {20}
+    assert all(r.phase(step) == 1 for step in r.frames)
+    fast = Ramp(rate=96)  # 0.005 of cooling < one sweep: bursts fall back to back
+    fast_starts = sorted(step for step, (_, f) in fast.frames.items() if f == 0)
+    assert {b - a for a, b in itertools.pairwise(fast_starts)} == {8}
+
+
+def test_rate_for_puts_every_size_at_the_same_kibble_zurek_point() -> None:
+    """r = L^3.17 / (x Tc): x = 0.3 at L = 128 is the research's ~1.4e7-sweep slow ramp."""
+    for L in (16, 32, 64, 128):
+        for x in (30.0, 0.3):
+            r = protocol.rate_for(L, x)
+            assert L**protocol.KZ_EXPONENT / (r * exact.TC) == pytest.approx(x, rel=0.02)
+    assert 2 * protocol.rate_for(128, 0.3) == pytest.approx(1.4e7, rel=0.02)
+
+
+def test_fixed_blocks_and_phases() -> None:
+    f = Fixed((1.5, 2.0, 3.5), therm=10, sweeps=20, stats_stride=7, saves=2)
+    assert f.blocks == 3 and f.total == 30 and f.temperatures(5) == (1.5, 2.0, 3.5)
+    assert f.phase(10) == 0 and f.phase(11) == 1
+    assert [t for t in range(1, 31) if f.records_stats(t)] == [7, 14, 21, 28, 30]  # always the last
+    assert min(f.frames) == 11 and max(f.frames) <= 30
+    _assert_pure(f)
