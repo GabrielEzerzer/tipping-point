@@ -147,3 +147,37 @@ async fn record(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(raw: &[&str]) -> Result<Args, String> {
+        parse_args(&raw.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn records_a_minute_into_the_gitignored_dir_by_default() {
+        let args = parse(&[]).expect("no flags is valid");
+        assert_eq!(args.seconds, 60);
+        let recorded = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/recorded");
+        assert_eq!(args.out.parent(), Some(recorded.as_path()));
+        assert_eq!(args.out.extension(), Some(std::ffi::OsStr::new("jsonl")));
+    }
+
+    #[test]
+    fn takes_seconds_and_out_and_refuses_anything_else() {
+        let args = parse(&["--seconds", "5", "--out", "x.jsonl"]).expect("valid flags");
+        assert_eq!(args.seconds, 5);
+        assert_eq!(args.out, PathBuf::from("x.jsonl"));
+        assert_eq!(
+            parse(&["--seconds"]).err().as_deref(),
+            Some("--seconds wants a value")
+        );
+        assert_eq!(
+            parse(&["--seconds", "five"]).err().as_deref(),
+            Some("--seconds wants a whole number, got \"five\"")
+        );
+        assert!(parse(&["--minutes", "5"]).is_err());
+    }
+}

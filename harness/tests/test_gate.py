@@ -6,6 +6,7 @@ red = deliberately broken files; any other name = files deliberately edited into
 
 import fnmatch
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -165,11 +166,37 @@ def test_cargo_lib_binary_with_zero_tests_is_red() -> None:
     assert "lib.rs" in verdict.source
 
 
-def test_cargo_floor_exempt_binaries_with_zero_tests_are_green() -> None:
-    # src/main.rs and src/bin/** unit tests may be empty; doc-tests print two result lines
-    verdict = gate.judge_cargo_test(0, fixture("cargo-test-exempt-binaries-green.txt"))
+WORKSPACE = fixture("cargo-test-workspace-green.txt")  # every crate after the #21 merge
+WORKSPACE_BINARIES = [
+    ln.strip().removeprefix("Running ")
+    for ln in WORKSPACE.splitlines()
+    if ln.strip().startswith("Running ")
+]
+
+
+def test_cargo_whole_workspace_passing_is_green() -> None:
+    verdict = gate.judge_cargo_test(0, WORKSPACE)
     assert verdict.green, verdict.source
-    assert verdict.source == "7 test result lines: 4 passed; 0 failed"
+
+
+@pytest.mark.parametrize(
+    "binary", WORKSPACE_BINARIES, ids=lambda b: b.split(" (")[0].replace("\\", "/")
+)
+def test_cargo_any_one_binary_with_zero_tests_is_red(binary: str) -> None:
+    # headers name binaries, not crates: no binary may ride on another's tests, so a bins-only
+    # crate (engine-harness: record, soak) cannot hide behind engine's
+    head, header, tail = WORKSPACE.partition(binary)
+    tail = re.sub(r"ok\. \d+ passed", "ok. 0 passed", tail, count=1)
+    verdict = gate.judge_cargo_test(0, head + header + tail)
+    assert not verdict.green
+    assert f"zero tests ran in {binary}" in verdict.source
+
+
+def test_cargo_doc_tests_may_print_two_result_lines() -> None:
+    # edition 2024 runs merged doctests, then standalone (compile_fail) ones, under one header
+    verdict = gate.judge_cargo_test(0, fixture("cargo-test-doctests-green.txt"))
+    assert verdict.green, verdict.source
+    assert verdict.source == "2 test result lines: 2 passed; 0 failed"
 
 
 def test_cargo_test_result_without_its_header_is_red() -> None:

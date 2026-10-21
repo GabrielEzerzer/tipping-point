@@ -74,16 +74,13 @@ _TEST_RESULT = re.compile(
 # The line cargo prints above each test binary's output: "Running unittests src\lib.rs (...)",
 # "Running tests\smoke.rs (...)", "Doc-tests engine".
 _TEST_HEADER = re.compile(r"^\s*(?:Running (?P<binary>.+?)|(?P<doctests>Doc-tests \S+))\s*$")
-# Binaries that may pass zero tests: doc-tests, and a binary target's own unit tests
-# (src/main.rs, src/bin/**: record, soak, ingest).
-_FLOOR_EXEMPT = re.compile(r"Doc-tests |unittests src[\\/](?:main\.rs|bin[\\/])")
 
 
 def judge_cargo_test(returncode: int, output: str) -> Verdict:
     """Credit each 'test result:' line to the cargo header above it. Every binary must report
-    ok, and every binary except the floor-exempt ones must pass >=1 test: each lib.rs unit-test
-    binary, each tests/*.rs binary, anything unrecognised. So one crate's passing tests cannot
-    hide another crate whose tests silently vanished."""
+    ok, and every test binary except doc-tests must pass >=1 test: headers name binaries, not
+    crates, so any exemption would let a crate of exempt binaries ride on another's tests. A
+    binary with nothing to test opts out openly with `test = false` on its [[bin]]."""
     binaries: list[tuple[str, list[re.Match[str]]]] = []
     for line in output.splitlines():
         if header := _TEST_HEADER.match(line):
@@ -103,7 +100,7 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     for name, found in binaries:
         if not found:
             return Verdict(False, f"{summary} (no 'test result:' line for {name})")
-        if sum(int(m["passed"]) for m in found) < 1 and not _FLOOR_EXEMPT.match(name):
+        if sum(int(m["passed"]) for m in found) < 1 and not name.startswith("Doc-tests "):
             return Verdict(False, f"{summary} (zero tests ran in {name})")
     if passed < 1:
         return Verdict(False, f"{summary} (zero tests ran)")

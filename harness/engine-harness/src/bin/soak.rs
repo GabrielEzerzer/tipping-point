@@ -144,3 +144,41 @@ async fn soak(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(raw: &[&str]) -> Result<Args, String> {
+        parse_args(&raw.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn soaks_a_day_reporting_hourly_into_harness_out_by_default() {
+        let args = parse(&[]).expect("no flags is valid");
+        assert_eq!(args.duration, Duration::from_hours(24));
+        assert_eq!(args.report_every, Duration::from_hours(1));
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../out");
+        assert_eq!(args.out.parent(), Some(out.as_path()));
+    }
+
+    #[test]
+    fn takes_its_flags_and_refuses_anything_else() {
+        let args = parse(&["--seconds", "90", "--report-secs", "30", "--out", "s.log"])
+            .expect("valid flags");
+        assert_eq!(args.duration, Duration::from_secs(90));
+        assert_eq!(args.report_every, Duration::from_secs(30));
+        assert_eq!(args.out, PathBuf::from("s.log"));
+        let hours = parse(&["--hours", "2"]).expect("valid flags");
+        assert_eq!(hours.duration, Duration::from_hours(2));
+        assert_eq!(
+            parse(&["--hours", "-1"]).err().as_deref(),
+            Some("--hours wants a whole number, got \"-1\"")
+        );
+        assert_eq!(
+            parse(&["--out"]).err().as_deref(),
+            Some("--out wants a value")
+        );
+        assert!(parse(&["--days", "1"]).is_err());
+    }
+}

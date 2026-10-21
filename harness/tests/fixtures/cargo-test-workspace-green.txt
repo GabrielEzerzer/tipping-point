@@ -1,0 +1,110 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\engine-9f819c0ddae3f0f5.exe)
+
+running 38 tests
+test binance::book::tests::a_cross_is_reported_not_panicked ... ok
+test binance::book::tests::deleting_an_absent_level_is_a_no_op ... ok
+test binance::decimal::tests::formats_back ... ok
+test binance::decimal::tests::parses_prices_and_quantities_exactly ... ok
+test binance::decimal::tests::rejects_excess_precision_and_junk ... ok
+test binance::decimal::tests::step_decimals_strips_trailing_zeros ... ok
+test binance::book::tests::snapshot_then_updates_keep_best_levels_right ... ok
+test binance::feed::tests::a_crossed_apply_is_counted ... ok
+test binance::feed::tests::a_depth_frame_that_does_not_convert_drops_the_book ... ok
+test binance::feed::tests::crosses_are_counted_per_replayed_update ... ok
+test binance::feed::tests::invalidate_all_only_counts_books_that_existed ... ok
+test binance::live::tests::a_depth_frame_that_does_not_convert_unsyncs_its_symbol ... ok
+test binance::live::tests::a_reconnect_drops_the_book_and_asks_for_a_fresh_snapshot ... ok
+test binance::messages::tests::parses_a_depth_frame_into_units ... ok
+test binance::feed::tests::a_too_old_snapshot_counts_one_resync ... ok
+test binance::messages::tests::parses_a_snapshot ... ok
+test binance::feed::tests::trades_are_counted_and_scaled ... ok
+test binance::live::tests::an_unreadable_depth_frame_drops_every_book ... ok
+test binance::live::tests::frames_dropped_under_backpressure_drop_the_book ... ok
+test binance::feed::tests::bad_frames_and_unknown_symbols_are_errors_not_panics ... ok
+test binance::feed::tests::routes_frames_requests_one_snapshot_and_syncs ... ok
+test binance::recording::tests::malformed_lines_name_their_line_number ... ok
+test binance::messages::tests::rejects_unknown_event_types_and_bad_precision ... ok
+test binance::messages::tests::parses_an_agg_trade_frame ... ok
+test binance::recording::tests::replay_requires_scales_first ... ok
+test binance::recording::tests::records_round_trip_through_json_lines ... ok
+test binance::rest::tests::a_missing_filter_is_named ... ok
+test binance::rest::tests::scales_come_from_the_price_and_lot_filters ... ok
+test binance::sync::tests::gap_after_snapshot_asks_for_a_resync_and_keeps_the_update ... ok
+test binance::sync::tests::buffers_until_snapshot_then_bridges_and_syncs ... ok
+test binance::sync::tests::invalidate_drops_everything_and_stale_snapshots_are_ignored ... ok
+test binance::sync::tests::sequence_gap_clears_the_book ... ok
+test binance::sync::tests::snapshot_newer_than_buffer_waits_for_the_bridge ... ok
+test binance::ws::tests::builds_combined_stream_urls ... ok
+test tests::version_is_set ... ok
+test binance::ws::tests::frames_dropped_just_before_a_disconnect_are_reported ... ok
+test binance::sync::tests::buffer_is_bounded ... ok
+test binance::ws::tests::frames_keep_a_connection_open_and_silence_ends_it ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\bin\ingest.rs (target\debug\deps\ingest-b2a00ac72889467a.exe)
+
+running 2 tests
+test tests::refuses_anything_else ... ok
+test tests::runs_until_stopped_or_for_the_given_seconds ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\book_properties.rs (target\debug\deps\book_properties-8ad620af26f86e78.exe)
+
+running 5 tests
+test arbitrary_levels_never_panic_and_a_cross_is_only_reported ... ok
+test applied_levels_land_exactly ... ok
+test applied_ids_are_monotonic_with_an_unbroken_pu_chain ... ok
+test book_is_never_crossed_and_every_level_positive ... ok
+test valid_stream_syncs_without_resync_and_matches_reference ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+     Running tests\fault_injection.rs (target\debug\deps\fault_injection-313e34ef5f07bcaf.exe)
+
+running 2 tests
+test invalidation_recovers_like_a_gap ... ok
+test faults_force_a_resync_then_a_fresh_snapshot_recovers ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests\replay.rs (target\debug\deps\replay-3070428013a3debc.exe)
+
+running 3 tests
+test recorded_fixtures_replay_with_no_unexpected_resync ... ok
+test synthetic_clean_stream_syncs_with_no_resync ... ok
+test synthetic_gap_stream_resyncs_once_and_recovers ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\smoke.rs (target\debug\deps\smoke-2eb0f36dcb0eae18.exe)
+
+running 1 test
+test version_is_reachable_from_outside_the_crate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\record.rs (target\debug\deps\record-12490ac94f03811c.exe)
+
+running 2 tests
+test tests::records_a_minute_into_the_gitignored_dir_by_default ... ok
+test tests::takes_seconds_and_out_and_refuses_anything_else ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\soak.rs (target\debug\deps\soak-352a7e17b046760b.exe)
+
+running 2 tests
+test tests::soaks_a_day_reporting_hourly_into_harness_out_by_default ... ok
+test tests::takes_its_flags_and_refuses_anything_else ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests engine
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
