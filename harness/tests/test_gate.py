@@ -231,3 +231,34 @@ def test_gate_exits_zero_only_when_all_green(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(gate, "OUT", tmp_path)
     monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", "print('All checks passed!')")])
     assert gate.main([]) == 0
+
+
+# ---------- lie: a tool that cannot start, a judge that crashes
+
+
+def test_unstartable_tool_is_red_and_the_rest_still_run(tmp_path, monkeypatch) -> None:
+    broken = tmp_path / "broken.exe"
+    broken.write_bytes(b"")  # on PATH-equivalent but not a runnable program
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(
+        gate,
+        "LEGS",
+        [
+            gate.Leg("broken", [str(broken)], gate.judge_ruff_check),
+            _python_leg("last", "print('All checks passed!')"),
+        ],
+    )
+    assert gate.main([]) == 1
+    (record,) = tmp_path.glob("gate-*.json")
+    rows = json.loads(record.read_text(encoding="utf-8"))
+    assert [(r["leg"], r["verdict"]) for r in rows] == [("broken", "RED"), ("last", "GREEN")]
+    assert rows[0]["returncode"] is None
+    assert "could not start" in rows[0]["verdict_source"]
+
+
+def test_non_utf8_junit_is_red_not_a_crash(monkeypatch) -> None:
+    monkeypatch.setattr(gate, "JUNIT", FIXTURES / "junit-non-utf8.xml")
+    leg = gate.Leg("junit", [sys.executable, "-c", "pass"], gate._judge_pytest_from_disk)
+    result = gate.run_leg(leg)
+    assert result.verdict == "RED"
+    assert "judge crashed" in result.verdict_source

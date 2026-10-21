@@ -212,8 +212,14 @@ def run_leg(leg: Leg) -> LegResult:
         )
     except FileNotFoundError:
         verdict, returncode = judge_missing_tool(leg.argv[0]), None
+    except OSError as exc:
+        verdict, returncode = Verdict(False, f"tool could not start: {exc}"), None
     else:
-        verdict, returncode = leg.judge(proc.returncode, proc.stdout + proc.stderr), proc.returncode
+        returncode = proc.returncode
+        try:
+            verdict = leg.judge(proc.returncode, proc.stdout + proc.stderr)
+        except Exception as exc:  # a crashing judge is a RED leg, never a dead gate
+            verdict = Verdict(False, f"judge crashed: {exc!r}")
     return LegResult(
         leg=leg.name,
         returncode=returncode,
