@@ -4,8 +4,12 @@ Fixtures in fixtures/ are real tool output captured on this repo (green = clean 
 red = deliberately broken files; any other name = files deliberately edited into that shape).
 """
 
+import fnmatch
 import json
+import shutil
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import gate
@@ -243,6 +247,47 @@ def test_pytest_leg_reads_the_dirs_from_the_real_pyproject(monkeypatch) -> None:
     verdict = gate._judge_pytest_from_disk(0, "")
     assert not verdict.green
     assert "zero tests ran from harness/tests" in verdict.source
+
+
+# ---------- the Cargo workspace: every harness crate joins, no other dir can break it
+
+
+def test_cargo_members_skip_non_crate_dirs_under_harness(tmp_path) -> None:
+    # record writes harness/fixtures/recorded/; dot-dirs, out/ and tests/ sit there too
+    for manifest in ("Cargo.toml", "engine/Cargo.toml", "harness/engine-harness/Cargo.toml"):
+        (tmp_path / manifest).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(gate.ROOT / manifest, tmp_path / manifest)
+    for path in (
+        "engine/src/lib.rs",
+        "harness/engine-harness/src/bin/record.rs",
+        "harness/engine-harness/src/bin/soak.rs",
+        "harness/fixtures/recorded/x.jsonl",
+        "harness/.hidden/x",
+        "harness/out/x",
+        "harness/tests/x",
+    ):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).touch()
+    proc = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    packages = sorted(p["name"] for p in json.loads(proc.stdout)["packages"])
+    assert packages == ["engine", "engine-harness"]
+
+
+def test_every_crate_under_harness_matches_the_members_glob() -> None:
+    # a crate the glob misses is never built or tested, and nothing else would say so
+    workspace = tomllib.loads((gate.ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+    crates = [f"harness/{p.parent.name}" for p in (gate.ROOT / "harness").glob("*/Cargo.toml")]
+    assert crates
+    missed = [c for c in crates if not any(fnmatch.fnmatchcase(c, m) for m in workspace["members"])]
+    assert not missed, f"not workspace members: {missed}"
 
 
 # ---------- lie: missing or garbage JUnit

@@ -1,10 +1,9 @@
 [workspace]
 resolver = "3"
-# A glob, so a crate added under harness/ is built and tested without being listed.
-members = ["engine", "harness/*"]
-# Non-crate dirs the glob matches; cargo refuses a member without a Cargo.toml, so any
-# other non-crate dir under harness/ fails every cargo leg loudly until it is listed here.
-exclude = ["harness/tests", "harness/out", "harness/__pycache__"]
+# Crates under harness/ are named *-harness, so the glob picks a new one up without it being
+# listed and never matches the non-crate dirs there (tests/, out/, fixtures/, dot-dirs), which
+# cargo would refuse as members without a Cargo.toml.
+members = ["engine", "harness/*-harness"]
 
 [workspace.package]
 edition = "2024"
