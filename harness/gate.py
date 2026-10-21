@@ -14,8 +14,9 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -70,10 +71,28 @@ def judge_clippy(returncode: int, output: str) -> Verdict:
 _TEST_RESULT = re.compile(
     r"test result: (?P<status>\w+)\. (?P<passed>\d+) passed; (?P<failed>\d+) failed"
 )
+# The line cargo prints above each test binary's output: "Running unittests src\lib.rs (...)",
+# "Running tests\smoke.rs (...)", "Doc-tests engine".
+_TEST_HEADER = re.compile(r"^\s*(?:Running (?P<binary>.+?)|(?P<doctests>Doc-tests \S+))\s*$")
+# Binaries that may pass zero tests: doc-tests, and a binary target's own unit tests
+# (src/main.rs, src/bin/**: record, soak, ingest).
+_FLOOR_EXEMPT = re.compile(r"Doc-tests |unittests src[\\/](?:main\.rs|bin[\\/])")
 
 
 def judge_cargo_test(returncode: int, output: str) -> Verdict:
-    results = list(_TEST_RESULT.finditer(output))
+    """Credit each 'test result:' line to the cargo header above it. Every binary must report
+    ok, and every binary except the floor-exempt ones must pass >=1 test: each lib.rs unit-test
+    binary, each tests/*.rs binary, anything unrecognised. So one crate's passing tests cannot
+    hide another crate whose tests silently vanished."""
+    binaries: list[tuple[str, list[re.Match[str]]]] = []
+    for line in output.splitlines():
+        if header := _TEST_HEADER.match(line):
+            binaries.append((header["binary"] or header["doctests"], []))
+        elif result := _TEST_RESULT.search(line):
+            if not binaries:
+                return Verdict(False, f"unparseable: no cargo header above {line.strip()!r}")
+            binaries[-1][1].append(result)  # doc-tests can print two (merged + standalone)
+    results = [m for _, found in binaries for m in found]
     if not results:
         return Verdict(False, f"no 'test result:' line (exit {returncode})")
     passed = sum(int(m["passed"]) for m in results)
@@ -81,6 +100,11 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     summary = f"{len(results)} test result lines: {passed} passed; {failed} failed"
     if any(m["status"] != "ok" for m in results) or failed:
         return Verdict(False, summary)
+    for name, found in binaries:
+        if not found:
+            return Verdict(False, f"{summary} (no 'test result:' line for {name})")
+        if sum(int(m["passed"]) for m in found) < 1 and not _FLOOR_EXEMPT.match(name):
+            return Verdict(False, f"{summary} (zero tests ran in {name})")
     if passed < 1:
         return Verdict(False, f"{summary} (zero tests ran)")
     if returncode != 0:
@@ -126,8 +150,10 @@ def judge_pyright(returncode: int, output: str) -> Verdict:
     return Verdict(True, line)
 
 
-def judge_pytest(returncode: int, junit_xml: str | None) -> Verdict:
-    """Judge pytest from the JUnit XML it wrote, never from its console output."""
+def judge_pytest(returncode: int, junit_xml: str | None, dirs: Sequence[str] = ()) -> Verdict:
+    """Judge pytest from the JUnit XML it wrote, never from its console output. Each of `dirs`
+    (repo-relative) must contribute >=1 test that ran, so one package's tests cannot hide
+    another's that silently vanished."""
     if junit_xml is None:
         return Verdict(False, f"JUnit XML missing (exit {returncode})")
     try:
@@ -152,9 +178,30 @@ def judge_pytest(returncode: int, junit_xml: str | None) -> Verdict:
         return Verdict(False, summary)
     if counts["tests"] - counts["skipped"] < 1:
         return Verdict(False, f"{summary} (zero tests ran)")
+    ran = [c.get("classname", "") for c in root.iter("testcase") if c.find("skipped") is None]
+    for d in dirs:
+        # pytest's classname is the test file's path, dotted: python/a/test_x.py -> python.a.test_x
+        dotted = d.strip("/").removesuffix(".py").replace("/", ".")
+        if not any(name == dotted or name.startswith(dotted + ".") for name in ran):
+            return Verdict(False, f"{summary} (zero tests ran from {d})")
     if returncode != 0:
         return Verdict(False, f"exit {returncode} despite: {summary}")
     return Verdict(True, summary)
+
+
+def pytest_dirs(pyproject: Path) -> list[str]:
+    """The dirs that must each contribute a test, read from the root pyproject at gate time:
+    every pytest testpath, then every uv workspace member (a glob match with a pyproject.toml),
+    so a package under a shared testpath like python/ cannot hide behind its siblings."""
+    tool = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {})
+    dirs = list(tool.get("pytest", {}).get("ini_options", {}).get("testpaths", []))
+    for pattern in tool.get("uv", {}).get("workspace", {}).get("members", []):
+        dirs += sorted(
+            p.relative_to(pyproject.parent).as_posix()
+            for p in pyproject.parent.glob(pattern)
+            if (p / "pyproject.toml").is_file()
+        )
+    return dirs
 
 
 # ---------------------------------------------------------------- legs and runner
@@ -169,7 +216,7 @@ class Leg:
 
 def _judge_pytest_from_disk(returncode: int, _output: str) -> Verdict:
     text = JUNIT.read_text(encoding="utf-8") if JUNIT.is_file() else None
-    return judge_pytest(returncode, text)
+    return judge_pytest(returncode, text, pytest_dirs(ROOT / "pyproject.toml"))
 
 
 LEGS: list[Leg] = [
@@ -204,7 +251,8 @@ def run_leg(leg: Leg) -> LegResult:
         proc = subprocess.run(
             leg.argv,
             cwd=ROOT,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # one stream in write order: cargo's headers go to stderr
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -217,7 +265,7 @@ def run_leg(leg: Leg) -> LegResult:
     else:
         returncode = proc.returncode
         try:
-            verdict = leg.judge(proc.returncode, proc.stdout + proc.stderr)
+            verdict = leg.judge(proc.returncode, proc.stdout)
         except Exception as exc:  # a crashing judge is a RED leg, never a dead gate
             verdict = Verdict(False, f"judge crashed: {exc!r}")
     return LegResult(

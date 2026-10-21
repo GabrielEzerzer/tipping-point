@@ -1,7 +1,7 @@
 """The gate must not lie: every lie case judges RED, the honest case judges GREEN.
 
 Fixtures in fixtures/ are real tool output captured on this repo (green = clean tree,
-red = deliberately broken files).
+red = deliberately broken files; any other name = files deliberately edited into that shape).
 """
 
 import json
@@ -91,6 +91,8 @@ def test_pytest_failing_exit_with_passing_junit_is_red() -> None:
 
 
 ZERO_CARGO = """\
+     Running unittests src/lib.rs (target/debug/deps/engine-0)
+
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -101,10 +103,18 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 """
+ZERO_CARGO_BINS_ONLY = """\
+     Running unittests src/bin/record.rs (target/debug/deps/record-0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+"""
 
 
-def test_cargo_zero_tests_is_red() -> None:
-    verdict = gate.judge_cargo_test(0, ZERO_CARGO)
+@pytest.mark.parametrize("output", [ZERO_CARGO, ZERO_CARGO_BINS_ONLY], ids=["lib", "bins-only"])
+def test_cargo_zero_tests_is_red(output: str) -> None:
+    verdict = gate.judge_cargo_test(0, output)
     assert not verdict.green
     assert "zero tests" in verdict.source
 
@@ -133,6 +143,106 @@ def test_pytest_zero_tests_ran_is_red(xml: str) -> None:
 def test_pytest_collection_error_is_red() -> None:
     xml = JUNIT_ZERO.replace('errors="0"', 'errors="1"').replace('tests="0"', 'tests="1"')
     assert not gate.judge_pytest(0, xml).green
+
+
+# ---------- lie: one crate's or package's tests vanish behind another's (#39)
+
+
+def test_cargo_every_test_binary_passing_is_green() -> None:
+    verdict = gate.judge_cargo_test(0, fixture("cargo-test-two-binaries-green.txt"))
+    assert verdict.green, verdict.source
+
+
+def test_cargo_lib_binary_with_zero_tests_is_red() -> None:
+    # engine's unit tests deleted; its integration test alone keeps the workspace at 1 passed
+    verdict = gate.judge_cargo_test(0, fixture("cargo-test-lib-zero.txt"))
+    assert not verdict.green
+    assert "zero tests ran in unittests src" in verdict.source
+    assert "lib.rs" in verdict.source
+
+
+def test_cargo_floor_exempt_binaries_with_zero_tests_are_green() -> None:
+    # src/main.rs and src/bin/** unit tests may be empty; doc-tests print two result lines
+    verdict = gate.judge_cargo_test(0, fixture("cargo-test-exempt-binaries-green.txt"))
+    assert verdict.green, verdict.source
+    assert verdict.source == "7 test result lines: 4 passed; 0 failed"
+
+
+def test_cargo_test_result_without_its_header_is_red() -> None:
+    lines = fixture("cargo-test-two-binaries-green.txt").splitlines(keepends=True)
+    verdict = gate.judge_cargo_test(0, "".join(ln for ln in lines if "Running unittests" not in ln))
+    assert not verdict.green
+    assert "unparseable" in verdict.source
+
+
+def test_cargo_binary_without_test_result_is_red() -> None:
+    output = fixture("cargo-test-two-binaries-green.txt")
+    cut = output.index("\n", output.index("Running tests")) + 1  # stops after smoke's header
+    verdict = gate.judge_cargo_test(0, output[:cut])
+    assert not verdict.green
+    assert "no 'test result:' line for tests" in verdict.source
+
+
+def test_cargo_headers_on_stderr_stay_above_their_results() -> None:
+    # cargo prints each binary's header on stderr; libtest prints its result on stdout
+    code = (
+        "import sys; "
+        "print('     Running tests/smoke.rs (target/debug/deps/smoke-0)', file=sys.stderr, "
+        "flush=True); "
+        "print('test result: ok. 1 passed; 0 failed; 0 ignored', flush=True)"
+    )
+    leg = gate.Leg("cargo-test", [sys.executable, "-c", code], gate.judge_cargo_test)
+    result = gate.run_leg(leg)
+    assert result.verdict == "GREEN", result.verdict_source
+
+
+JUNIT_HARNESS_ALL_SKIPPED = (
+    fixture("junit-green.xml")
+    .replace('skipped="0" tests="1"', 'skipped="1" tests="2"')
+    .replace(
+        "</testsuite>",
+        '<testcase classname="harness.tests.test_gate" name="test_x" time="0.0">'
+        '<skipped type="pytest.skip" message="no torch">skipped</skipped></testcase></testsuite>',
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "xml", [fixture("junit-green.xml"), JUNIT_HARNESS_ALL_SKIPPED], ids=["none", "all-skipped"]
+)
+def test_pytest_dir_contributing_zero_tests_is_red(xml: str) -> None:
+    verdict = gate.judge_pytest(0, xml, ["python", "harness/tests"])
+    assert not verdict.green
+    assert "zero tests ran from harness/tests" in verdict.source
+
+
+def test_pytest_every_dir_contributing_is_green() -> None:
+    verdict = gate.judge_pytest(0, fixture("junit-green.xml"), ["python", "python/tipping_point"])
+    assert verdict.green, verdict.source
+
+
+def test_pytest_dirs_are_testpaths_then_uv_members(tmp_path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    for name in ("b", "a"):
+        (tmp_path / "libs" / name).mkdir(parents=True)
+        (tmp_path / "libs" / name / "pyproject.toml").touch()
+    (tmp_path / "libs" / "notes").mkdir()  # no pyproject.toml: not a uv member
+    members = '[tool.uv.workspace]\nmembers = ["libs/*"]\n'
+    pyproject.write_text(
+        '[tool.pytest.ini_options]\ntestpaths = ["libs", "harness/tests"]\n' + members,
+        encoding="utf-8",
+    )
+    assert gate.pytest_dirs(pyproject) == ["libs", "harness/tests", "libs/a", "libs/b"]
+    pyproject.write_text(members, encoding="utf-8")
+    assert gate.pytest_dirs(pyproject) == ["libs/a", "libs/b"]
+
+
+def test_pytest_leg_reads_the_dirs_from_the_real_pyproject(monkeypatch) -> None:
+    # real JUnit from when only the python package had tests: harness/tests contributed none
+    monkeypatch.setattr(gate, "JUNIT", FIXTURES / "junit-green.xml")
+    verdict = gate._judge_pytest_from_disk(0, "")
+    assert not verdict.green
+    assert "zero tests ran from harness/tests" in verdict.source
 
 
 # ---------- lie: missing or garbage JUnit
