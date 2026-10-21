@@ -191,7 +191,8 @@ def pytest_dirs(pyproject: Path) -> list[str]:
     every pytest testpath, then every uv workspace member (a glob match with a pyproject.toml),
     so a package under a shared testpath like python/ cannot hide behind its siblings."""
     tool = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("tool", {})
-    dirs = list(tool.get("pytest", {}).get("ini_options", {}).get("testpaths", []))
+    cfg = tool.get("pytest", {})  # pytest 9 reads native [tool.pytest] as well as ini_options
+    dirs = list(cfg.get("testpaths") or cfg.get("ini_options", {}).get("testpaths", []))
     for pattern in tool.get("uv", {}).get("workspace", {}).get("members", []):
         dirs += sorted(
             p.relative_to(pyproject.parent).as_posix()

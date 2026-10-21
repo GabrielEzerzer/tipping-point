@@ -206,6 +206,15 @@ def test_cargo_test_result_without_its_header_is_red() -> None:
     assert "unparseable" in verdict.source
 
 
+def test_cargo_integration_binary_with_zero_tests_is_red() -> None:
+    output = fixture("cargo-test-two-binaries-green.txt")
+    head, header, tail = output.partition("Running tests\\smoke.rs")
+    tail = tail.replace("ok. 1 passed", "ok. 0 passed", 1)  # smoke's own result line
+    verdict = gate.judge_cargo_test(0, head + header + tail)
+    assert not verdict.green
+    assert "zero tests ran in tests\\smoke.rs" in verdict.source
+
+
 def test_cargo_binary_without_test_result_is_red() -> None:
     output = fixture("cargo-test-two-binaries-green.txt")
     cut = output.index("\n", output.index("Running tests")) + 1  # stops after smoke's header
@@ -247,6 +256,17 @@ def test_pytest_dir_contributing_zero_tests_is_red(xml: str) -> None:
     assert "zero tests ran from harness/tests" in verdict.source
 
 
+def test_pytest_sibling_sharing_a_name_prefix_does_not_count() -> None:
+    # python/tipping_point_extra's tests must not vouch for python/tipping_point
+    xml = fixture("junit-green.xml").replace(
+        'classname="python.tipping_point.tests.test_smoke"',
+        'classname="python.tipping_point_extra.tests.test_x"',
+    )
+    verdict = gate.judge_pytest(0, xml, ["python/tipping_point"])
+    assert not verdict.green
+    assert "zero tests ran from python/tipping_point" in verdict.source
+
+
 def test_pytest_every_dir_contributing_is_green() -> None:
     verdict = gate.judge_pytest(0, fixture("junit-green.xml"), ["python", "python/tipping_point"])
     assert verdict.green, verdict.source
@@ -266,6 +286,13 @@ def test_pytest_dirs_are_testpaths_then_uv_members(tmp_path) -> None:
     assert gate.pytest_dirs(pyproject) == ["libs", "harness/tests", "libs/a", "libs/b"]
     pyproject.write_text(members, encoding="utf-8")
     assert gate.pytest_dirs(pyproject) == ["libs/a", "libs/b"]
+
+
+def test_pytest_dirs_read_native_toml_testpaths(tmp_path) -> None:
+    # pytest 9 also takes [tool.pytest]; moving testpaths there must not empty the list
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[tool.pytest]\ntestpaths = ["libs", "harness/tests"]\n', encoding="utf-8")
+    assert gate.pytest_dirs(pyproject) == ["libs", "harness/tests"]
 
 
 def test_pytest_leg_reads_the_dirs_from_the_real_pyproject(monkeypatch) -> None:
