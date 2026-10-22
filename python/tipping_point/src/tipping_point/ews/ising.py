@@ -227,9 +227,17 @@ def measured(s: Series) -> Series:
     return s.take(s.phase == 1)
 
 
-def thin(s: Series, every: int) -> Series:
-    """Keep the samples at steps divisible by `every` sweeps: an even cadence."""
-    return s.take(s.steps % every == 0)
+def thin(s: Series, every: float) -> Series:
+    """One sample per `every` sweeps: for each point of a regular grid from the first recorded
+    step, the row nearest to it, never the same row twice. With `every` a multiple of the stats
+    stride the grid lands on rows; otherwise each sample sits within half a stride of its point,
+    so runs with different strides still share one cadence."""
+    if len(s.steps) < 2:
+        return s
+    grid = np.arange(float(s.steps[0]), float(s.steps[-1]) + 0.5, every)
+    right = np.clip(np.searchsorted(s.steps, grid), 1, len(s.steps) - 1)
+    nearer = np.where(grid - s.steps[right - 1] <= s.steps[right] - grid, right - 1, right)
+    return s.take(np.unique(nearer))
 
 
 def plateaus(run: Run, cadence: str) -> tuple[dict[float, Series], int]:
@@ -280,8 +288,9 @@ class Inputs:
     """The runs one L contributes, one per slot of the prereg's data section."""
 
     ramps: list[Run]  # one per seed
-    nulls: list[tuple[Run, int]]  # (run, block) per (seed, eps_L)
+    nulls: list[tuple[Run, int]]  # (run, block) per (seed, eps_L) that passed its check
     staircases: list[Run]  # one per seed
+    dropped: list[str]  # null blocks that failed complete.json's thermalised check
 
     def runs(self) -> Iterator[Run]:
         yield from self.ramps
@@ -291,6 +300,12 @@ class Inputs:
 
 def _close(a: float, b: float) -> bool:
     return math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-6)
+
+
+def _thermalised(run: Run, temperature: float) -> bool:
+    """False when complete.json's thermalised check failed at that temperature."""
+    checks = run.checks.get("thermalised", [])
+    return not any(_close(c["temperature"], temperature) and not c["passed"] for c in checks)
 
 
 def _slots(run: Run, data: dict[str, Any]) -> list[tuple[Any, ...]]:
@@ -319,7 +334,8 @@ def select(
 ) -> dict[int, Inputs]:
     """For each L, exactly one complete run per (kind, seed) and one null block per
     (seed, eps_L). A slot left empty or filled twice, or a matching run that has not completed,
-    is an error; listing a run in data.exclusions takes it out."""
+    is an error; listing a run in data.exclusions takes it out. A null block that failed its
+    thermalised check fills its slot but is dropped from scoring and counted."""
     excluded = {e["run_id"] for e in data["exclusions"]}
     pending = [r.run_id for r in incomplete if r.run_id not in excluded and _slots(r, data)]
     if pending:
@@ -353,12 +369,21 @@ def select(
         ]
         if short:
             raise IsingDataError(f"fewer than {data['replicas']} replicas per block: {short}")
+        blocks = [filled[k][0] for k in wanted if k[1] == "null"]
+        passed = [(r, b) for r, b in blocks if _thermalised(r, _block_temperature(r, b))]
+        if not passed:
+            raise IsingDataError(f"L = {L}: every null block failed its thermalised check")
         chosen[L] = Inputs(
             ramps=[filled[(L, "ramp", s)][0][0] for s in data["seeds"]],
-            nulls=[filled[k][0] for k in wanted if k[1] == "null"],
+            nulls=passed,
             staircases=[filled[(L, "staircase", s)][0][0] for s in data["seeds"]],
+            dropped=[f"{r.run_id} block {b}" for r, b in blocks if (r, b) not in passed],
         )
     return chosen
+
+
+def _block_temperature(run: Run, block: int) -> float:
+    return float(run.schedule["params"]["temperatures"][block])
 
 
 # ---------------------------------------------------------------- cadences in samples
@@ -391,17 +416,18 @@ def _density(s: Series) -> float:
 def prepare(
     inputs: Inputs, cadence: str, tau_c: float, thin_taus: float, band: tuple[float, float]
 ) -> Prepared:
-    """Dense: thin every run to one sample per thin_taus tau_c, rounded to a common multiple of
-    their stats strides. Matched: keep every frame; ramps and nulls must save at the same rate
-    (frames per sweep) inside the analysis band, or a window would span different times."""
+    """Dense: thin every run to one sample per thin_taus tau_c (never finer than the coarsest
+    stats stride), nearest rows to one shared grid spacing. Matched: keep every frame; ramps and
+    nulls must save at the same rate (frames per sweep) inside the analysis band, or a window
+    would span different times."""
     ramps = [(run, series(run, cadence)[0]) for run in inputs.ramps]
     nulls = [(run, measured(series(run, cadence)[block])) for run, block in inputs.nulls]
     if cadence == "dense":
-        step = math.lcm(*(_stride(run) for run in inputs.runs() if run.kind != "staircase"))
-        every = step * max(1, round(thin_taus * tau_c / step))
+        coarsest = max(_stride(run) for run, _ in [*ramps, *nulls])
+        every = max(float(coarsest), thin_taus * tau_c)
         return Prepared(
             cadence,
-            float(every),
+            every,
             [(r, thin(s, every)) for r, s in ramps],
             [(r, thin(s, every)) for r, s in nulls],
         )
@@ -444,7 +470,7 @@ class Evaluation:
     tables: dict[str, list[Row]]  # auc, surrogates, alarms, fss
     inputs: list[Run]
     pilot: Pilot
-    dropped_plateaus: int
+    dropped: dict[str, list[str] | int]  # failed null blocks, and how many plateaus were dropped
 
 
 def evaluate(
@@ -466,9 +492,11 @@ def evaluate(
         for cadence in doc["indicators"]["cadences"]:
             prep = _cells(doc, L, inputs, cadence, pilot.tau(L), tables, alarm_eps, rng)
             say(f"L = {L}, {cadence}: {prep.sweeps:g} sweeps per sample, tau_c = {pilot.tau(L):g}")
-    static, dropped = _static(doc, chosen, rng)
+    static, plateaus_dropped = _static(doc, chosen, rng)
     tables["fss"] = static + _dynamic(doc, alarm_eps, rng)
     inputs = list({run.run_id: run for i in chosen.values() for run in i.runs()}.values())
+    null_blocks = [block for i in chosen.values() for block in i.dropped]
+    dropped = {"null_blocks": null_blocks, "plateaus": plateaus_dropped}
     return Evaluation(tables, inputs, pilot, dropped)
 
 

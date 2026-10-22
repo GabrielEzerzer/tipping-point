@@ -10,9 +10,11 @@ The dataset (L = 16 and 32, seeds 1 and 2, 8 replicas):
   pilot.json  tau_c = 4 and 8 sweeps, in a pilot run folder
 """
 
+import inspect
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from tipping_point.ising import io, protocol
@@ -102,7 +104,12 @@ def write_run(
         columns["spins"] = np.zeros((saved.sum() * lattices, io.packed_width(L)), dtype=np.uint8)
         io.write_chunk(run_dir, "configs", L, columns)
     if complete:
-        plateaus = sorted({float(T) for T in temps[:, 0]}) if schedule.kind == "staircase" else []
+        # complete.json's thermalised verdicts: one per staircase plateau, or per null block
+        plateaus = []
+        if schedule.kind == "staircase":
+            plateaus = sorted({float(T) for T in temps[:, 0]})
+        elif schedule.kind == "fixed":
+            plateaus = [float(T) for T in temps[0]]
         checks = [
             {
                 "gate": "thermalised",
@@ -161,15 +168,23 @@ def plateau_values(L: int) -> Values:
 
 
 def ramp(L: int) -> protocol.Ramp:
-    return protocol.Ramp(RATES[L], pre=20, hold=20, x=0.02)
+    """The slow ramp at L; its size is passed when Ramp takes one (#50 spaces saves in eps_L)."""
+    sized: dict[str, Any] = {"L": L} if "L" in inspect.signature(protocol.Ramp).parameters else {}
+    return protocol.Ramp(RATES[L], pre=20, hold=20, x=0.02, **sized)
+
+
+def burst_gap(schedule: protocol.Schedule, L: int, top: float = 3.0, bottom: float = 0.0) -> int:
+    """Sweeps between the ramp's burst starts while the bath is between eps_L = top and bottom."""
+    starts = sorted(t for t, (_, frame) in schedule.frames.items() if frame == 0)
+    inside = [t for t in starts if bottom <= L * (schedule.temperatures(t)[0] - TC) / TC <= top]
+    return int(np.median(np.diff(inside)))
 
 
 def nulls(L: int, sweeps: int) -> protocol.Fixed:
-    """Blocks at eps_L = 1.5 and 2.5, saving frames as densely as the ramp does (1 per sweep at
-    L = 16, 8 per 14 at L = 32)."""
+    """Blocks at eps_L = 1.5 and 2.5, saving bursts as densely as the ramp does in its analysis
+    band, so the matched cadence has the same frames per sweep in both."""
     temps = [TC * (1 + e / L) for e in NULL_EPS]
-    spacing = max(8, round(0.005 * RATES[L]))
-    return protocol.Fixed(temps, therm=20, sweeps=sweeps, saves=sweeps // spacing)
+    return protocol.Fixed(temps, therm=20, sweeps=sweeps, saves=sweeps // burst_gap(ramp(L), L))
 
 
 def staircase() -> protocol.Staircase:

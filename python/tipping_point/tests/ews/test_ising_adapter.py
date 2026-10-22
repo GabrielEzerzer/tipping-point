@@ -13,6 +13,7 @@ from ews_planted import (
     PILOT_RUN,
     PLATEAU,
     REPLICAS,
+    nulls,
     pilot,
     plateau_values,
     ramp,
@@ -55,9 +56,17 @@ def test_series_splits_blocks_and_reads_per_site_values(planted: Any) -> None:
 
 
 def test_thinning_keeps_an_even_cadence(planted: Any) -> None:
+    """The grid starts at the first row. On a multiple of the stride it lands on rows; off it,
+    rows within half a stride of the grid keep the mean spacing, which lets runs with different
+    strides share one cadence."""
     (s,) = ising.series(ising.open_run(planted.runs["L32-ramp-s1"]), "dense")
     thinned = ising.thin(s, 4)
-    assert np.all(thinned.steps % 4 == 0) and np.all(np.diff(thinned.steps) == 4)
+    assert thinned.steps[0] == s.steps[0] and np.all(np.diff(thinned.steps) == 4)
+    uneven = ising.thin(s, 2.5)
+    gaps = np.diff(uneven.steps)
+    assert set(gaps.tolist()) <= {2, 3} and abs(gaps.mean() - 2.5) < 0.01
+    grid = s.steps[0] + 2.5 * np.arange(len(uneven.steps))
+    assert np.all(np.abs(uneven.steps - grid) <= 0.5)
 
 
 def test_ramp_segment_finds_where_the_bath_reaches_each_eps(planted: Any) -> None:
@@ -130,6 +139,37 @@ def test_select_fills_each_slot_exactly_once(planted: Any) -> None:
     other = _data(ramps={"kind": "ramp", "x": 0.3})  # no ramp at that Kibble-Zurek point
     with pytest.raises(ising.IsingDataError, match="no complete run"):
         ising.select(complete, incomplete, other)
+
+
+def test_a_null_block_that_failed_its_check_is_dropped_and_counted(tmp_path: Path) -> None:
+    """Null runs are read as equilibrium, so a block whose thermalised check failed (#50 writes
+    the check for null runs too) is left out of scoring and reported, not silently used."""
+    for tag, schedule, values in (
+        ("L16-ramp-s1", ramp(16), ramp_values(16)),
+        ("L16-qs-s1", staircase(), plateau_values(16)),
+    ):
+        write_run(tmp_path, tag, schedule, 16, 1, values)
+    schedule = nulls(16, 500)
+    hot = float(schedule.temperatures(1)[1])  # the eps_L = 2.5 block
+    write_run(tmp_path, "L16-null-s1", schedule, 16, 1, ramp_values(16), failed=(hot,))
+    inputs = ising.select(*ising.find_runs(tmp_path), _data(L=[16], seeds=[1]))[16]
+    assert [b for _, b in inputs.nulls] == [0]
+    assert inputs.dropped == ["20261023T000000Z-L16-null-s1 block 1"]
+
+
+def test_the_pilot_record_from_50_reads(tmp_path: Path) -> None:
+    """The committed copy of #50's measured record (fixtures/ising_pilot.json): the contract the
+    scorer reads tau_c through."""
+    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "ising_pilot.json"
+    folder = tmp_path / "ising" / "measured"
+    folder.mkdir(parents=True)
+    (folder / "pilot.json").write_bytes(fixture.read_bytes())
+    digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+    record = ising.read_pilot(tmp_path, "measured", digest)
+    assert sorted(record.tau_c) == [16, 32, 64]
+    assert record.tau(16) == pytest.approx(52.1, abs=0.05)
+    assert record.tau(64) == pytest.approx(875.4, abs=0.05)
+    assert len(record.kernel_commit.split("-")[0]) == 40
 
 
 def test_a_doubled_slot_is_an_error_until_one_run_is_excluded(planted: Any, tmp_path: Path) -> None:

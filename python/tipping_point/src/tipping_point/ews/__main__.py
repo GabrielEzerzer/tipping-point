@@ -150,7 +150,7 @@ def _score(args: argparse.Namespace) -> int:
             "kernel_commit": pilot.kernel_commit,
             "tau_c": {str(L): tau for L, tau in sorted(pilot.tau_c.items())},
         },
-        "dropped_plateaus": evaluation.dropped_plateaus,
+        "dropped": evaluation.dropped,
     }
     inputs = [
         {"domain": "ising", "run_id": r.run_id, "complete_sha256": r.complete_sha256}
