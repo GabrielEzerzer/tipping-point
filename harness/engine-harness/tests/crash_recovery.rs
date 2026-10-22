@@ -1,14 +1,14 @@
 //! Crash injection: the production writer, run as its own process with every frame split in
-//! two, is killed at a random moment; recovery must then close the log with every good frame
-//! kept, seqs contiguous from 0 and every payload the one written at that position. Rounds
-//! default to 24 to keep the gate quick; set `TP_CRASH_ROUNDS` for a longer soak.
+//! two, is killed 10-500 ms after it opens its log; recovery must then close the log with every
+//! good frame kept, seqs contiguous from 0 and every payload the one written at that position.
+//! Rounds default to 24 to keep the gate quick; set `TP_CRASH_ROUNDS` for a longer soak.
 
 use std::error::Error;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine::store::frame::Kind;
 use engine::store::segment::{self, Ending, LOG_DIR, SegmentReader, recover_run};
@@ -39,12 +39,19 @@ fn a_killed_writer_loses_no_good_frame_once_recovered() -> Result<(), Box<dyn Er
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
+        // Time the kill from when the writer has its log open, not from the spawn: a slow
+        // start (a scan of a fresh binary, a loaded machine) must not eat the random delay.
+        let started = Instant::now();
+        while !run_dir.join(LOG_DIR).exists() && started.elapsed() < Duration::from_secs(20) {
+            sleep(Duration::from_millis(2));
+        }
         sleep(Duration::from_millis(10 + random() % 491));
         child.kill()?;
         child.wait()?;
-        if !run_dir.join(LOG_DIR).exists() {
-            continue; // killed before it opened the log
-        }
+        assert!(
+            run_dir.join(LOG_DIR).exists(),
+            "round {round}: the writer never started"
+        );
 
         let recovery = recover_run(&run_dir)?;
         if recovery.as_ref().is_some_and(|r| r.cut > 0) {

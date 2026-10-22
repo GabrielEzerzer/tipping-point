@@ -21,7 +21,7 @@ use engine::store::rotate::rotate;
 use engine::store::run::{self, BookSample, MarketParams};
 use engine::store::segment::{self, LOG_DIR};
 use engine::store::writer::{LogConfig, LogWriter};
-use engine_harness::transcript::Transcript;
+use engine_harness::transcript::{FORMAT, Transcript};
 
 type Outcome = Result<(), Box<dyn Error>>;
 
@@ -139,7 +139,8 @@ async fn a_session_with_every_fault_replays_exactly_as_it_ran() -> Outcome {
 }
 
 /// The recordings `record` made, if any: each run's log replays (and its Parquet replays)
-/// exactly as the live loop ran while recording it. Skips, and says so, when there are none.
+/// exactly as the live loop ran while recording it. Skips, and says so, when there are none,
+/// and passes over (saying so) a run whose transcript an older harness wrote.
 #[test]
 fn recorded_sessions_replay_exactly_as_they_ran_live() -> Outcome {
     let recorded = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -158,6 +159,14 @@ fn recorded_sessions_replay_exactly_as_they_ran_live() -> Outcome {
     }
     for original in runs {
         let live = Transcript::load(&original.join("live-transcript.json"))?;
+        if live.format != FORMAT {
+            println!(
+                "passed over {}: its transcript is format {}, this harness writes {FORMAT}; record it again",
+                original.display(),
+                live.format
+            );
+            continue;
+        }
         // A copy, so rotating never leaves Parquet from older code next to the recording.
         let run_dir = fresh_dir("recorded").join(original.file_name().expect("a run id"));
         fs::create_dir_all(run_dir.join(LOG_DIR))?;
