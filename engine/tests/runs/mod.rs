@@ -121,7 +121,7 @@ pub fn write_run(script: &Path, dir: &Path, log: LogConfig) -> (PathBuf, Summary
         book_sample: BookSample::default(),
     };
     let manifest = run::create(&run_dir, params).expect("a run folder");
-    let writer = LogWriter::start(&run_dir, Meta::for_run(&manifest), log).expect("a writer");
+    let mut writer = LogWriter::start(&run_dir, Meta::for_run(&manifest), log).expect("a writer");
     for record in records {
         let message = record
             .into_message()

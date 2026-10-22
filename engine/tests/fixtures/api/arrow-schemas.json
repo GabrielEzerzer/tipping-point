@@ -1,0 +1,1195 @@
+{
+  "ising/configs": {
+    "fields": [
+      {
+        "name": "step",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "replica",
+        "nullable": true,
+        "type": "UInt16"
+      },
+      {
+        "name": "temperature",
+        "nullable": true,
+        "type": "Float64"
+      },
+      {
+        "name": "segment",
+        "nullable": true,
+        "type": "Int32"
+      },
+      {
+        "name": "burst",
+        "nullable": true,
+        "type": "Int32"
+      },
+      {
+        "name": "frame",
+        "nullable": true,
+        "type": "Int8"
+      },
+      {
+        "name": "magnetisation",
+        "nullable": true,
+        "type": "Int32"
+      },
+      {
+        "name": "energy",
+        "nullable": true,
+        "type": "Int32"
+      },
+      {
+        "name": "spins",
+        "nullable": true,
+        "type": "FixedSizeBinary(2)"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "ising",
+      "tp.run": "20261022T000000Z-fixture",
+      "tp.schema": "configs/1"
+    }
+  },
+  "ising/stats": {
+    "fields": [
+      {
+        "name": "step",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "replica",
+        "nullable": true,
+        "type": "UInt16"
+      },
+      {
+        "name": "temperature",
+        "nullable": true,
+        "type": "Float64"
+      },
+      {
+        "name": "segment",
+        "nullable": true,
+        "type": "Int32"
+      },
+      {
+        "name": "phase",
+        "nullable": true,
+        "type": "Int8"
+      },
+      {
+        "name": "magnetisation",
+        "nullable": true,
+        "type": "Int32"
+      },
+      {
+        "name": "energy",
+        "nullable": true,
+        "type": "Int32"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "ising",
+      "tp.run": "20261022T000000Z-fixture",
+      "tp.schema": "stats/1"
+    }
+  },
+  "live/book_samples": {
+    "fields": [
+      {
+        "name": "sample_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "symbol",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "last_update_id",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "synced",
+        "nullable": false,
+        "type": "Boolean"
+      },
+      {
+        "name": "bid_px_0",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_1",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_2",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_3",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_4",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_5",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_6",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_7",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_8",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_9",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_10",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_11",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_12",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_13",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_14",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_15",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_16",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_17",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_18",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_19",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_0",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_1",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_2",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_3",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_4",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_5",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_6",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_7",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_8",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_9",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_10",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_11",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_12",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_13",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_14",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_15",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_16",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_17",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_18",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_19",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_0",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_1",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_2",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_3",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_4",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_5",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_6",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_7",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_8",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_9",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_10",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_11",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_12",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_13",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_14",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_15",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_16",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_17",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_18",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_19",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_0",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_1",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_2",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_3",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_4",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_5",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_6",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_7",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_8",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_9",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_10",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_11",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_12",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_13",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_14",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_15",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_16",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_17",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_18",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_19",
+        "nullable": true,
+        "type": "Int64"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "market",
+      "tp.run": "20231114T221320Z-session",
+      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
+      "tp.schema": "book_samples/1"
+    }
+  },
+  "market/agg_trades": {
+    "fields": [
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "source_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "trade_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "capture_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "symbol",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
+        "name": "agg_trade_id",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "first_trade_id",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "last_trade_id",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "price",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "qty",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "buyer_is_maker",
+        "nullable": false,
+        "type": "Boolean"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "market",
+      "tp.run": "20231114T221320Z-session",
+      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
+      "tp.schema": "agg_trades/1"
+    }
+  },
+  "market/book_samples": {
+    "fields": [
+      {
+        "name": "sample_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "symbol",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "last_update_id",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "synced",
+        "nullable": false,
+        "type": "Boolean"
+      },
+      {
+        "name": "bid_px_0",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_1",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_2",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_3",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_4",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_5",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_6",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_7",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_8",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_9",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_10",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_11",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_12",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_13",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_14",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_15",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_16",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_17",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_18",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_px_19",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_0",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_1",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_2",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_3",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_4",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_5",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_6",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_7",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_8",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_9",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_10",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_11",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_12",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_13",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_14",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_15",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_16",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_17",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_18",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "bid_qty_19",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_0",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_1",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_2",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_3",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_4",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_5",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_6",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_7",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_8",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_9",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_10",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_11",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_12",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_13",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_14",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_15",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_16",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_17",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_18",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_px_19",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_0",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_1",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_2",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_3",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_4",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_5",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_6",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_7",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_8",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_9",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_10",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_11",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_12",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_13",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_14",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_15",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_16",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_17",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_18",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "ask_qty_19",
+        "nullable": true,
+        "type": "Int64"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "market",
+      "tp.run": "20231114T221320Z-session",
+      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
+      "tp.schema": "book_samples/1"
+    }
+  },
+  "market/depth_updates": {
+    "fields": [
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "source_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "transaction_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "capture_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "symbol",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
+        "name": "first_update_id",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "last_update_id",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "prev_last_update_id",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "level_idx",
+        "nullable": false,
+        "type": "Int32"
+      },
+      {
+        "name": "side",
+        "nullable": false,
+        "type": "Int8"
+      },
+      {
+        "name": "price",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "qty",
+        "nullable": false,
+        "type": "Int64"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "market",
+      "tp.run": "20231114T221320Z-session",
+      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
+      "tp.schema": "depth_updates/1"
+    }
+  },
+  "market/frames": {
+    "fields": [
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "kind",
+        "nullable": false,
+        "type": "Int8"
+      },
+      {
+        "name": "source_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "capture_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "payload",
+        "nullable": false,
+        "type": "Utf8"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "market",
+      "tp.run": "20231114T221320Z-session",
+      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
+      "tp.schema": "frames/1"
+    }
+  },
+  "market/snapshots": {
+    "fields": [
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "source_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "capture_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "symbol",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
+        "name": "last_update_id",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "level_idx",
+        "nullable": false,
+        "type": "Int32"
+      },
+      {
+        "name": "side",
+        "nullable": false,
+        "type": "Int8"
+      },
+      {
+        "name": "price",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "qty",
+        "nullable": false,
+        "type": "Int64"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "market",
+      "tp.run": "20231114T221320Z-session",
+      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
+      "tp.schema": "snapshots/1"
+    }
+  }
+}

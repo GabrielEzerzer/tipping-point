@@ -154,7 +154,7 @@ fn a_closed_segment_is_left_alone_and_bytes_after_its_marker_are_damage() -> Out
 #[test]
 fn recovery_waits_for_the_writer_to_let_go() -> Outcome {
     let dir = fresh_dir("in-use");
-    let writer = LogWriter::start(&dir, meta(), LogConfig::default())?;
+    let mut writer = LogWriter::start(&dir, meta(), LogConfig::default())?;
     writer.append_blocking(Entry {
         kind: Kind::Depth,
         source_ts_ns: 0,

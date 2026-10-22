@@ -13,12 +13,20 @@ license = "MIT"
 engine = { path = "engine" }
 # arrow and parquet stay on the arrow major that duckdb re-exports (58, not the latest): all
 # three move together, and `cargo tree -d` must show one arrow (#22).
-arrow = { version = "58", default-features = false }
+arrow = { version = "58", default-features = false, features = ["ipc"] }
+# The local API (#24): one HTTP server; the WebSocket upgrade runs over hyper with the
+# tokio-tungstenite below, because axum's `ws` feature would bring a second tungstenite.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query"] }
 crc = "3.4.0"
 # Linked against DuckDB's prebuilt library, downloaded by the build script (DUCKDB_DOWNLOAD_LIB
 # in .cargo/config.toml), not compiled from C++ with `bundled`.
 duckdb = "=1.10506.1"
+# The crate under duckdb, pinned with it. engine depends on it directly only so that its build
+# script runs after this one's and learns where the downloaded duckdb.dll is (engine/build.rs).
+libduckdb-sys = "=1.10506.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
+hyper = { version = "1.12.0", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"] }
 parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2", "query"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
@@ -27,6 +35,7 @@ serde_json = "1.0.154"
 thiserror = "2.0.21"
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

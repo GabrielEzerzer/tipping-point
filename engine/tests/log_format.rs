@@ -148,19 +148,21 @@ proptest! {
     ) {
         let dir = fresh_dir("round-trip");
         let config = LogConfig { max_segment_bytes, ..LogConfig::default() };
-        let writer = LogWriter::start(&dir, meta(), config)?;
+        let mut writer = LogWriter::start(&dir, meta(), config)?;
+        let mut given = Vec::new();
         for (kind, source_ts_ns, capture_ts_ns, payload) in &entries {
-            writer.append_blocking(Entry {
+            given.push(writer.append_blocking(Entry {
                 kind: *kind,
                 source_ts_ns: *source_ts_ns,
                 capture_ts_ns: *capture_ts_ns,
                 payload: payload.clone(),
-            })?;
+            })?);
         }
         let summary = writer.finish()?;
 
         let mut seq = 0;
         let mut data = Vec::new();
+        let mut stored = Vec::new();
         let segments = segment::list(&dir.join(LOG_DIR))?;
         prop_assert_eq!(segments.len() as u64, summary.segments);
         for (first_seq, path) in &segments {
@@ -174,7 +176,10 @@ proptest! {
                 }
                 match frame.kind {
                     Kind::Meta | Kind::SegmentEnd => {}
-                    kind => data.push((kind, frame.source_ts_ns, frame.capture_ts_ns, frame.payload)),
+                    kind => {
+                        stored.push(frame.seq);
+                        data.push((kind, frame.source_ts_ns, frame.capture_ts_ns, frame.payload));
+                    }
                 }
                 seq += 1;
                 in_segment += 1;
@@ -184,12 +189,14 @@ proptest! {
         }
         prop_assert_eq!(seq, summary.frames);
         prop_assert_eq!(data, entries);
+        prop_assert_eq!(given, stored, "append returns the seq the entry is stored under");
         fs::remove_dir_all(&dir)?;
     }
 }
 
-/// Segments end on the clock too, even with nothing to write: each piece of an idle hour is a
-/// segment of its own, Meta and marker.
+/// Segments end on the clock too, even with nothing to write: the live loop ticks the writer on
+/// its timer, and each piece of an idle hour becomes a segment of its own, Meta and marker. The
+/// seqs the handle hands out run on across those markers.
 #[test]
 fn segments_also_end_on_the_clock() -> Result<(), Box<dyn std::error::Error>> {
     let dir = fresh_dir("clock");
@@ -203,12 +210,25 @@ fn segments_also_end_on_the_clock() -> Result<(), Box<dyn std::error::Error>> {
         capture_ts_ns: 0,
         payload: payload.to_owned(),
     };
-    let writer = LogWriter::start(&dir, meta(), config)?;
-    writer.append_blocking(entry("before"))?;
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    writer.append_blocking(entry("after"))?;
+    let mut writer = LogWriter::start(&dir, meta(), config)?;
+    let before = writer.append_blocking(entry("before"))?;
+    let mut ticks = 0;
+    for _ in 0..15 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        ticks += u64::from(writer.tick_blocking()?);
+    }
+    let after = writer.append_blocking(entry("after"))?;
     let summary = writer.finish()?;
     assert!(summary.segments >= 3, "{summary:?}");
+    assert!(ticks >= 2, "{ticks} idle rotations");
+    // Seq 0 is the first Meta and every rotation takes two seqs, its marker and the next Meta.
+    // An hour can end before the first entry too, so only the total is fixed.
+    assert_eq!(before % 2, 1, "{before}: Meta, then rotations in pairs");
+    assert_eq!(
+        after,
+        2 * summary.segments,
+        "both entries and every rotation's two frames: {summary:?}"
+    );
 
     let mut holder = Vec::new();
     for (first_seq, path) in segment::list(&dir.join(LOG_DIR))? {

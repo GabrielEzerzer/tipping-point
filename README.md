@@ -10,8 +10,9 @@ Open-source framework for detecting critical transitions in live data streams: a
 - `app/` — the Tauri desktop app (not yet started).
 - `paper/` — the paper.
 - `harness/` — supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
-  a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries and the
-  replay-equals-live checks (production code never depends on it).
+  a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries, the
+  replay-equals-live checks and the API's contract, parity, Python and load checks (production code
+  never depends on it).
 
 ## Binance ingest
 
@@ -51,13 +52,63 @@ cargo run -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the 
 ```
 
 DuckDB is linked from its prebuilt library, which the build downloads once per target dir
-(`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network.
+(`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network. On
+Windows the build also copies `duckdb.dll` next to the binaries (`target/<profile>/`,
+`engine/build.rs`), so `store.exe` and `serve.exe` start from any shell, not only under cargo;
+a binary copied elsewhere needs that DLL beside it. Linux and macOS binaries find the library
+through their rpath.
 
 Recorded fixtures are never committed; the replay tests replay any present locally and skip
 otherwise. The committed tests use synthetic streams and a golden log
 (`engine/tests/fixtures/synthetic/`) and generated ones (property tests and fault injection in
 `engine/tests/`, crash injection and replay-equals-live in `harness/engine-harness/tests/`).
 `TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default).
+
+## Engine API
+
+`serve` runs the engine as its own process: the live feed plus one HTTP server on 127.0.0.1
+(`engine/src/api/`). The app is a WebSocket client and the Python worker a third process. It
+prints `serve listening on http://127.0.0.1:<port>` once it accepts connections, so a parent
+that passed `--port 0` reads the port from it.
+
+```sh
+cargo run -p engine --bin serve                                   # live Binance feed on 127.0.0.1:7731
+cargo run -p engine --bin serve -- --record                       # ...recorded, closed segments rotated in the background
+cargo run -p engine --bin serve -- --script <file.jsonl> --speed 10 --port 0   # a recorded script played back instead
+```
+
+| route | what |
+|---|---|
+| `GET /v1/health` | alive, protocol version, whether the live feed has started or ended |
+| `GET /v1/runs` | every run in the data dir, by domain |
+| `GET /v1/live/book_samples` | Arrow IPC stream: live book samples, each batch one or more whole 100 ms instants (one per batch live; a backfill or an unpaced replay sends several); `?backfill_s=` first replays that much of the recent past from memory (no gap, no overlap), `?run=&speed=` replays a recorded run instead |
+| `GET /v1/table/{domain}/{run}/{table}` | Arrow IPC stream: any table of a market or Ising run, `?start=&end=` a range of its key, read through DuckDB and cast back to the schema stored in the Parquet footer |
+| `POST /v1/publish/{topic}` | a JSON result (`meters`, `jev`, `pnl`, `ising`) relayed to the app |
+| `GET /v1/ws` | the app's WebSocket: JSON `book` (top 20 per symbol), `trades`, `status`, and the relayed topics; replay and seek of recorded runs; binary frames carry only Ising lattices |
+
+- **Live samples come from rotate's own sampler** (`store/samples.rs`), each row carrying the log
+  seq of the last frame applied, which the live loop now assigns: the live stream equals the
+  `book_samples` table rotate writes later.
+- **Ingest never waits on a client.** The live loop publishes into `watch` (latest value) and
+  bounded `broadcast` channels. An app client is sent the newest book at most every 16 ms, a `gap`
+  when it falls behind on trades, and close code 4002 after a 10 s stall; an Arrow stream is
+  lossless or cut, its response aborted so a reader never takes it for a short table.
+- **Times on the wire are milliseconds** (`ts_ms`), prices and quantities integer ticks and lots at
+  the scales sent in `welcome`; storage keeps nanoseconds.
+- **Checks on every request:** `Host` must name the server (stops DNS rebinding) and a browser's
+  `Origin` must be on the allowlist (the Tauri webview, the Vite dev server, `--allow-origin`).
+- **Replay and scrub:** rotated hours come from Parquet through DuckDB, the hour not yet rotated
+  from memory, as the same `book` and `trades` messages.
+
+Training reads Parquet directly (`tipping_point.engine.read`, no engine); the engine's Arrow
+streams serve live inference and replay tests of it (`live`, `table`, `publish`; stdlib and
+pyarrow only). The protocol is pinned by golden files in `engine/tests/fixtures/api/`, which the
+app's mock replays; a change fails `api_contract` until they are regenerated in the same commit
+(`TP_UPDATE_GOLDEN=1 cargo test -p engine-harness`). `api_load` drives ten times the live rate
+into nine app clients, two Arrow clients and one stalled client of each kind, and writes its
+measurements to `harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
+default 5 s. The Python round trip (`api_python`) runs the repository's `.venv` Python, or
+`$TP_PYTHON`.
 
 ## Ising simulator
 

@@ -96,7 +96,7 @@ async fn soak(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut previous = (Stats::default(), LiveStats::default());
     let mut period = 0u64;
-    run_live(config, |event| match event {
+    run_live(config, |event: LiveEvent<'_>| match event {
         LiveEvent::Report {
             elapsed,
             feed,

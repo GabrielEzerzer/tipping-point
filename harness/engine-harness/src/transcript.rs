@@ -73,6 +73,7 @@ impl Transcript {
                 kind,
                 applied,
                 feed,
+                ..
             } => {
                 let events = std::mem::take(&mut self.pending);
                 let books = self.books_now(feed);
@@ -299,6 +300,7 @@ mod tests {
             kind: engine::store::frame::Kind::Control,
             applied: &applied,
             feed: &feed,
+            stats: &engine::binance::live::LiveStats::default(),
         });
         assert_eq!(transcript.steps.len(), 1);
         assert!(transcript.raised("Reconnect"));

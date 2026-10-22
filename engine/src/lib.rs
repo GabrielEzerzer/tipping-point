@@ -1,5 +1,6 @@
 //! Tipping Point engine: streaming critical-transition detection.
 
+pub mod api;
 pub mod binance;
 pub mod store;
 

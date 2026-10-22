@@ -17,10 +17,8 @@
 //!
 //! Times are Int64 nanoseconds since the epoch, update and trade ids are Int64, and prices and
 //! quantities are integer units at the run's scales (kept in its manifest and every Meta).
-//! Rows go in seq order. A book sample at instant `t` is the book after every input captured at
-//! or before `t`, the capture clock taken as a running maximum so a clock step back cannot
-//! reorder anything; its `seq` is the last frame applied before it. Levels are null past the
-//! book's depth and while the symbol is not synced.
+//! Rows go in seq order. Book samples are made by [`super::samples`], the code the live API
+//! samples with too.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -39,13 +37,13 @@ use parquet::file::properties::WriterProperties;
 
 use super::frame::{Frame, Kind, Meta};
 use super::replay::Replay;
-use super::run::{self, BookSample, MANIFEST, Manifest};
+use super::run::{self, MANIFEST, Manifest};
+use super::samples::{Sample, SampleRows, Sampler};
 use super::segment::{self, Ending, LOG_DIR, SegmentReader};
 use super::{StoreError, ms_to_ns};
-use crate::binance::feed::Feed;
 use crate::binance::messages::{Payload, RawAggTrade, RawDepthUpdate, parse_frame, parse_snapshot};
-use crate::binance::pipeline::{Pipeline, SnapshotPayload};
-use crate::binance::sync::{BookSync, Level};
+use crate::binance::pipeline::SnapshotPayload;
+use crate::binance::sync::Level;
 use crate::binance::{Scales, Symbol};
 
 /// Every table rotate writes, in the order the manifest lists them.
@@ -67,9 +65,6 @@ const ROW_GROUP: usize = 256 * 1024;
 const BATCH: usize = 16 * 1024;
 /// Text gathered before a batch goes out whatever its row count, so string offsets stay small.
 const BATCH_BYTES: usize = 64 << 20;
-/// A capture-clock jump longer than this many grid instants is skipped rather than filled with
-/// samples of an unchanged book (a day at the default 100 ms).
-const MAX_GAP_SAMPLES: i64 = 864_000;
 
 /// What a rotate did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -116,7 +111,8 @@ pub fn rotate(run_dir: &Path) -> Result<Rotation, StoreError> {
     let mut replay = Replay::new(None);
     let mut sampler = Sampler::new(manifest.params.book_sample);
     for (index, (first_seq, path)) in segments.iter().enumerate() {
-        let mut tables = Tables::open(run_dir, *first_seq, sampler.levels, &mut rotation.skipped)?;
+        let mut tables =
+            Tables::open(run_dir, *first_seq, sampler.levels(), &mut rotation.skipped)?;
         let mut reader = SegmentReader::open(path)?;
         while let Some(frame) = reader.next_frame()? {
             if frame.kind == Kind::Meta
@@ -129,8 +125,15 @@ pub fn rotate(run_dir: &Path) -> Result<Rotation, StoreError> {
                 rotation.unparsed += 1;
             }
             if is_input(frame.kind) {
-                let feed = replay.pipeline().map(Pipeline::feed);
-                sampler.before(&frame, feed, &mut tables.samples.rows)?;
+                // Before the input is applied: each instant it passes is the book without it.
+                let instants = sampler.instants(frame.capture_ts_ns);
+                if let Some(pipeline) = replay.pipeline() {
+                    let seq = to_i64(frame.seq)? - 1;
+                    for t in instants {
+                        let sample = Sample::of_feed(pipeline.feed(), t, seq, sampler.levels())?;
+                        tables.samples.rows.push(&sample);
+                    }
+                }
             }
             replay.push(&frame, &mut |_| {})?;
             tables.flush_full()?;
@@ -146,7 +149,7 @@ pub fn rotate(run_dir: &Path) -> Result<Rotation, StoreError> {
             rotation.open = Some(path.clone());
         }
     }
-    rotation.skipped_samples = sampler.skipped;
+    rotation.skipped_samples = sampler.skipped();
     Ok(rotation)
 }
 
@@ -754,179 +757,20 @@ impl Rows for SnapshotRows {
     }
 }
 
-/// `book_samples`: one row per symbol and grid instant, the top `levels` of each side in wide
-/// columns (`bid_px_0..`, `bid_qty_0..`, `ask_px_0..`, `ask_qty_0..`).
-struct SampleRows {
-    levels: usize,
-    sample_ts_ns: Int64Builder,
-    symbol: StringBuilder,
-    seq: Int64Builder,
-    last_update_id: Int64Builder,
-    synced: BooleanBuilder,
-    /// `levels` builders each for bid prices, bid quantities, ask prices, ask quantities.
-    sides: [Vec<Int64Builder>; 4],
-}
-
-impl SampleRows {
-    fn new(levels: usize) -> Self {
-        let side = || (0..levels).map(|_| Int64Builder::new()).collect::<Vec<_>>();
-        Self {
-            levels,
-            sample_ts_ns: Int64Builder::new(),
-            symbol: StringBuilder::new(),
-            seq: Int64Builder::new(),
-            last_update_id: Int64Builder::new(),
-            synced: BooleanBuilder::new(),
-            sides: [side(), side(), side(), side()],
-        }
-    }
-
-    fn schema(levels: usize) -> SchemaRef {
-        let mut fields = vec![
-            int64("sample_ts_ns"),
-            Field::new("symbol", DataType::Utf8, false),
-            int64("seq"),
-            Field::new("last_update_id", DataType::Int64, true),
-            Field::new("synced", DataType::Boolean, false),
-        ];
-        for prefix in ["bid_px", "bid_qty", "ask_px", "ask_qty"] {
-            fields.extend(
-                (0..levels).map(|i| Field::new(format!("{prefix}_{i}"), DataType::Int64, true)),
-            );
-        }
-        Arc::new(Schema::new(fields))
-    }
-
-    /// One row: the symbol's book at `t` as the feed holds it now.
-    fn push(&mut self, t: i64, seq: i64, symbol: &str, feed: &Feed) -> Result<(), StoreError> {
-        let sync = feed.sync(symbol);
-        let synced = sync.is_some_and(BookSync::is_synced);
-        let last_id = match sync.and_then(BookSync::last_id) {
-            Some(id) if synced => Some(to_i64(id)?),
-            _ => None,
-        };
-        self.sample_ts_ns.append_value(t);
-        self.symbol.append_value(symbol);
-        self.seq.append_value(seq);
-        self.last_update_id.append_option(last_id);
-        self.synced.append_value(synced);
-        let book = feed.book(symbol).filter(|_| synced);
-        let bids: Vec<Level> = book
-            .map(|b| b.bids().take(self.levels).collect())
-            .unwrap_or_default();
-        let asks: Vec<Level> = book
-            .map(|b| b.asks().take(self.levels).collect())
-            .unwrap_or_default();
-        let [bid_px, bid_qty, ask_px, ask_qty] = &mut self.sides;
-        for i in 0..self.levels {
-            bid_px[i].append_option(bids.get(i).map(|l| l.price));
-            bid_qty[i].append_option(bids.get(i).map(|l| l.qty));
-            ask_px[i].append_option(asks.get(i).map(|l| l.price));
-            ask_qty[i].append_option(asks.get(i).map(|l| l.qty));
-        }
-        Ok(())
-    }
-}
-
+/// `book_samples` rows go through the same table plumbing as every other table.
 impl Rows for SampleRows {
     fn len(&self) -> usize {
-        self.seq.len()
+        SampleRows::len(self)
     }
 
     fn take(&mut self) -> Result<RecordBatch, StoreError> {
-        let mut columns = vec![
-            column(self.sample_ts_ns.finish()),
-            column(self.symbol.finish()),
-            column(self.seq.finish()),
-            column(self.last_update_id.finish()),
-            column(self.synced.finish()),
-        ];
-        for side in &mut self.sides {
-            columns.extend(side.iter_mut().map(|builder| column(builder.finish())));
-        }
-        Ok(RecordBatch::try_new(Self::schema(self.levels), columns)?)
-    }
-}
-
-/// Walks the capture clock and emits book samples on its grid.
-struct Sampler {
-    levels: usize,
-    every_ns: i64,
-    /// The running maximum of input capture times.
-    clock: Option<i64>,
-    /// The next grid instant not yet sampled.
-    next: i64,
-    skipped: u64,
-}
-
-impl Sampler {
-    fn new(sample: BookSample) -> Self {
-        Self {
-            levels: sample.levels,
-            every_ns: sample.every_ns.max(1),
-            clock: None,
-            next: 0,
-            skipped: 0,
-        }
-    }
-
-    /// The first grid instant at or after `t`.
-    fn ceil(&self, t: i64) -> i64 {
-        t.div_euclid(self.every_ns)
-            .saturating_add(i64::from(t.rem_euclid(self.every_ns) != 0))
-            .saturating_mul(self.every_ns)
-    }
-
-    /// Called before an input is applied. Every grid instant the clock now passes gets a sample
-    /// of each symbol from the book as it stands: after every earlier input, before this one.
-    fn before(
-        &mut self,
-        frame: &Frame,
-        feed: Option<&Feed>,
-        rows: &mut SampleRows,
-    ) -> Result<(), StoreError> {
-        let captured = frame.capture_ts_ns;
-        let Some(clock) = self.clock else {
-            self.clock = Some(captured);
-            self.next = self.ceil(captured);
-            return Ok(());
-        };
-        if captured <= clock {
-            return Ok(());
-        }
-        self.clock = Some(captured);
-        let instants = (captured - self.next).max(0).div_euclid(self.every_ns);
-        let Some(feed) = feed.filter(|_| instants <= MAX_GAP_SAMPLES) else {
-            self.skipped += u64::try_from(instants).unwrap_or(0);
-            self.next = self.ceil(captured);
-            return Ok(());
-        };
-        let seq = to_i64(frame.seq)? - 1;
-        while self.next < captured {
-            for symbol in feed.symbols() {
-                rows.push(self.next, seq, symbol, feed)?;
-            }
-            self.next += self.every_ns;
-        }
-        Ok(())
+        SampleRows::take(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn grid_instants_round_up() {
-        let sampler = Sampler::new(BookSample {
-            levels: 1,
-            every_ns: 100,
-        });
-        assert_eq!(sampler.ceil(0), 0);
-        assert_eq!(sampler.ceil(1), 100);
-        assert_eq!(sampler.ceil(100), 100);
-        assert_eq!(sampler.ceil(-1), 0);
-    }
 
     #[test]
     fn every_schema_starts_with_its_key() {
@@ -938,10 +782,5 @@ mod tests {
         ] {
             assert_eq!(schema.field(0).name(), "seq");
         }
-        let samples = SampleRows::schema(2);
-        assert_eq!(samples.fields().len(), 5 + 4 * 2);
-        assert_eq!(samples.field(5).name(), "bid_px_0");
-        assert_eq!(samples.field(7).name(), "bid_qty_0");
-        assert_eq!(samples.field(12).name(), "ask_qty_1");
     }
 }

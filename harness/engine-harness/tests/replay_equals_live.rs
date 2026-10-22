@@ -11,19 +11,36 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use engine::binance::feed::Feed;
-use engine::binance::live::{LiveStats, handle};
+use engine::binance::live::{LiveEvent, LiveStats, Log, Observer, handle};
 use engine::binance::pipeline::Pipeline;
 use engine::binance::recording::{Record, read_records};
 use engine::binance::sync::BookSync;
-use engine::store::frame::Meta;
+use engine::store::frame::{Kind, Meta};
 use engine::store::replay::{replay_log, replay_parquet};
 use engine::store::rotate::rotate;
 use engine::store::run::{self, BookSample, MarketParams};
-use engine::store::segment::{self, LOG_DIR};
-use engine::store::writer::{LogConfig, LogWriter};
+use engine::store::segment::{self, LOG_DIR, SegmentReader};
+use engine::store::writer::{Entry, LogConfig, LogWriter};
 use engine_harness::transcript::{FORMAT, Transcript};
 
 type Outcome = Result<(), Box<dyn Error>>;
+
+/// What the live loop showed its observer: every input with its seq, and the transcript.
+#[derive(Default)]
+struct Watch {
+    inputs: Vec<(u64, Entry)>,
+    transcript: Transcript,
+}
+
+impl Observer for Watch {
+    fn input(&mut self, seq: u64, entry: &Entry, _feed: &Feed) {
+        self.inputs.push((seq, entry.clone()));
+    }
+
+    fn event(&mut self, event: LiveEvent<'_>) {
+        self.transcript.observe(&event);
+    }
+}
 
 fn fresh_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
@@ -82,23 +99,51 @@ async fn a_session_with_every_fault_replays_exactly_as_it_ran() -> Outcome {
         max_segment_bytes: 2048,
         ..LogConfig::default()
     };
-    let log = LogWriter::start(&run_dir, Meta::for_run(&manifest), config)?;
+    let mut log = Log::recorded(LogWriter::start(
+        &run_dir,
+        Meta::for_run(&manifest),
+        config,
+    )?);
 
     // Live: exactly what run_live does with each message, network aside.
     let mut pipeline = Pipeline::new(Feed::new(scales));
-    let mut live = Transcript::default();
+    let mut live = Watch::default();
     for record in records {
         let message = record
             .into_message()
             .expect("only the first line holds scales");
-        handle(message, &mut pipeline, Some(&log), &mut |event| {
-            live.observe(&event);
-        })
-        .await?;
+        handle(message, &mut pipeline, &mut log, &mut live).await?;
     }
-    let summary = tokio::task::spawn_blocking(move || log.finish()).await??;
+    let summary = tokio::task::spawn_blocking(move || log.finish())
+        .await??
+        .expect("a recorded log");
     assert!(summary.segments >= 3, "{summary:?}");
     run::complete(&run_dir, &summary)?;
+
+    // The loop knew each input's seq as it applied it: the seq it is stored under, across every
+    // segment boundary (#53).
+    let stored: Vec<(u64, Entry)> = segment::list(&run_dir.join(LOG_DIR))?
+        .iter()
+        .flat_map(|(_, path)| {
+            let mut reader = SegmentReader::open(path).expect("a segment");
+            std::iter::from_fn(move || reader.next_frame().expect("a good frame"))
+        })
+        .filter(|frame| !matches!(frame.kind, Kind::Meta | Kind::SegmentEnd))
+        .map(|frame| {
+            let entry = Entry {
+                kind: frame.kind,
+                source_ts_ns: frame.source_ts_ns,
+                capture_ts_ns: frame.capture_ts_ns,
+                payload: frame.payload,
+            };
+            (frame.seq, entry)
+        })
+        .collect();
+    assert_eq!(
+        live.inputs, stored,
+        "the seqs the loop saw are the stored seqs"
+    );
+    let live = live.transcript;
 
     // The session does exercise what replay used to miss.
     for reaction in [

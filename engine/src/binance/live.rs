@@ -1,5 +1,6 @@
 //! The live loop: two socket readers and a REST client around one [`Pipeline`], recording
-//! every input it applies to a run's log when asked to.
+//! every input it applies to a run's log when asked to. Every input gets the seq its log gives
+//! it, recorded or not, and an [`Observer`] sees each one, numbered, right before it is applied.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -19,7 +20,7 @@ use super::ws::{self, Inbound};
 use super::{Scales, Symbol};
 use crate::store::frame::{Kind, Meta};
 use crate::store::run::{self, BookSample, MarketParams};
-use crate::store::writer::{LogConfig, LogWriter};
+use crate::store::writer::{Entry, LogConfig, LogWriter, Summary};
 use crate::store::{LogError, now_ns};
 
 /// The depth stream the loop subscribes to.
@@ -133,13 +134,108 @@ pub enum LiveEvent<'a> {
         feed: &'a Feed,
         stats: &'a LiveStats,
     },
-    /// One input was applied: what it did, and the feed right after. Fires for every frame,
-    /// so loggers usually skip it; transcripts and replay checks are built from it.
+    /// One input was applied: what it did, and the feed and the loop's counters right after.
+    /// Fires for every frame, so loggers usually skip it; transcripts, replay checks and the
+    /// API's status are built from it.
     Applied {
         kind: Kind,
         applied: &'a Applied,
         feed: &'a Feed,
+        stats: &'a LiveStats,
     },
+}
+
+/// Whoever watches the live loop: it sees every input right before the loop applies it, and
+/// every event the loop raises. A closure over [`LiveEvent`]s is an observer that skips inputs.
+pub trait Observer {
+    /// The loop is about to start, with this feed (its symbols and scales) and, when recording,
+    /// this run id.
+    fn started(&mut self, feed: &Feed, run_id: Option<&str>) {
+        let _ = (feed, run_id);
+    }
+
+    /// One input, with the seq its log gave it, right before it is applied to `feed`.
+    fn input(&mut self, seq: u64, entry: &Entry, feed: &Feed) {
+        let _ = (seq, entry, feed);
+    }
+
+    /// One event, as it happens.
+    fn event(&mut self, event: LiveEvent<'_>);
+}
+
+impl<F: FnMut(LiveEvent<'_>)> Observer for F {
+    fn event(&mut self, event: LiveEvent<'_>) {
+        self(event);
+    }
+}
+
+/// Where the live loop numbers its inputs: the run's log when recording, or else a count that
+/// numbers them as a one-segment log would (its Meta at seq 0, then one seq per input), so an
+/// input has a seq either way.
+#[derive(Debug)]
+pub enum Log {
+    Recorded(Box<LogWriter>),
+    Unrecorded { next_seq: u64 },
+}
+
+impl Log {
+    /// The log of a recorded run.
+    #[must_use]
+    pub fn recorded(writer: LogWriter) -> Self {
+        Self::Recorded(Box::new(writer))
+    }
+
+    /// A count for a loop that records nothing.
+    #[must_use]
+    pub fn unrecorded() -> Self {
+        Self::Unrecorded { next_seq: 1 }
+    }
+
+    /// Logs one entry, or only numbers it, and returns its seq.
+    ///
+    /// # Errors
+    /// Returns the log's error once the writer has stopped.
+    pub async fn append(&mut self, entry: Entry) -> Result<u64, LogError> {
+        match self {
+            Self::Recorded(writer) => writer.append(entry).await,
+            Self::Unrecorded { next_seq } => {
+                let seq = *next_seq;
+                *next_seq += 1;
+                Ok(seq)
+            }
+        }
+    }
+
+    /// Lets a recorded log end its segment when the hour is over, with nothing to append.
+    ///
+    /// # Errors
+    /// Returns the log's error once the writer has stopped.
+    pub async fn tick(&mut self) -> Result<(), LogError> {
+        if let Self::Recorded(writer) = self {
+            writer.tick().await?;
+        }
+        Ok(())
+    }
+
+    /// The writer, when recording.
+    #[must_use]
+    pub fn writer(&self) -> Option<&LogWriter> {
+        match self {
+            Self::Recorded(writer) => Some(writer),
+            Self::Unrecorded { .. } => None,
+        }
+    }
+
+    /// Closes a recorded log (see [`LogWriter::finish`]); `None` when nothing was recorded.
+    ///
+    /// # Errors
+    /// Returns the error that stopped the writer.
+    pub fn finish(self) -> Result<Option<Summary>, LogError> {
+        match self {
+            Self::Recorded(writer) => writer.finish().map(Some),
+            Self::Unrecorded { .. } => Ok(None),
+        }
+    }
 }
 
 /// A finished snapshot fetch: the symbol, when its reply arrived, and the body or the error.
@@ -156,25 +252,28 @@ pub enum LiveError {
     Run { path: PathBuf, source: io::Error },
 }
 
-/// Runs the pipeline live until `config.duration` elapses or Ctrl-C, calling `on_event` as it
+/// Runs the pipeline live until `config.duration` elapses or Ctrl-C, telling `observer` as it
 /// goes. When recording, the run folder gets its manifest at the start and `complete.json`
 /// after a clean end.
 ///
 /// # Errors
 /// Returns an error when the REST client cannot be built, the scales cannot be fetched, or the
 /// recording cannot be created or written.
-pub async fn run_live(
-    config: LiveConfig,
-    mut on_event: impl FnMut(LiveEvent<'_>),
-) -> Result<(), LiveError> {
+pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result<(), LiveError> {
     install_crypto_provider();
     let rest = Rest::new()?;
     let scales = rest.fetch_scales(&config.symbols).await?;
-    let log = match &config.record {
-        Some(recording) => Some(start_recording(recording, &config.symbols, &scales)?),
-        None => None,
+    let mut log = match &config.record {
+        Some(recording) => Log::recorded(start_recording(recording, &config.symbols, &scales)?),
+        None => Log::unrecorded(),
     };
     let mut pipeline = Pipeline::new(Feed::new(scales));
+    let run_id = config
+        .record
+        .as_ref()
+        .and_then(|recording| recording.run_dir.file_name())
+        .and_then(|name| name.to_str());
+    observer.started(pipeline.feed(), run_id);
 
     let (depth_tx, mut depth_rx) = mpsc::channel(config.channel_capacity);
     let (trade_tx, mut trade_rx) = mpsc::channel(config.channel_capacity);
@@ -220,7 +319,10 @@ pub async fn run_live(
                 result: result.map_err(|error| error.to_string()),
             },
             _ = report.tick() => {
-                on_event(LiveEvent::Report { elapsed: start.elapsed(), feed: pipeline.feed(), stats: pipeline.stats() });
+                observer.event(LiveEvent::Report { elapsed: start.elapsed(), feed: pipeline.feed(), stats: pipeline.stats() });
+                if let Err(error) = log.tick().await {
+                    break Err(error.into());
+                }
                 continue;
             }
             () = &mut stop => break Ok(()),
@@ -232,7 +334,7 @@ pub async fn run_live(
                 continue;
             }
         };
-        if let Err(error) = handle(message, &mut pipeline, log.as_ref(), &mut on_event).await {
+        if let Err(error) = handle(message, &mut pipeline, &mut log, &mut observer).await {
             break Err(error.into());
         }
 
@@ -258,8 +360,8 @@ pub async fn run_live(
     depth_reader.abort();
     trade_reader.abort();
     let recorded = match (log, &config.record) {
-        (Some(log), Some(recording)) => {
-            finish_recording(log, &recording.run_dir, ended.is_ok()).await
+        (Log::Recorded(log), Some(recording)) => {
+            finish_recording(*log, &recording.run_dir, ended.is_ok()).await
         }
         _ => Ok(()),
     };
@@ -268,17 +370,17 @@ pub async fn run_live(
 }
 
 /// What the live loop does with each message, network aside: it logs every input the message
-/// stands for, then applies it, so the log holds exactly what the feed saw, in order. A failed
-/// connection attempt is counted, not logged: it changes no book. Public so that a test can
-/// drive the live path from a script.
+/// stands for, shows it to the observer with its seq, then applies it, so the log holds exactly
+/// what the feed saw, in order. A failed connection attempt is counted, not logged: it changes
+/// no book. Public so that a test can drive the live path from a script.
 ///
 /// # Errors
 /// Returns the log's error once the writer has stopped.
 pub async fn handle(
     message: Message,
     pipeline: &mut Pipeline,
-    log: Option<&LogWriter>,
-    on_event: &mut impl FnMut(LiveEvent<'_>),
+    log: &mut Log,
+    observer: &mut impl Observer,
 ) -> Result<(), LogError> {
     if let Message::Socket {
         stream,
@@ -286,17 +388,18 @@ pub async fn handle(
     } = &message
     {
         pipeline.stats_mut().connect_failures += 1;
-        on_event(LiveEvent::ConnectFailed {
+        observer.event(LiveEvent::ConnectFailed {
             stream: *stream,
             error,
         });
         return Ok(());
     }
     for entry in entries(message) {
-        if let Some(log) = log {
-            log.append(entry.clone()).await?;
-        }
-        pipeline.apply(entry.kind, &entry.payload, on_event);
+        let seq = log.append(entry.clone()).await?;
+        observer.input(seq, &entry, pipeline.feed());
+        pipeline.apply(entry.kind, &entry.payload, &mut |event| {
+            observer.event(event);
+        });
     }
     Ok(())
 }
