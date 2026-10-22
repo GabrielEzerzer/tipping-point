@@ -202,6 +202,26 @@ along domain walls (#50).
   630,295 at 64; L = 128 is refused until a pilot measures it, since the manifest could not tell
   a fitted tau_c from a measured one.
 
+## Early-warning signals
+
+`python/tipping_point/src/tipping_point/ews/` holds the classic indicators (rolling variance,
+autocorrelation and skewness after Gaussian detrending), their Kendall-tau trend, surrogate tests,
+the scoring protocol (AUC, alarms, lead times, hierarchical bootstrap) and finite-size-scaling
+verdicts, on numpy alone. The definitions are ewstools 2.1.3's, pinned by a golden fixture that
+`python/tipping_point/tests/fixtures/make_ews_golden.py` regenerates in an isolated environment.
+Experiments are pre-registered in `paper/prereg/<id>-v<k>.toml` (start from `TEMPLATE.toml`) and
+frozen as git tags; the scorer refuses an unfrozen or edited file, and reads tau_c(L) from a pilot
+run's `pilot.json`, never from the pre-registration.
+
+```sh
+uv run python -m tipping_point.ews prereg freeze ising-ews           # tags prereg/ising-ews-v<k>
+uv run python -m tipping_point.ews score --prereg paper/prereg/ising-ews-v1.toml
+uv run python -m tipping_point.ews calibrate                         # 2,000 nulls x 999 surrogates
+```
+
+Results land in `<data dir>/ews/<run_id>/`, and every evaluated cell is appended to
+`<data dir>/ews/trials.jsonl`.
+
 ## Running the gate
 
 ```sh
