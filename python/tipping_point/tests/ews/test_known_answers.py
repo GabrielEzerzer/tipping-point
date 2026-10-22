@@ -35,7 +35,7 @@ def _pipeline(indicator: str) -> Pipeline:
 
 def test_fold_warnings_rise() -> None:
     """Catches an indicator or trend that has lost its signal: a sign flip, a window misaligned
-    with time, or detrending that eats the rise. Measured here: 0.951 and 0.964."""
+    with time, or detrending that eats the rise. Measured here: 0.948 and 0.956."""
     rng = np.random.default_rng(26)
     forced, fixed = _fold(200, True, rng), _fold(200, False, rng)
     for indicator in ("variance", "ac"):

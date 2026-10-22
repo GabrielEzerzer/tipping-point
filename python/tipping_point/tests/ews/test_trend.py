@@ -58,8 +58,9 @@ def test_pipeline_scores_the_trailing_segment_of_the_indicator() -> None:
     assert np.array_equal(p.trend(early), expected)
 
 
-def test_trailing_score_detrends_each_slice_on_its_own() -> None:
-    """s(t) uses only samples up to t: changing the future leaves every earlier score alone."""
+def test_trailing_score_detrends_each_slice_on_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """s(t) uses only samples up to t: changing the future leaves every earlier score alone, and
+    batching the slices to bound memory changes nothing."""
     x = np.random.default_rng(10).standard_normal((3, 400)).cumsum(axis=1)
     p = Pipeline("ac", window=30, length=60, bandwidth=20.0)
     times, scores = trend.trailing_score(x, p, every=7)
@@ -72,6 +73,8 @@ def test_trailing_score_detrends_each_slice_on_its_own() -> None:
     _, changed = trend.trailing_score(future, p, every=7)
     before = times < 300
     assert np.array_equal(changed[:, before], scores[:, before])
+    monkeypatch.setattr(trend, "SLICES", 500)  # one evaluation time per batch
+    assert np.array_equal(trend.trailing_score(x, p, every=7)[1], scores)
 
 
 def test_pipeline_refuses_unknown_indicators_and_short_inputs() -> None:

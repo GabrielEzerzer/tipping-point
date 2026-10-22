@@ -14,8 +14,9 @@ the row beats all 19 too often (> 8%).
 """
 
 import numpy as np
+import pytest
 from tipping_point.ews import scoring, surrogates
-from tipping_point.ews.__main__ import calibration, null_series
+from tipping_point.ews.__main__ import calibration, main, null_series
 from tipping_point.ews.trend import Pipeline
 
 WINDOW, LENGTH, BANDWIDTH = 50, 256, 50.0
@@ -58,3 +59,12 @@ def test_mismatched_surrogates_flag_too_many() -> None:
     observed = pipe.trend(residuals)
     drawn = narrow.trend(surrogates.phase_randomised(residuals, 19, rng))
     assert np.mean(scoring.surrogate_pvalue(observed, drawn) <= 0.05) > 0.08
+
+
+def test_calibrate_command_reports_every_cell(capsys: pytest.CaptureFixture[str]) -> None:
+    """The long command's plumbing at toy size: every null, indicator and surrogate test gets a
+    line with its band, and the exit code says whether all sat inside."""
+    code = main(["calibrate", "--nulls", "40", "--surrogates", "9", "--seed", "2"])
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 8 and all("99% band" in line for line in lines)
+    assert code == (0 if all(line.endswith("inside") for line in lines) else 1)

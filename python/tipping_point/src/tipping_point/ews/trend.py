@@ -25,6 +25,7 @@ INDICATORS: dict[str, Callable[..., np.ndarray]] = {
 }
 CHUNK = 1 << 17  # elements per row chunk: small enough to stay in cache
 THREADS = min(8, os.cpu_count() or 1)
+SLICES = 1 << 23  # elements of s(t) slices held at once (64 MB)
 
 
 def rowwise(fn: Callable[[np.ndarray], np.ndarray], rows: np.ndarray) -> np.ndarray:
@@ -152,9 +153,15 @@ def trailing_score(
     for t = span - 1, span - 1 + every, ... < n."""
     x = np.asarray(x, dtype=np.float64)
     *lead, n = x.shape
-    if n < pipeline.span:
-        raise ValueError(f"s(t) needs {pipeline.span} samples, got {n}")
-    times = np.arange(pipeline.span - 1, n, every)
-    slices = np.lib.stride_tricks.sliding_window_view(x, pipeline.span, axis=-1)[..., ::every, :]
-    scores = pipeline(slices.reshape(-1, pipeline.span))
+    span = pipeline.span
+    if n < span:
+        raise ValueError(f"s(t) needs {span} samples, got {n}")
+    times = np.arange(span - 1, n, every)
+    rows = x.reshape(-1, n)
+    scores = np.empty((len(rows), len(times)))
+    per = max(1, SLICES // (len(rows) * span))  # times per batch: the slices are copies
+    for k in range(0, len(times), per):
+        t = times[k : k + per]
+        slices = rows[:, t[:, None] - span + 1 + np.arange(span)]  # (rows, len t, span)
+        scores[:, k : k + per] = pipeline(slices.reshape(-1, span)).reshape(len(rows), len(t))
     return times, scores.reshape(*lead, len(times))

@@ -56,6 +56,9 @@ def test_committed_files_validate_and_v1_waits_only_for_its_pilot() -> None:
     missing = prereg.problems(v1.doc, strict=True)
     assert missing and all(m.startswith("data.tau_c.pilot_") for m in missing), missing
     assert not prereg.problems(tomllib.loads(_ready(V1.read_text("utf-8"))), strict=True)
+    grown = tomllib.loads(_ready(V1.read_text("utf-8")))
+    grown["data"]["L"].append(128)  # a fourth size without a budget to match
+    assert any("trials.budget" in p for p in prereg.problems(grown, strict=True))
 
 
 def test_v1_holds_the_research_pass_protocol() -> None:

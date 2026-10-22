@@ -222,6 +222,8 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         ]
         if not _SHA256.fullmatch(data["tau_c"]["pilot_sha256"]):
             found.append("data.tau_c.pilot_sha256: the pilot record's sha256 (64 hex digits)")
+        if doc["trials"]["budget"] < cells(doc):
+            found.append(f"trials.budget: one scoring run evaluates {cells(doc)} cells")
     return found
 
 
