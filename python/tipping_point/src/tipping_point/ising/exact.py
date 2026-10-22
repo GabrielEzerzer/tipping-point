@@ -59,8 +59,10 @@ def boltzmann_weights(E: np.ndarray, T: float) -> np.ndarray:
 
 
 def acceptance_rate(T: float, L: int = 4) -> float:
-    """Expected Metropolis acceptance per attempted flip in equilibrium: E_pi[min(1, e^(-dE/T))]."""
+    """Expected acceptance per attempted flip in equilibrium, E_pi[a(dE)], for the simulator's
+    rule a = min(1, e^(-dE/T)) except a = 1/2 at dE = 0."""
     s, _, E = enumerate_states(L)
     h = np.roll(s, 1, 1) + np.roll(s, -1, 1) + np.roll(s, 1, 2) + np.roll(s, -1, 2)
-    p = np.minimum(1.0, np.exp(-2.0 * s * h / T)).mean(axis=(1, 2))
+    dE = 2.0 * s * h
+    p = np.where(dE == 0, 0.5, np.minimum(1.0, np.exp(-dE / T))).mean(axis=(1, 2))
     return float(boltzmann_weights(E, T) @ p)

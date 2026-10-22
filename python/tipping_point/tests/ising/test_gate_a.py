@@ -15,7 +15,8 @@ import torch.nn.functional as F
 from tipping_point.ising import gates, kernel, run
 from torch import Tensor
 
-_HALF_SWEEP = kernel.half_sweep  # the real one, for mutants built on top of it
+_HALF_SWEEP = kernel.half_sweep  # the real ones, for mutants built on top of them
+_ACCEPT_TABLE = kernel.accept_table
 
 
 def both_colours_at_once(
@@ -42,9 +43,8 @@ def zero_padded_conv2d(s: Tensor) -> Tensor:
 
 
 def beta_for_t(temperature: Tensor) -> Tensor:
-    """exp(-dE * T) where exp(-dE / T) belongs."""
-    de = torch.arange(-8.0, 9.0, 4.0, dtype=torch.float64, device=temperature.device)
-    return torch.exp(-de * temperature[:, None]).clamp(max=1.0).float()
+    """exp(-dE * T) where exp(-dE / T) belongs: the real table at 1/T, 1/2 at dE = 0 kept."""
+    return _ACCEPT_TABLE(1 / temperature)
 
 
 def shared_draw(

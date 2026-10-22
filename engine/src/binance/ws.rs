@@ -29,6 +29,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// expiry, with no FIN or RST): treat it as a disconnect.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A drop mid-handshake leaves the peer silent rather than closed, so a connect (TCP, TLS and
+/// the WebSocket upgrade) still unfinished after this long is given up and retried.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// What the reader sends down its channel. `capture_ns` is the wall clock when the reader saw
 /// it happen, stamped here because messages can wait in the channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,13 +77,17 @@ pub async fn run_reader(url: String, max_age: Duration, tx: mpsc::Sender<Inbound
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let socket = match connect_async(&url).await {
+        let connected = match timeout(CONNECT_TIMEOUT, connect_async(&url)).await {
+            Ok(result) => result.map_err(|error| error.to_string()),
+            Err(_) => Err(format!(
+                "no handshake within {}s",
+                CONNECT_TIMEOUT.as_secs()
+            )),
+        };
+        let socket = match connected {
             Ok((socket, _response)) => socket,
             Err(error) => {
-                let notice = Inbound::ConnectFailed {
-                    error: error.to_string(),
-                };
-                if tx.send(notice).await.is_err() {
+                if tx.send(Inbound::ConnectFailed { error }).await.is_err() {
                     return;
                 }
                 sleep(backoff).await;
@@ -88,11 +96,11 @@ pub async fn run_reader(url: String, max_age: Duration, tx: mpsc::Sender<Inbound
             }
         };
         backoff = INITIAL_BACKOFF;
-        let connected = Inbound::Connected {
+        let notice = Inbound::Connected {
             attempt,
             capture_ns: now_ns(),
         };
-        if tx.send(connected).await.is_err() {
+        if tx.send(notice).await.is_err() {
             return;
         }
         let Some(disconnected) = read_until_closed(socket, max_age, &tx).await else {
@@ -162,6 +170,7 @@ where
 #[cfg(test)]
 mod tests {
     use tokio::io::{DuplexStream, duplex};
+    use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
     use super::*;
@@ -260,6 +269,41 @@ mod tests {
             "{ended:?}"
         );
         assert_eq!(text_of(rx.try_recv().ok()), Some(text("frame 0", 0)));
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_accepts_but_never_answers_the_handshake_fails_the_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}/", listener.local_addr().expect("local address"));
+        let (tx, mut rx) = mpsc::channel(16);
+        // Before the spawn: the reader fixes its deadline when it dials and the paused clock jumps
+        // to exactly that, so wall time spent reaching pause() falls inside the 30 s, not on top.
+        let start = Instant::now();
+        let reader = tokio::spawn(run_reader(url, Duration::from_hours(1), tx));
+
+        // The TCP connection is made, then the peer stays silent: no HTTP 101, and no close.
+        let (_silent_peer, _) = timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the reader dials within 10 s")
+            .expect("accept");
+        tokio::time::pause();
+        // Its own bound makes a missing connect timeout fail here instead of hanging (#42).
+        let first = timeout(4 * CONNECT_TIMEOUT, rx.recv())
+            .await
+            .expect("still connecting at 4x the connect timeout");
+
+        assert_eq!(
+            first,
+            Some(Inbound::ConnectFailed {
+                error: format!("no handshake within {}s", CONNECT_TIMEOUT.as_secs())
+            })
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            (CONNECT_TIMEOUT..CONNECT_TIMEOUT + Duration::from_secs(1)).contains(&elapsed),
+            "gave up after {elapsed:?}"
+        );
+        reader.abort();
     }
 
     #[test]

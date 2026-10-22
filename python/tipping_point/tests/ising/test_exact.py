@@ -65,11 +65,13 @@ def test_l4_enumeration_reproduces_the_known_density_of_states() -> None:
 
 
 def test_boltzmann_weights_and_acceptance_limits() -> None:
-    """Catches unnormalised weights or a sign error in the expected acceptance rate."""
+    """Catches unnormalised weights, a sign error in the expected acceptance rate, or a rate
+    that forgets the kernel accepts dE = 0 moves half the time."""
     _, _, energies = exact.enumerate_states(4)
     pi = exact.boltzmann_weights(energies, 2.0)
     assert pi.sum() == pytest.approx(1.0)
     assert pi[energies == energies.min()].sum() > pi[energies == energies.max()].sum()
     rates = [exact.acceptance_rate(T) for T in (1.5, exact.TC, 3.5, 1e6)]
     assert rates == sorted(rates)
-    assert rates[-1] == pytest.approx(1.0, abs=1e-4)  # infinite T accepts everything
+    # infinite T accepts every move but half the dE = 0 ones, which are 6/16 of sites at random
+    assert rates[-1] == pytest.approx(1 - 6 / 16 / 2, abs=1e-4)
