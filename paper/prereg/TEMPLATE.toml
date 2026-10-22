@@ -1,0 +1,108 @@
+# Pre-registration template: copy to <id>-v<k>.toml, replace every "<...>" and "TBD", commit,
+# then `python -m tipping_point.ews prereg freeze <id>` tags the commit prereg/<id>-v<k>.
+# Scoring refuses a file that differs from the blob at its tag. To change anything after the
+# freeze, write <id>-v<k+1>.toml with `supersedes` and `reason`; earlier results stay bound to
+# the earlier version. Units: time in tau_c(L) (tau_int of |m| at Tc), temperature in
+# eps_L = L (T - Tc) / Tc, lags in samples of the cadence.
+
+id = "<lowercase-slug>"
+version = 1
+supersedes = ""          # "<id>-v<k>" this version amends, or ""
+reason = ""              # why it amends that version (required when supersedes is set)
+question = "<the question this experiment answers, in one sentence>"
+
+# One table per hypothesis. direction: greater | less | two-sided | match
+[[hypotheses]]
+name = "<short-name>"
+statement = "<what is claimed>"
+prediction = "<the number that would confirm or refute it, and the rule that reads it>"
+direction = "greater"
+
+[data]
+domain = "ising"
+L = [16, 32, 64]          # two sizes at least: the finite-size fits need them
+seeds = [1, 2, 3, 4, 5]
+replicas = 16            # at least this many replicas per run
+exclusions = []          # runs excluded before scoring: [{ run_id = "...", reason = "..." }]
+
+# tau_c(L) is read from a pilot record, never written here, and only as measured: each L's
+# per_L entry. The record's fitted z, and any tau_c extrapolated to an unmeasured L, are never
+# pre-registered on; an L the record did not measure cannot be scored.
+[data.tau_c]
+source = "pilot"         # the only source: measured values from the record
+pilot_run = "TBD"        # <data dir>/ising/<pilot_run>/pilot.json
+pilot_sha256 = "TBD"     # sha256 of that file, pinned before the freeze
+
+[data.ramps]
+kind = "ramp"
+x = 0.02                 # Kibble-Zurek point of the scored ramp
+
+[data.nulls]
+kind = "fixed"
+eps_L = [2.0, 4.0, 6.0]  # fixed-temperature null runs
+
+[data.staircase]
+kind = "staircase"
+temperature = 2.269231   # the plateau the static FSS fits read
+
+[indicators]
+names = ["variance", "ac", "skewness"]
+observables = ["abs_m", "energy"]
+cadences = ["dense", "matched"]   # dense: every stats row, thinned; matched: the saved frames
+thin = 0.1               # dense cadence: one sample per this many tau_c
+lag = 1                  # autocorrelation lag, in samples
+detrend = "gaussian"     # gaussian | none (none rules out the ar1 surrogate)
+# the trend each indicator is expected to take: one-sided surrogate tests and alarms follow it
+direction = { variance = "greater", ac = "greater", skewness = "less" }
+
+[event]
+definition = "<what the transition is, and why it is known before any data exist>"
+horizons = [0.0, 1.0, 2.0]   # h: the scored segment ends at eps_L = h
+segment = 6.0                # and starts at eps_L = h + segment
+
+[scoring]
+positives = "<which series' scores are positives>"
+negatives = "<which series' scores are negatives>"
+auc = "Mann-Whitney, ties count 1/2"
+alpha = 0.05
+ci_level = 0.95
+bootstrap = 2000         # hierarchical: seeds, then replicas within each seed
+
+[scoring.surrogates]
+primary = "phase"        # phase-randomised (Theiler et al. 1992)
+secondary = "ar1"        # AR(1)-fitted (Dakos et al. 2012; Bury et al. 2021)
+n = 999
+cells = "headline"       # headline | all
+
+[scoring.alarms]
+far = 0.01               # false alarms per tau_c on the half of the nulls that sets theta
+report_per = 1000.0      # false alarms reported per this many tau_c on the other half
+band = [2.0, -2.0]       # eps_L range searched for each ramp's first alarm
+every = 1.0              # s(t) evaluated every this many tau_c
+
+# quantity: l2_var_abs_m | mean_abs_m | skewness_abs_m | tau_int_abs_m | one_minus_ac1
+# role: positive-control (needs expected and tolerance) | descriptive | reference
+[[fss.static]]
+quantity = "l2_var_abs_m"
+role = "positive-control"
+expected = 1.75
+tolerance = 0.1
+
+[fss.dynamic]
+indicators = ["variance", "ac"]
+observable = "abs_m"
+expected_inverse_nu = 1.0
+tolerance = 0.1
+
+[sensitivity]
+window = [10.0, 20.0, 40.0]     # tau_c
+bandwidth = [5.0, 10.0, 20.0]   # tau_c
+headline = { window = 20.0, bandwidth = 10.0 }
+
+[trials]
+budget = 0               # evaluations this version may log
+counted = "<what one trial is>"
+
+[deviations]
+policy = "<how a deviation is handled>"
+log = []                 # [{ date = "...", change = "...", reason = "..." }]
