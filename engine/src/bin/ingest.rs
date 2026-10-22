@@ -100,3 +100,29 @@ fn print_tops(feed: &Feed, snapshot_fetches: u64) {
             .count()
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(raw: &[&str]) -> Result<Option<u64>, String> {
+        parse_seconds(&raw.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn runs_until_stopped_or_for_the_given_seconds() {
+        assert_eq!(parse(&[]), Ok(None));
+        assert_eq!(parse(&["--seconds", "60"]), Ok(Some(60)));
+    }
+
+    #[test]
+    fn refuses_anything_else() {
+        assert_eq!(
+            parse(&["--seconds", "1.5"]),
+            Err("--seconds wants a whole number, got \"1.5\"".to_owned())
+        );
+        assert!(parse(&["--seconds"]).is_err());
+        assert!(parse(&["--minutes", "1"]).is_err());
+        assert!(parse(&["--seconds", "1", "--seconds", "2"]).is_err());
+    }
+}

@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["engine", "harness/engine-harness"]
+# Crates under harness/ are named *-harness, so the glob picks a new one up without it being
+# listed and never matches the non-crate dirs there (tests/, out/, fixtures/, dot-dirs), which
+# cargo would refuse as members without a Cargo.toml.
+members = ["engine", "harness/*-harness"]
 
 [workspace.package]
 edition = "2024"
