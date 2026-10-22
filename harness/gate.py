@@ -4,6 +4,9 @@ Run as `uv run python harness/gate.py [--leg NAME ...]`.
 
 A leg is GREEN only when its exit code is 0 AND its own summary evidence is positive.
 Every leg always runs; the gate exits nonzero if any leg is RED. Stdlib only.
+
+The cargo legs cover only the root workspace's members; test_gate fails engine/ or any crate
+under harness/ that is outside it, so app/src-tauri must join members and that check when it lands.
 """
 
 from __future__ import annotations

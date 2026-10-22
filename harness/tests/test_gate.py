@@ -352,12 +352,14 @@ def _cargo_packages(root: Path) -> list[dict]:
 
 
 def _workspace_problems(root: Path) -> list[str]:
-    """Ask cargo, never re-derive its rules: every crate dir under harness/ must be a package it
-    builds, and every package must keep a target that runs tests (a `test = false` binary prints
-    no header, so the cargo-test judge cannot see a crate whose targets all opted out)."""
+    """Ask cargo, never re-derive its rules: engine/ and every crate dir under harness/ must be a
+    package it builds, every package must keep a target that runs tests (a `test = false` binary
+    prints no header, so the cargo-test judge cannot see a crate whose targets all opted out),
+    and no target may need features that `cargo test --workspace` never enables."""
     packages = _cargo_packages(root)
     built = {Path(p["manifest_path"]).resolve().parent for p in packages}
-    crates = sorted(m.resolve().parent for m in (root / "harness").rglob("Cargo.toml"))
+    manifests = [root / "engine" / "Cargo.toml", *(root / "harness").rglob("Cargo.toml")]
+    crates = sorted(m.resolve().parent for m in manifests)
     problems = [
         f"{c.relative_to(root.resolve()).as_posix()} is not a workspace member"
         for c in crates
@@ -367,6 +369,12 @@ def _workspace_problems(root: Path) -> list[str]:
         f"{p['name']} has no target that runs tests"
         for p in packages
         if not any(t["test"] for t in p["targets"])
+    ]
+    problems += [
+        f"{p['name']}: {t['name']} needs features {t['required-features']}, never enabled"
+        for p in packages
+        for t in p["targets"]
+        if t.get("required-features")
     ]
     return problems
 
@@ -432,6 +440,35 @@ def test_a_crate_whose_every_target_skips_tests_is_caught(tmp_path) -> None:
     no_tests = '\n[[bin]]\nname = "ising"\npath = "src/main.rs"\ntest = false\n'
     _add_crate(root / "harness" / "ising-harness", "main.rs", no_tests)
     assert _workspace_problems(root) == ["ising-harness has no target that runs tests"]
+
+
+def test_a_crate_whose_only_target_needs_features_is_caught(tmp_path) -> None:
+    # cargo test --workspace enables no features, so this target is never built or run
+    root = _scratch_workspace(tmp_path)
+    gated = (
+        '\n[features]\nsim = []\n\n[[bin]]\nname = "ising"\npath = "src/main.rs"\n'
+        'required-features = ["sim"]\n'
+    )
+    _add_crate(root / "harness" / "ising-harness", "main.rs", gated)
+    assert _workspace_problems(root) == [
+        "ising-harness: ising needs features ['sim'], never enabled"
+    ]
+
+
+def test_engine_outside_the_workspace_is_caught(tmp_path) -> None:
+    # exclude alone keeps an explicitly listed member, and engine-harness's path dependency
+    # pulls engine back in, so engine leaves members and is excluded
+    root = _scratch_workspace(tmp_path)
+    (root / "engine" / "Cargo.toml").write_text(
+        '[package]\nname = "engine"\nversion = "0.1.0"\nedition = "2024"\n', encoding="utf-8"
+    )
+    manifest = root / "Cargo.toml"
+    listed = 'members = ["engine", "harness/*-harness"]'
+    text = manifest.read_text(encoding="utf-8")
+    assert listed in text
+    dropped = 'members = ["harness/*-harness"]\nexclude = ["engine"]'
+    manifest.write_text(text.replace(listed, dropped), encoding="utf-8")
+    assert _workspace_problems(root) == ["engine is not a workspace member"]
 
 
 # ---------- lie: missing or garbage JUnit
