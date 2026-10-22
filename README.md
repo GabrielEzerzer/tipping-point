@@ -10,25 +10,54 @@ Open-source framework for detecting critical transitions in live data streams: a
 - `app/` — the Tauri desktop app (not yet started).
 - `paper/` — the paper.
 - `harness/` — supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
-  a Cargo workspace member holding the engine's recorder and soak binaries (production code never
-  depends on it).
+  a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries and the
+  replay-equals-live checks (production code never depends on it).
 
 ## Binance ingest
 
 `engine/src/binance/` keeps a correct local order book for BTCUSDT and ETHUSDT from the USD-M
 depth stream (snapshot plus diffs, sequence-gap detection, resync, backpressure) and reads aggTrades.
-The sync logic is a pure state machine (`sync.rs`) behind a multi-symbol `feed.rs`; the network
-layer (`ws.rs`, `rest.rs`, `live.rs`) is thin around it.
+The sync logic is a pure state machine (`sync.rs`) behind a multi-symbol `feed.rs`, and
+`pipeline.rs` holds the one copy of how the engine reacts to every input; the network layer
+(`ws.rs`, `rest.rs`, `live.rs`) is thin around it.
 
 ```sh
 cargo run -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
-cargo run -p engine-harness --bin record -- --seconds 60    # raw frames + snapshots → harness/fixtures/recorded/ (gitignored)
+cargo run -p engine --bin ingest -- --record                # ...and records a run to the data dir (Ctrl-C ends it cleanly)
+cargo run -p engine-harness --bin record -- --seconds 60    # a run + the live transcript → harness/fixtures/recorded/ (gitignored)
 cargo run -p engine-harness --bin soak -- --hours 24        # gaps/resyncs/reconnects/drops per hour → harness/out/
 ```
 
-Recorded fixtures are never committed; `engine/tests/replay.rs` replays any present locally and skips
-otherwise. The committed tests use synthetic streams (`engine/tests/fixtures/synthetic/`) and
-generated ones (property tests and fault injection in `engine/tests/`).
+## Market data on disk
+
+`engine/src/store/` is the storage. The live loop logs every input right before applying it —
+depth and trade frames as received, snapshots, and control events (connects, disconnects, frames
+dropped under backpressure, failed snapshots) — to an append-only binary log: 36-byte header, raw
+payload, CRC-32C, one `write_all` per frame, `sync_data` every second, a new segment every UTC hour
+or 1 GiB. A crash can only tear the tail; recovery cuts it back to the last good frame and refuses
+damage in the middle. An offline step rotates closed segments into Parquet (`frames`,
+`depth_updates`, `agg_trades`, `snapshots`, `book_samples`), and DuckDB queries and replays it
+through the same pipeline the live loop runs.
+
+Runs live in `<data dir>/market/<run_id>/` (`manifest.json`, `log/`, one Parquet file per table per
+segment, `complete.json` after a clean end), the layout the Ising simulator shares. The data dir is
+`$TP_DATA_DIR`, or else `%LOCALAPPDATA%\tipping-point` (`~/.local/share/tipping-point` elsewhere),
+never the repository.
+
+```sh
+cargo run -p engine --bin store -- recover <run dir>              # after a crash: close the newest segment
+cargo run -p engine --bin store -- rotate <run dir>               # closed segments → Parquet (safe to re-run)
+cargo run -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the books from the log or the Parquet
+```
+
+DuckDB is linked from its prebuilt library, which the build downloads once per target dir
+(`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network.
+
+Recorded fixtures are never committed; the replay tests replay any present locally and skip
+otherwise. The committed tests use synthetic streams and a golden log
+(`engine/tests/fixtures/synthetic/`) and generated ones (property tests and fault injection in
+`engine/tests/`, crash injection and replay-equals-live in `harness/engine-harness/tests/`).
+`TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default).
 
 ## Ising simulator
 

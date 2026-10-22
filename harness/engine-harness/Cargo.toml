@@ -16,7 +16,12 @@ path = "src/bin/record.rs"
 name = "soak"
 path = "src/bin/soak.rs"
 
+[[bin]]
+name = "crash-writer"
+path = "src/bin/crash_writer.rs"
+
 [dependencies]
 engine.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -59,6 +59,12 @@ pub struct RawAggTrade {
     pub price: String,
     #[serde(rename = "q")]
     pub qty: String,
+    /// The first and last trade ids aggregated; kept for the `agg_trades` table, absent
+    /// fields read as `None` so they never fail a frame.
+    #[serde(rename = "f", default)]
+    pub first_trade_id: Option<u64>,
+    #[serde(rename = "l", default)]
+    pub last_trade_id: Option<u64>,
     #[serde(rename = "T")]
     pub trade_time_ms: u64,
     #[serde(rename = "m")]
@@ -219,6 +225,7 @@ mod tests {
         let Payload::AggTrade(raw) = frame.data else {
             panic!("expected an aggTrade payload");
         };
+        assert_eq!((raw.first_trade_id, raw.last_trade_id), (Some(1), Some(2)));
         let trade = BTC.agg_trade(&raw)?;
         assert_eq!(trade.agg_trade_id, 42);
         assert_eq!(trade.price, 500_001);

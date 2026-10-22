@@ -1,0 +1,5 @@
+# libduckdb-sys links DuckDB's prebuilt library, downloaded once per target dir into
+# target/duckdb-download/ and copied next to the test binaries, instead of compiling DuckDB's
+# C++ with the `bundled` feature (slow, per worktree, and it breaks on long Windows paths). #22
+[env]
+DUCKDB_DOWNLOAD_LIB = "1"

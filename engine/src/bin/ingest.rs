@@ -1,42 +1,88 @@
 //! Connects to Binance, keeps the BTC and ETH books, and logs top-of-book plus every resync.
+//! With `--record` it also records every input to a new run under the data dir: `TP_DATA_DIR`,
+//! or else a per-user folder outside the repository. Ctrl-C ends a run cleanly.
 //!
-//! `cargo run -p engine --bin ingest -- [--seconds N]`
+//! `cargo run -p engine --bin ingest -- [--seconds N] [--record]`
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use engine::binance::decimal::format_units;
 use engine::binance::feed::Feed;
-use engine::binance::live::{LiveConfig, LiveEvent, run_live, utc_clock};
+use engine::binance::live::{LiveConfig, LiveEvent, Recording, run_live, utc_clock};
 use engine::binance::sync::BookSync;
+use engine::store::run;
+use engine::store::writer::LogConfig;
 
-fn parse_seconds(args: &[String]) -> Result<Option<u64>, String> {
-    match args {
-        [] => Ok(None),
-        [flag, value] if flag == "--seconds" => value
-            .parse()
-            .map(Some)
-            .map_err(|_| format!("--seconds wants a whole number, got {value:?}")),
-        _ => Err("usage: ingest [--seconds N]".to_owned()),
+const USAGE: &str = "usage: ingest [--seconds N] [--record]";
+
+#[derive(Debug, PartialEq, Eq)]
+struct Args {
+    seconds: Option<u64>,
+    record: bool,
+}
+
+fn parse_args(args: &[String]) -> Result<Args, String> {
+    let mut parsed = Args {
+        seconds: None,
+        record: false,
+    };
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--seconds" if parsed.seconds.is_none() => {
+                let value = it.next().ok_or_else(|| USAGE.to_owned())?;
+                let seconds = value
+                    .parse()
+                    .map_err(|_| format!("--seconds wants a whole number, got {value:?}"))?;
+                parsed.seconds = Some(seconds);
+            }
+            "--record" if !parsed.record => parsed.record = true,
+            _ => return Err(USAGE.to_owned()),
+        }
     }
+    Ok(parsed)
+}
+
+/// `btceth` for BTCUSDT and ETHUSDT.
+fn run_tag(symbols: &[String]) -> String {
+    symbols
+        .iter()
+        .map(|s| s.trim_end_matches("USDT").to_lowercase())
+        .collect()
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let seconds = match parse_seconds(&args) {
-        Ok(seconds) => seconds,
+    let args = match parse_args(&args) {
+        Ok(args) => args,
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::FAILURE;
         }
     };
-    let config = LiveConfig {
-        duration: seconds.map(Duration::from_secs),
+    let mut config = LiveConfig {
+        duration: args.seconds.map(Duration::from_secs),
         ..LiveConfig::default()
     };
+    if args.record {
+        let run_dir = match run::market_run_dir(&run::data_dir(), &run_tag(&config.symbols)) {
+            Ok(run_dir) => run_dir,
+            Err(message) => {
+                eprintln!("{message}");
+                return ExitCode::FAILURE;
+            }
+        };
+        println!("{} recording to {}", utc_clock(), run_dir.display());
+        config.record = Some(Recording {
+            run_dir,
+            log: LogConfig::default(),
+        });
+    }
     let result = run_live(config, |event| match event {
         LiveEvent::Report { feed, stats, .. } => print_tops(feed, stats.snapshot_fetches),
+        LiveEvent::Applied { .. } => {}
         other => println!("{} {other:?}", utc_clock()),
     })
     .await;
@@ -105,14 +151,27 @@ fn print_tops(feed: &Feed, snapshot_fetches: u64) {
 mod tests {
     use super::*;
 
-    fn parse(raw: &[&str]) -> Result<Option<u64>, String> {
-        parse_seconds(&raw.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    fn parse(raw: &[&str]) -> Result<Args, String> {
+        parse_args(&raw.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
     }
 
     #[test]
-    fn runs_until_stopped_or_for_the_given_seconds() {
-        assert_eq!(parse(&[]), Ok(None));
-        assert_eq!(parse(&["--seconds", "60"]), Ok(Some(60)));
+    fn runs_until_stopped_or_for_the_given_seconds_recording_on_request() {
+        assert_eq!(
+            parse(&[]),
+            Ok(Args {
+                seconds: None,
+                record: false
+            })
+        );
+        assert_eq!(parse(&["--seconds", "60"]).map(|a| a.seconds), Ok(Some(60)));
+        assert_eq!(
+            parse(&["--record", "--seconds", "5"]),
+            Ok(Args {
+                seconds: Some(5),
+                record: true
+            })
+        );
     }
 
     #[test]
@@ -124,5 +183,12 @@ mod tests {
         assert!(parse(&["--seconds"]).is_err());
         assert!(parse(&["--minutes", "1"]).is_err());
         assert!(parse(&["--seconds", "1", "--seconds", "2"]).is_err());
+        assert!(parse(&["--record", "--record"]).is_err());
+    }
+
+    #[test]
+    fn the_run_tag_names_the_coins() {
+        let symbols = ["BTCUSDT".to_owned(), "ETHUSDT".to_owned()];
+        assert_eq!(run_tag(&symbols), "btceth");
     }
 }

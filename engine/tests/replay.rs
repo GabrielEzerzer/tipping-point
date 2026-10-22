@@ -1,17 +1,17 @@
-//! Fixture replay: the same pipeline the live loop runs, driven from JSON-lines recordings.
+//! Fixture replay: the same pipeline the live loop runs, driven from JSON-lines scripts.
 //!
-//! The committed fixtures are small hand-built synthetic streams. Real recordings made with
-//! `cargo run -p engine-harness --bin record` live in the gitignored
+//! The committed fixtures are small hand-built synthetic streams. Depth-only JSON-lines
+//! recordings from before the binary log, if any, live in the gitignored
 //! `harness/fixtures/recorded/` and are replayed only when present.
 
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use engine::binance::feed::Feed;
+use engine::binance::pipeline::Replayed;
 use engine::binance::recording::{RecordingError, read_records, replay};
 
-fn replay_file(path: &Path) -> Result<Feed, RecordingError> {
+fn replay_file(path: &Path) -> Result<Replayed, RecordingError> {
     let records = read_records(BufReader::new(File::open(path)?))?;
     replay(records)
 }
@@ -28,7 +28,9 @@ fn recorded_dir() -> PathBuf {
 
 #[test]
 fn synthetic_clean_stream_syncs_with_no_resync() -> Result<(), RecordingError> {
-    let feed = replay_file(&synthetic("depth-clean.jsonl"))?;
+    let replayed = replay_file(&synthetic("depth-clean.jsonl"))?;
+    assert_eq!(replayed.report.errors, 0);
+    let feed = replayed.pipeline.feed();
     let stats = feed.stats();
     assert_eq!(stats.resyncs, 0);
     assert_eq!(stats.parse_errors, 0);
@@ -57,7 +59,9 @@ fn synthetic_clean_stream_syncs_with_no_resync() -> Result<(), RecordingError> {
 
 #[test]
 fn synthetic_gap_stream_resyncs_once_and_recovers() -> Result<(), RecordingError> {
-    let feed = replay_file(&synthetic("depth-gap.jsonl"))?;
+    let replayed = replay_file(&synthetic("depth-gap.jsonl"))?;
+    assert_eq!(replayed.report.errors, 0);
+    let feed = replayed.pipeline.feed();
     let stats = feed.stats();
     assert_eq!((stats.resyncs, stats.sequence_gaps), (1, 1));
     assert_eq!(
@@ -101,7 +105,8 @@ fn recorded_fixtures_replay_with_no_unexpected_resync() -> Result<(), RecordingE
     }
 
     for path in paths {
-        let feed = replay_file(&path)?;
+        let replayed = replay_file(&path)?;
+        let feed = replayed.pipeline.feed();
         let stats = feed.stats();
         println!(
             "{}: frames={} applied={} buffered={} stale={} snapshots={} resyncs={} crossed={}",
