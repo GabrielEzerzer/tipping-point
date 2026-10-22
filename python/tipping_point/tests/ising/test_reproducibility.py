@@ -26,7 +26,7 @@ def _staircase() -> protocol.Staircase:
 
 
 def _ramp() -> protocol.Ramp:
-    return protocol.Ramp(rate=200, pre=50, hold=50, save_dT=0.05)  # 500 sweeps
+    return protocol.Ramp(rate=200, L=SPEC.L, pre=50, hold=50, save_dT=0.05)  # 500 sweeps
 
 
 def _files(run_dir: Path) -> dict[str, str]:

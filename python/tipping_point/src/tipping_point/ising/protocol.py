@@ -29,7 +29,6 @@ from .exact import TC
 
 T_HOT, T_COLD = 3.5, 1.5
 GRID = tuple(float(t) for t in np.linspace(T_COLD, T_HOT, 40)[::-1])  # staircase order: hot first
-KZ_EXPONENT = 2.17 + 1.0  # z + 1/nu: Metropolis z = 2.17 (Liu, Polkovnikov, Sandvik 2014), nu = 1
 
 
 @dataclass(frozen=True)
@@ -46,6 +45,11 @@ class Burst:
 
 
 BURST = Burst()
+BAND = (10.0, -5.0)  # the EWS analysis band in epsilon_L = L (T - Tc) / Tc, hot edge first (#26)
+BAND_PER_EPSILON_L = 28.0  # ramp bursts per unit epsilon_L inside it: what dT = 0.005 gives L = 16
+X_SLOW = 0.02  # the slow ramp's Kibble-Zurek point (rate_for), whose cadence a null run copies
+NULL_EPSILON_L = (2.0, 4.0, 6.0)  # fixed-T null runs above Tc, in epsilon_L (#26 call 5)
+NULL_TAU_C = 700  # a null run's measured length in tau_c: two scored slices of 310-340 tau_c
 
 
 class Schedule(Protocol):
@@ -66,9 +70,20 @@ def dwell(tau: float, min_therm: int = 500, min_meas: int = 2000) -> tuple[int, 
     return max(min_therm, math.ceil(20 * tau)), max(min_meas, math.ceil(100 * tau))
 
 
-def rate_for(L: int, x: float) -> int:
-    """Sweeps per unit T that put size L at the Kibble-Zurek point x = L^(z+1/nu) / (r Tc)."""
-    return max(1, round(L**KZ_EXPONENT / (x * TC)))
+def rate_for(L: int, x: float, A: float, z: float) -> int:
+    """Sweeps per unit T that put size L at the Kibble-Zurek point x of the true tau_c = A L^z
+    (the pilot record's fit; nu = 1):
+
+        r = A L^(z + 1) / (x Tc),   that is   x = tau_c(L) / (r Tc / L),
+
+    tau_c over the sweeps the bath spends per unit of epsilon_L = L (T - Tc) / Tc, the same at
+    every L. The critical window |epsilon_L| < 1 takes 2/x tau_c to cross: the slow ramp, x = 0.02,
+    spends 50 tau_c per unit epsilon_L and ~100 tau_c in the window; the fast one, x = 2, crosses
+    it in ~1 tau_c, the Kibble-Zurek regime #19 asked for. Before #50 the rate was
+    L^3.17 / (x Tc), with no A: its nominal x = 0.3 and 30 are 0.3 A and 30 A here, 0.016 and 1.6
+    on the pre-#47 kernel (A = 0.052).
+    """
+    return max(1, round(A * L ** (z + 1) / (x * TC)))
 
 
 def _bursts(first: int, n: int, saves: int, burst: Burst) -> list[int]:
@@ -157,7 +172,12 @@ class Staircase:
 
 class Ramp:
     """Linear cooling T0 -> T1 at `rate` sweeps per unit T, between an equilibration at T0 and a
-    hold at T1. The bath crosses Tc at the real-valued step t_c = t0 + rate * (T0 - Tc)."""
+    hold at T1. The bath crosses Tc at the real-valued step t_c = t0 + rate * (T0 - Tc).
+
+    Bursts are saved every save_dT of cooling, except inside the analysis band of epsilon_L =
+    L (T - Tc) / Tc, where they come every 1/per_epsilon_L of epsilon_L: evenly spaced in T, a
+    fixed dT gives L = 128 an eighth of L = 16's bursts per unit epsilon_L. A ramp too fast for
+    either spacing saves its bursts back to back."""
 
     kind = "ramp"
     blocks = 1
@@ -165,23 +185,33 @@ class Ramp:
     def __init__(
         self,
         rate: int,
+        L: int,
         T0: float = T_HOT,
         T1: float = T_COLD,
         pre: int = 1000,
         hold: int = 1000,
         save_dT: float = 0.005,
+        band: Sequence[float] = BAND,
+        per_epsilon_L: float = BAND_PER_EPSILON_L,
         burst: Burst = BURST,
         x: float | None = None,  # the Kibble-Zurek point the rate came from, kept for the record
+        A: float | None = None,  # ... and the tau_c = A L^z fit it was computed against
+        z: float | None = None,
     ) -> None:
         self.params = {
             "rate": rate,
+            "L": L,
             "T0": T0,
             "T1": T1,
             "pre": pre,
             "hold": hold,
             "save_dT": save_dT,
+            "band": list(band),
+            "per_epsilon_L": per_epsilon_L,
             "burst": asdict(burst),
             "x": x,
+            "A": A,
+            "z": z,
         }
         self.rate, self.T0, self.T1 = rate, T0, T1
         self.t0 = pre  # last step at T0
@@ -189,8 +219,28 @@ class Ramp:
         self.total = self.t1 + hold
         self.t_c = self.t0 + rate * (T0 - TC)
         self.stride = max(1, self.total // 100_000)  # ~1e5 stats rows per replica at most
-        spacing = max(burst.span, round(save_dT * rate))  # a save point every save_dT of cooling
-        self.frames = _frames(range(self.t0 + 1, self.t1 - burst.span + 2, spacing), burst)
+        hot, cold = (TC * (1 + e / L) for e in band)
+        # the band's steps: the first at or below its hot edge, the last at or above its cold one
+        first = max(self.t0 + 1, self.t0 + math.ceil((T0 - hot) * rate))
+        last = min(self.t1, self.t0 + math.floor((T0 - cold) * rate))
+        outside = max(burst.span, round(save_dT * rate))
+        inside = max(burst.span, round(TC / (per_epsilon_L * L) * rate))
+        starts = []
+        step = self.t0 + 1
+        while step <= self.t1 - burst.span + 1:
+            starts.append(step)
+            gap = inside if first <= step <= last else outside
+            if step < first < step + gap:  # enter the band at its edge rather than past it
+                gap = max(burst.span, first - step)
+            step += gap
+        self.frames = _frames(starts, burst)
+        self.saves = {
+            "gap": outside,
+            "band_steps": [first, last],
+            "band_gap": inside,
+            "bursts": len(starts),
+            "bursts_in_band": sum(first <= s <= last for s in starts),
+        }
 
     def temperatures(self, step: int) -> tuple[float, ...]:
         if step <= self.t0:
@@ -217,11 +267,12 @@ class Ramp:
             "t1": self.t1,
             "t_c": self.t_c,
             "stats_stride": self.stride,
+            "saves": self.saves,
         }
 
 
 class Fixed:
-    """Constant temperatures, one per block of replicas: pilot and validation runs."""
+    """Constant temperatures, one per block of replicas: pilot, validation and null runs."""
 
     kind = "fixed"
 
@@ -233,6 +284,8 @@ class Fixed:
         stats_stride: int = 1,
         saves: int = 0,
         burst: Burst = BURST,
+        epsilon_L: float | None = None,  # a null run's scaled temperature, kept for the record
+        tau_c: float | None = None,  # ... and the tau_c its length came from
     ) -> None:
         self.params = {
             "temperatures": list(temperatures),
@@ -241,7 +294,10 @@ class Fixed:
             "stats_stride": stats_stride,
             "saves": saves,
             "burst": asdict(burst),
+            "epsilon_L": epsilon_L,
+            "tau_c": tau_c,
         }
+        self.epsilon_L = epsilon_L
         self.temps = tuple(temperatures)
         self.blocks = len(self.temps)
         self.therm, self.stats_stride = therm, stats_stride
@@ -262,6 +318,24 @@ class Fixed:
 
     def to_json(self) -> dict[str, Any]:
         return {"kind": self.kind, "params": self.params, "total": self.total}
+
+
+def null_run(L: int, epsilon_L: float, tau_c: float, burst: Burst = BURST) -> Fixed:
+    """A fixed-T null run for the EWS scorer (#26): T = Tc (1 + epsilon_L / L) from a hot start,
+    thermalised for 20 tau_c, then measured for NULL_TAU_C tau_c with a stats row every tau_c/50
+    sweeps and bursts at the slow ramp's in-band cadence (BAND_PER_EPSILON_L per tau_c / X_SLOW
+    sweeps), so null segments are sampled like the ramp segments they are scored against."""
+    therm, _ = dwell(tau_c)
+    return Fixed(
+        (TC * (1 + epsilon_L / L),),
+        therm=therm,
+        sweeps=math.ceil(NULL_TAU_C * tau_c),
+        stats_stride=max(1, int(tau_c // 50)),
+        saves=round(NULL_TAU_C * BAND_PER_EPSILON_L * X_SLOW),
+        burst=burst,
+        epsilon_L=epsilon_L,
+        tau_c=tau_c,
+    )
 
 
 def from_json(record: dict[str, Any]) -> Schedule:

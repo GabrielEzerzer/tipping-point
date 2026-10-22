@@ -83,7 +83,7 @@ def test_short_windows_save_fewer_bursts_rather_than_overlap() -> None:
 
 def test_ramp_temperature_is_computed_from_the_sweep_index() -> None:
     """Catches an accumulated temperature (drifts) and an off-by-one at either end of the ramp."""
-    r = Ramp(rate=1000, pre=1000, hold=1000)
+    r = Ramp(rate=1000, L=16, pre=1000, hold=1000)
     assert (r.t0, r.t1, r.total) == (1000, 3000, 4000)
     assert r.temperatures(1) == (3.5,) and r.temperatures(1000) == (3.5,)
     assert r.temperatures(1001) == (3.5 - 1 / 1000,)
@@ -96,31 +96,97 @@ def test_ramp_temperature_is_computed_from_the_sweep_index() -> None:
 
 def test_ramp_crosses_tc_exactly_at_t_c() -> None:
     """t_c is where the bath crosses Tc; lead times are measured against it."""
-    r = Ramp(rate=1000)
+    r = Ramp(rate=1000, L=16)
     assert r.t_c == 1000 + 1000 * (3.5 - exact.TC)
     before, after = int(r.t_c), int(r.t_c) + 1
     assert r.temperatures(before)[0] > exact.TC > r.temperatures(after)[0]
 
 
-def test_ramp_saves_a_burst_every_0_005_of_cooling() -> None:
-    """400 save points per ramp when the rate allows; never outside the ramp; never overlapping."""
-    r = Ramp(rate=4000)  # 0.005 of cooling = 20 sweeps > a burst's 8
-    starts = sorted(step for step, (_, f) in r.frames.items() if f == 0)
-    assert len(starts) == 400
-    assert {b - a for a, b in itertools.pairwise(starts)} == {20}
+def _starts(r: Ramp) -> list[int]:
+    return sorted(step for step, (_, f) in r.frames.items() if f == 0)
+
+
+def _in_band(r: Ramp, L: int, step: int) -> bool:
+    return -5 <= L * (r.temperatures(step)[0] - exact.TC) / exact.TC <= 10
+
+
+def _gaps(r: Ramp, L: int, in_band: bool) -> set[int]:
+    """Sweeps between consecutive burst starts that both lie inside (or both outside) the band."""
+    pairs = itertools.pairwise(_starts(r))
+    return {b - a for a, b in pairs if _in_band(r, L, a) == _in_band(r, L, b) == in_band}
+
+
+def test_ramp_saves_a_burst_every_0_005_of_cooling_outside_the_band() -> None:
+    """Outside epsilon_L in [10, -5] saves stay 0.005 of cooling apart; bursts never leave the
+    ramp or overlap, and a ramp too fast for a spacing saves back to back."""
+    r = Ramp(rate=4000, L=128)  # 0.005 of cooling = 20 sweeps; the band's 2.5 < a burst's 8
+    assert _gaps(r, 128, in_band=False) == {20} and _gaps(r, 128, in_band=True) == {8}
+    assert min(b - a for a, b in itertools.pairwise(_starts(r))) == 8
     assert all(r.phase(step) == 1 for step in r.frames)
-    fast = Ramp(rate=96)  # 0.005 of cooling < one sweep: bursts fall back to back
-    fast_starts = sorted(step for step, (_, f) in fast.frames.items() if f == 0)
-    assert {b - a for a, b in itertools.pairwise(fast_starts)} == {8}
+    _assert_pure(r)
+    fast = Ramp(rate=96, L=16)  # 0.005 of cooling < one sweep: bursts fall back to back
+    assert {b - a for a, b in itertools.pairwise(_starts(fast))} == {8}
 
 
-def test_rate_for_puts_every_size_at_the_same_kibble_zurek_point() -> None:
-    """r = L^3.17 / (x Tc): x = 0.3 at L = 128 is the research's ~1.4e7-sweep slow ramp."""
+def test_ramp_saves_evenly_in_epsilon_l_inside_the_band() -> None:
+    """#26 call 5: saved every 0.005 in T, L = 128 got 3.5 bursts per unit epsilon_L to L = 16's
+    28, about one per scoring window. On the slow ramp (x = 0.02) the bursts per unit epsilon_L
+    inside the band must match across L, and the manifest must say where they went."""
+    per_unit = {}
+    for L in (16, 128):
+        r = Ramp(rate=protocol.rate_for(L, 0.02, 0.13, 2.2), L=L)
+        inside = [s for s in _starts(r) if _in_band(r, L, s)]
+        hot_edge = min(10.0, L * (r.T0 - exact.TC) / exact.TC)  # L = 16's band starts above T0
+        per_unit[L] = len(inside) / (hot_edge + 5)
+        saves = r.to_json()["saves"]
+        assert saves["bursts_in_band"] == len(inside) and saves["bursts"] == len(_starts(r))
+        assert _gaps(r, L, in_band=True) == {saves["band_gap"]} and saves["band_gap"] > 8
+    assert abs(per_unit[16] - per_unit[128]) <= 1
+    assert per_unit[128] == pytest.approx(protocol.BAND_PER_EPSILON_L, abs=1)
+
+
+def test_rate_for_puts_every_size_at_the_same_point_of_the_true_tau() -> None:
+    """x = tau_c(L) / (sweeps per unit epsilon_L) at every L, so the window |epsilon_L| < 1 takes
+    2/x tau_c: 100 at x = 0.02 and 1 at x = 2. Catches a rate that ignores A (pre-#50, the fixed
+    kernel's 2.5x slower tau made every ramp 2.5x faster than its x said) or uses another z."""
+    A, z = 0.13, 2.2
     for L in (16, 32, 64, 128):
-        for x in (30.0, 0.3):
-            r = protocol.rate_for(L, x)
-            assert L**protocol.KZ_EXPONENT / (r * exact.TC) == pytest.approx(x, rel=0.02)
-    assert 2 * protocol.rate_for(128, 0.3) == pytest.approx(1.4e7, rel=0.02)
+        for x in (0.02, 2.0):
+            per_epsilon_L = protocol.rate_for(L, x, A, z) * exact.TC / L
+            assert per_epsilon_L == pytest.approx(A * L**z / x, rel=0.01)
+    slower = protocol.rate_for(64, 0.02, 2.5 * A, z)
+    assert slower == pytest.approx(2.5 * protocol.rate_for(64, 0.02, A, z), rel=1e-6)
+
+
+def test_the_pre_50_x_values_are_x_times_a() -> None:
+    """The old rate L^3.17 / (x Tc) is this rate at x A with z = 2.17: on the pre-#47 kernel
+    (A = 0.052) the nominal 0.3 and 30 were 0.016 and 1.6."""
+    for x_old in (0.3, 30.0):
+        old = 32**3.17 / (x_old * exact.TC)
+        assert protocol.rate_for(32, x_old * 0.052, 0.052, 2.17) == pytest.approx(old, rel=1e-3)
+
+
+def test_null_runs_hold_epsilon_l_for_700_tau_c_at_the_slow_ramps_cadence() -> None:
+    """#26 call 5: a null is one temperature above Tc at a preset epsilon_L, long enough for two
+    scored slices (310-340 tau_c each at x = 0.02) and saved like a ramp segment, and its
+    manifest says which epsilon_L and tau_c made it. A manifest from before the fields existed
+    still rebuilds."""
+    assert protocol.NULL_EPSILON_L == (2.0, 4.0, 6.0)
+    f = protocol.null_run(64, 4.0, tau_c=1000.0)
+    assert f.kind == "fixed" and f.temperatures(1) == (exact.TC * (1 + 4.0 / 64),)
+    assert (f.therm, f.total) == (20_000, 20_000 + 700_000)
+    assert f.stats_stride == 20  # 50 stats rows per tau_c
+    starts = sorted(step for step, (_, frame) in f.frames.items() if frame == 0)
+    per_tau_c = len(starts) / 700  # the slow ramp: 28 bursts per 50 tau_c of cooling
+    assert per_tau_c == pytest.approx(protocol.BAND_PER_EPSILON_L * protocol.X_SLOW, rel=0.01)
+    assert min(starts) > f.therm and max(f.frames) <= f.total
+    params = f.to_json()["params"]
+    assert (params["epsilon_L"], params["tau_c"]) == (4.0, 1000.0)
+    _assert_pure(protocol.null_run(8, 2.0, tau_c=3.0))
+    legacy = f.to_json()
+    for key in ("epsilon_L", "tau_c"):
+        del legacy["params"][key]
+    assert protocol.from_json(legacy).frames == f.frames
 
 
 def test_fixed_blocks_and_phases() -> None:
