@@ -138,6 +138,17 @@ def test_discard_after_removes_only_what_followed_the_checkpoint(tmp_path: Path)
     ]
 
 
+def test_runs_refuse_more_lattices_than_uint16_replica_ids_hold(tmp_path: Path) -> None:
+    """Catches the research's Gate A size (65,536 per T x 3 T) crashing at the final flush, after
+    the whole run: it is refused before anything is written. 65,536 lattices still fit."""
+    too_many = run.Spec(L=4, replicas=65536, seed=1)
+    with pytest.raises(ValueError, match="uint16"):
+        run.start(too_many, protocol.Fixed(run.VALIDATION_TEMPERATURES, 0, 1), tmp_path, "x", "cpu")
+    assert not (tmp_path / "ising").exists()
+    full = run.start(too_many, protocol.Fixed((2.0,), 0, 1), tmp_path, "edge", "cpu")
+    assert io.read_table(full, "stats")["replica"].to_numpy().max() == 65535
+
+
 def test_spins_column_is_fixed_size_binary() -> None:
     """FIXED_LEN_BYTE_ARRAY in Parquet: what the research pinned for arrow-rs readers."""
     assert io.schema("configs", 128).field("spins").type == pa.binary(2048)

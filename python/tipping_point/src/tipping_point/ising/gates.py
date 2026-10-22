@@ -7,6 +7,7 @@ B  local Boltzmann identity on saved configs, any L: flipping a site with n unsa
 C  detailed balance of each half-sweep: in equilibrium accepted flips costing +d and -d balance
    (d = 4, 8), and moves that do not raise the energy are always accepted
 independence  replicas share no randomness: their |M| series are uncorrelated
+thermalised   each plateau's mean |m| is the same over both halves of its measurement window
 
 Error bars come from the spread across replicas, which are independent by construction, so time
 correlation inside a chain can never fake a pass.
@@ -15,7 +16,7 @@ correlation inside a chain can never fake a pass.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -23,12 +24,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from . import exact, io, protocol, run
+from . import exact, io
 
 Z_MAX = 5.0  # a replica t-statistic beyond 5 sigma fails
 P_MIN = 1e-6  # a G-test p-value below this fails
 MAX_CORRELATION = 0.01  # far above the noise once a temperature has ~1000 replicas
-VALIDATION_TEMPERATURES = (1.5, exact.TC, 3.5)
 
 
 @dataclass(frozen=True)
@@ -37,23 +37,6 @@ class Check:
     temperature: float
     passed: bool
     detail: str
-
-
-def validate(
-    root: Path,
-    seed: int = 1,
-    replicas: int = 4096,
-    therm: int = 400,
-    sweeps: int = 400,
-    device: str | None = None,
-) -> tuple[Path, list[Check]]:
-    """A small L = 4 run at 1.5, Tc and 3.5, judged by every gate; results go to gates.json."""
-    schedule = protocol.Fixed(VALIDATION_TEMPERATURES, therm, sweeps, stats_stride=8, saves=5)
-    spec = run.Spec(L=4, replicas=replicas, seed=seed, tally=True)
-    run_dir = run.start(spec, schedule, root, f"L4-val-s{seed}", device)
-    checks = gate_a(run_dir) + gate_b(run_dir) + gate_c(run_dir) + independence(run_dir)
-    io.write_json(run_dir / "gates.json", [asdict(c) for c in checks])
-    return run_dir, checks
 
 
 def t_statistic(values: np.ndarray, mean: float = 0.0) -> float:
@@ -196,4 +179,24 @@ def independence(run_dir: Path) -> list[Check]:
         corr = (R * m.mean(axis=1).var() / spread - 1) / (R - 1) if spread > 0 else 0.0
         detail = f"mean inter-replica correlation of |M| {corr:+.5f} over {R} replicas"
         checks.append(Check("independence", float(T), bool(corr <= MAX_CORRELATION), detail))
+    return checks
+
+
+def thermalised(run_dir: Path) -> list[Check]:
+    """Per constant-temperature plateau: each replica's mean |m| over the first half of the
+    measurement window must match the second half. A drift means it was still relaxing."""
+    L = io.read_json(run_dir / "manifest.json")["params"]["L"]
+    stats = _columns(io.read_table(run_dir, "stats"))
+    measured = stats["phase"] == 1
+    checks = []
+    for segment in np.unique(stats["segment"][measured]):
+        plateau = measured & (stats["segment"] == segment)
+        for T in np.unique(stats["temperature"][plateau]):  # fixed runs: one block per T
+            mine = plateau & (stats["temperature"] == T)
+            steps = len(np.unique(stats["step"][mine]))
+            m = np.abs(stats["magnetisation"][mine]).reshape(steps, -1) / L**2  # (steps, replicas)
+            first, second = m[: steps // 2].mean(axis=0), m[steps // 2 :].mean(axis=0)
+            t = t_statistic(second - first)
+            detail = f"mean |m| {first.mean():.4f} then {second.mean():.4f} (t={t:+.2f})"
+            checks.append(Check("thermalised", float(T), bool(abs(t) <= Z_MAX), detail))
     return checks

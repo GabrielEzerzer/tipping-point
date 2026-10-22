@@ -154,8 +154,9 @@ def discard_after(run_dir: Path, step: int) -> None:
                 path.unlink()
 
 
-def write_complete(run_dir: Path, last_step: int) -> None:
-    """complete.json: rows per table and the sha256 of every chunk; it marks a clean end."""
+def write_complete(run_dir: Path, last_step: int, checks: dict[str, Any]) -> None:
+    """complete.json: rows per table, the sha256 of every chunk, and the end-of-run checks;
+    it marks a clean end."""
     rows: dict[str, int] = {}
     files: dict[str, str] = {}
     for name in TABLES:
@@ -170,5 +171,6 @@ def write_complete(run_dir: Path, last_step: int) -> None:
         "rows": rows,
         "clean": True,
         "files": files,
+        "checks": checks,
     }
     write_json(run_dir / "complete.json", record)

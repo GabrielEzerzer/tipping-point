@@ -13,11 +13,11 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Tau:
-    tau: float  # Sokal estimate 1 + 2 sum_{t<=window} rho(t)
+    tau: float  # Sokal estimate 1 + 2 sum_{t<=window} rho(t); a floor when no window was found
     window: int  # first lag W with W >= c * tau(W)
     binning: float  # binning ratio at the largest block size: the cross-check
     n: int  # samples per series
-    reliable: bool  # a window was found and n >= 50 tau
+    reliable: bool  # a window was found, tau > 0 and n >= 50 tau
 
 
 def autocorrelation(x: np.ndarray) -> np.ndarray:
@@ -34,11 +34,16 @@ def autocorrelation(x: np.ndarray) -> np.ndarray:
 
 
 def sokal(rho: np.ndarray, c: float = 5.0) -> tuple[float, int, bool]:
-    """Sum rho up to the first window W >= c * tau(W): late lags add noise, not signal."""
-    taus = 2 * np.cumsum(rho) - 1  # tau(W) = 1 + 2 sum_{t=1..W} rho(t), since rho(0) = 1
-    found = np.arange(len(rho)) >= c * taus
+    """Sum rho up to the first window W >= c * tau(W): late lags add noise, not signal.
+
+    Windows are sought below n/2 only. Subtracting the mean forces the full sum to zero
+    (tau(n-1) = 0), which would fake a window, and a tau of 0, in a series far too short to have
+    one. With no window the series cannot say; the largest running sum is returned as a floor.
+    """
+    taus = 2 * np.cumsum(rho[: max(1, len(rho) // 2)]) - 1  # tau(W) = 1 + 2 sum_{t=1..W} rho(t)
+    found = np.arange(len(taus)) >= c * taus
     if not found.any():
-        return float(taus[-1]), len(rho) - 1, False
+        return float(taus.max()), len(taus) - 1, False
     window = int(np.argmax(found))
     return float(taus[window]), window, True
 
@@ -65,4 +70,4 @@ def estimate(x: np.ndarray, c: float = 5.0) -> Tau:
     _, ratios = binning(x)
     n = x.shape[1]
     plateau = float(ratios[-1]) if len(ratios) else float("nan")
-    return Tau(tau, window, plateau, n, found and n >= 50 * tau)
+    return Tau(tau, window, plateau, n, found and 0 < tau <= n / 50)

@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from . import autocorr, gates, io, protocol, run
+from . import autocorr, io, protocol, run
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -90,16 +90,21 @@ def _spec(args: argparse.Namespace) -> run.Spec:
 
 
 def _taus(value: str, temperatures: Sequence[float]) -> list[float]:
-    """--tau: one number for every temperature, or a pilot's tau.json that covers them all."""
+    """--tau: one number for every temperature, or a pilot's tau.json that covers them all with
+    reliable points. A pilot too short for its tau underestimates it, and the dwell would end
+    before the plateau equilibrates."""
     try:
         return [float(value)] * len(temperatures)
     except ValueError:
         pass
-    measured = {round(p["temperature"], 9): p["tau"] for p in io.read_json(Path(value))["points"]}
-    missing = [T for T in temperatures if round(T, 9) not in measured]
+    points = {round(p["temperature"], 9): p for p in io.read_json(Path(value))["points"]}
+    missing = [T for T in temperatures if round(T, 9) not in points]
     if missing:
         raise SystemExit(f"{value} has no tau for T = {missing}")
-    return [measured[round(T, 9)] for T in temperatures]
+    unreliable = [T for T in temperatures if not points[round(T, 9)].get("reliable", False)]
+    if unreliable:
+        raise SystemExit(f"{value}: tau is unreliable at T = {unreliable}; run the pilot longer")
+    return [points[round(T, 9)]["tau"] for T in temperatures]
 
 
 def _staircase(args: argparse.Namespace) -> int:
@@ -131,10 +136,11 @@ def _pilot(args: argparse.Namespace) -> int:
     points = _measure(run_dir, args.L)
     io.write_json(run_dir / "tau.json", {"L": args.L, "seconds": seconds, "points": points})
     for p in points:
+        samples = f"{p['sweeps'] / p['tau']:.0f}" if p["tau"] > 0 else "n/a"
         print(
             f"T={p['temperature']:.4f}  tau(|m|)={p['tau']:.1f} (window {p['window']}, "
             f"binning {p['binning']:.1f})  tau(e)={p['tau_energy']:.1f}  "
-            f"N/tau={p['sweeps'] / p['tau']:.0f}{'' if p['reliable'] else '  UNRELIABLE'}"
+            f"N/tau={samples}{'' if p['reliable'] else '  UNRELIABLE'}"
         )
     print(f"{run_dir}  ({seconds:.1f} s)")
     return 0
@@ -168,7 +174,7 @@ def _measure(run_dir: Path, L: int) -> list[dict[str, Any]]:
 
 
 def _validate(args: argparse.Namespace) -> int:
-    run_dir, checks = gates.validate(
+    run_dir, checks = run.validate(
         args.data_dir, args.seed, args.replicas, args.therm, args.sweeps, args.device
     )
     for c in checks:

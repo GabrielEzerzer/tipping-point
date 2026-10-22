@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 import torch
 import torch.nn.functional as F
-from tipping_point.ising import gates, kernel
+from tipping_point.ising import gates, kernel, run
 from torch import Tensor
 
 _HALF_SWEEP = kernel.half_sweep  # the real one, for mutants built on top of it
@@ -76,7 +76,7 @@ MUTANTS: dict[str, tuple[str, Callable[..., Any]]] = {
 
 
 def _small_validation(root: Path) -> list[gates.Check]:
-    return gates.validate(root, seed=2, replicas=1024, therm=200, sweeps=200, device="cpu")[1]
+    return run.validate(root, seed=2, replicas=1024, therm=200, sweeps=200, device="cpu")[1]
 
 
 def _gate(checks: list[gates.Check], name: str) -> list[gates.Check]:

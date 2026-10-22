@@ -13,6 +13,15 @@ def _only_run(root: Path) -> Path:
     return run_dir
 
 
+def _pilot_file(path: Path, unreliable: tuple[float, ...] = ()) -> Path:
+    """A tau.json covering the staircase grid, with the given temperatures marked unreliable."""
+    points = [
+        {"temperature": T, "tau": 1.0, "reliable": T not in unreliable} for T in protocol.GRID
+    ]
+    path.write_text(json.dumps({"points": points}))
+    return path
+
+
 def test_pilot_smoke_at_l16(tmp_path: Path) -> None:
     """Short CPU pilot at L = 16: a sane tau at T = 3, a larger one at Tc, manifest, tau.json."""
     argv = ["pilot", "--L", "16", "--T", "3.0", "--T", repr(exact.TC), "--replicas", "8"]
@@ -51,10 +60,7 @@ def test_staircase_cli_reads_taus_from_a_pilot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A pilot's tau.json drives the staircase dwell (shrunk here so the 40 plateaus take ms)."""
-    pilot = tmp_path / "tau.json"
-    pilot.write_text(
-        json.dumps({"points": [{"temperature": T, "tau": 1.0} for T in protocol.GRID]})
-    )
+    pilot = _pilot_file(tmp_path / "tau.json")
     monkeypatch.setattr(protocol, "dwell", lambda tau, *_: (2, 6))
     argv = ["staircase", "--L", "4", "--tau", str(pilot), "--replicas", "2", "--warmup", "0"]
     assert main([*argv, "--saves", "0", "--data-dir", str(tmp_path / "d"), "--device", "cpu"]) == 0
@@ -63,10 +69,35 @@ def test_staircase_cli_reads_taus_from_a_pilot(
     assert schedule["params"]["taus"] == [1.0] * 40
 
 
+def test_staircase_refuses_a_pilot_tau_marked_unreliable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a dwell set from a pilot too short to measure its own tau: such a pilot reports
+    tau several times too small (AR(1) tau = 199 from 600 samples reads 41.7), so the plateau
+    nearest Tc would be measured before it equilibrates. Refused before any run starts."""
+    near_tc = protocol.GRID[24]
+    pilot = _pilot_file(tmp_path / "tau.json", unreliable=(near_tc,))
+    monkeypatch.setattr(protocol, "dwell", lambda tau, *_: (2, 6))  # keeps a wrongful run short
+    argv = ["staircase", "--L", "4", "--tau", str(pilot), "--replicas", "2", "--warmup", "0"]
+    with pytest.raises(SystemExit) as refused:
+        main([*argv, "--saves", "0", "--data-dir", str(tmp_path / "d"), "--device", "cpu"])
+    assert isinstance(refused.value.code, str) and str(near_tc) in refused.value.code  # exit 1
+    assert not (tmp_path / "d").exists()
+
+
+def test_pilot_too_short_for_a_window_is_unreliable_and_does_not_crash(tmp_path: Path) -> None:
+    """Catches tau = 0 from the forced tail of the running sum (two samples give tau(1) = 0
+    exactly): it was marked reliable, and the N/tau print divided by it after tau.json existed."""
+    argv = ["pilot", "--L", "16", "--T", "3.0", "--replicas", "4", "--therm", "0", "--sweeps", "2"]
+    assert main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"]) == 0
+    (point,) = io.read_json(_only_run(tmp_path) / "tau.json")["points"]
+    assert point["tau"] > 0 and point["reliable"] is False
+
+
 def test_tau_option_takes_a_number_or_a_complete_pilot(tmp_path: Path) -> None:
     assert _taus("4.5", (3.5, 2.0)) == [4.5, 4.5]
     pilot = tmp_path / "tau.json"
-    pilot.write_text(json.dumps({"points": [{"temperature": 3.5, "tau": 2.0}]}))
+    pilot.write_text(json.dumps({"points": [{"temperature": 3.5, "tau": 2.0, "reliable": True}]}))
     assert _taus(str(pilot), (3.5,)) == [2.0]
     with pytest.raises(SystemExit):
         _taus(str(pilot), (3.5, 2.0))  # no tau measured at 2.0

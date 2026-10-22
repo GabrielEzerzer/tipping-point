@@ -54,6 +54,14 @@ def test_fft_autocorrelation_matches_a_direct_sum() -> None:
     assert np.allclose(autocorr.autocorrelation(x), direct, atol=1e-12)
 
 
+def test_the_forced_zero_tail_never_passes_as_a_window() -> None:
+    """Subtracting the mean makes tau(n-1) = 0 exactly; a window taken there reported tau = 0 as
+    reliable (n >= 50 * 0). Series far shorter than tau must come back unreliable, with tau > 0."""
+    for n in (2, 3, 5, 20, 100, 600):
+        tau = autocorr.estimate(_ar1(0.99, replicas=4, n=n, seed=n))
+        assert not tau.reliable and tau.tau > 0, (n, tau)
+
+
 def test_short_series_are_flagged_unreliable() -> None:
     """A series shorter than ~50 tau cannot be trusted, and the result must say so."""
     x = _ar1(0.99, replicas=4, n=2000, seed=5)

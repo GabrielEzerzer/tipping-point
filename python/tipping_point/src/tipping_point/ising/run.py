@@ -21,10 +21,12 @@ import torch
 from torch import Tensor
 
 from .. import __version__
-from . import io, kernel, protocol
+from . import gates, io, kernel, protocol
 from .exact import TC
 
 CONFIG_BUFFER_BYTES = 2**28  # flush before ~256 MB of configurations pile up on the device
+MAX_LATTICES = 2**16  # replica ids are stored as uint16
+VALIDATION_TEMPERATURES = (1.5, TC, 3.5)
 
 
 def default_device() -> str:
@@ -47,6 +49,11 @@ def start(
     spec: Spec, schedule: protocol.Schedule, root: Path, tag: str, device: str | None = None
 ) -> Path:
     """Create <root>/ising/<run_id>/ and its manifest, then run the schedule to the end."""
+    if spec.replicas * schedule.blocks > MAX_LATTICES:
+        raise ValueError(
+            f"{spec.replicas * schedule.blocks:,} lattices in one run, but replica ids are "
+            f"uint16: at most {MAX_LATTICES:,} (replicas per temperature x temperatures)"
+        )
     dev = torch.device(device or default_device())
     run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{tag}"
     run_dir = Path(root) / "ising" / run_id
@@ -153,8 +160,41 @@ def _loop(
                 f"{run_dir.name}: step {step:,}/{schedule.total:,} ({rate:,.0f} sweeps/s)",
                 flush=True,
             )
-    io.write_complete(run_dir, schedule.total)
+    io.write_complete(run_dir, schedule.total, _final_checks(run_dir, schedule))
     (run_dir / "checkpoint.pt").unlink()
+
+
+def _final_checks(run_dir: Path, schedule: protocol.Schedule) -> dict[str, Any]:
+    """Verdicts recorded in complete.json: every staircase plateau must look thermalised."""
+    if schedule.kind != "staircase":
+        return {}
+    checks = gates.thermalised(run_dir)
+    drifting = [c.temperature for c in checks if not c.passed]
+    verdict = f"still drifting at T = {drifting}" if drifting else "all thermalised"
+    print(f"{run_dir.name}: {len(checks)} plateaus, {verdict}", flush=True)
+    return {"thermalised": [asdict(c) for c in checks]}
+
+
+def validate(
+    root: Path,
+    seed: int = 1,
+    replicas: int = 4096,
+    therm: int = 400,
+    sweeps: int = 400,
+    device: str | None = None,
+) -> tuple[Path, list[gates.Check]]:
+    """A small L = 4 run at 1.5, Tc and 3.5, judged by every gate; verdicts go to gates.json."""
+    schedule = protocol.Fixed(VALIDATION_TEMPERATURES, therm, sweeps, stats_stride=8, saves=5)
+    spec = Spec(L=4, replicas=replicas, seed=seed, tally=True)
+    run_dir = start(spec, schedule, root, f"L4-val-s{seed}", device)
+    checks = (
+        gates.gate_a(run_dir)
+        + gates.gate_b(run_dir)
+        + gates.gate_c(run_dir)
+        + gates.independence(run_dir)
+    )
+    io.write_json(run_dir / "gates.json", [asdict(c) for c in checks])
+    return run_dir, checks
 
 
 def _keys(spec: Spec, schedule: protocol.Schedule, steps: np.ndarray) -> dict[str, np.ndarray]:
