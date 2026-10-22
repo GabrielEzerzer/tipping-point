@@ -100,6 +100,11 @@ def test_first_alarm_is_a_rise_and_late_starters_are_censored() -> None:
     flat = np.full((5, 30), 0.9)
     alarm, censored = scoring.first_alarm(np.arange(30.0), flat, 0.5, previous=flat[:, 0])
     assert np.isnan(alarm).all() and censored.all()
+    gaps = np.array([[0.1, np.nan, 0.9, 0.9, 0.9], [np.nan] * 5])
+    alarm, censored = scoring.first_alarm(np.arange(5.0), gaps, 0.5, np.array([0.1, np.nan]))
+    assert alarm[0] == 2.0 and not censored[0]  # a rise after a gap: an alarm, as alarms() counts
+    assert np.isnan(alarm[1]) and censored[1]  # no score to place it by: not measured, not a miss
+    assert scoring.alarms(gaps[:1], 0.5).tolist() == [1]
     lead = scoring.lead_times(35.0, np.array([20.0, np.nan]))
     assert lead[0] == 15.0 and np.isnan(lead[1])
 

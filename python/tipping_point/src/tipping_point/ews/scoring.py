@@ -132,12 +132,14 @@ def first_alarm(
 ) -> tuple[np.ndarray, np.ndarray]:
     """The first rise of each row of s(t) above theta inside a stretch: s > theta after
     s <= theta, `previous` being each row's score just before the stretch opens. A row already
-    above theta there is censored: its alarm came earlier, so here it is neither an alarm nor a
-    miss. Returns (alarm times, NaN for none; censored rows)."""
+    above theta there, or with no score there, is censored: its alarm came earlier or cannot be
+    placed, so here it is neither an alarm nor a miss. After a missing score the previous one is
+    -inf, as in `alarms`. Returns (alarm times, NaN for none; censored rows)."""
     scores = np.atleast_2d(np.asarray(scores, dtype=np.float64))
     entry = np.asarray(previous, dtype=np.float64).reshape(len(scores))
-    censored = entry > theta
+    censored = ~(entry <= theta)
     before = np.concatenate([entry[:, None], scores[:, :-1]], axis=1)
+    before = np.where(np.isnan(before), -np.inf, before)
     rise = (before <= theta) & (scores > theta)
     found = rise.any(axis=1) & ~censored
     first = np.argmax(rise, axis=1)
