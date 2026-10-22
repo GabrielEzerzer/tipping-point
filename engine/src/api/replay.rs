@@ -184,7 +184,8 @@ async fn feed(
             .collect();
         let every = hub.config().book_sample.every_ns;
         let first = samples.first().map(|sample| sample.sample_ts_ns);
-        if let Some(lost) = missing_instants(last_sample, start_ns, first, every)
+        if let Some(lost) =
+            missing_instants(last_sample, start_ns, recent.first_sample, first, every)
             && tx.send(Item::BookGap(lost)).await.is_err()
         {
             return;
@@ -204,12 +205,13 @@ async fn feed(
 }
 
 /// Grid instants missing between where the replay is (the last sample sent, or else the
-/// requested start) and the first sample memory still holds; `None` when they meet or when there
-/// is nothing to compare. Samples are one grid step apart however quiet the market, so a longer
-/// step is samples lost to the replay.
+/// requested start, but never before the run's first sample `first_ever`) and the first sample
+/// memory still holds; `None` when they meet or when there is nothing to compare. Samples are one
+/// grid step apart however quiet the market, so a longer step is samples lost to the replay.
 fn missing_instants(
     last_sample: i64,
     start_ns: i64,
+    first_ever: Option<i64>,
     first_held: Option<i64>,
     every_ns: i64,
 ) -> Option<u64> {
@@ -218,11 +220,13 @@ fn missing_instants(
     let expected = if last_sample != i64::MIN {
         last_sample.checked_add(every_ns)?
     } else if start_ns != i64::MIN {
-        // The first grid instant at or after the start.
-        start_ns
+        // The first grid instant at or after the start; a run's first sample comes a second or
+        // two after the run starts, and there is nothing before it to lose.
+        let start = start_ns
             .div_euclid(every_ns)
             .checked_add(i64::from(start_ns.rem_euclid(every_ns) != 0))?
-            .checked_mul(every_ns)?
+            .checked_mul(every_ns)?;
+        first_ever.map_or(start, |first_ever| start.max(first_ever))
     } else {
         return None;
     };
@@ -478,23 +482,25 @@ mod tests {
 
     #[test]
     fn a_step_longer_than_the_grid_is_instants_lost() {
+        let lost = |last_sample, start_ns, first_ever, first_held| {
+            missing_instants(last_sample, start_ns, first_ever, first_held, 100)
+        };
         // After the rotated hours: the next sample is due one step after the last one sent.
-        assert_eq!(missing_instants(1_000, i64::MIN, Some(1_100), 100), None);
-        assert_eq!(missing_instants(1_000, i64::MIN, Some(1_400), 100), Some(3));
-        // Nothing rotated: memory must start at the first instant of the requested start.
-        assert_eq!(missing_instants(i64::MIN, 950, Some(1_000), 100), None);
-        assert_eq!(missing_instants(i64::MIN, 1_000, Some(1_500), 100), Some(5));
-        assert_eq!(
-            missing_instants(i64::MIN, i64::MIN, Some(1_500), 100),
-            None,
-            "no start"
-        );
-        assert_eq!(
-            missing_instants(1_000, i64::MIN, None, 100),
-            None,
-            "memory empty"
-        );
-        assert_eq!(missing_instants(1_000, i64::MIN, Some(1_050), 100), None);
+        assert_eq!(lost(1_000, i64::MIN, Some(0), Some(1_100)), None);
+        assert_eq!(lost(1_000, i64::MIN, Some(0), Some(1_200)), Some(1));
+        assert_eq!(lost(1_000, i64::MIN, Some(0), Some(1_400)), Some(3));
+        assert_eq!(lost(1_000, i64::MIN, Some(0), Some(1_050)), None);
+        // Nothing rotated: memory must start at the first instant of the requested start...
+        assert_eq!(lost(i64::MIN, 950, Some(1_000), Some(1_000)), None);
+        assert_eq!(lost(i64::MIN, 1_000, Some(1_000), Some(1_500)), Some(5));
+        // ...but never before the run's first sample: a fresh run replayed from its start (the
+        // first sample 1.5 s later) lost nothing, until memory lets its first samples go.
+        assert_eq!(lost(i64::MIN, 0, Some(1_500), Some(1_500)), None);
+        assert_eq!(lost(i64::MIN, 0, Some(1_500), Some(2_000)), Some(5));
+        assert_eq!(lost(i64::MIN, 1_750, Some(1_500), Some(2_000)), Some(2));
+        let no_start = lost(i64::MIN, i64::MIN, Some(1_500), Some(1_500));
+        assert_eq!(no_start, None);
+        assert_eq!(lost(1_000, i64::MIN, Some(0), None), None, "memory empty");
     }
 
     #[test]

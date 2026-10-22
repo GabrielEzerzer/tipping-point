@@ -612,6 +612,13 @@ async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
         .cloned()
         .collect();
     assert_subsequence(&books, &held_rows, "replay from memory after a gap");
+    // From before the run's first sample, as from the run's start: the same instants are lost.
+    let early = json!({"t": "replay", "run": RUN, "from_ms": first_ms - 2_000, "speed": 0});
+    send_json(&mut viewer, &early).await?;
+    until_replay(&mut viewer).await?;
+    let gap = next_json(&mut viewer, WAIT).await?;
+    assert_eq!(gap, json!({"t": "gap", "topic": "book", "lost": lost}));
+    read_until_ended(&mut viewer).await?;
     live.finish().await?;
     server.stop().await;
     fs::remove_dir_all(&dir)?;

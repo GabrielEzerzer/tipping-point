@@ -113,6 +113,8 @@ struct Ring {
     samples: VecDeque<Arc<Sample>>,
     /// Each with its capture time, the clock samples are on.
     trades: VecDeque<(i64, Arc<TradeMessage>)>,
+    /// The run's first sample instant, kept after the ring lets that sample go.
+    first_sample: Option<i64>,
 }
 
 /// Book samples and trades from memory, each trade with its capture time.
@@ -120,6 +122,8 @@ struct Ring {
 pub struct Recent {
     pub samples: Vec<Arc<Sample>>,
     pub trades: Vec<(i64, Arc<TradeMessage>)>,
+    /// The run's first sample instant, whether or not memory still holds it.
+    pub first_sample: Option<i64>,
 }
 
 /// What a reader starting with a backfill gets: the recent past, and receivers that carry on
@@ -227,6 +231,7 @@ impl Hub {
         {
             let mut ring = self.ring();
             let t = published.sample.sample_ts_ns;
+            ring.first_sample.get_or_insert(t);
             ring.samples.push_back(Arc::clone(&published.sample));
             let oldest = t.saturating_sub(self.ring_ns());
             while ring
@@ -361,6 +366,7 @@ impl Hub {
                 .filter(|(t, _)| *t > after_ns)
                 .cloned()
                 .collect(),
+            first_sample: ring.first_sample,
         }
     }
 
