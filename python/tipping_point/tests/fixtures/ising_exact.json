@@ -1,0 +1,29 @@
+{
+  "source": "Onsager (1944) energy and Yang (1952) magnetisation, J = k_B = 1, evaluated to 4 decimals in the #25 research pass; exact density of states of the periodic 4x4 lattice as tabulated in the literature (e.g. Beale, PRL 76, 78 (1996))",
+  "Tc": 2.269185314,
+  "decimals_tolerance": 5e-05,
+  "energy_per_site": {
+    "1.5": -1.9511,
+    "3.5": -0.6601
+  },
+  "magnetisation": {
+    "1.5": 0.9865
+  },
+  "density_of_states_L4": {
+    "-32": 2,
+    "-24": 32,
+    "-20": 64,
+    "-16": 424,
+    "-12": 1728,
+    "-8": 6688,
+    "-4": 13568,
+    "0": 20524,
+    "4": 13568,
+    "8": 6688,
+    "12": 1728,
+    "16": 424,
+    "20": 64,
+    "24": 32,
+    "32": 2
+  }
+}
