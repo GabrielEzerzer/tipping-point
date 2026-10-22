@@ -82,15 +82,18 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     crates, so any exemption would let a crate of exempt binaries ride on another's tests. A
     binary may opt out with `test = false` only while its crate keeps a tested target: an
     opted-out binary prints no header at all, so test_gate checks that against cargo metadata."""
-    binaries: list[tuple[str, list[re.Match[str]]]] = []
+    # (name, is cargo's own Doc-tests header, results): the flag records which branch matched,
+    # because a [[test]] at path "Doc-tests x.rs" prints "Running Doc-tests x.rs (...)"
+    binaries: list[tuple[str, bool, list[re.Match[str]]]] = []
     for line in output.splitlines():
         if header := _TEST_HEADER.match(line):
-            binaries.append((header["binary"] or header["doctests"], []))
+            doctests = header["doctests"] is not None
+            binaries.append((header["binary"] or header["doctests"], doctests, []))
         elif result := _TEST_RESULT.search(line):
             if not binaries:
                 return Verdict(False, f"unparseable: no cargo header above {line.strip()!r}")
-            binaries[-1][1].append(result)  # doc-tests can print two (merged + standalone)
-    results = [m for _, found in binaries for m in found]
+            binaries[-1][2].append(result)  # doc-tests can print two (merged + standalone)
+    results = [m for *_, found in binaries for m in found]
     if not results:
         return Verdict(False, f"no 'test result:' line (exit {returncode})")
     passed = sum(int(m["passed"]) for m in results)
@@ -98,10 +101,10 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     summary = f"{len(results)} test result lines: {passed} passed; {failed} failed"
     if any(m["status"] != "ok" for m in results) or failed:
         return Verdict(False, summary)
-    for name, found in binaries:
+    for name, doctests, found in binaries:
         if not found:
             return Verdict(False, f"{summary} (no 'test result:' line for {name})")
-        if sum(int(m["passed"]) for m in found) < 1 and not name.startswith("Doc-tests "):
+        if sum(int(m["passed"]) for m in found) < 1 and not doctests:
             return Verdict(False, f"{summary} (zero tests ran in {name})")
     if passed < 1:
         return Verdict(False, f"{summary} (zero tests ran)")

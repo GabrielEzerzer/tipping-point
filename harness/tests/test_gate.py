@@ -190,6 +190,19 @@ def test_cargo_any_one_binary_with_zero_tests_is_red(binary: str) -> None:
     assert f"zero tests ran in {binary}" in verdict.source
 
 
+def test_cargo_test_binary_named_like_doc_tests_is_not_exempt() -> None:
+    # real header of a [[test]] at path "Doc-tests sweep.rs": only cargo's own Doc-tests line
+    # is exempt from the floor, not a binary whose name merely reads like it
+    spoof = (
+        "\n     Running Doc-tests sweep.rs (target\\debug\\deps\\sweep-a70bfbc7b205fadb.exe)\n\n"
+        "running 0 tests\n\n"
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+    )
+    verdict = gate.judge_cargo_test(0, fixture("cargo-test-two-binaries-green.txt") + spoof)
+    assert not verdict.green
+    assert "zero tests ran in Doc-tests sweep.rs" in verdict.source
+
+
 def test_cargo_doc_tests_may_print_two_result_lines() -> None:
     # edition 2024 runs merged doctests, then standalone (compile_fail) ones, under one header
     verdict = gate.judge_cargo_test(0, fixture("cargo-test-doctests-green.txt"))
