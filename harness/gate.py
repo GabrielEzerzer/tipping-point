@@ -80,7 +80,8 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     """Credit each 'test result:' line to the cargo header above it. Every binary must report
     ok, and every test binary except doc-tests must pass >=1 test: headers name binaries, not
     crates, so any exemption would let a crate of exempt binaries ride on another's tests. A
-    binary with nothing to test opts out openly with `test = false` on its [[bin]]."""
+    binary may opt out with `test = false` only while its crate keeps a tested target: an
+    opted-out binary prints no header at all, so test_gate checks that against cargo metadata."""
     binaries: list[tuple[str, list[re.Match[str]]]] = []
     for line in output.splitlines():
         if header := _TEST_HEADER.match(line):

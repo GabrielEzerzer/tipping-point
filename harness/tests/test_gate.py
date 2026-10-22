@@ -4,13 +4,11 @@ Fixtures in fixtures/ are real tool output captured on this repo (green = clean 
 red = deliberately broken files; any other name = files deliberately edited into that shape).
 """
 
-import fnmatch
 import json
 import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 import gate
@@ -303,45 +301,103 @@ def test_pytest_leg_reads_the_dirs_from_the_real_pyproject(monkeypatch) -> None:
     assert "zero tests ran from harness/tests" in verdict.source
 
 
-# ---------- the Cargo workspace: every harness crate joins, no other dir can break it
+# ---------- the Cargo workspace, as cargo itself resolves it
 
 
-def test_cargo_members_skip_non_crate_dirs_under_harness(tmp_path) -> None:
-    # record writes harness/fixtures/recorded/; dot-dirs, out/ and tests/ sit there too
-    for manifest in ("Cargo.toml", "engine/Cargo.toml", "harness/engine-harness/Cargo.toml"):
-        (tmp_path / manifest).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(gate.ROOT / manifest, tmp_path / manifest)
-    for path in (
-        "engine/src/lib.rs",
-        "harness/engine-harness/src/bin/record.rs",
-        "harness/engine-harness/src/bin/soak.rs",
-        "harness/fixtures/recorded/x.jsonl",
-        "harness/.hidden/x",
-        "harness/out/x",
-        "harness/tests/x",
-    ):
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).touch()
+def _cargo_packages(root: Path) -> list[dict]:
     proc = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"],
-        cwd=tmp_path,
+        cwd=root,
         capture_output=True,
         text=True,
         encoding="utf-8",
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    packages = sorted(p["name"] for p in json.loads(proc.stdout)["packages"])
-    assert packages == ["engine", "engine-harness"]
+    return json.loads(proc.stdout)["packages"]
 
 
-def test_every_crate_under_harness_matches_the_members_glob() -> None:
-    # a crate the glob misses is never built or tested, and nothing else would say so
-    workspace = tomllib.loads((gate.ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
-    crates = [f"harness/{p.parent.name}" for p in (gate.ROOT / "harness").glob("*/Cargo.toml")]
-    assert crates
-    missed = [c for c in crates if not any(fnmatch.fnmatchcase(c, m) for m in workspace["members"])]
-    assert not missed, f"not workspace members: {missed}"
+def _workspace_problems(root: Path) -> list[str]:
+    """Ask cargo, never re-derive its rules: every crate dir under harness/ must be a package it
+    builds, and every package must keep a target that runs tests (a `test = false` binary prints
+    no header, so the cargo-test judge cannot see a crate whose targets all opted out)."""
+    packages = _cargo_packages(root)
+    built = {Path(p["manifest_path"]).resolve().parent for p in packages}
+    crates = sorted(m.resolve().parent for m in (root / "harness").rglob("Cargo.toml"))
+    problems = [
+        f"{c.relative_to(root.resolve()).as_posix()} is not a workspace member"
+        for c in crates
+        if c not in built
+    ]
+    problems += [
+        f"{p['name']} has no target that runs tests"
+        for p in packages
+        if not any(t["test"] for t in p["targets"])
+    ]
+    return problems
+
+
+def _scratch_workspace(root: Path) -> Path:
+    """The real manifests with empty sources: enough for cargo metadata, nothing to build."""
+    for manifest in ("Cargo.toml", "engine/Cargo.toml", "harness/engine-harness/Cargo.toml"):
+        (root / manifest).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(gate.ROOT / manifest, root / manifest)
+    for source in (
+        "engine/src/lib.rs",
+        "harness/engine-harness/src/bin/record.rs",
+        "harness/engine-harness/src/bin/soak.rs",
+    ):
+        (root / source).parent.mkdir(parents=True, exist_ok=True)
+        (root / source).touch()
+    return root
+
+
+def _add_crate(crate: Path, source: str = "lib.rs", targets: str = "") -> None:
+    (crate / "src").mkdir(parents=True)
+    (crate / "src" / source).touch()
+    (crate / "Cargo.toml").write_text(
+        f'[package]\nname = "{crate.name}"\nversion = "0.1.0"\nedition = "2024"\n{targets}',
+        encoding="utf-8",
+    )
+
+
+def test_every_harness_crate_is_a_workspace_package_that_runs_tests() -> None:
+    assert _workspace_problems(gate.ROOT) == []
+
+
+def test_cargo_members_skip_non_crate_dirs_under_harness(tmp_path) -> None:
+    # record writes harness/fixtures/recorded/; dot-dirs, out/ and tests/ sit there too
+    root = _scratch_workspace(tmp_path)
+    for path in ("fixtures/recorded/x.jsonl", ".hidden/x", "out/x", "tests/x"):
+        (root / "harness" / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / "harness" / path).touch()
+    assert sorted(p["name"] for p in _cargo_packages(root)) == ["engine", "engine-harness"]
+    assert _workspace_problems(root) == []
+
+
+def test_an_excluded_harness_crate_is_caught(tmp_path) -> None:
+    root = _scratch_workspace(tmp_path)
+    _add_crate(root / "harness" / "ising-harness")
+    manifest = root / "Cargo.toml"
+    excluded = '[workspace]\nexclude = ["harness/ising-harness"]\n'
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace("[workspace]\n", excluded, 1),
+        encoding="utf-8",
+    )
+    assert _workspace_problems(root) == ["harness/ising-harness is not a workspace member"]
+
+
+def test_a_nested_harness_crate_is_caught(tmp_path) -> None:
+    root = _scratch_workspace(tmp_path)
+    _add_crate(root / "harness" / "tools" / "ising-harness")
+    assert _workspace_problems(root) == ["harness/tools/ising-harness is not a workspace member"]
+
+
+def test_a_crate_whose_every_target_skips_tests_is_caught(tmp_path) -> None:
+    root = _scratch_workspace(tmp_path)
+    no_tests = '\n[[bin]]\nname = "ising"\npath = "src/main.rs"\ntest = false\n'
+    _add_crate(root / "harness" / "ising-harness", "main.rs", no_tests)
+    assert _workspace_problems(root) == ["ising-harness has no target that runs tests"]
 
 
 # ---------- lie: missing or garbage JUnit
