@@ -41,6 +41,7 @@ CADENCES = {"dense", "matched"}
 DIRECTIONS = {"greater", "less", "two-sided", "match"}
 ROLES = {"positive-control", "descriptive", "reference"}
 QUANTITIES = {"l2_var_abs_m", "mean_abs_m", "skewness_abs_m", "tau_int_abs_m", "one_minus_ac1"}
+SURROGATES = {"phase", "ar1"}
 _PLACEHOLDER = re.compile(r"TBD|<[a-z][^<>|]*>")  # "TBD", or "<words>" as in TEMPLATE
 _SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -100,6 +101,7 @@ _SCHEMA: dict[str, Any] = {
         "thin": _NUMBER,
         "lag": int,
         "detrend": str,
+        "direction": {},
     },
     "event": {"definition": str, "horizons": [_NUMBER], "segment": _NUMBER},
     "scoring": {
@@ -189,8 +191,14 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
             found.append(f"indicators.{key}: a non-empty subset of {sorted(allowed)}")
     if ind["detrend"] not in {"gaussian", "none"}:
         found.append("indicators.detrend: 'gaussian' or 'none'")
-    if not data["L"] or not data["seeds"]:
-        found.append("data: L and seeds must be non-empty")
+    if len(data["L"]) < 2:
+        found.append("data.L: at least two sizes; a finite-size fit needs them")
+    if not data["seeds"]:
+        found.append("data.seeds: at least one")
+    directions = ind["direction"]
+    for name in ind["names"]:
+        if directions.get(name) not in ("greater", "less"):
+            found.append(f"indicators.direction.{name}: 'greater' or 'less', the expected trend")
     if (data["ramps"]["kind"], data["nulls"]["kind"]) != ("ramp", "fixed"):
         found.append("data: ramps are kind 'ramp' and nulls kind 'fixed'")
     if data["tau_c"]["source"] != "pilot":
@@ -214,8 +222,17 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         found.append("sensitivity.headline: must be a cell of the grid")
     if len(doc["scoring"]["alarms"]["band"]) != 2:
         found.append("scoring.alarms.band: [from eps_L, to eps_L]")
-    if doc["scoring"]["surrogates"]["cells"] not in {"headline", "all"}:
+    tests = doc["scoring"]["surrogates"]
+    if tests["cells"] not in {"headline", "all"}:
         found.append("scoring.surrogates.cells: 'headline' or 'all'")
+    for key in ("primary", "secondary"):
+        if tests[key] not in SURROGATES:
+            found.append(f"scoring.surrogates.{key}: one of {sorted(SURROGATES)}")
+    if ind["detrend"] == "none" and "ar1" in (tests["primary"], tests["secondary"]):
+        found.append(
+            "scoring.surrogates: ar1 needs detrending; fitted to a trending series it draws "
+            "near-random walks with no trend"
+        )
     if strict:
         found += [
             f"{where}: placeholder {text!r}"

@@ -94,6 +94,10 @@ def test_v1_holds_the_research_pass_protocol() -> None:
         (lambda d: d["indicators"].update(names=["kurtosis"]), "indicators.names"),
         (lambda d: d["scoring"].update(bootstrap=True), "scoring.bootstrap: expected int"),
         (lambda d: d["data"]["tau_c"].update(source="fit"), "never fitted"),
+        (lambda d: d["data"].update(L=[16]), "data.L: at least two sizes"),
+        (lambda d: d["indicators"].update(detrend="none"), "ar1 needs detrending"),
+        (lambda d: d["indicators"]["direction"].pop("skewness"), "indicators.direction.skewness"),
+        (lambda d: d["scoring"]["surrogates"].update(primary="fourier"), "surrogates.primary"),
     ],
 )
 def test_malformed_files_are_named(edit: Any, complaint: str) -> None:

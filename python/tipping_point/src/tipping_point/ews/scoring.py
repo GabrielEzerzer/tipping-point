@@ -51,11 +51,19 @@ def surrogate_pvalue(observed: npt.ArrayLike, surrogates: npt.ArrayLike) -> np.n
 
 
 def surrogate_test(
-    x: np.ndarray, pipeline: Pipeline, surrogate: Surrogate, n: int, rng: np.random.Generator
+    x: np.ndarray,
+    pipeline: Pipeline,
+    surrogate: Surrogate,
+    n: int,
+    rng: np.random.Generator,
+    direction: str = "greater",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Scores of the rows of x (rows, time) and their surrogate p-values. Surrogates are drawn
-    from each row's residuals and scored in the same batch as the row itself, so a surrogate
-    identical to its row scores identically."""
+    """Scores of the rows of x (rows, time) and their one-sided surrogate p-values: for a trend
+    expected to rise ("greater") a surrogate counts when it scores at least as high, for one
+    expected to fall ("less") when it scores at least as low. Surrogates are drawn from each
+    row's residuals and scored in the same batch as the row itself, so a surrogate identical to
+    its row scores identically."""
+    sign = _sign(direction)
     x = np.atleast_2d(np.asarray(x, dtype=np.float64))
     residuals = pipeline.residuals(x)
     observed, p = np.empty(len(x)), np.empty(len(x))
@@ -65,8 +73,19 @@ def surrogate_test(
         batch = np.concatenate([own[:, None, :], surrogate(own, n, rng)], axis=1)
         scores = pipeline.trend(batch)
         observed[start : start + rows] = scores[:, 0]
-        p[start : start + rows] = surrogate_pvalue(scores[:, 0], scores[:, 1:])
+        p[start : start + rows] = surrogate_pvalue(sign * scores[:, 0], sign * scores[:, 1:])
     return observed, p
+
+
+def _sign(direction: str) -> float:
+    if direction not in ("greater", "less"):
+        raise ValueError(f"direction must be 'greater' or 'less', got {direction!r}")
+    return 1.0 if direction == "greater" else -1.0
+
+
+def oriented(scores: np.ndarray, direction: str) -> np.ndarray:
+    """Scores turned so that the expected change is upward: negated for a falling indicator."""
+    return _sign(direction) * np.asarray(scores, dtype=np.float64)
 
 
 def _steps(scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -74,6 +74,7 @@ cadences = ["dense", "matched"]     # parity is claimed against dense, added inf
 thin = 0.1
 lag = 1
 detrend = "gaussian"
+direction = { variance = "greater", ac = "greater", skewness = "less" }  # hypotheses 2 and 3
 
 [event]
 definition = "The bath crosses the exact Tc = 2/ln(1 + sqrt 2), at step t_c in the run's manifest: the same for every replica and signal, and fixed before any data exist."

@@ -57,6 +57,7 @@ cadences = ["dense", "matched"]
 thin = 0.5
 lag = 1
 detrend = "gaussian"
+direction = {{ variance = "greater", ac = "greater" }}
 
 [event]
 definition = "The bath crosses Tc at the manifest's t_c."

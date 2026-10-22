@@ -20,7 +20,7 @@ direction = "greater"
 
 [data]
 domain = "ising"
-L = [16, 32, 64]
+L = [16, 32, 64]          # two sizes at least: the finite-size fits need them
 seeds = [1, 2, 3, 4, 5]
 replicas = 16            # at least this many replicas per run
 exclusions = []          # runs excluded before scoring: [{ run_id = "...", reason = "..." }]
@@ -51,7 +51,9 @@ observables = ["abs_m", "energy"]
 cadences = ["dense", "matched"]   # dense: every stats row, thinned; matched: the saved frames
 thin = 0.1               # dense cadence: one sample per this many tau_c
 lag = 1                  # autocorrelation lag, in samples
-detrend = "gaussian"     # gaussian | none
+detrend = "gaussian"     # gaussian | none (none rules out the ar1 surrogate)
+# the trend each indicator is expected to take: one-sided surrogate tests and alarms follow it
+direction = { variance = "greater", ac = "greater", skewness = "less" }
 
 [event]
 definition = "<what the transition is, and why it is known before any data exist>"

@@ -550,6 +550,7 @@ def _cells(
                             "window_taus": window_taus,
                             "bandwidth_taus": bandwidth_taus,
                             "headline": top,
+                            "direction": ind["direction"][name],
                         }
                         pos, neg = [pipe(g) for g in pos_rows], [pipe(g) for g in neg_rows]
                         samples = {
@@ -602,11 +603,13 @@ def _surrogate_rows(
 ) -> list[Row]:
     """The share of positive and of null series each surrogate test flags at alpha."""
     s, alpha = sc["surrogates"], float(sc["alpha"])
+    direction = cell["direction"]
     rows = []
     for kind in (s["primary"], s["secondary"]):
         make, n = surrogates.KINDS[kind], int(s["n"])
-        _, p_pos = scoring.surrogate_test(np.concatenate(pos_rows), pipe, make, n, rng)
-        _, p_neg = scoring.surrogate_test(np.concatenate(neg_rows), pipe, make, n, rng)
+        pos, neg = np.concatenate(pos_rows), np.concatenate(neg_rows)
+        _, p_pos = scoring.surrogate_test(pos, pipe, make, n, rng, direction)
+        _, p_neg = scoring.surrogate_test(neg, pipe, make, n, rng, direction)
         rows.append(
             cell
             | {
@@ -645,11 +648,12 @@ def _alarms(
     rows, eps_out = [], {}
     for name in dyn["indicators"]:
         pipe = Pipeline(name, window, length, bandwidth, int(doc["indicators"]["lag"]))
+        direction = doc["indicators"]["direction"][name]  # a falling indicator alarms on -s(t)
         seeds = sorted({run.seed for run, _ in prep.nulls})
         halves: list[list[np.ndarray]] = [[], []]  # alternate seeds set theta and test it
         for run, s in prep.nulls:
             scores = trailing_score(s.observable(observable), pipe, every)[1]
-            halves[seeds.index(run.seed) % 2].append(scores)
+            halves[seeds.index(run.seed) % 2].append(scoring.oriented(scores, direction))
         if not halves[1]:
             raise IsingDataError(f"L = {L}: alarms need null runs from two seeds, one per half")
         train, test = (_ragged(h) for h in halves)
@@ -658,6 +662,7 @@ def _alarms(
         groups, censored = [], []
         for run, s in prep.ramps:
             times, scores = trailing_score(s.observable(observable), pipe, every)
+            scores = scoring.oriented(scores, direction)
             eps = run.eps(s.temperature[times])
             inside = np.flatnonzero((eps <= band_top) & (eps >= band_bottom))
             if len(inside) == 0:
@@ -677,6 +682,7 @@ def _alarms(
                 "observable": observable,
                 "cadence": prep.cadence,
                 "L": L,
+                "direction": direction,
                 "theta": theta,
                 "far_set": scoring.false_alarm_rate(train, theta, duration[0]) * per,
                 "far_test": scoring.false_alarm_rate(test, theta, duration[1]) * per,

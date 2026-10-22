@@ -4,7 +4,7 @@ import itertools
 
 import numpy as np
 import pytest
-from tipping_point.ews import scoring
+from tipping_point.ews import scoring, surrogates
 from tipping_point.ews.trend import Pipeline
 
 
@@ -46,6 +46,23 @@ def test_a_surrogate_identical_to_its_row_never_rejects() -> None:
     observed, pvalues = scoring.surrogate_test(x, p, copies, 19, np.random.default_rng(2))
     assert np.array_equal(observed, p(x))
     assert np.all(pvalues == 1.0)
+
+
+def test_a_falling_indicator_is_tested_for_falling() -> None:
+    """Review round 1: the one-sided test only looked for rises, so v1's hypothesis that
+    skewness falls could never be detected (p = 1). x = g + a (g^2 - 1) has skewness ~6a; with
+    a falling to 0 the rolling skewness falls. Read as 'less' it beats its surrogates (p at or
+    near the floor of 1/20); read as 'greater', it never does."""
+    rng = np.random.default_rng(1)
+    g = rng.standard_normal((6, 1000))
+    x = g + np.linspace(0.5, 0.0, 1000) * (g * g - 1)
+    pipe = Pipeline("skewness", window=150, length=851)
+    make = surrogates.phase_randomised
+    observed, falling = scoring.surrogate_test(x, pipe, make, 19, rng, direction="less")
+    _, rising = scoring.surrogate_test(x, pipe, make, 19, rng, direction="greater")
+    assert np.all(observed < -0.5)
+    assert np.all(falling <= 0.1) and np.all(rising >= 0.9)
+    assert np.array_equal(scoring.oriented(np.array([0.3, -0.2]), "less"), [-0.3, 0.2])
 
 
 def test_alarms_count_rises_above_the_threshold() -> None:
