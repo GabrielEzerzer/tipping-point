@@ -8,10 +8,14 @@ mode (phi = 0.5 and 0.995), the case near Tc. Geometry: window 50, segment 256, 
 samples. This is `python -m tipping_point.ews calibrate` at 400 nulls instead of 2,000 and 19
 surrogates instead of 999.
 
-Breaks: surrogates identical to their row tie it every time, so nothing is flagged (0%);
-surrogates scored with half the window spread their scores less than the row they imitate, so
-the row beats all 19 too often (> 8%).
+What each check pins: the band, that the p-value is exact (N + 1 in the denominator, ties
+counted against the row). It cannot tell a surrogate that keeps the spectrum from one that does
+not: the score's null spread is set by the window, so even white-noise surrogates sit inside the
+band (5.5% and 5.2% measured). The identity break pins tie handling (0% flagged); the half-window
+break shows the band leaves its range when surrogates are scored through a different pipeline.
 """
+
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -23,9 +27,22 @@ WINDOW, LENGTH, BANDWIDTH = 50, 256, 50.0
 SPAN = WINDOW + LENGTH - 1
 
 
+@dataclass(frozen=True)
+class Mismatched(Pipeline):
+    """Scores each row as itself and its surrogates through `drawn`: the break, made to run
+    inside surrogate_test's own batching and p-values."""
+
+    drawn: Pipeline | None = None
+
+    def trend(self, residuals: np.ndarray) -> np.ndarray:
+        assert self.drawn is not None
+        own = super().trend(residuals[:, :1])
+        return np.concatenate([own, self.drawn.trend(residuals[:, 1:])], axis=1)
+
+
 def test_phase_surrogate_false_positives_sit_in_the_band() -> None:
-    """Catches p-values that are not exact: (N + 1) in the denominator, ties counted for the
-    observed score, or surrogates that lose the spectrum the score depends on."""
+    """Catches p-values that are not exact: (N + 1) dropped from the denominator, or ties
+    counted for the observed score."""
     rows = calibration(nulls=400, draws=19, seed=26, tests=("phase",))
     assert len(rows) == 4
     for row in rows:
@@ -48,17 +65,14 @@ def test_identity_surrogates_flag_nothing() -> None:
 
 
 def test_mismatched_surrogates_flag_too_many() -> None:
-    """Revert check: surrogates scored through a different pipeline (half the window) spread
-    their scores less than the row does, so the row beats all 19 too often and the band is
-    left. The calibration above must be able to fail."""
+    """Revert check: surrogates scored with half the window spread their scores less than the
+    row does, so the row beats all 19 too often and the band is left (13.5% measured)."""
     rng = np.random.default_rng(34)
     x = null_series("ar1", SPAN, 400, rng)
-    pipe = Pipeline("variance", WINDOW, LENGTH, BANDWIDTH)
     narrow = Pipeline("variance", WINDOW // 2, SPAN - WINDOW // 2 + 1, BANDWIDTH)
-    residuals = pipe.residuals(x)
-    observed = pipe.trend(residuals)
-    drawn = narrow.trend(surrogates.phase_randomised(residuals, 19, rng))
-    assert np.mean(scoring.surrogate_pvalue(observed, drawn) <= 0.05) > 0.08
+    pipe = Mismatched("variance", WINDOW, LENGTH, BANDWIDTH, drawn=narrow)
+    _, p = scoring.surrogate_test(x, pipe, surrogates.phase_randomised, 19, rng)
+    assert np.mean(p <= 0.05) > 0.08
 
 
 def test_calibrate_command_reports_every_cell(capsys: pytest.CaptureFixture[str]) -> None:
