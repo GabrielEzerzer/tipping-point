@@ -43,8 +43,19 @@ const APP_CLIENTS: usize = 9;
 const ARROW_CLIENTS: usize = 2;
 /// How long a client may stall before the engine cuts it, here.
 const STALL: Duration = Duration::from_secs(2);
-/// Latency the load must stay under (a bound with room for a loaded machine; the target is 50 ms).
-const LATENCY_BOUND: Duration = Duration::from_millis(250);
+/// The p99 capture-to-receive latency the load must stay under, for each kind of client. Measured
+/// with this test in the debug profile (the gate's) on the development laptop with other jobs on
+/// the CPU, fifteen runs on 2026-10-22: book p99 26.6 to 41.8 ms, trades 28.4 to 58.2 ms, Arrow
+/// 8.7 to 49.9 ms. The bound is about twice the worst of those, so a real regression fails and a
+/// busy machine does not. The research's 50 ms target was an estimate awaiting this measurement.
+/// Re-measure and tighten it when the profile or the machine changes; the report records both.
+const LATENCY_BOUND: Duration = Duration::from_millis(120);
+/// The build profile the measurement above was taken in, which the report records.
+const PROFILE: &str = if cfg!(debug_assertions) {
+    "debug"
+} else {
+    "release"
+};
 
 /// What one app client got: book messages and trades with when they arrived, and gaps.
 #[derive(Debug, Default)]
@@ -369,6 +380,7 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
     let book_messages: usize = app_reports.iter().map(|r| r.books.len()).sum();
     let report = json!({
         "seconds": elapsed.as_secs_f64(),
+        "profile": PROFILE,
         "target": {"depth_per_s": DEPTH_PER_S, "trades_per_s": TRADES_PER_S, "samples_per_s": 10 * CLOCK},
         "achieved": {
             "depth_per_s": depth as f64 / elapsed.as_secs_f64(),
@@ -394,7 +406,8 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
             "book": {"p50": millis(percentile(&mut book_latency, 50.0)), "p99": millis(percentile(&mut book_latency, 99.0)), "n": book_latency.len()},
             "trades": {"p50": millis(percentile(&mut trade_latency, 50.0)), "p99": millis(percentile(&mut trade_latency, 99.0)), "n": trade_latency.len()},
             "arrow": {"p50": millis(percentile(&mut arrow_latency, 50.0)), "p99": millis(percentile(&mut arrow_latency, 99.0)), "n": arrow_latency.len()},
-            "target_p99": 50.0,
+            "bound_p99": millis(LATENCY_BOUND),
+            "research_target_p99": 50.0,
         },
         "live_path_ms_per_input": {"p50": millis(percentile(&mut per_input, 50.0)), "p99": millis(percentile(&mut per_input, 99.0)), "max": millis(per_input.iter().copied().max().unwrap_or_default())},
         "writer_queue": {"max": max_queued, "capacity": LogConfig::default().queue},
