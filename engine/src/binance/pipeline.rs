@@ -273,6 +273,7 @@ impl Pipeline {
             kind,
             applied: &applied,
             feed: &self.feed,
+            stats: &self.stats,
         });
         applied
     }

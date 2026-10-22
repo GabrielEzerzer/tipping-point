@@ -67,6 +67,19 @@ fn depth() -> Stream {
 }
 
 impl Record {
+    /// When the loop received it, in milliseconds since the epoch; `None` for the scales.
+    #[must_use]
+    pub fn t_ms(&self) -> Option<u64> {
+        match self {
+            Self::Scales { .. } => None,
+            Self::Frame { t_ms, .. }
+            | Self::Snapshot { t_ms, .. }
+            | Self::SnapshotFailed { t_ms, .. }
+            | Self::Connected { t_ms, .. }
+            | Self::Disconnected { t_ms, .. } => Some(*t_ms),
+        }
+    }
+
     /// The live-loop message this line stands for; `None` for the scales.
     #[must_use]
     pub fn into_message(self) -> Option<Message> {

@@ -134,12 +134,14 @@ pub enum LiveEvent<'a> {
         feed: &'a Feed,
         stats: &'a LiveStats,
     },
-    /// One input was applied: what it did, and the feed right after. Fires for every frame,
-    /// so loggers usually skip it; transcripts and replay checks are built from it.
+    /// One input was applied: what it did, and the feed and the loop's counters right after.
+    /// Fires for every frame, so loggers usually skip it; transcripts, replay checks and the
+    /// API's status are built from it.
     Applied {
         kind: Kind,
         applied: &'a Applied,
         feed: &'a Feed,
+        stats: &'a LiveStats,
     },
 }
 
