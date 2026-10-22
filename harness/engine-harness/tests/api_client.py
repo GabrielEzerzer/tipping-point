@@ -125,11 +125,12 @@ def cut(args: argparse.Namespace) -> None:
     }
     complete = []
     for name, opener in openers.items():
-        try:
-            with opener() as stream:
+        # Opening is outside the try: a 404 or a refused connection fails the check.
+        with opener() as stream:
+            try:
                 table = stream.read_all()
-        except (OSError, pa.ArrowException, http.client.HTTPException):
-            continue
+            except (OSError, pa.ArrowException, http.client.HTTPException):
+                continue
         complete.append(f"{name} read {table.num_rows} rows as complete")
     check(not complete, "; ".join(complete))
 
