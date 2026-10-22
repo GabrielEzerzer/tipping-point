@@ -15,6 +15,7 @@ pub mod run;
 pub mod segment;
 pub mod writer;
 
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +33,22 @@ pub fn now_ns() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_nanos()).unwrap_or(i64::MAX)
         })
+}
+
+/// Opens `path` (creating it if need be) and takes an exclusive lock on it without waiting:
+/// `None` while another handle, in this process or another, holds it. The lock lasts as long as
+/// the returned file stays open and is released when its process dies.
+fn try_lock(path: &Path) -> io::Result<Option<File>> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
 }
 
 /// Binance's millisecond times as nanoseconds, the unit of every `_ns` column; 0 when out of
@@ -114,6 +131,8 @@ pub enum StoreError {
     SeqGap { previous: u64, got: u64 },
     #[error("{}: segment has no end marker and is not the newest; recover the run first", .0.display())]
     Unclosed(PathBuf),
+    #[error("{}: another rotate is running on this run", .0.display())]
+    InUse(PathBuf),
     #[error("{0} does not fit an Int64 column")]
     TooBig(u64),
     #[error("kind code {0} in Parquet is not a frame kind")]

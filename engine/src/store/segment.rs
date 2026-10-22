@@ -8,7 +8,7 @@
 //! them is good. If a valid frame does follow, the damage is in the middle of the file: nothing
 //! is cut, and the reader reports which frame and byte it is.
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -349,17 +349,9 @@ pub fn recover(path: &Path) -> Result<Option<Recovery>, LogError> {
 /// Returns [`LogError::InUse`] or the I/O error.
 pub fn lock(log_dir: &Path) -> Result<File, LogError> {
     let path = log_dir.join(LOCK_FILE);
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(LogError::io(&path))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => Err(LogError::InUse(log_dir.to_owned())),
-        Err(TryLockError::Error(error)) => Err(LogError::io(&path)(error)),
-    }
+    super::try_lock(&path)
+        .map_err(LogError::io(&path))?
+        .ok_or_else(|| LogError::InUse(log_dir.to_owned()))
 }
 
 /// Recovers a crashed run: only its newest segment can be missing its marker. Refuses while a

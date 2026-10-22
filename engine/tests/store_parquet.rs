@@ -1,6 +1,7 @@
 //! Rotation into Parquet, and `DuckDB` over it: the Parquet holds exactly what the log holds, a
-//! rotate can be re-run and survives its own crash, and window queries and replays see the rows
-//! they should. Two independent implementations meet here: arrow-rs writes, `DuckDB` reads.
+//! rotate can be re-run, survives its own crash and runs one at a time, and window queries and
+//! replays see the rows they should. Two independent implementations meet here: arrow-rs
+//! writes, `DuckDB` reads.
 
 mod runs;
 
@@ -21,7 +22,7 @@ use engine::store::StoreError;
 use engine::store::frame::{Frame, Kind, Meta};
 use engine::store::query::{connect, for_each_frame, table_files, window};
 use engine::store::replay::{Replay, replay_log, replay_parquet};
-use engine::store::rotate::rotate;
+use engine::store::rotate::{LOCK_FILE, rotate};
 use engine::store::segment::{self, LOG_DIR, recover_run};
 use engine::store::writer::LogConfig;
 use runs::{fresh_dir, log_frames, synthetic, write_run};
@@ -275,6 +276,70 @@ fn rotate_can_be_rerun_and_cleans_up_after_its_own_crash() -> Outcome {
     assert_eq!(repaired.written, vec![missing]);
     assert!(!stray.exists());
     assert_eq!(count(&conn, &run_dir, "depth_updates")?, rows);
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// Every file under `dir` by its path relative to `dir`, with its bytes. Empty files (the lock
+/// files) are listed but not read: Windows refuses reads of a file another handle has locked.
+fn files(dir: &Path) -> std::io::Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut found = BTreeMap::new();
+    let mut folders = vec![dir.to_owned()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            let bytes = if fs::metadata(&path)?.len() == 0 {
+                Vec::new()
+            } else {
+                fs::read(&path)?
+            };
+            let relative = path.strip_prefix(dir).expect("found under dir").to_owned();
+            found.insert(relative, bytes);
+        }
+    }
+    Ok(found)
+}
+
+/// Two rotates of one run would write the same temp files and rename an interleaved one into
+/// place for good. While one rotate holds the run, a second is refused at once and leaves every
+/// file exactly as it was; once the first lets go, a rotate runs.
+#[test]
+fn a_second_rotate_of_a_run_is_refused_at_once_and_changes_nothing() -> Outcome {
+    let (dir, run_dir, segments) = session("rotate-lock");
+    let held = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(run_dir.join(LOCK_FILE))?;
+    held.try_lock()?;
+    let before = files(&run_dir)?;
+
+    // On a thread with a deadline, so a rotate that waited for the lock fails here, not hangs.
+    let (done, outcome) = std::sync::mpsc::channel();
+    let second = run_dir.clone();
+    std::thread::spawn(move || {
+        let refused = rotate(&second).map(|_| ()).map_err(|error| {
+            let in_use = matches!(error, StoreError::InUse(_));
+            (in_use, error.to_string())
+        });
+        let _ = done.send(refused);
+    });
+    let refused = outcome
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .map_err(|_| "the second rotate waited for the lock instead of failing")?;
+    assert!(matches!(&refused, Err((true, _))), "{refused:?}");
+    assert_eq!(
+        files(&run_dir)?,
+        before,
+        "the refused rotate touched nothing"
+    );
+
+    drop(held);
+    assert_eq!(rotate(&run_dir)?.segments, segments);
     fs::remove_dir_all(&dir)?;
     Ok(())
 }

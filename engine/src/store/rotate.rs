@@ -2,8 +2,10 @@
 //! after the segment's first seq, so each file traces back to exactly one segment.
 //!
 //! It is safe to re-run. Outputs that exist are skipped, temp files an interrupted run left are
-//! deleted first, and a file only appears by renaming a synced temp file to a new name. Only
-//! this step writes Parquet: a live writer that crashed would leave a file without its footer.
+//! deleted first, and a file only appears by renaming a synced temp file to a new name. One
+//! rotate at a time: a second rotate of a run while one is running is refused, because both
+//! would write the same temp files. Only this step writes Parquet: a live writer that crashed
+//! would leave a file without its footer.
 //!
 //! | table | one row per |
 //! |---|---|
@@ -55,6 +57,9 @@ pub const TABLES: [&str; 5] = [
     "book_samples",
 ];
 
+/// The file in the run folder a rotate holds a lock on for as long as it runs.
+pub const LOCK_FILE: &str = "rotate.lock";
+
 /// Rows per Parquet row group: several per hourly file, and one group is what the writer holds
 /// in memory.
 const ROW_GROUP: usize = 256 * 1024;
@@ -91,9 +96,14 @@ pub struct Rotation {
 /// the files that are missing.
 ///
 /// # Errors
-/// Returns an error for a missing manifest, a damaged or unclosed segment that is not the
+/// Returns [`StoreError::InUse`] at once, touching nothing, while another rotate holds the run;
+/// otherwise an error for a missing manifest, a damaged or unclosed segment that is not the
 /// newest, a seq that skips, or a failed write.
 pub fn rotate(run_dir: &Path) -> Result<Rotation, StoreError> {
+    let lock_path = run_dir.join(LOCK_FILE);
+    let _lock = super::try_lock(&lock_path)
+        .map_err(StoreError::io(&lock_path))?
+        .ok_or_else(|| StoreError::InUse(run_dir.to_owned()))?;
     let manifest_path = run_dir.join(MANIFEST);
     let manifest: Manifest =
         run::read_json(&manifest_path).map_err(StoreError::io(&manifest_path))?;
