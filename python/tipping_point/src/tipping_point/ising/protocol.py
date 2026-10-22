@@ -47,6 +47,9 @@ class Burst:
 BURST = Burst()
 BAND = (10.0, -5.0)  # the EWS analysis band in epsilon_L = L (T - Tc) / Tc, hot edge first (#26)
 BAND_PER_EPSILON_L = 28.0  # ramp bursts per unit epsilon_L inside it: what dT = 0.005 gives L = 16
+X_SLOW = 0.02  # the slow ramp's Kibble-Zurek point (rate_for), whose cadence a null run copies
+NULL_EPSILON_L = (2.0, 4.0, 6.0)  # fixed-T null runs above Tc, in epsilon_L (#26 call 5)
+NULL_TAU_C = 400  # a null run's measured length in tau_c, longer than a scored ramp segment
 
 
 class Schedule(Protocol):
@@ -269,7 +272,7 @@ class Ramp:
 
 
 class Fixed:
-    """Constant temperatures, one per block of replicas: pilot and validation runs."""
+    """Constant temperatures, one per block of replicas: pilot, validation and null runs."""
 
     kind = "fixed"
 
@@ -281,6 +284,8 @@ class Fixed:
         stats_stride: int = 1,
         saves: int = 0,
         burst: Burst = BURST,
+        epsilon_L: float | None = None,  # a null run's scaled temperature, kept for the record
+        tau_c: float | None = None,  # ... and the tau_c its length came from
     ) -> None:
         self.params = {
             "temperatures": list(temperatures),
@@ -289,7 +294,10 @@ class Fixed:
             "stats_stride": stats_stride,
             "saves": saves,
             "burst": asdict(burst),
+            "epsilon_L": epsilon_L,
+            "tau_c": tau_c,
         }
+        self.epsilon_L = epsilon_L
         self.temps = tuple(temperatures)
         self.blocks = len(self.temps)
         self.therm, self.stats_stride = therm, stats_stride
@@ -310,6 +318,24 @@ class Fixed:
 
     def to_json(self) -> dict[str, Any]:
         return {"kind": self.kind, "params": self.params, "total": self.total}
+
+
+def null_run(L: int, epsilon_L: float, tau_c: float, burst: Burst = BURST) -> Fixed:
+    """A fixed-T null run for the EWS scorer (#26): T = Tc (1 + epsilon_L / L) from a hot start,
+    thermalised for 20 tau_c, then measured for NULL_TAU_C tau_c with a stats row every tau_c/50
+    sweeps and bursts at the slow ramp's in-band cadence (BAND_PER_EPSILON_L per tau_c / X_SLOW
+    sweeps), so null segments are sampled like the ramp segments they are scored against."""
+    therm, _ = dwell(tau_c)
+    return Fixed(
+        (TC * (1 + epsilon_L / L),),
+        therm=therm,
+        sweeps=math.ceil(NULL_TAU_C * tau_c),
+        stats_stride=max(1, int(tau_c // 50)),
+        saves=round(NULL_TAU_C * BAND_PER_EPSILON_L * X_SLOW),
+        burst=burst,
+        epsilon_L=epsilon_L,
+        tau_c=tau_c,
+    )
 
 
 def from_json(record: dict[str, Any]) -> Schedule:

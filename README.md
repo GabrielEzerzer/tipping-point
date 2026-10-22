@@ -73,6 +73,7 @@ uv run python -m tipping_point.ising pilot --L 16 --sweeps 50000      # tau_int 
 uv run python -m tipping_point.ising tauc <pilot run> ...             # tau_c(L) at Tc -> pilot.json
 uv run python -m tipping_point.ising staircase --L 16 --tau <pilot run>/tau.json
 uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <record>/pilot.json  # x: 0.02 slow, 2 fast
+uv run python -m tipping_point.ising null --L 16 --epsilon-L 4 --pilot <record>/pilot.json --seed 1   # epsilon_L 2, 4, 6; seeds 1-5
 uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
 ```
 
@@ -138,6 +139,13 @@ along domain walls (#50).
   Bursts are saved every 0.005 of cooling, except inside the EWS analysis band epsilon_L in
   [10, -5], where they come 28 per unit epsilon_L at every L (spaced evenly in T, L = 128
   got 3.5 there); the manifest's `schedule.saves` records the gaps and the burst counts.
+
+- **Null runs**, the EWS scorer's negatives: `null --epsilon-L {2,4,6}` for each L, at least 5
+  seeds each, holds T = Tc (1 + epsilon_L / L) for 20 tau_c of thermalisation and 400 tau_c of
+  measurement, with a stats row every tau_c / 50 sweeps and bursts at the slow ramp's in-band
+  cadence. The manifest is a `fixed` schedule whose params add `epsilon_L` and `tau_c`, and
+  complete.json judges the run thermalised like a staircase plateau. One run is 21,886 sweeps
+  at L = 16, 97,236 at 32, 367,673 at 64 and 1,548,063 at 128.
 
 ## Running the gate
 

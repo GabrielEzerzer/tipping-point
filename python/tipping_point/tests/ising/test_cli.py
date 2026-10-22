@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from tipping_point.ising import exact, io, pilot, protocol
+from tipping_point.ising import exact, gates, io, pilot, protocol
 from tipping_point.ising.__main__ import _taus, main
 
 PILOT = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #50's pilot record
@@ -78,6 +78,28 @@ def test_ramp_x_needs_a_pilot_record(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="--pilot"):
         main(argv)
     assert not (tmp_path / "ising").exists()
+
+
+def test_null_run_is_a_complete_thermalised_fixed_run_naming_epsilon_l_and_tau_c(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#26 call 5's nulls end to end, shortened to 20 tau_c: a fixed run at Tc (1 + 6/16) whose
+    manifest names epsilon_L and the record's tau_c, judged thermalised in complete.json like a
+    staircase plateau. An epsilon_L outside the presets is refused."""
+    monkeypatch.setattr(protocol, "NULL_TAU_C", 20)
+    argv = ["null", "--L", "16", "--epsilon-L", "6", "--pilot", str(PILOT), "--seed", "3"]
+    assert main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"]) == 0
+    run_dir = _only_run(tmp_path)
+    assert run_dir.name.endswith("-L16-null-e6-s3")
+    schedule = io.read_json(run_dir / "manifest.json")["params"]["schedule"]
+    params, tau_c = schedule["params"], pilot.tau_c(pilot.read(PILOT), 16)
+    assert schedule["kind"] == "fixed" and (params["epsilon_L"], params["tau_c"]) == (6.0, tau_c)
+    assert params["temperatures"] == [exact.TC * (1 + 6 / 16)]
+    (check,) = io.read_json(run_dir / "complete.json")["checks"]["thermalised"]
+    assert check["passed"], check
+    assert all(c.passed for c in gates.gate_b(run_dir))  # its bursts sample Boltzmann, as any run's
+    with pytest.raises(SystemExit):
+        main([*argv[:4], "3", *argv[5:], "--data-dir", str(tmp_path / "x"), "--device", "cpu"])
 
 
 def test_staircase_cli_reads_taus_from_a_pilot(

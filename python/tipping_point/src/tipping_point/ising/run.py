@@ -165,8 +165,10 @@ def _loop(
 
 
 def _final_checks(run_dir: Path, schedule: protocol.Schedule) -> dict[str, Any]:
-    """Verdicts recorded in complete.json: every staircase plateau must look thermalised."""
-    if schedule.kind != "staircase":
+    """Verdicts recorded in complete.json: every staircase plateau and every null run (a fixed
+    run with an epsilon_L) must look thermalised, since both are read as equilibrium."""
+    null = isinstance(schedule, protocol.Fixed) and schedule.epsilon_L is not None
+    if schedule.kind != "staircase" and not null:
         return {}
     checks = gates.thermalised(run_dir)
     drifting = [c.temperature for c in checks if not c.passed]

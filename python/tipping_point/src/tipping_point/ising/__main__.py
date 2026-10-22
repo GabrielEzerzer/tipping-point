@@ -3,6 +3,7 @@
   staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json
   ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x of a pilot record's tau_c
              (or an explicit rate)
+  null       fixed-T null run at epsilon_L = 2, 4 or 6 above Tc, 400 tau_c of the pilot record
   pilot      measure tau_int of |m| and e at given temperatures; writes tau.json
   tauc       tau_c(L) at Tc from pilot runs (one per L) and its fit A L^z; writes pilot.json
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure
@@ -67,6 +68,17 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--pre", type=int, default=1000, help="equilibration sweeps at 3.5")
     p.add_argument("--hold", type=int, default=1000, help="sweeps held at 1.5")
     p.set_defaults(command=_ramp)
+
+    p = sub.add_parser("null", parents=[sized, saving], help="fixed-T null run above Tc")
+    p.add_argument(
+        "--epsilon-L",
+        type=float,
+        required=True,
+        choices=protocol.NULL_EPSILON_L,
+        help="scaled temperature L (T - Tc) / Tc",
+    )
+    p.add_argument("--pilot", type=Path, required=True, help="pilot.json: tau_c sets the length")
+    p.set_defaults(command=_null)
 
     p = sub.add_parser("pilot", parents=[sized], help="measure tau_int")
     p.add_argument(
@@ -144,6 +156,15 @@ def _ramp(args: argparse.Namespace) -> int:
     )
     speed = f"r{rate}" if args.x is None else f"x{args.x:g}"
     tag = f"L{args.L}-ramp-{speed}-s{args.seed}"
+    print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))
+    return 0
+
+
+def _null(args: argparse.Namespace) -> int:
+    tau_c = pilot.tau_c(pilot.read(args.pilot), args.L)
+    burst = protocol.Burst(stride=args.burst_stride)
+    schedule = protocol.null_run(args.L, args.epsilon_L, tau_c, burst)
+    tag = f"L{args.L}-null-e{args.epsilon_L:g}-s{args.seed}"
     print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))
     return 0
 
