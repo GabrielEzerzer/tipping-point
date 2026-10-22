@@ -70,6 +70,8 @@ def test_alarm_convergence_on_scaling_alarms() -> None:
         (1.70, (1.66, 1.75), fss.PASS),
         (1.60, (1.55, 1.65), fss.FAIL),  # precise, and off by more than the tolerance
         (1.75, (1.40, 2.10), fss.INCONCLUSIVE),  # right on, but too wide to have failed
+        (2.30, (2.10, 2.50), fss.FAIL),  # wide, yet wholly outside 1.65-1.85
+        (1.20, (1.00, 1.40), fss.FAIL),
         (np.nan, (1.0, 2.0), fss.INCONCLUSIVE),
     ],
 )

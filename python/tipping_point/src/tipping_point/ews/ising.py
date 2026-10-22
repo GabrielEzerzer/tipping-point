@@ -54,6 +54,7 @@ _CONFIGS = (
     "energy",
 )
 Row = dict[str, Any]
+Alarms = dict[tuple[str, str], dict[int, tuple[list[np.ndarray], float]]]  # per-L alarm eps_L
 
 
 class IsingDataError(RuntimeError):
@@ -495,7 +496,7 @@ def evaluate(
     pilot = read_pilot(data_dir, data["tau_c"]["pilot_run"], pinned if len(pinned) == 64 else None)
     chosen = select(*find_runs(data_dir), data)
     tables: dict[str, list[Row]] = {"auc": [], "surrogates": [], "alarms": []}
-    alarm_eps: dict[tuple[str, str], dict[int, list[np.ndarray]]] = {}
+    alarm_eps: Alarms = {}
     for L, inputs in chosen.items():
         for cadence in doc["indicators"]["cadences"]:
             prep = _cells(doc, L, inputs, cadence, pilot.tau(L), tables, alarm_eps, rng)
@@ -515,7 +516,7 @@ def _cells(
     cadence: str,
     tau_c: float,
     tables: dict[str, list[Row]],
-    alarm_eps: dict[tuple[str, str], dict[int, list[np.ndarray]]],
+    alarm_eps: Alarms,
     rng: np.random.Generator,
 ) -> Prepared:
     """Every sensitivity cell of one L and cadence: AUC rows, plus surrogate and alarm rows at the
@@ -565,8 +566,8 @@ def _cells(
             if top:
                 rows, eps = _alarms(doc, prep, L, tau_c, window, bandwidth)
                 tables["alarms"] += rows
-                for key, groups in eps.items():
-                    alarm_eps.setdefault(key, {})[L] = groups
+                for key, found in eps.items():
+                    alarm_eps.setdefault(key, {})[L] = found
     return prep
 
 
@@ -628,11 +629,12 @@ def _alarms(
     tau_c: float,
     window: int,
     bandwidth: float | None,
-) -> tuple[list[Row], dict[tuple[str, str], list[np.ndarray]]]:
+) -> tuple[list[Row], dict[tuple[str, str], tuple[list[np.ndarray], float]]]:
     """theta from the null blocks of half the seeds at the target false-alarm rate per tau_c,
-    the rate on the other half, and the eps_L of each ramp replica's first alarm in the band
-    (NaN: a miss).
-    s(t) runs every `every` tau_c over each whole series, each score seeing only its past."""
+    the rate on the other half, and the eps_L at which each ramp replica's s(t) first rises above
+    theta inside the band (NaN: a miss, or censored: above theta already as the band opens, so
+    its alarm came before the band and is not measured here). s(t) runs every `every` tau_c over
+    each whole series, each score seeing only its past."""
     a, dyn = doc["scoring"]["alarms"], doc["fss"]["dynamic"]
     observable, per = dyn["observable"], float(a["report_per"])
     every = max(1, round(float(a["every"]) * tau_c / prep.sweeps))
@@ -653,15 +655,21 @@ def _alarms(
         train, test = (_ragged(h) for h in halves)
         duration = tuple(sum(b.size for b in h) * taus_per_score for h in halves)
         theta = scoring.threshold_at_far(train, float(a["far"]), duration[0])
-        groups = []
+        groups, censored = [], []
         for run, s in prep.ramps:
             times, scores = trailing_score(s.observable(observable), pipe, every)
             eps = run.eps(s.temperature[times])
-            inside = (eps <= band_top) & (eps >= band_bottom)
-            groups.append(scoring.first_alarm(eps[inside], scores[:, inside], theta))
-        eps_out[(name, prep.cadence)] = groups
-        alarm = np.concatenate(groups)
+            inside = np.flatnonzero((eps <= band_top) & (eps >= band_bottom))
+            if len(inside) == 0:
+                raise IsingDataError(f"{run.run_id}: no s(t) inside the alarm band {a['band']}")
+            entry = scores[:, max(0, inside[0] - 1)]  # the score as the band opens
+            alarm, late = scoring.first_alarm(eps[inside], scores[:, inside], theta, entry)
+            groups.append(alarm)
+            censored.append(late)
+        alarm, late = np.concatenate(groups), np.concatenate(censored)
+        eps_out[(name, prep.cadence)] = (groups, float(np.mean(late)))
         hit = alarm[np.isfinite(alarm)]
+        measured = ~late
         q1, median, q3 = np.quantile(hit, [0.25, 0.5, 0.75]) if len(hit) else (np.nan,) * 3
         rows.append(
             {
@@ -676,7 +684,10 @@ def _alarms(
                 "alarm_eps_median": float(median),
                 "alarm_eps_q1": float(q1),
                 "alarm_eps_q3": float(q3),
-                "miss_rate": float(np.mean(~np.isfinite(alarm))),
+                "censored": float(np.mean(late)),
+                "miss_rate": float(np.mean(~np.isfinite(alarm[measured])))
+                if measured.any()
+                else float("nan"),
                 "n": len(alarm),
             }
         )
@@ -704,22 +715,23 @@ def _fss_row(quantity: str, cadence: str, role: str, fit: fss.Exponent, judged: 
     }
 
 
-def _dynamic(
-    doc: dict[str, Any],
-    alarm_eps: dict[tuple[str, str], dict[int, list[np.ndarray]]],
-    rng: np.random.Generator,
-) -> list[Row]:
-    """1/nu from the median alarm eps_L over L, per indicator and cadence."""
+def _dynamic(doc: dict[str, Any], alarm_eps: Alarms, rng: np.random.Generator) -> list[Row]:
+    """1/nu from the median alarm eps_L over L, per indicator and cadence. Censored and missed
+    replicas carry no alarm eps_L; where more than half of an L's replicas were censored, the
+    alarm position was not measured there and the verdict is inconclusive."""
     dyn, sc = doc["fss"]["dynamic"], doc["scoring"]
     expected, tolerance = float(dyn["expected_inverse_nu"]), float(dyn["tolerance"])
     rows = []
-    for (name, cadence), samples in alarm_eps.items():
+    for (name, cadence), per_size in alarm_eps.items():
+        samples = {L: groups for L, (groups, _) in per_size.items()}
         inv_nu, ci = fss.alarm_convergence(
             samples, int(sc["bootstrap"]), rng, float(sc["ci_level"])
         )
         verdict = fss.combine(
             fss.match(inv_nu, ci, expected, tolerance), fss.excludes(ci, 0.0, tolerance)
         )
+        if max(late for _, late in per_size.values()) > 0.5:
+            verdict = fss.INCONCLUSIVE  # unmeasured: neither a pass nor a fail
         fit = fss.Exponent(inv_nu, ci, float("nan"), {})
         judged = {"expected": expected, "tolerance": tolerance, "verdict": verdict}
         rows.append(_fss_row(f"inverse_nu_{name}", cadence, "dynamic", fit, judged))

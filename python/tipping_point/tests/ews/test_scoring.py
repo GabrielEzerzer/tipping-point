@@ -69,12 +69,21 @@ def test_threshold_at_far_is_the_lowest_safe_threshold() -> None:
     assert len(below) and rate[below.max()] > far
 
 
-def test_first_alarm_and_lead_times() -> None:
+def test_first_alarm_is_a_rise_and_late_starters_are_censored() -> None:
+    """An alarm is s(t) rising above theta inside the stretch. A row already above theta when
+    the stretch opens is censored, not an alarm at its first time: counting it as one put every
+    such replica at the band's edge, and a median there scales like FSS whatever the physics."""
     times = np.array([10.0, 20.0, 30.0, 40.0])
-    s = np.array([[0.0, 0.6, 0.2, 0.9], [0.0, 0.1, 0.2, 0.3]])
-    alarm = scoring.first_alarm(times, s, 0.5)
-    assert alarm[0] == 20.0 and np.isnan(alarm[1])  # the second row is a miss
-    lead = scoring.lead_times(35.0, alarm)
+    s = np.array([[0.0, 0.6, 0.2, 0.9], [0.0, 0.1, 0.2, 0.3], [0.9, 0.9, 0.9, 0.9]])
+    alarm, censored = scoring.first_alarm(times, s, 0.5, previous=np.array([0.1, 0.1, 0.9]))
+    assert alarm[0] == 20.0 and np.isnan(alarm[1]) and np.isnan(alarm[2])
+    assert censored.tolist() == [False, False, True]  # row 2: censored; row 1: a miss
+    alarm, censored = scoring.first_alarm(times, s[2:], 0.5, previous=np.array([0.2]))
+    assert alarm[0] == 10.0 and not censored[0]  # it rose as the stretch opened: an alarm
+    flat = np.full((5, 30), 0.9)
+    alarm, censored = scoring.first_alarm(np.arange(30.0), flat, 0.5, previous=flat[:, 0])
+    assert np.isnan(alarm).all() and censored.all()
+    lead = scoring.lead_times(35.0, np.array([20.0, np.nan]))
     assert lead[0] == 15.0 and np.isnan(lead[1])
 
 

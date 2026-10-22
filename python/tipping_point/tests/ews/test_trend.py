@@ -12,11 +12,12 @@ def _scipy(rows: np.ndarray) -> np.ndarray:
     return np.array([kendalltau(np.arange(rows.shape[1]), r)[0] for r in rows])
 
 
-@pytest.mark.parametrize("n", [2, 3, 7, 64, 65, 513, 1000])
+@pytest.mark.parametrize("n", [2, 3, 7, 64, 65, 513, 1000, 16385])
 def test_kendall_tau_matches_scipy(n: int) -> None:
     """Catches a miscounted merge level, padding that pairs with real values, or a length that
-    is not a power of two going wrong (65, 513 pad almost 2x; 64 pads nothing)."""
-    rows = np.cumsum(np.random.default_rng(n).standard_normal((40, n)), axis=1)
+    is not a power of two going wrong (65, 513 pad almost 2x; 64 pads nothing); 16385 pads to
+    2^15, past what 16-bit ranks hold."""
+    rows = np.cumsum(np.random.default_rng(n).standard_normal((40 if n < 10_000 else 2, n)), axis=1)
     assert np.allclose(trend.kendall_tau(rows), _scipy(rows), rtol=0, atol=1e-14)
 
 

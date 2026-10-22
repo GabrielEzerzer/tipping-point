@@ -8,8 +8,9 @@ fit_exponent        kappa of I(L) ~ L^kappa with a CI from bootstrapping seeds, 
 inverse_nu          alarms that obey FSS sit at a fixed eps_L, so T_alarm - Tc ~ L^(-1/nu) with
                     1/nu = 1 - d log eps_alarm / d log L; an indicator merely monotone in T
                     alarms at a fixed T instead, eps_alarm ~ L and 1/nu = 0 (#19's risk)
-match               pass when the estimate is within tolerance of the expected value;
-                    inconclusive when the CI is wider than the tolerance band, too weak to fail
+match               fail when the CI lies wholly outside expected +- tolerance; otherwise
+                    inconclusive when the CI is wider than the tolerance band (too weak to
+                    fail), else pass when the estimate is within tolerance
 excludes            pass when the CI excludes a value; when it holds it, inconclusive if the CI is
                     wider than the tolerance band, else fail
 """
@@ -109,7 +110,11 @@ def _width(ci: tuple[float, float]) -> float:
 
 
 def match(estimate: float, ci: tuple[float, float], expected: float, tolerance: float) -> str:
-    if not np.isfinite([estimate, *ci]).all() or _width(ci) > tolerance:
+    if not np.isfinite([estimate, *ci]).all():
+        return INCONCLUSIVE
+    if ci[1] < expected - tolerance or ci[0] > expected + tolerance:
+        return FAIL  # the data exclude the whole tolerance band, however wide the CI
+    if _width(ci) > tolerance:
         return INCONCLUSIVE
     return PASS if abs(estimate - expected) <= tolerance else FAIL
 

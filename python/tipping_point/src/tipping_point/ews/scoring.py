@@ -8,7 +8,8 @@ alarms                  an alarm is s(t) rising above theta: s(t) > theta after 
 false_alarm_rate        alarms per unit of time on null series
 threshold_at_far        the lowest theta whose false-alarm rate, and every higher theta's, stays
                         within a target
-first_alarm, lead_times when each series first exceeds theta, and how long before the event
+first_alarm, lead_times when each series first rises above theta inside a stretch (a series
+                        already above it as the stretch opens is censored), and how early
 hierarchical_bootstrap  resample seeds, then replicas within each chosen seed
 """
 
@@ -107,12 +108,21 @@ def threshold_at_far(scores: np.ndarray, far: float, duration: float) -> float:
     return float(candidates[np.argmax(worst_above <= far * duration)])
 
 
-def first_alarm(times: np.ndarray, scores: np.ndarray, theta: float) -> np.ndarray:
-    """The first time each row of s(t) exceeds theta; NaN for a row that never does (a miss)."""
+def first_alarm(
+    times: np.ndarray, scores: np.ndarray, theta: float, previous: npt.ArrayLike
+) -> tuple[np.ndarray, np.ndarray]:
+    """The first rise of each row of s(t) above theta inside a stretch: s > theta after
+    s <= theta, `previous` being each row's score just before the stretch opens. A row already
+    above theta there is censored: its alarm came earlier, so here it is neither an alarm nor a
+    miss. Returns (alarm times, NaN for none; censored rows)."""
     scores = np.atleast_2d(np.asarray(scores, dtype=np.float64))
-    above = scores > theta
-    first = np.argmax(above, axis=1)
-    return np.where(above.any(axis=1), np.asarray(times, dtype=np.float64)[first], np.nan)
+    entry = np.asarray(previous, dtype=np.float64).reshape(len(scores))
+    censored = entry > theta
+    before = np.concatenate([entry[:, None], scores[:, :-1]], axis=1)
+    rise = (before <= theta) & (scores > theta)
+    found = rise.any(axis=1) & ~censored
+    first = np.argmax(rise, axis=1)
+    return np.where(found, np.asarray(times, dtype=np.float64)[first], np.nan), censored
 
 
 def lead_times(event: float | np.ndarray, alarm: np.ndarray) -> np.ndarray:

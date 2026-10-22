@@ -49,7 +49,7 @@ def _discordant(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     groups are then split stably by that bit, which gives the next level's groups."""
     b, m = rows.shape
     M = 1 << (m - 1).bit_length()
-    small = np.int16 if M <= 1 << 15 else np.int32
+    small = np.int16 if M < 1 << 15 else np.int32  # indices and group offsets reach M
     padded = rows
     if m < M:
         padded = np.full((b, M), np.inf)
