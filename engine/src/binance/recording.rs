@@ -4,7 +4,7 @@
 //! network. The engine's own recordings are binary logs ([`crate::store`]).
 
 use std::collections::BTreeMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -149,16 +149,6 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// Writes one record as a JSON line.
-///
-/// # Errors
-/// Returns the underlying write error.
-pub fn write_record(out: &mut impl Write, record: &Record) -> io::Result<()> {
-    let line = serde_json::to_string(record).map_err(io::Error::other)?;
-    out.write_all(line.as_bytes())?;
-    out.write_all(b"\n")
-}
-
 /// Reads every record of a JSON-lines script.
 ///
 /// # Errors
@@ -219,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn records_round_trip_through_json_lines() -> Result<(), RecordingError> {
+    fn records_round_trip_through_json_lines() -> Result<(), Box<dyn std::error::Error>> {
         let records = vec![
             scales(),
             Record::Frame {
@@ -258,7 +248,8 @@ mod tests {
         ];
         let mut bytes = Vec::new();
         for record in &records {
-            write_record(&mut bytes, record)?;
+            serde_json::to_writer(&mut bytes, record)?;
+            bytes.push(b'\n');
         }
         assert_eq!(
             String::from_utf8_lossy(&bytes).lines().count(),
