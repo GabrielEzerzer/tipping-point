@@ -149,6 +149,7 @@ def _score(args: argparse.Namespace) -> int:
             "sha256": pilot.sha256,
             "kernel_commit": pilot.kernel_commit,
             "tau_c": {str(L): tau for L, tau in sorted(pilot.tau_c.items())},
+            "tau_c_ci": {str(L): ci for L, ci in sorted(pilot.tau_c_ci.items())},
         },
         "dropped": evaluation.dropped,
     }

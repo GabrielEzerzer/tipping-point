@@ -25,8 +25,11 @@ seeds = [1, 2, 3, 4, 5]
 replicas = 16            # at least this many replicas per run
 exclusions = []          # runs excluded before scoring: [{ run_id = "...", reason = "..." }]
 
-[data.tau_c]             # tau_c(L) is read from a pilot record, never written here
-source = "pilot"
+# tau_c(L) is read from a pilot record, never written here, and only as measured: each L's
+# per_L entry. The record's fitted z, and any tau_c extrapolated to an unmeasured L, are never
+# pre-registered on; an L the record did not measure cannot be scored.
+[data.tau_c]
+source = "pilot"         # the only source: measured values from the record
 pilot_run = "TBD"        # <data dir>/ising/<pilot_run>/pilot.json
 pilot_sha256 = "TBD"     # sha256 of that file, pinned before the freeze
 

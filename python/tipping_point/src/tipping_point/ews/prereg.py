@@ -193,6 +193,8 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         found.append("data: L and seeds must be non-empty")
     if (data["ramps"]["kind"], data["nulls"]["kind"]) != ("ramp", "fixed"):
         found.append("data: ramps are kind 'ramp' and nulls kind 'fixed'")
+    if data["tau_c"]["source"] != "pilot":
+        found.append("data.tau_c.source: 'pilot', tau_c as measured per L (never fitted)")
     for i, row in enumerate(fss["static"]):
         if row["quantity"] not in QUANTITIES or row["role"] not in ROLES:
             found.append(

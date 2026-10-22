@@ -11,9 +11,11 @@ a fixed run holds one temperature, and a null block is matched on its eps_L.
 tau_c(L), the time unit, comes from the #50 pilot record <data dir>/ising/<pilot run>/pilot.json:
   {"kernel_commit": str,
    "per_L": {"16": {"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps",
-                    "seed"}, ...},
+                    "seed", optional "tau_c_ci": [lo, hi]}, ...},
    "fit": {"A", "z", "A_ci", "z_ci"}}
-Nothing here holds a tau_c of its own: without the record, scoring stops.
+Only the measured per_L values are read (other keys are ignored); the fit, and any tau_c it would
+extrapolate to an unmeasured L, never enter scoring. Nothing here holds a tau_c of its own:
+without the record, or for an L it did not measure, scoring stops.
 
 Cadences: `dense` is every stats row, thinned to one sample per `thin` tau_c; `matched` is every
 saved frame (bursts of consecutive sweeps), exactly what the JEPA sees. Windows, bandwidths and
@@ -67,6 +69,7 @@ class Pilot:
     sha256: str
     kernel_commit: str
     tau_c: dict[int, float]
+    tau_c_ci: dict[int, list[float]]  # the record's 95% interval, where it gives one
 
     def tau(self, L: int) -> float:
         if L not in self.tau_c:
@@ -89,6 +92,11 @@ def read_pilot(data_dir: Path, run_id: str, sha256: str | None = None) -> Pilot:
     try:
         record = json.loads(raw)
         tau_c = {int(L): float(point["tau_c"]) for L, point in record["per_L"].items()}
+        ci = {
+            int(L): [float(v) for v in point["tau_c_ci"]]
+            for L, point in record["per_L"].items()
+            if point.get("tau_c_ci") is not None
+        }
         commit = record["kernel_commit"]
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise IsingDataError(f"{path}: not a pilot record ({exc!r})") from exc
@@ -97,7 +105,7 @@ def read_pilot(data_dir: Path, run_id: str, sha256: str | None = None) -> Pilot:
     bad = sorted(L for L, tau in tau_c.items() if not 0 < tau < math.inf)
     if bad or not tau_c:
         raise IsingDataError(f"{path}: tau_c must be positive and finite for every L (bad: {bad})")
-    return Pilot(path, digest, commit, tau_c)
+    return Pilot(path, digest, commit, tau_c, ci)
 
 
 @dataclass(frozen=True)

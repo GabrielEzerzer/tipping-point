@@ -110,6 +110,11 @@ def test_pilot_record_is_read_and_checked(tmp_path: Path) -> None:
         record.tau(64)
     with pytest.raises(ising.IsingDataError, match="pins"):
         ising.read_pilot(tmp_path, PILOT_RUN, "f" * 64)
+    extended = json.loads(path.read_text("utf-8"))
+    extended["per_L"]["16"] |= {"tau_c_ci": [3.5, 4.6], "a_key_from_later": 1}
+    path.write_text(json.dumps(extended))
+    record = ising.read_pilot(tmp_path, PILOT_RUN)  # optional and unknown keys are fine
+    assert record.tau(16) == 4.0 and record.tau_c_ci == {16: [3.5, 4.6]}
     path.write_text(json.dumps({"per_L": {"16": {"tau_c": -1.0}}, "kernel_commit": "x"}))
     with pytest.raises(ising.IsingDataError, match="positive"):
         ising.read_pilot(tmp_path, PILOT_RUN)

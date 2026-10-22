@@ -74,14 +74,14 @@ bootstrap = 50
 [scoring.surrogates]
 primary = "phase"
 secondary = "ar1"
-n = 9
+n = 4
 cells = "headline"
 
 [scoring.alarms]
 far = 0.02
 report_per = 100.0
 band = [2.0, -1.0]
-every = 4.0
+every = 8.0
 
 [[fss.static]]
 quantity = "l2_var_abs_m"

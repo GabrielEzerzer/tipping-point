@@ -3,7 +3,9 @@
 # data.tau_c from the #50 pilot record, decide on L = 128 (#19: budget permitting; its tau_c must
 # be in the pilot record), set trials.budget to match, and recalibrate the surrogate test on real
 # fixed-T segments (#28 pre-flight). Units: time in tau_c(L) = tau_int(|m|) at Tc on the fixed
-# kernel; temperature in eps_L = L (T - Tc) / Tc; lags in samples of the cadence.
+# kernel, as measured per L in the record; its fitted z and any tau_c extrapolated to an
+# unmeasured L are never pre-registered on (#50 review); temperature in eps_L = L (T - Tc) / Tc;
+# lags in samples of the cadence.
 
 id = "ising-ews"
 version = 1
@@ -49,7 +51,7 @@ replicas = 16
 exclusions = []
 
 [data.tau_c]
-source = "pilot"
+source = "pilot"         # measured per L; never the fit's z or an extrapolated tau_c
 pilot_run = "TBD"        # the #50 pilot run: <data dir>/ising/<run>/pilot.json, fixed kernel
 pilot_sha256 = "TBD"
 

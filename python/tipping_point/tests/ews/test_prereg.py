@@ -93,6 +93,7 @@ def test_v1_holds_the_research_pass_protocol() -> None:
         (lambda d: d.update(supersedes="ising-ews-v1"), "reason: an amendment"),
         (lambda d: d["indicators"].update(names=["kurtosis"]), "indicators.names"),
         (lambda d: d["scoring"].update(bootstrap=True), "scoring.bootstrap: expected int"),
+        (lambda d: d["data"]["tau_c"].update(source="fit"), "never fitted"),
     ],
 )
 def test_malformed_files_are_named(edit: Any, complaint: str) -> None:
@@ -101,15 +102,35 @@ def test_malformed_files_are_named(edit: Any, complaint: str) -> None:
     assert any(complaint in problem for problem in prereg.problems(doc)), prereg.problems(doc)
 
 
-def test_freeze_tags_the_commit_and_scoring_checks_the_blob(repo: Path) -> None:
-    """Catches a freeze that tags the wrong thing, or a check that would accept an edit made
-    after the freeze."""
+def test_freeze_binds_the_file_and_results_carry_the_stamp(tmp_path: Path, repo: Path) -> None:
+    """Unfrozen, a file cannot be scored; frozen, the tag is annotated and on the committed file,
+    results are stamped with it in the shared layout (manifest, one Parquet file per non-empty
+    table keyed by cell, complete.json hashes); edited after the freeze, it is refused."""
+    path = repo / "paper" / "prereg" / "demo-v1.toml"
+    with pytest.raises(prereg.PreregError, match="not frozen"):
+        prereg.frozen(prereg.load(path))
     tag = prereg.freeze(repo, "demo")
     assert tag == "prereg/demo-v1"
     assert _git(repo, "cat-file", "-t", tag) == "tag"  # annotated: it carries its own date
-    path = repo / "paper" / "prereg" / "demo-v1.toml"
-    ref = prereg.frozen(prereg.load(path))
+    demo = prereg.load(path)
+    ref = prereg.frozen(demo)
     assert ref.tag == tag and ref.commit == _git(repo, "rev-parse", "HEAD")
+    inputs = [{"domain": "ising", "run_id": "r1", "complete_sha256": "c" * 64}]
+    tables = {"auc": [{"L": 16, "auc": 0.9}, {"L": 32, "auc": 0.8}], "alarms": []}
+    data_dir = tmp_path / "data"
+    run_dir = prereg.write_result(data_dir, demo, ref, tables, inputs, {"pilot": {"run_id": "p"}})
+    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["domain"] == "ews" and manifest["key"] == "cell"
+    assert manifest["tables"] == ["auc"] and manifest["params"]["inputs"] == inputs
+    stamp = {"id": "demo", "version": 1, "sha256": demo.sha256, "tag": tag, "commit": ref.commit}
+    assert manifest["params"]["prereg"] == stamp
+    assert manifest["params"]["pilot"] == {"run_id": "p"}
+    table = pq.read_table(run_dir / "auc" / f"{0:020d}.parquet").to_pydict()
+    assert table["cell"] == [0, 1] and table["auc"] == [0.9, 0.8]
+    done = json.loads((run_dir / "complete.json").read_text("utf-8"))
+    assert done["rows"] == {"auc": 2} and done["last_key"] == 1 and done["clean"]
+    for relative, digest in done["files"].items():
+        assert hashlib.sha256((run_dir / relative).read_bytes()).hexdigest() == digest
     path.write_bytes(path.read_bytes().replace(b"x = 0.02", b"x = 0.03"))
     with pytest.raises(prereg.PreregError, match="differs from the version frozen"):
         prereg.frozen(prereg.load(path))
@@ -138,46 +159,12 @@ def test_freeze_refuses_what_it_should(repo: Path) -> None:
         prereg.freeze(repo, "absent")
 
 
-def test_an_unfrozen_file_cannot_be_scored(repo: Path) -> None:
-    with pytest.raises(prereg.PreregError, match="not frozen"):
-        prereg.frozen(prereg.load(repo / "paper" / "prereg" / "demo-v1.toml"))
-
-
-def test_trials_append_and_count_per_version(tmp_path: Path, repo: Path) -> None:
-    demo = prereg.load(repo / "paper" / "prereg" / "demo-v1.toml")
-    stamp = {"id": "demo", "version": 1}
+def test_trials_append_and_count_per_version(tmp_path: Path) -> None:
+    v1 = prereg.load(V1)
     for i in range(3):
-        prereg.log_trial(tmp_path, {"prereg": stamp, "cell": i})
-    prereg.log_trial(tmp_path, {"prereg": {"id": "demo", "version": 2}, "cell": 0})
+        prereg.log_trial(tmp_path, {"prereg": {"id": "ising-ews", "version": 1}, "cell": i})
+    prereg.log_trial(tmp_path, {"prereg": {"id": "ising-ews", "version": 2}, "cell": 0})
     lines = prereg.trials_path(tmp_path).read_bytes().split(b"\n")
     assert len(lines) == 5 and lines[-1] == b"" and b"\r" not in lines[0]
     assert all("logged_ns" in json.loads(line) for line in lines[:-1])
-    assert prereg.trials(tmp_path, demo) == 3
-
-
-def test_results_follow_the_shared_layout_and_carry_the_stamp(tmp_path: Path, repo: Path) -> None:
-    """manifest.json stamped with the prereg and inputs, one Parquet file per non-empty table
-    keyed by cell, and complete.json whose hashes match the files."""
-    demo = prereg.load(repo / "paper" / "prereg" / "demo-v1.toml")
-    prereg.freeze(repo, "demo")
-    ref = prereg.frozen(demo)
-    inputs = [{"domain": "ising", "run_id": "r1", "complete_sha256": "c" * 64}]
-    tables = {"auc": [{"L": 16, "auc": 0.9}, {"L": 32, "auc": 0.8}], "alarms": []}
-    run_dir = prereg.write_result(tmp_path, demo, ref, tables, inputs, {"pilot": {"run_id": "p"}})
-    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
-    assert manifest["domain"] == "ews" and manifest["key"] == "cell"
-    assert manifest["tables"] == ["auc"] and manifest["params"]["inputs"] == inputs
-    assert manifest["params"]["prereg"] == {
-        "id": "demo", "version": 1, "sha256": demo.sha256, "tag": "prereg/demo-v1",
-        "commit": ref.commit,
-    }  # fmt: skip
-    assert manifest["params"]["pilot"] == {"run_id": "p"}
-    table = pq.read_table(run_dir / "auc" / f"{0:020d}.parquet")
-    assert table.column("cell").to_pylist() == [0, 1] and table.column("auc").to_pylist() == [
-        0.9,
-        0.8,
-    ]
-    done = json.loads((run_dir / "complete.json").read_text("utf-8"))
-    assert done["rows"] == {"auc": 2} and done["last_key"] == 1 and done["clean"]
-    for relative, digest in done["files"].items():
-        assert hashlib.sha256((run_dir / relative).read_bytes()).hexdigest() == digest
+    assert prereg.trials(tmp_path, v1) == 3
