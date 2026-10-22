@@ -62,6 +62,16 @@ def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
     assert params["rate"] == protocol.rate_for(4, 2.0, fit["A"], fit["z"])
 
 
+def test_ramp_manifest_records_the_save_schedule_it_ran(tmp_path: Path) -> None:
+    """The manifest's save schedule is the one the run kept: as many bursts as configs holds."""
+    argv = ["ramp", "--L", "16", "--rate", "400", "--replicas", "2", "--pre", "10", "--hold", "10"]
+    assert main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"]) == 0
+    run_dir = _only_run(tmp_path)
+    schedule = io.read_json(run_dir / "manifest.json")["params"]["schedule"]
+    bursts = set(io.read_table(run_dir, "configs")["burst"].to_pylist())
+    assert schedule["params"]["L"] == 16 and schedule["saves"]["bursts"] == len(bursts) > 0
+
+
 def test_ramp_x_needs_a_pilot_record(tmp_path: Path) -> None:
     """Catches a rate taken from a hidden constant: --x without a record is refused, no run."""
     argv = ["ramp", "--L", "4", "--x", "2", "--data-dir", str(tmp_path), "--device", "cpu"]

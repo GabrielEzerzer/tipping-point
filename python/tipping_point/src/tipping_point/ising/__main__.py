@@ -139,7 +139,9 @@ def _ramp(args: argparse.Namespace) -> int:
         A, z = fit["A"], fit["z"]
         rate = protocol.rate_for(args.L, args.x, A, z)
     burst = protocol.Burst(stride=args.burst_stride)
-    schedule = protocol.Ramp(rate, pre=args.pre, hold=args.hold, burst=burst, x=args.x, A=A, z=z)
+    schedule = protocol.Ramp(
+        rate, args.L, pre=args.pre, hold=args.hold, burst=burst, x=args.x, A=A, z=z
+    )
     speed = f"r{rate}" if args.x is None else f"x{args.x:g}"
     tag = f"L{args.L}-ramp-{speed}-s{args.seed}"
     print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))

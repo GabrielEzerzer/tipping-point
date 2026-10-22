@@ -45,6 +45,8 @@ class Burst:
 
 
 BURST = Burst()
+BAND = (10.0, -5.0)  # the EWS analysis band in epsilon_L = L (T - Tc) / Tc, hot edge first (#26)
+BAND_PER_EPSILON_L = 28.0  # ramp bursts per unit epsilon_L inside it: what dT = 0.005 gives L = 16
 
 
 class Schedule(Protocol):
@@ -167,7 +169,12 @@ class Staircase:
 
 class Ramp:
     """Linear cooling T0 -> T1 at `rate` sweeps per unit T, between an equilibration at T0 and a
-    hold at T1. The bath crosses Tc at the real-valued step t_c = t0 + rate * (T0 - Tc)."""
+    hold at T1. The bath crosses Tc at the real-valued step t_c = t0 + rate * (T0 - Tc).
+
+    Bursts are saved every save_dT of cooling, except inside the analysis band of epsilon_L =
+    L (T - Tc) / Tc, where they come every 1/per_epsilon_L of epsilon_L: evenly spaced in T, a
+    fixed dT gives L = 128 an eighth of L = 16's bursts per unit epsilon_L. A ramp too fast for
+    either spacing saves its bursts back to back."""
 
     kind = "ramp"
     blocks = 1
@@ -175,11 +182,14 @@ class Ramp:
     def __init__(
         self,
         rate: int,
+        L: int,
         T0: float = T_HOT,
         T1: float = T_COLD,
         pre: int = 1000,
         hold: int = 1000,
         save_dT: float = 0.005,
+        band: Sequence[float] = BAND,
+        per_epsilon_L: float = BAND_PER_EPSILON_L,
         burst: Burst = BURST,
         x: float | None = None,  # the Kibble-Zurek point the rate came from, kept for the record
         A: float | None = None,  # ... and the tau_c = A L^z fit it was computed against
@@ -187,11 +197,14 @@ class Ramp:
     ) -> None:
         self.params = {
             "rate": rate,
+            "L": L,
             "T0": T0,
             "T1": T1,
             "pre": pre,
             "hold": hold,
             "save_dT": save_dT,
+            "band": list(band),
+            "per_epsilon_L": per_epsilon_L,
             "burst": asdict(burst),
             "x": x,
             "A": A,
@@ -203,8 +216,28 @@ class Ramp:
         self.total = self.t1 + hold
         self.t_c = self.t0 + rate * (T0 - TC)
         self.stride = max(1, self.total // 100_000)  # ~1e5 stats rows per replica at most
-        spacing = max(burst.span, round(save_dT * rate))  # a save point every save_dT of cooling
-        self.frames = _frames(range(self.t0 + 1, self.t1 - burst.span + 2, spacing), burst)
+        hot, cold = (TC * (1 + e / L) for e in band)
+        # the band's steps: the first at or below its hot edge, the last at or above its cold one
+        first = max(self.t0 + 1, self.t0 + math.ceil((T0 - hot) * rate))
+        last = min(self.t1, self.t0 + math.floor((T0 - cold) * rate))
+        outside = max(burst.span, round(save_dT * rate))
+        inside = max(burst.span, round(TC / (per_epsilon_L * L) * rate))
+        starts = []
+        step = self.t0 + 1
+        while step <= self.t1 - burst.span + 1:
+            starts.append(step)
+            gap = inside if first <= step <= last else outside
+            if step < first < step + gap:  # enter the band at its edge rather than past it
+                gap = max(burst.span, first - step)
+            step += gap
+        self.frames = _frames(starts, burst)
+        self.saves = {
+            "gap": outside,
+            "band_steps": [first, last],
+            "band_gap": inside,
+            "bursts": len(starts),
+            "bursts_in_band": sum(first <= s <= last for s in starts),
+        }
 
     def temperatures(self, step: int) -> tuple[float, ...]:
         if step <= self.t0:
@@ -231,6 +264,7 @@ class Ramp:
             "t1": self.t1,
             "t_c": self.t_c,
             "stats_stride": self.stride,
+            "saves": self.saves,
         }
 
 

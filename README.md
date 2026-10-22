@@ -135,6 +135,10 @@ along domain walls (#50).
   in about 130 and 1.3 tau_c; on the fixed kernel, where tau_c is about 2.5 times longer, they
   are x = 0.030-0.038 and 3.0-3.8.
 
+  Bursts are saved every 0.005 of cooling, except inside the EWS analysis band epsilon_L in
+  [10, -5], where they come 28 per unit epsilon_L at every L (spaced evenly in T, L = 128
+  got 3.5 there); the manifest's `schedule.saves` records the gaps and the burst counts.
+
 ## Running the gate
 
 ```sh
