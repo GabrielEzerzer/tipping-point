@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.signal import lfilter
+from scipy.stats import skew as scipy_skew
 from tipping_point.ews import indicators as ind
 from tipping_point.ews import trend
 
@@ -111,6 +112,36 @@ def test_flat_windows_have_zero_variance_and_no_correlation_or_skewness() -> Non
     assert np.all(np.isnan(ind.rolling_autocorrelation(x, 50)[199:300]))
     assert np.all(np.isnan(ind.rolling_skewness(x, 50)[199:300]))
     assert np.all(ind.rolling_variance(np.full(80, 3.0), 10)[9:] == 0.0)
+
+
+def test_each_window_is_judged_by_its_own_spread() -> None:
+    """Review round 1: the flat floor was 1e-10 of the whole series' variance, so a quiet half
+    beside a level 1e6 away came out flat (variance 0, AC NaN), and a sum taken around the far
+    level loses the window's digits. Every window must match a two-pass computation on its own
+    samples."""
+    rng = np.random.default_rng(5)
+    x = np.concatenate([rng.standard_normal(500), 1e6 + rng.standard_normal(500)])
+    window = 100
+    view = np.lib.stride_tricks.sliding_window_view(x, window)
+    a, b = view[:, :-1], view[:, 1:]
+    da, db = a - a.mean(axis=1, keepdims=True), b - b.mean(axis=1, keepdims=True)
+    ac = (da * db).sum(1) / np.sqrt((da * da).sum(1) * (db * db).sum(1))
+    valid = slice(window - 1, None)
+    assert np.allclose(ind.rolling_variance(x, window)[valid], view.var(1, ddof=1), rtol=1e-9)
+    assert np.allclose(ind.rolling_autocorrelation(x, window)[valid], ac, rtol=0, atol=1e-9)
+    skew = ind.rolling_skewness(x, window)[valid]
+    assert np.allclose(skew, scipy_skew(view, axis=1, bias=False), rtol=0, atol=1e-8)
+
+
+def test_a_flat_window_after_a_long_loud_stretch_is_still_flat() -> None:
+    """The other side of a window-local floor: after 1e5 noisy samples the running sums are
+    large, and a constant window's sums are pure rounding. It must come out flat, not as an
+    autocorrelation of rounding noise."""
+    y = np.concatenate([np.random.default_rng(6).standard_normal(100_000), np.full(200, 0.7)])
+    t = 100_150
+    assert ind.rolling_variance(y, 100)[t] == 0.0
+    assert np.isnan(ind.rolling_autocorrelation(y, 100)[t])
+    assert np.isnan(ind.rolling_skewness(y, 100)[t])
 
 
 def test_burst_pairs_never_cross_bursts() -> None:
