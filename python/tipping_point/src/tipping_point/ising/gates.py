@@ -7,7 +7,8 @@ B  local Boltzmann identity on saved configs, any L: flipping a site with n unsa
 C  detailed balance of each half-sweep: in equilibrium accepted flips costing +d and -d balance
    (d = 4, 8), and moves that do not raise the energy are always accepted
 independence  replicas share no randomness: their |M| series are uncorrelated
-thermalised   each plateau's mean |m| is the same over both halves of its measurement window
+thermalised   each plateau's mean |m| is the same over both halves of its measurement window,
+              and the window is at least 50 of the plateau's own tau long
 
 Error bars come from the spread across replicas, which are independent by construction, so time
 correlation inside a chain can never fake a pass.
@@ -24,7 +25,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from . import exact, io
+from . import autocorr, exact, io
 
 Z_MAX = 5.0  # a replica t-statistic beyond 5 sigma fails
 P_MIN = 1e-6  # a G-test p-value below this fails
@@ -184,7 +185,10 @@ def independence(run_dir: Path) -> list[Check]:
 
 def thermalised(run_dir: Path) -> list[Check]:
     """Per constant-temperature plateau: each replica's mean |m| over the first half of the
-    measurement window must match the second half. A drift means it was still relaxing."""
+    measurement window must match the second half (a drift means it was still relaxing), and
+    the window must hold >= 50 tau of the plateau's own |m|. The halves alone miss a dwell set
+    from a tau several times too small: one grid step moves <|m|> little, so after a few tau the
+    leftover drift hides in the noise; the window's length in its own tau does not."""
     L = io.read_json(run_dir / "manifest.json")["params"]["L"]
     stats = _columns(io.read_table(run_dir, "stats"))
     measured = stats["phase"] == 1
@@ -197,6 +201,9 @@ def thermalised(run_dir: Path) -> list[Check]:
             m = np.abs(stats["magnetisation"][mine]).reshape(steps, -1) / L**2  # (steps, replicas)
             first, second = m[: steps // 2].mean(axis=0), m[steps // 2 :].mean(axis=0)
             t = t_statistic(second - first)
+            est = autocorr.estimate(m.T)  # (replicas, steps)
+            passed = abs(t) <= Z_MAX and est.reliable
             detail = f"mean |m| {first.mean():.4f} then {second.mean():.4f} (t={t:+.2f})"
-            checks.append(Check("thermalised", float(T), bool(abs(t) <= Z_MAX), detail))
+            detail += f", plateau tau {est.tau:.0f} from {est.n} rows"
+            checks.append(Check("thermalised", float(T), bool(passed), detail))
     return checks

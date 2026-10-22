@@ -4,7 +4,8 @@ correct runs at L = 4, 8 and 16, and a deliberate violation of each one's premis
 from pathlib import Path
 
 import pytest
-from tipping_point.ising import gates, io, kernel, protocol, run
+from tipping_point.ising import exact, gates, io, kernel, protocol, run
+from tipping_point.ising.__main__ import main
 
 
 def _passed(checks: list[gates.Check], gate: str) -> list[bool]:
@@ -71,10 +72,36 @@ def test_a_plateau_measured_too_soon_fails_the_thermalisation_check(tmp_path: Pa
     assert _thermalised(run_dir) == [False]
 
 
-def test_dwelled_plateaus_pass_the_thermalisation_check(tmp_path: Path) -> None:
-    """Plateaus held for ~100 tau before measuring show the same |m| in both halves."""
+def test_a_dwell_from_a_tau_seven_times_too_small_fails_the_thermalisation_check(
+    tmp_path: Path,
+) -> None:
+    """Negative control: a staircase whose dwell comes from tau/7 (thermalise ~3 tau, measure
+    ~14 tau) stepping onto Tc from the grid point above. The halves agree, since one grid step
+    barely moves <|m|>, but the window holds ~14 of the plateau's own tau, short of 50."""
+    argv = ["pilot", "--L", "16", "--T", repr(exact.TC), "--replicas", "16", "--therm", "500"]
+    assert main([*argv, "--sweeps", "4000", "--data-dir", str(tmp_path), "--device", "cpu"]) == 0
+    (pilot,) = (tmp_path / "ising").iterdir()
+    (point,) = io.read_json(pilot / "tau.json")["points"]
+    assert point["reliable"]
+    tau = point["tau"]
     schedule = protocol.Staircase(
-        [2.0, 2.0], temperatures=(3.0, 2.5), warmup=300, min_therm=300, min_meas=1000
+        [tau / 7, tau / 7],
+        temperatures=(protocol.GRID[23], exact.TC),
+        warmup=round(40 * tau),
+        min_therm=1,
+        min_meas=1,
     )
+    run_dir = run.start(run.Spec(16, 16, seed=13), schedule, tmp_path / "qs", "short", "cpu")
+    at_tc = io.read_json(run_dir / "complete.json")["checks"]["thermalised"][1]
+    assert at_tc["temperature"] == exact.TC and at_tc["passed"] is False, at_tc
+
+
+def test_dwelled_plateaus_pass_the_thermalisation_check(tmp_path: Path) -> None:
+    """Positive control: plateaus held well past 20 tau, then measured for ~100 tau of |m|
+    (L = 16: tau ~ 4 at 3.0, ~14 at 2.5), agree across halves and time reliably."""
+    schedule = protocol.Staircase(
+        [4.0, 14.0], temperatures=(3.0, 2.5), warmup=300, min_therm=300, min_meas=1000
+    )
+    assert schedule.meas == [1000, 1400]
     run_dir = run.start(run.Spec(16, 32, seed=11), schedule, tmp_path, "dwelled", "cpu")
     assert _thermalised(run_dir) == [True, True]

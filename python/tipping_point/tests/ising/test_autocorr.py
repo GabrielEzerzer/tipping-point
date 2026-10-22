@@ -62,6 +62,13 @@ def test_the_forced_zero_tail_never_passes_as_a_window() -> None:
         assert not tau.reliable and tau.tau > 0, (n, tau)
 
 
+def test_frozen_series_are_unreliable_rather_than_an_error() -> None:
+    """A plateau frozen in every replica has no tau to measure; the end-of-staircase check must
+    record that, not raise before complete.json is written."""
+    tau = autocorr.estimate(np.ones((4, 100)))
+    assert not tau.reliable and np.isnan(tau.tau)
+
+
 def test_short_series_are_flagged_unreliable() -> None:
     """A series shorter than ~50 tau cannot be trusted, and the result must say so."""
     x = _ar1(0.99, replicas=4, n=2000, seed=5)

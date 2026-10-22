@@ -12,6 +12,7 @@ Runs land in <data dir>/ising/<run_id>/; the data dir is --data-dir or $TP_DATA_
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -94,17 +95,21 @@ def _taus(value: str, temperatures: Sequence[float]) -> list[float]:
     reliable points. A pilot too short for its tau underestimates it, and the dwell would end
     before the plateau equilibrates."""
     try:
-        return [float(value)] * len(temperatures)
+        taus = [float(value)] * len(temperatures)
     except ValueError:
-        pass
-    points = {round(p["temperature"], 9): p for p in io.read_json(Path(value))["points"]}
-    missing = [T for T in temperatures if round(T, 9) not in points]
-    if missing:
-        raise SystemExit(f"{value} has no tau for T = {missing}")
-    unreliable = [T for T in temperatures if not points[round(T, 9)].get("reliable", False)]
-    if unreliable:
-        raise SystemExit(f"{value}: tau is unreliable at T = {unreliable}; run the pilot longer")
-    return [points[round(T, 9)]["tau"] for T in temperatures]
+        points = {round(p["temperature"], 9): p for p in io.read_json(Path(value))["points"]}
+        missing = [T for T in temperatures if round(T, 9) not in points]
+        if missing:
+            raise SystemExit(f"{value} has no tau for T = {missing}") from None
+        unreliable = [T for T in temperatures if not points[round(T, 9)].get("reliable", False)]
+        if unreliable:
+            raise SystemExit(
+                f"{value}: unreliable tau at T = {unreliable}; run the pilot longer"
+            ) from None
+        taus = [points[round(T, 9)]["tau"] for T in temperatures]
+    if not all(0 < tau < math.inf for tau in taus):  # NaN fails both comparisons
+        raise SystemExit(f"tau must be a positive number, got {value}")
+    return taus
 
 
 def _staircase(args: argparse.Namespace) -> int:

@@ -103,6 +103,22 @@ def test_tau_option_takes_a_number_or_a_complete_pilot(tmp_path: Path) -> None:
         _taus(str(pilot), (3.5, 2.0))  # no tau measured at 2.0
 
 
+@pytest.mark.parametrize("value", ["0", "-3", "nan", "inf"])
+def test_numeric_tau_must_be_a_positive_number(value: str) -> None:
+    """Catches --tau 0 or -3 silently running every plateau at the dwell floors, and nan or inf
+    crashing inside dwell() with no hint of which flag was wrong."""
+    with pytest.raises(SystemExit, match="positive"):
+        _taus(value, (3.5, 2.0))
+
+
+def test_pilot_tau_must_be_a_positive_number(tmp_path: Path) -> None:
+    """The same guard covers a hand-written tau.json that marks a zero tau reliable."""
+    pilot = tmp_path / "tau.json"
+    pilot.write_text(json.dumps({"points": [{"temperature": 3.5, "tau": 0.0, "reliable": True}]}))
+    with pytest.raises(SystemExit, match="positive"):
+        _taus(str(pilot), (3.5,))
+
+
 def test_data_dir_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
     """Runs never default into the repository (it lives in the vault; data is GBs)."""
     monkeypatch.delenv("TP_DATA_DIR", raising=False)

@@ -66,8 +66,10 @@ def binning(x: np.ndarray, min_blocks: int = 32) -> tuple[np.ndarray, np.ndarray
 def estimate(x: np.ndarray, c: float = 5.0) -> Tau:
     """tau of the replica series in x (one row each), with the binning cross-check."""
     x = np.atleast_2d(x)
+    n = x.shape[1]
+    if not np.any(x.std(axis=1) > 0):  # every series frozen: nothing to time, nothing to vouch for
+        return Tau(float("nan"), 0, float("nan"), n, False)
     tau, window, found = sokal(autocorrelation(x), c)
     _, ratios = binning(x)
-    n = x.shape[1]
     plateau = float(ratios[-1]) if len(ratios) else float("nan")
     return Tau(tau, window, plateau, n, found and 0 < tau <= n / 50)
