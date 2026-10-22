@@ -12,6 +12,7 @@ pub mod query;
 pub mod replay;
 pub mod rotate;
 pub mod run;
+pub mod samples;
 pub mod segment;
 pub mod writer;
 
