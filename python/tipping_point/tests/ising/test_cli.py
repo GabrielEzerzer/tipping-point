@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 
 import pytest
-from tipping_point.ising import exact, io, protocol
+from tipping_point.ising import exact, gates, io, pilot, protocol
 from tipping_point.ising.__main__ import _taus, main
+
+PILOT = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #50's pilot record
 
 
 def _only_run(root: Path) -> Path:
@@ -47,13 +49,66 @@ def test_validate_cli_passes_and_writes_its_verdicts(tmp_path: Path) -> None:
 
 
 def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
-    """--x picks r from L; the tag and the manifest record both."""
-    argv = ["ramp", "--L", "4", "--x", "30", "--replicas", "2", "--pre", "10", "--hold", "10"]
+    """--x picks r from L and the pilot record's A L^z; the tag and the manifest record x, the
+    fit it was read against, and r."""
+    argv = ["ramp", "--L", "4", "--x", "2", "--pilot", str(PILOT), "--replicas", "2"]
+    argv += ["--pre", "10", "--hold", "10", "--data-dir", str(tmp_path), "--device", "cpu"]
+    assert main(argv) == 0
+    run_dir = _only_run(tmp_path)
+    assert run_dir.name.endswith("-L4-ramp-x2-s1")
+    params = io.read_json(run_dir / "manifest.json")["params"]["schedule"]["params"]
+    fit = pilot.read(PILOT)["fit"]
+    assert (params["x"], params["A"], params["z"]) == (2.0, fit["A"], fit["z"])
+    assert params["rate"] == protocol.rate_for(4, 2.0, fit["A"], fit["z"])
+
+
+def test_ramp_manifest_records_the_save_schedule_it_ran(tmp_path: Path) -> None:
+    """The manifest's save schedule is the one the run kept: as many bursts as configs holds."""
+    argv = ["ramp", "--L", "16", "--rate", "400", "--replicas", "2", "--pre", "10", "--hold", "10"]
     assert main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"]) == 0
     run_dir = _only_run(tmp_path)
-    assert run_dir.name.endswith("-L4-ramp-x30-s1")
-    params = io.read_json(run_dir / "manifest.json")["params"]["schedule"]["params"]
-    assert params["x"] == 30.0 and params["rate"] == protocol.rate_for(4, 30.0)
+    schedule = io.read_json(run_dir / "manifest.json")["params"]["schedule"]
+    bursts = set(io.read_table(run_dir, "configs")["burst"].to_pylist())
+    assert schedule["params"]["L"] == 16 and schedule["saves"]["bursts"] == len(bursts) > 0
+
+
+def test_ramp_x_needs_a_pilot_record(tmp_path: Path) -> None:
+    """Catches a rate taken from a hidden constant: --x without a record is refused, no run."""
+    argv = ["ramp", "--L", "4", "--x", "2", "--data-dir", str(tmp_path), "--device", "cpu"]
+    with pytest.raises(SystemExit, match="--pilot"):
+        main(argv)
+    assert not (tmp_path / "ising").exists()
+
+
+def test_null_run_is_a_complete_thermalised_fixed_run_naming_epsilon_l_and_tau_c(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#26 call 5's nulls end to end, shortened to 20 tau_c: a fixed run at Tc (1 + 6/16) whose
+    manifest names epsilon_L and the record's tau_c, judged thermalised in complete.json like a
+    staircase plateau. An epsilon_L outside the presets is refused."""
+    monkeypatch.setattr(protocol, "NULL_TAU_C", 20)
+    argv = ["null", "--L", "16", "--epsilon-L", "6", "--pilot", str(PILOT), "--seed", "3"]
+    assert main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"]) == 0
+    run_dir = _only_run(tmp_path)
+    assert run_dir.name.endswith("-L16-null-e6-s3")
+    schedule = io.read_json(run_dir / "manifest.json")["params"]["schedule"]
+    params, tau_c = schedule["params"], pilot.tau_c(pilot.read(PILOT), 16)
+    assert schedule["kind"] == "fixed" and (params["epsilon_L"], params["tau_c"]) == (6.0, tau_c)
+    assert params["temperatures"] == [exact.TC * (1 + 6 / 16)]
+    (check,) = io.read_json(run_dir / "complete.json")["checks"]["thermalised"]
+    assert check["passed"], check
+    assert all(c.passed for c in gates.gate_b(run_dir))  # its bursts sample Boltzmann, as any run's
+    with pytest.raises(SystemExit):
+        main([*argv[:4], "3", *argv[5:], "--data-dir", str(tmp_path / "x"), "--device", "cpu"])
+
+
+def test_null_run_refuses_a_size_the_record_did_not_measure(tmp_path: Path) -> None:
+    """Catches a null run's length resting on the fit's extrapolation, which its manifest could
+    not tell from a measurement: the record has no L = 128, so the run is refused, none started."""
+    argv = ["null", "--L", "128", "--epsilon-L", "4", "--pilot", str(PILOT)]
+    with pytest.raises(SystemExit, match="L = 128"):
+        main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"])
+    assert not (tmp_path / "ising").exists()
 
 
 def test_staircase_cli_reads_taus_from_a_pilot(

@@ -20,8 +20,8 @@ class Tau:
     reliable: bool  # a window was found, tau > 0 and n >= 50 tau
 
 
-def autocorrelation(x: np.ndarray) -> np.ndarray:
-    """rho(t) for t = 0..n-1, computed per row by FFT, then averaged over rows."""
+def _rows(x: np.ndarray) -> np.ndarray:
+    """rho(t) for t = 0..n-1 of each row that is not constant, by FFT."""
     x = np.atleast_2d(np.asarray(x, dtype=np.float64))
     x = x[x.std(axis=1) > 0]  # a frozen series carries no correlation information
     if len(x) == 0:
@@ -30,7 +30,12 @@ def autocorrelation(x: np.ndarray) -> np.ndarray:
     size = 1 << (2 * n - 1).bit_length()  # zero-padding to >= 2n stops the FFT wrapping around
     f = np.fft.rfft(x - x.mean(axis=1, keepdims=True), n=size, axis=1)
     acov = np.fft.irfft(f * f.conj(), n=size, axis=1)[:, :n]
-    return (acov / acov[:, :1]).mean(axis=0)
+    return acov / acov[:, :1]
+
+
+def autocorrelation(x: np.ndarray) -> np.ndarray:
+    """rho(t) for t = 0..n-1, computed per row by FFT, then averaged over rows."""
+    return _rows(x).mean(axis=0)
 
 
 def sokal(rho: np.ndarray, c: float = 5.0) -> tuple[float, int, bool]:
@@ -40,7 +45,12 @@ def sokal(rho: np.ndarray, c: float = 5.0) -> tuple[float, int, bool]:
     (tau(n-1) = 0), which would fake a window, and a tau of 0, in a series far too short to have
     one. With no window the series cannot say; the largest running sum is returned as a floor.
     """
-    taus = 2 * np.cumsum(rho[: max(1, len(rho) // 2)]) - 1  # tau(W) = 1 + 2 sum_{t=1..W} rho(t)
+    return _window(rho[: max(1, len(rho) // 2)], c)
+
+
+def _window(head: np.ndarray, c: float) -> tuple[float, int, bool]:
+    """sokal on rho already cut to the lags below n/2."""
+    taus = 2 * np.cumsum(head) - 1  # tau(W) = 1 + 2 sum_{t=1..W} rho(t)
     found = np.arange(len(taus)) >= c * taus
     if not found.any():
         return float(taus.max()), len(taus) - 1, False
@@ -73,3 +83,17 @@ def estimate(x: np.ndarray, c: float = 5.0) -> Tau:
     _, ratios = binning(x)
     plateau = float(ratios[-1]) if len(ratios) else float("nan")
     return Tau(tau, window, plateau, n, found and 0 < tau <= n / 50)
+
+
+def bootstrap(x: np.ndarray, draws: int, rng: np.random.Generator, c: float = 5.0) -> np.ndarray:
+    """Sokal tau of `draws` resamples of the rows of x (replicas, drawn with replacement), each
+    averaging its rows' rho as `estimate` does: the spread a confidence interval comes from."""
+    x = np.atleast_2d(x)
+    rows = _rows(x)[:, : max(1, x.shape[1] // 2)]  # the lags sokal searches
+    R = len(rows)
+    taus = np.empty(draws)
+    for first in range(0, draws, 16):  # 16 resampled curves at a time bounds the memory
+        counts = rng.multinomial(R, np.full(R, 1 / R), size=min(16, draws - first))
+        for i, rho in enumerate(counts @ rows / R):
+            taus[first + i] = _window(rho, c)[0]
+    return taus

@@ -70,12 +70,86 @@ Runs follow the shared layout `<data dir>/ising/<run_id>/` (`manifest.json`, Par
 ```sh
 uv run python -m tipping_point.ising validate                        # Gates A-C on a small L = 4 run
 uv run python -m tipping_point.ising pilot --L 16 --sweeps 50000      # tau_int per T -> tau.json
+uv run python -m tipping_point.ising tauc <pilot run> ...             # tau_c(L) at Tc -> pilot.json
 uv run python -m tipping_point.ising staircase --L 16 --tau <pilot run>/tau.json
-uv run python -m tipping_point.ising ramp --L 16 --x 30               # Kibble-Zurek x: 30 fast, 0.3 slow
+uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <record>/pilot.json  # x: 0.02 slow, 2 fast
+uv run python -m tipping_point.ising null --L 16 --epsilon-L 4 --pilot <record>/pilot.json --seed 1   # epsilon_L 2, 4, 6; seeds 1-5
 uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
 ```
 
-At Tc alone (seed 1) the L = 16 pilot reads tau(|m|) = 52.8 (binning 49.0) and tau(e) = 27.5 (#47).
+### The pilot record: tau_c(L)
+
+The time unit of everything downstream (ramp rates, null-run lengths, the EWS scorer's windows) is
+tau_c(L) = tau_int(|m|) at exactly Tc, read from a pilot record and never from a constant. Run one
+pilot per L at Tc, then `tauc` fits tau_c = A L^z and writes the record:
+
+```sh
+uv run python -m tipping_point.ising pilot --L 16 --T 2.269185314213022 --replicas 64 --therm 2000 --sweeps 50000
+uv run python -m tipping_point.ising pilot --L 32 --T 2.269185314213022 --replicas 64 --therm 10000 --sweeps 100000
+uv run python -m tipping_point.ising pilot --L 64 --T 2.269185314213022 --replicas 16 --therm 40000 --sweeps 300000
+uv run python -m tipping_point.ising tauc <L16 run> <L32 run> <L64 run>    # -> <data dir>/ising/<id>-tauc-L16-32-64/pilot.json
+```
+
+`pilot.json` is `{"kernel_commit", "per_L": {"16": {...}, ...}, "fit": {"A", "z", "A_ci", "z_ci"}}`,
+each `per_L` entry `{"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps", "seed"}`
+plus `"tau_c_ci"` (95%, optional for readers; field notes in `ising/pilot.py`). A size missing from
+`per_L` reads tau_c = A L^z. `tauc` refuses a run that is incomplete, never held exactly Tc, or
+holds fewer than 300 tau_c: subtracting each series' mean pulls the windowed estimate about
+10 / (N / tau) low, so a recorded tau_c is at most ~3% short (`test_autocorr` pins the bias).
+
+The record on the fixed kernel (#47; commit 5aac98e, CPU, seed 1), copied to
+`python/tipping_point/tests/fixtures/ising_pilot.json`:
+
+| L | replicas x sweeps | tau_c = tau(\|m\|) [95% CI] | binning | tau(e) | N / tau_c |
+|---|---|---|---|---|---|
+| 16 | 64 x 50,000 | 52.1 [50.5, 53.9] | 50.5 | 26.1 | 960 |
+| 32 | 64 x 100,000 | 231.5 [219.9, 244.3] | 223.2 | 92.5 | 432 |
+| 64 | 16 x 300,000 | 875.4 [797.2, 969.3] | 851.2 | 318.9 | 343 |
+
+Fit: A = 0.190 [0.149, 0.238], z = 2.04 [1.96, 2.11], 95% CIs from a bootstrap over replicas.
+That z sits below the 2.17 of Liu, Polkovnikov and Sandvik's Kibble-Zurek collapse for Metropolis:
+the local slope is 2.15 from L = 16 to 32 but 1.92 from 32 to 64, where 16 replicas leave tau_c
+5% uncertain (bootstrap s.d.). tau_c at L = 128 is an extrapolation, 3,690 [3,240, 4,230]
+sweeps from the fit, to re-measure before the L = 128 runs. The pre-#47
+kernel read 21.3, 85.7 and 376 (A ~ 0.05): its fixed black-then-white order relayed level flips
+along domain walls (#50).
+
+### Protocol (#19)
+
+- **Staircase**, the quasi-static arm: the 40-point grid from 3.5 down to 1.5, each plateau
+  thermalised for max(500, 20 tau) sweeps and measured for max(2000, 100 tau), with tau from a
+  `pilot` run's tau.json at that temperature. The plateau nearest Tc costs 1,043 + 5,211 sweeps
+  at L = 16.
+- **Ramps**, the dynamic arm: linear cooling from 3.5 to 1.5 at r = A L^(z+1) / (x Tc) sweeps per
+  unit T, A and z from the pilot record, so x = tau_c(L) / (sweeps per unit of epsilon_L =
+  L (T - Tc) / Tc) at every L. The slow ramp, x = 0.02, spends 50 tau_c per unit epsilon_L and
+  crosses the critical window |epsilon_L| < 1 in 100 tau_c; the fast one, x = 2, crosses it in one
+  tau_c, the Kibble-Zurek regime. Sweeps with this record (tau_c at L = 128 from the fit):
+
+  | | L = 16 | L = 32 | L = 64 | L = 128 |
+  |---|---|---|---|---|
+  | x = 0.02: critical window | 5,353 | 21,939 | 89,925 | 368,586 |
+  | x = 0.02: whole ramp | 37,742 | 309,390 | 2,536,252 | 20,791,168 |
+  | x = 2: critical window | 54 | 219 | 899 | 3,686 |
+  | x = 2: whole ramp | 378 | 3,094 | 25,362 | 207,912 |
+
+  Before #50 the rate was L^3.17 / (x Tc), with no A, at nominal x = 0.3 and 30. Under this
+  definition those were x = 0.016 and 1.6 on the pre-#47 kernel (A = 0.052), crossing the window
+  in about 130 and 1.3 tau_c; on the fixed kernel, where tau_c is about 2.5 times longer, they
+  are x = 0.030-0.038 and 3.0-3.8.
+
+  Bursts are saved every 0.005 of cooling, except inside the EWS analysis band epsilon_L in
+  [10, -5], where they come 28 per unit epsilon_L at every L (spaced evenly in T, L = 128
+  got 3.5 there); the manifest's `schedule.saves` records the gaps and the burst counts.
+
+- **Null runs**, the EWS scorer's negatives: `null --epsilon-L {2,4,6}` for each L, at least 5
+  seeds each, holds T = Tc (1 + epsilon_L / L) for 20 tau_c of thermalisation and 700 tau_c of
+  measurement, two scored slices at x = 0.02 (310-340 tau_c each), with a stats row every
+  tau_c / 50 sweeps and bursts at the slow ramp's in-band cadence. The manifest is a `fixed`
+  schedule whose params add `epsilon_L` and `tau_c`, and complete.json judges the run
+  thermalised like a staircase plateau. One run is 37,519 sweeps at L = 16, 166,689 at 32 and
+  630,295 at 64; L = 128 is refused until a pilot measures it, since the manifest could not tell
+  a fitted tau_c from a measured one.
 
 ## Running the gate
 

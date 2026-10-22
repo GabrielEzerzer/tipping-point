@@ -1,8 +1,11 @@
 """Command line: python -m tipping_point.ising <command> [options]
 
   staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json
-  ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x (or an explicit rate)
+  ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x of a pilot record's tau_c
+             (or an explicit rate)
+  null       fixed-T null run at epsilon_L = 2, 4 or 6: 700 tau_c of a size a pilot record measured
   pilot      measure tau_int of |m| and e at given temperatures; writes tau.json
+  tauc       tau_c(L) at Tc from pilot runs (one per L) and its fit A L^z; writes pilot.json
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure
   resume     continue a crashed or stopped run from its checkpoint
 
@@ -22,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from . import autocorr, io, protocol, run
+from . import autocorr, io, pilot, protocol, run
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -59,11 +62,23 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ramp", parents=[sized, saving], help="linear cooling ramp")
     speed = p.add_mutually_exclusive_group(required=True)
-    speed.add_argument("--x", type=float, help="Kibble-Zurek point: 30 fast, 0.3 slow")
+    speed.add_argument("--x", type=float, help="Kibble-Zurek point: 0.02 slow, 2 fast")
     speed.add_argument("--rate", type=int, help="sweeps per unit T")
+    p.add_argument("--pilot", type=Path, help="pilot.json: --x is read against its A L^z")
     p.add_argument("--pre", type=int, default=1000, help="equilibration sweeps at 3.5")
     p.add_argument("--hold", type=int, default=1000, help="sweeps held at 1.5")
     p.set_defaults(command=_ramp)
+
+    p = sub.add_parser("null", parents=[sized, saving], help="fixed-T null run above Tc")
+    p.add_argument(
+        "--epsilon-L",
+        type=float,
+        required=True,
+        choices=protocol.NULL_EPSILON_L,
+        help="scaled temperature L (T - Tc) / Tc",
+    )
+    p.add_argument("--pilot", type=Path, required=True, help="pilot.json that measured --L")
+    p.set_defaults(command=_null)
 
     p = sub.add_parser("pilot", parents=[sized], help="measure tau_int")
     p.add_argument(
@@ -72,6 +87,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--therm", type=int, default=2000)
     p.add_argument("--sweeps", type=int, default=20_000, help="measured sweeps")
     p.set_defaults(command=_pilot)
+
+    p = sub.add_parser("tauc", help="tau_c(L) at Tc and its fit A L^z -> pilot.json")
+    p.add_argument("runs", type=Path, nargs="+", help="complete pilot runs at Tc, one per L")
+    p.add_argument("--data-dir", type=Path, default=os.environ.get("TP_DATA_DIR"))
+    p.add_argument("--draws", type=int, default=pilot.DRAWS, help="bootstrap resamples")
+    p.set_defaults(command=_tauc)
 
     p = sub.add_parser("validate", parents=[common], help="Gates A-C on a small L = 4 run")
     p.add_argument("--replicas", type=int, default=4096, help="per temperature")
@@ -122,11 +143,31 @@ def _staircase(args: argparse.Namespace) -> int:
 
 
 def _ramp(args: argparse.Namespace) -> int:
-    rate = args.rate if args.x is None else protocol.rate_for(args.L, args.x)
+    rate, A, z = args.rate, None, None
+    if args.x is not None:
+        if args.pilot is None:
+            raise SystemExit("--x needs --pilot: x is measured against the record's tau_c = A L^z")
+        fit = pilot.read(args.pilot)["fit"]
+        A, z = fit["A"], fit["z"]
+        rate = protocol.rate_for(args.L, args.x, A, z)
     burst = protocol.Burst(stride=args.burst_stride)
-    schedule = protocol.Ramp(rate, pre=args.pre, hold=args.hold, burst=burst, x=args.x)
+    schedule = protocol.Ramp(
+        rate, args.L, pre=args.pre, hold=args.hold, burst=burst, x=args.x, A=A, z=z
+    )
     speed = f"r{rate}" if args.x is None else f"x{args.x:g}"
     tag = f"L{args.L}-ramp-{speed}-s{args.seed}"
+    print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))
+    return 0
+
+
+def _null(args: argparse.Namespace) -> int:
+    record = pilot.read(args.pilot)
+    if str(args.L) not in record["per_L"]:
+        raise SystemExit(f"{args.pilot} measured no tau_c at L = {args.L}; pilot that size first")
+    tau_c = pilot.tau_c(record, args.L)
+    burst = protocol.Burst(stride=args.burst_stride)
+    schedule = protocol.null_run(args.L, args.epsilon_L, tau_c, burst)
+    tag = f"L{args.L}-null-e{args.epsilon_L:g}-s{args.seed}"
     print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))
     return 0
 
@@ -157,11 +198,7 @@ def _measure(run_dir: Path, L: int) -> list[dict[str, Any]]:
     columns = {name: stats[name].to_numpy() for name in stats.column_names}
     points = []
     for T in np.unique(columns["temperature"]):
-        mine = (columns["phase"] == 1) & (columns["temperature"] == T)
-        steps = len(np.unique(columns["step"][mine]))
-        # rows are in (step, replica) order: reshape, then one row per replica
-        m = np.abs(columns["magnetisation"][mine]).reshape(steps, -1).T / L**2
-        e = columns["energy"][mine].reshape(steps, -1).T / L**2
+        m, e = pilot.series(columns, T, L)
         tau_m, tau_e = autocorr.estimate(m), autocorr.estimate(e)
         points.append(
             {
@@ -170,12 +207,35 @@ def _measure(run_dir: Path, L: int) -> list[dict[str, Any]]:
                 "window": tau_m.window,
                 "binning": tau_m.binning,
                 "tau_energy": tau_e.tau,
-                "sweeps": steps,
+                "sweeps": m.shape[1],
                 "replicas": m.shape[0],
                 "reliable": tau_m.reliable,
             }
         )
     return points
+
+
+def _tauc(args: argparse.Namespace) -> int:
+    try:
+        record = pilot.record(args.runs, args.draws)
+    except ValueError as refused:
+        raise SystemExit(str(refused)) from None
+    path = pilot.write(record, args.data_dir)
+    for L, p in record["per_L"].items():
+        lo, hi = p["tau_c_ci"]
+        print(
+            f"L={L:<4} tau_c={p['tau_c']:.1f} [{lo:.1f}, {hi:.1f}]  "
+            f"binning {p['tau_c_binning']:.1f}  tau(e)={p['tau_e']:.1f}  "
+            f"N/tau={p['n_over_tau']:.0f}  "
+            f"({p['replicas']} replicas x {p['sweeps']:,} sweeps, seed {p['seed']})"
+        )
+    fit = record["fit"]
+    print(
+        f"tau_c = A L^z:  A = {fit['A']:.4f} [{fit['A_ci'][0]:.4f}, {fit['A_ci'][1]:.4f}]  "
+        f"z = {fit['z']:.3f} [{fit['z_ci'][0]:.3f}, {fit['z_ci'][1]:.3f}]"
+    )
+    print(path)
+    return 0
 
 
 def _validate(args: argparse.Namespace) -> int:
