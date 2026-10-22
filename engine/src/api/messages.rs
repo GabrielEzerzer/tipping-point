@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::binance::Scales;
-use crate::binance::sync::Level;
+use crate::market::Scales;
+use crate::market::sync::Level;
 use crate::store::samples::{BookRow, Sample};
 
 /// The protocol version a client must say hello with.

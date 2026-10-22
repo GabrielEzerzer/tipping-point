@@ -16,7 +16,7 @@ use arrow::error::ArrowError;
 use arrow::ipc::MetadataVersion;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
-use crate::binance::{Scales, Symbol};
+use crate::market::{Scales, Symbol};
 
 /// The media type of an Arrow IPC stream.
 pub const STREAM_TYPE: &str = "application/vnd.apache.arrow.stream";

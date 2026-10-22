@@ -18,6 +18,7 @@ use engine::store::frame::{Kind, Meta};
 use engine::store::now_ns;
 use engine::store::run::Producer;
 use engine::store::writer::{Entry, LogConfig, LogWriter};
+use engine::venue::Venue;
 use engine_harness::crash_payload;
 
 fn parse_args(args: &[String]) -> Result<&Path, String> {
@@ -53,6 +54,7 @@ fn main() -> ExitCode {
             git_sha: None,
             dirty: None,
         },
+        venue: Venue::BinanceUsdm,
         scales: BTreeMap::new(),
     };
     std::thread::spawn(|| {

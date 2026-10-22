@@ -8,8 +8,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use engine::binance::pipeline::Replayed;
-use engine::binance::recording::{RecordingError, read_records, replay};
+use engine::market::pipeline::Replayed;
+use engine::market::recording::{RecordingError, read_records, replay};
 
 fn replay_file(path: &Path) -> Result<Replayed, RecordingError> {
     let records = read_records(BufReader::new(File::open(path)?))?;

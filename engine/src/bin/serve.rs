@@ -24,17 +24,16 @@ use std::time::Duration;
 
 use engine::api::hub::{Hub, HubConfig, LiveTap};
 use engine::api::{ApiConfig, DEFAULT_PORT, serve};
-use engine::binance::feed::Feed;
-use engine::binance::live::{
-    DEPTH_STREAM, LiveConfig, Log, Observer, Recording, TRADE_STREAM, handle, run_live, utc_clock,
-};
-use engine::binance::pipeline::Pipeline;
-use engine::binance::recording::{Record, read_records};
+use engine::market::feed::Feed;
+use engine::market::live::{Log, Observer, handle, utc_clock};
+use engine::market::pipeline::Pipeline;
+use engine::market::recording::{Record, read_records};
 use engine::store::frame::Meta;
 use engine::store::rotate::rotate;
 use engine::store::run::{self, BookSample, MarketParams};
 use engine::store::segment::{self, LOG_DIR};
 use engine::store::writer::{LogConfig, LogWriter};
+use engine::venue::binance::live::{DEPTH_STREAM, LiveConfig, Recording, TRADE_STREAM, run_live};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, sleep_until};
@@ -223,12 +222,13 @@ async fn play_script(
     hub: &Arc<Hub>,
 ) -> Result<(), Box<dyn Error>> {
     let mut records = read_records(BufReader::new(File::open(path)?))?.into_iter();
-    let Some(Record::Scales { scales }) = records.next() else {
+    let Some(Record::Scales { venue, scales }) = records.next() else {
         return Err("a script starts with its scales".into());
     };
     let mut log = match recording {
         Some(run_dir) => {
             let params = MarketParams {
+                venue,
                 symbols: scales.keys().cloned().collect(),
                 scales: scales.clone(),
                 streams: vec![DEPTH_STREAM.to_owned(), TRADE_STREAM.to_owned()],
@@ -240,7 +240,7 @@ async fn play_script(
         }
         None => Log::unrecorded(),
     };
-    let mut pipeline = Pipeline::new(Feed::new(scales));
+    let mut pipeline = Pipeline::new(Feed::new(venue, scales));
     let mut tap = LiveTap::new(Arc::clone(hub));
     let run_id = recording
         .and_then(Path::file_name)

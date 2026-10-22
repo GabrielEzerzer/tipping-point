@@ -7,12 +7,13 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use engine::binance::decimal::format_units;
-use engine::binance::feed::Feed;
-use engine::binance::live::{LiveConfig, LiveEvent, Recording, run_live, utc_clock};
-use engine::binance::sync::BookSync;
+use engine::market::decimal::format_units;
+use engine::market::feed::Feed;
+use engine::market::live::{LiveEvent, utc_clock};
+use engine::market::sync::BookSync;
 use engine::store::run;
 use engine::store::writer::LogConfig;
+use engine::venue::binance::live::{LiveConfig, Recording, run_live};
 
 const USAGE: &str = "usage: ingest [--seconds N] [--record]";
 
@@ -109,7 +110,7 @@ fn print_tops(feed: &Feed, snapshot_fetches: u64) {
         let top = feed.book(symbol).map_or_else(
             || "no book".to_owned(),
             |book| {
-                let side = |level: Option<engine::binance::sync::Level>| {
+                let side = |level: Option<engine::market::sync::Level>| {
                     level.map_or_else(
                         || "-".to_owned(),
                         |l| {

@@ -1,5 +1,6 @@
-//! The multi-symbol feed: raw frame text in, book outcomes out. Pure, so the live loop, a
-//! recording and a synthetic test stream all drive exactly the same code.
+//! The multi-symbol feed of one venue: raw frame text in, book outcomes out. Pure, so the live
+//! loop, a recording and a synthetic test stream all drive exactly the same code. The venue reads
+//! the text and its rule keeps each book; the counting and the reactions are shared.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,9 +8,20 @@ use thiserror::Error;
 
 use super::book::Book;
 use super::decimal::DecimalError;
-use super::messages::{AggTrade, MessageError, Payload, parse_frame, parse_snapshot};
 use super::sync::{BookSync, Outcome, ResyncReason};
 use super::{Scales, Symbol};
+use crate::venue::{Depth, MessageError, Parsed, Venue};
+
+/// An aggregated trade in integer units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggTrade {
+    pub symbol: String,
+    pub agg_trade_id: u64,
+    pub price: i64,
+    pub qty: i64,
+    pub trade_time_ms: u64,
+    pub buyer_is_maker: bool,
+}
 
 /// Counters over everything the feed has seen.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -59,9 +71,10 @@ pub enum FeedError {
     UnknownSymbol(String),
 }
 
-/// One [`BookSync`] per symbol, plus the scales to parse with and the running counters.
+/// One venue's [`BookSync`] per symbol, plus the scales to parse with and the running counters.
 #[derive(Debug)]
 pub struct Feed {
+    venue: Venue,
     scales: BTreeMap<Symbol, Scales>,
     syncs: BTreeMap<Symbol, BookSync>,
     pending_snapshot: BTreeSet<Symbol>,
@@ -69,20 +82,27 @@ pub struct Feed {
 }
 
 impl Feed {
-    /// A feed for exactly the symbols given scales.
+    /// A feed of `venue`'s books for exactly the symbols given scales.
     #[must_use]
-    pub fn new(scales: BTreeMap<Symbol, Scales>) -> Self {
+    pub fn new(venue: Venue, scales: BTreeMap<Symbol, Scales>) -> Self {
         let syncs = scales
             .keys()
             .cloned()
-            .map(|s| (s, BookSync::new()))
+            .map(|s| (s, BookSync::new(venue)))
             .collect();
         Self {
+            venue,
             scales,
             syncs,
             pending_snapshot: BTreeSet::new(),
             stats: Stats::default(),
         }
+    }
+
+    /// The venue whose streams this feed reads.
+    #[must_use]
+    pub fn venue(&self) -> Venue {
+        self.venue
     }
 
     /// The symbols this feed tracks.
@@ -133,34 +153,37 @@ impl Feed {
     }
 
     fn route(&mut self, text: &str) -> Result<Event, FeedError> {
-        match parse_frame(text)?.data {
-            Payload::Depth(raw) => {
+        match self.venue.parse(text)? {
+            Parsed::Depth(raw) => {
                 self.stats.depth_events += 1;
-                let scales = self.scales_for(&raw.symbol)?;
-                let update = match scales.depth_update(&raw) {
-                    Ok(update) => update,
+                let scales = self.scales_for(raw.symbol())?;
+                let converted = raw.convert(scales);
+                let symbol = raw.into_symbol();
+                let depth = match converted {
+                    Ok(depth) => depth,
                     Err(error) => {
-                        self.invalidate(&raw.symbol, ResyncReason::BadFrame);
-                        return Err(FeedError::BadDepth {
-                            symbol: raw.symbol,
-                            error,
-                        });
+                        self.invalidate(&symbol, ResyncReason::BadFrame);
+                        return Err(FeedError::BadDepth { symbol, error });
                     }
                 };
-                let sync = self.syncs.entry(raw.symbol.clone()).or_default();
-                let outcome = sync.on_event(update);
+                let Some(sync) = self.syncs.get_mut(&symbol) else {
+                    return Err(FeedError::UnknownSymbol(symbol));
+                };
+                let outcome = match depth {
+                    Depth::Update(update) => sync.on_event(update),
+                };
                 let crossed = sync.book().is_some_and(Book::is_crossed);
                 self.count(outcome, crossed);
                 Ok(Event::Depth {
-                    symbol: raw.symbol,
+                    symbol,
                     outcome,
                     crossed,
                 })
             }
-            Payload::AggTrade(raw) => {
+            Parsed::Trade(raw) => {
                 self.stats.trades += 1;
-                let scales = self.scales_for(&raw.symbol)?;
-                Ok(Event::Trade(scales.agg_trade(&raw)?))
+                let scales = self.scales_for(raw.symbol())?;
+                Ok(Event::Trade(raw.convert(scales)?))
             }
         }
     }
@@ -173,8 +196,10 @@ impl Feed {
         self.pending_snapshot.remove(symbol);
         self.stats.snapshots += 1;
         let scales = self.scales_for(symbol)?;
-        let snapshot = scales.snapshot(&parse_snapshot(body)?)?;
-        let sync = self.syncs.entry(symbol.to_owned()).or_default();
+        let snapshot = self.venue.parse_snapshot(body)?.convert(scales)?;
+        let Some(sync) = self.syncs.get_mut(symbol) else {
+            return Err(FeedError::UnknownSymbol(symbol.to_owned()));
+        };
         let installed = sync.on_snapshot(&snapshot);
         // The install is counted under `snapshots`; a failed install is the resync among the
         // replayed updates, so counting those counts it exactly once.
@@ -264,13 +289,16 @@ mod tests {
     use super::*;
 
     fn feed() -> Feed {
-        Feed::new(BTreeMap::from([(
-            "BTCUSDT".to_owned(),
-            Scales {
-                price_decimals: 1,
-                qty_decimals: 3,
-            },
-        )]))
+        Feed::new(
+            Venue::BinanceUsdm,
+            BTreeMap::from([(
+                "BTCUSDT".to_owned(),
+                Scales {
+                    price_decimals: 1,
+                    qty_decimals: 3,
+                },
+            )]),
+        )
     }
 
     fn depth(first: u64, last: u64, prev: u64, bids: &str, asks: &str) -> String {

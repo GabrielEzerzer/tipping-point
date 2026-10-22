@@ -11,8 +11,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use engine::binance::pipeline::Replayed;
-use engine::binance::sync::BookSync;
+use engine::market::pipeline::Replayed;
+use engine::market::sync::BookSync;
 use engine::store::replay::{replay_log, replay_parquet};
 use engine::store::rotate::rotate;
 use engine::store::segment::recover_run;
@@ -136,7 +136,7 @@ fn print_replay(run_dir: &Path, replayed: &Replayed) {
     );
     for symbol in feed.symbols() {
         let synced = feed.sync(symbol).is_some_and(BookSync::is_synced);
-        let depth = feed.book(symbol).map(engine::binance::book::Book::depth);
+        let depth = feed.book(symbol).map(engine::market::book::Book::depth);
         println!("{symbol}: synced={synced} levels={depth:?}");
     }
 }

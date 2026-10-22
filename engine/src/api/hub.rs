@@ -17,11 +17,11 @@ use tokio::sync::{broadcast, watch};
 
 use super::ipc::{Encoder, Provenance, tagged};
 use super::messages::{Status, StreamStatus, Streams, SymbolStatus, Topic, TradeMessage};
-use crate::binance::feed::{Event, Feed};
-use crate::binance::live::{LiveEvent, LiveStats, Observer, Stream};
-use crate::binance::pipeline::Applied;
-use crate::binance::sync::BookSync;
-use crate::binance::{Scales, Symbol};
+use crate::market::feed::{Event, Feed};
+use crate::market::live::{LiveEvent, LiveStats, Observer, Stream};
+use crate::market::pipeline::Applied;
+use crate::market::sync::BookSync;
+use crate::market::{Scales, Symbol};
 use crate::store::run::{BookSample, MARKET};
 use crate::store::samples::{Sample, SampleRows, Sampler};
 use crate::store::writer::Entry;

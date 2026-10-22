@@ -17,7 +17,7 @@ use tokio::time::{Instant, sleep_until};
 use super::hub::Hub;
 use super::messages::TradeMessage;
 use super::table::{Table, TableError, locate};
-use crate::binance::sync::Level;
+use crate::market::sync::Level;
 use crate::store::run::MARKET;
 use crate::store::samples::{BookRow, Sample};
 use crate::store::{StoreError, query};

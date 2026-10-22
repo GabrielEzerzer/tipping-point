@@ -14,13 +14,16 @@ Open-source framework for detecting critical transitions in live data streams: a
   replay-equals-live checks and the API's contract, parity, Python and load checks (production code
   never depends on it).
 
-## Binance ingest
+## Venues and the live feed
 
-`engine/src/binance/` keeps a correct local order book for BTCUSDT and ETHUSDT from the USD-M
-depth stream (snapshot plus diffs, sequence-gap detection, resync, backpressure) and reads aggTrades.
-The sync logic is a pure state machine (`sync.rs`) behind a multi-symbol `feed.rs`, and
-`pipeline.rs` holds the one copy of how the engine reacts to every input; the network layer
-(`ws.rs`, `rest.rs`, `live.rs`) is thin around it.
+`engine/src/market/` is the market-data core every venue shares: integer-unit order books, a
+multi-symbol `feed.rs` that turns a venue's raw frames into book updates, and `pipeline.rs`, the
+one copy of how the engine reacts to every input; the network layer (`ws.rs`, `live.rs`) is thin
+around it. What differs between venues (wire format, sync rule, scales, endpoints) lives in
+`engine/src/venue/`, reached by matching on `enum Venue`. `venue/binance/` keeps a correct local
+order book for BTCUSDT and ETHUSDT from the USD-M depth stream (REST snapshot plus diffs,
+sequence-gap detection, resync, backpressure) and reads aggTrades; its sync rule is a pure state
+machine (`sync.rs`).
 
 ```sh
 cargo run -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs

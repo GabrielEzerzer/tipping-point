@@ -17,8 +17,8 @@ use super::live::{LiveEvent, LiveStats, Stream};
 use super::sync::{BookSync, Outcome, ResyncReason};
 use super::ws::Inbound;
 use crate::store::frame::Kind;
-use crate::store::ms_to_ns;
 use crate::store::writer::Entry;
+use crate::venue::Venue;
 
 /// Something a socket or the REST client did that the feed reacts to although it is no frame.
 /// Logged as a Control frame: JSON tagged by `type`.
@@ -59,12 +59,12 @@ pub enum Message {
     },
 }
 
-/// The log entries a message stands for, in the order the live loop applies them. A drop count
-/// arrives with the next frame but invalidates the books before that frame is applied, so it
-/// becomes its own entry first. A failed connection attempt changes no book and stands for
-/// nothing. Pure: the same message always gives the same entries.
+/// The log entries a message from `venue`'s sockets or REST API stands for, in the order the live
+/// loop applies them. A drop count arrives with the next frame but invalidates the books before
+/// that frame is applied, so it becomes its own entry first. A failed connection attempt changes
+/// no book and stands for nothing. Pure: the same message always gives the same entries.
 #[must_use]
-pub fn entries(message: Message) -> Vec<Entry> {
+pub fn entries(venue: Venue, message: Message) -> Vec<Entry> {
     match message {
         Message::Socket { stream, inbound } => match inbound {
             Inbound::Connected {
@@ -99,7 +99,7 @@ pub fn entries(message: Message) -> Vec<Entry> {
                 }
                 out.push(Entry {
                     kind: stream.kind(),
-                    source_ts_ns: frame_event_time_ns(&text),
+                    source_ts_ns: venue.event_time_ns(&text),
                     capture_ts_ns: capture_ns,
                     payload: text,
                 });
@@ -112,7 +112,7 @@ pub fn entries(message: Message) -> Vec<Entry> {
             result: Ok(body),
         } => vec![Entry {
             kind: Kind::Snapshot,
-            source_ts_ns: snapshot_event_time_ns(&body),
+            source_ts_ns: venue.snapshot_time_ns(&body),
             capture_ts_ns: capture_ns,
             payload: to_json(&SnapshotPayload { symbol, body }),
         }],
@@ -140,35 +140,6 @@ fn control(control: &Control, capture_ts_ns: i64) -> Entry {
 /// serialize.
 fn to_json(value: &impl Serialize) -> String {
     serde_json::to_string(value).expect("a Control or Snapshot payload always serializes")
-}
-
-/// Just the exchange event time `E`, wherever it sits.
-#[derive(Deserialize)]
-struct EventTime {
-    #[serde(rename = "E")]
-    event_time_ms: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct Combined {
-    data: Option<EventTime>,
-}
-
-/// The `E` of a combined-stream frame in nanoseconds, 0 when it has none.
-fn frame_event_time_ns(text: &str) -> i64 {
-    serde_json::from_str::<Combined>(text)
-        .ok()
-        .and_then(|frame| frame.data)
-        .and_then(|data| data.event_time_ms)
-        .map_or(0, ms_to_ns)
-}
-
-/// The `E` of a REST snapshot body in nanoseconds, 0 when it has none.
-fn snapshot_event_time_ns(body: &str) -> i64 {
-    serde_json::from_str::<EventTime>(body)
-        .ok()
-        .and_then(|body| body.event_time_ms)
-        .map_or(0, ms_to_ns)
 }
 
 /// What one input did to the feed.
@@ -459,7 +430,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::binance::Scales;
+    use crate::market::Scales;
 
     const SYMBOL: &str = "BTCUSDT";
 
@@ -489,8 +460,12 @@ mod tests {
                 price_decimals: 1,
                 qty_decimals: 3,
             };
+            let feed = Feed::new(
+                Venue::BinanceUsdm,
+                BTreeMap::from([(SYMBOL.to_owned(), scales)]),
+            );
             let mut live = Self {
-                pipeline: Pipeline::new(Feed::new(BTreeMap::from([(SYMBOL.to_owned(), scales)]))),
+                pipeline: Pipeline::new(feed),
                 resyncs: Vec::new(),
             };
             live.send(text(10, 12, 9, 0));
@@ -513,7 +488,7 @@ mod tests {
                     resyncs.push((symbol.to_owned(), reason));
                 }
             };
-            for entry in entries(message) {
+            for entry in entries(Venue::BinanceUsdm, message) {
                 self.pipeline
                     .apply(entry.kind, &entry.payload, &mut on_event);
             }
@@ -664,7 +639,7 @@ mod tests {
 
     #[test]
     fn messages_become_entries_in_the_order_they_apply() {
-        let entries = entries(text(13, 13, 12, 4));
+        let entries = entries(Venue::BinanceUsdm, text(13, 13, 12, 4));
         let kinds: Vec<Kind> = entries.iter().map(|e| e.kind).collect();
         assert_eq!(kinds, vec![Kind::Control, Kind::Depth]);
         assert_eq!(
@@ -677,11 +652,16 @@ mod tests {
         assert_eq!(entries[1].source_ts_ns, 1_000_000, "E = 1 ms");
         assert_eq!(entries[1].capture_ts_ns, 5);
 
-        let snapshot = super::entries(Message::Snapshot {
-            symbol: SYMBOL.to_owned(),
-            capture_ns: 9,
-            result: Ok(r#"{"lastUpdateId":1,"E":1700000000123,"bids":[],"asks":[]}"#.to_owned()),
-        });
+        let snapshot = super::entries(
+            Venue::BinanceUsdm,
+            Message::Snapshot {
+                symbol: SYMBOL.to_owned(),
+                capture_ns: 9,
+                result: Ok(
+                    r#"{"lastUpdateId":1,"E":1700000000123,"bids":[],"asks":[]}"#.to_owned(),
+                ),
+            },
+        );
         assert_eq!(snapshot[0].source_ts_ns, 1_700_000_000_123_000_000);
         let payload: SnapshotPayload =
             serde_json::from_str(&snapshot[0].payload).expect("a snapshot payload");
@@ -693,7 +673,7 @@ mod tests {
                 error: "refused".to_owned(),
             },
         };
-        assert_eq!(super::entries(failed), Vec::new());
+        assert_eq!(super::entries(Venue::BinanceUsdm, failed), Vec::new());
     }
 
     #[test]
@@ -711,7 +691,7 @@ mod tests {
 
     #[test]
     fn a_report_keeps_counting_past_errors() {
-        let mut feed = Feed::new(BTreeMap::new());
+        let mut feed = Feed::new(Venue::BinanceUsdm, BTreeMap::new());
         let mut report = Report::default();
         report.note(0, &Applied::NotAnInput);
         report.note(1, &Applied::Frame(feed.on_text("not json")));

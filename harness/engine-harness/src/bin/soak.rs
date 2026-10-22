@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use engine::binance::feed::Stats;
-use engine::binance::live::{LiveConfig, LiveEvent, LiveStats, run_live, utc_clock};
-use engine::binance::recording::now_ms;
-use engine::binance::sync::BookSync;
+use engine::market::feed::Stats;
+use engine::market::live::{LiveEvent, LiveStats, utc_clock};
+use engine::market::recording::now_ms;
+use engine::market::sync::BookSync;
+use engine::venue::binance::live::{LiveConfig, run_live};
 
 struct Args {
     duration: Duration,

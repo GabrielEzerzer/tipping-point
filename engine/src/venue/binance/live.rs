@@ -1,32 +1,51 @@
-//! The live loop: two socket readers and a REST client around one [`Pipeline`], recording
-//! every input it applies to a run's log when asked to. Every input gets the seq its log gives
-//! it, recorded or not, and an [`Observer`] sees each one, numbered, right before it is applied.
+//! Binance's live loop: two combined-stream sockets (depth on `/public`, aggregated trades on
+//! `/market`) and a REST client around one [`Pipeline`], recording every input it applies to a
+//! run's log when asked to. Every input gets the seq its log gives it, recorded or not, and an
+//! [`Observer`] sees each one, numbered, right before it is applied.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, interval, sleep, sleep_until};
 
-use super::feed::Feed;
-use super::pipeline::{Applied, Message, Pipeline, entries};
 use super::rest::{Rest, RestError};
-use super::sync::ResyncReason;
-use super::ws::{self, Inbound};
-use super::{Scales, Symbol};
-use crate::store::frame::{Kind, Meta};
+use crate::market::feed::Feed;
+use crate::market::live::{LiveEvent, Log, Observer, Stream, handle, install_crypto_provider};
+use crate::market::pipeline::{Message, Pipeline};
+use crate::market::ws;
+use crate::market::{Scales, Symbol};
+use crate::store::frame::Meta;
 use crate::store::run::{self, BookSample, MarketParams};
-use crate::store::writer::{Entry, LogConfig, LogWriter, Summary};
+use crate::store::writer::{LogConfig, LogWriter};
 use crate::store::{LogError, now_ns};
+use crate::venue::Venue;
 
 /// The depth stream the loop subscribes to.
 pub const DEPTH_STREAM: &str = "depth@100ms";
 /// The trade stream the loop subscribes to.
 pub const TRADE_STREAM: &str = "aggTrade";
+
+/// Routed path that serves `@depth@100ms`.
+pub const DEPTH_HOST: &str = "wss://fstream.binance.com/public/stream";
+/// Routed path that serves `@aggTrade` (it is not delivered on `/public`).
+pub const TRADE_HOST: &str = "wss://fstream.binance.com/market/stream";
+
+/// Binance closes a connection after 24 h; leaving before that keeps the reconnect on our terms.
+pub const DEFAULT_MAX_CONNECTION_AGE: Duration = Duration::from_hours(23);
+
+/// Combined-stream URL for the given symbols and stream suffix, e.g. `depth@100ms`.
+#[must_use]
+pub fn stream_url(host: &str, symbols: &[Symbol], suffix: &str) -> String {
+    let streams: Vec<String> = symbols
+        .iter()
+        .map(|s| format!("{}@{suffix}", s.to_lowercase()))
+        .collect();
+    format!("{host}?streams={}", streams.join("/"))
+}
 
 /// Knobs for a live run.
 #[derive(Debug, Clone)]
@@ -54,7 +73,7 @@ impl Default for LiveConfig {
             report_every: Duration::from_secs(1),
             channel_capacity: 1024,
             min_snapshot_interval: Duration::from_secs(2),
-            max_connection_age: ws::DEFAULT_MAX_CONNECTION_AGE,
+            max_connection_age: DEFAULT_MAX_CONNECTION_AGE,
             record: None,
         }
     }
@@ -66,176 +85,6 @@ pub struct Recording {
     /// The run folder to create, normally `<data dir>/market/<run_id>/`; it must not exist.
     pub run_dir: PathBuf,
     pub log: LogConfig,
-}
-
-/// Which socket an event is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Stream {
-    Depth,
-    Trades,
-}
-
-impl Stream {
-    /// The kind of frame this socket's text is logged as.
-    #[must_use]
-    pub fn kind(self) -> Kind {
-        match self {
-            Self::Depth => Kind::Depth,
-            Self::Trades => Kind::Trade,
-        }
-    }
-}
-
-/// Counters the sockets and REST produce (the feed keeps its own).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LiveStats {
-    pub depth_reconnects: u64,
-    pub trade_reconnects: u64,
-    pub connect_failures: u64,
-    pub depth_frames_dropped: u64,
-    pub trade_frames_dropped: u64,
-    pub snapshot_fetches: u64,
-    pub snapshot_failures: u64,
-}
-
-/// What the loop tells its caller as it goes.
-#[derive(Debug)]
-pub enum LiveEvent<'a> {
-    Connected {
-        stream: Stream,
-        attempt: u32,
-    },
-    Disconnected {
-        stream: Stream,
-        reason: &'a str,
-    },
-    ConnectFailed {
-        stream: Stream,
-        error: &'a str,
-    },
-    FramesDropped {
-        stream: Stream,
-        count: u64,
-    },
-    Resync {
-        symbol: &'a str,
-        reason: ResyncReason,
-    },
-    Synced {
-        symbol: &'a str,
-    },
-    SnapshotFailed {
-        symbol: &'a str,
-        error: &'a str,
-    },
-    Report {
-        elapsed: Duration,
-        feed: &'a Feed,
-        stats: &'a LiveStats,
-    },
-    /// One input was applied: what it did, and the feed and the loop's counters right after.
-    /// Fires for every frame, so loggers usually skip it; transcripts, replay checks and the
-    /// API's status are built from it.
-    Applied {
-        kind: Kind,
-        applied: &'a Applied,
-        feed: &'a Feed,
-        stats: &'a LiveStats,
-    },
-}
-
-/// Whoever watches the live loop: it sees every input right before the loop applies it, and
-/// every event the loop raises. A closure over [`LiveEvent`]s is an observer that skips inputs.
-pub trait Observer {
-    /// The loop is about to start, with this feed (its symbols and scales) and, when recording,
-    /// this run id.
-    fn started(&mut self, feed: &Feed, run_id: Option<&str>) {
-        let _ = (feed, run_id);
-    }
-
-    /// One input, with the seq its log gave it, right before it is applied to `feed`.
-    fn input(&mut self, seq: u64, entry: &Entry, feed: &Feed) {
-        let _ = (seq, entry, feed);
-    }
-
-    /// One event, as it happens.
-    fn event(&mut self, event: LiveEvent<'_>);
-}
-
-impl<F: FnMut(LiveEvent<'_>)> Observer for F {
-    fn event(&mut self, event: LiveEvent<'_>) {
-        self(event);
-    }
-}
-
-/// Where the live loop numbers its inputs: the run's log when recording, or else a count that
-/// numbers them as a one-segment log would (its Meta at seq 0, then one seq per input), so an
-/// input has a seq either way.
-#[derive(Debug)]
-pub enum Log {
-    Recorded(Box<LogWriter>),
-    Unrecorded { next_seq: u64 },
-}
-
-impl Log {
-    /// The log of a recorded run.
-    #[must_use]
-    pub fn recorded(writer: LogWriter) -> Self {
-        Self::Recorded(Box::new(writer))
-    }
-
-    /// A count for a loop that records nothing.
-    #[must_use]
-    pub fn unrecorded() -> Self {
-        Self::Unrecorded { next_seq: 1 }
-    }
-
-    /// Logs one entry, or only numbers it, and returns its seq.
-    ///
-    /// # Errors
-    /// Returns the log's error once the writer has stopped.
-    pub async fn append(&mut self, entry: Entry) -> Result<u64, LogError> {
-        match self {
-            Self::Recorded(writer) => writer.append(entry).await,
-            Self::Unrecorded { next_seq } => {
-                let seq = *next_seq;
-                *next_seq += 1;
-                Ok(seq)
-            }
-        }
-    }
-
-    /// Lets a recorded log end its segment when the hour is over, with nothing to append.
-    ///
-    /// # Errors
-    /// Returns the log's error once the writer has stopped.
-    pub async fn tick(&mut self) -> Result<(), LogError> {
-        if let Self::Recorded(writer) = self {
-            writer.tick().await?;
-        }
-        Ok(())
-    }
-
-    /// The writer, when recording.
-    #[must_use]
-    pub fn writer(&self) -> Option<&LogWriter> {
-        match self {
-            Self::Recorded(writer) => Some(writer),
-            Self::Unrecorded { .. } => None,
-        }
-    }
-
-    /// Closes a recorded log (see [`LogWriter::finish`]); `None` when nothing was recorded.
-    ///
-    /// # Errors
-    /// Returns the error that stopped the writer.
-    pub fn finish(self) -> Result<Option<Summary>, LogError> {
-        match self {
-            Self::Recorded(writer) => writer.finish().map(Some),
-            Self::Unrecorded { .. } => Ok(None),
-        }
-    }
 }
 
 /// A finished snapshot fetch: the symbol, when its reply arrived, and the body or the error.
@@ -267,7 +116,7 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
         Some(recording) => Log::recorded(start_recording(recording, &config.symbols, &scales)?),
         None => Log::unrecorded(),
     };
-    let mut pipeline = Pipeline::new(Feed::new(scales));
+    let mut pipeline = Pipeline::new(Feed::new(Venue::BinanceUsdm, scales));
     let run_id = config
         .record
         .as_ref()
@@ -277,8 +126,8 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
 
     let (depth_tx, mut depth_rx) = mpsc::channel(config.channel_capacity);
     let (trade_tx, mut trade_rx) = mpsc::channel(config.channel_capacity);
-    let depth_url = ws::stream_url(ws::DEPTH_HOST, &config.symbols, DEPTH_STREAM);
-    let trade_url = ws::stream_url(ws::TRADE_HOST, &config.symbols, TRADE_STREAM);
+    let depth_url = stream_url(DEPTH_HOST, &config.symbols, DEPTH_STREAM);
+    let trade_url = stream_url(TRADE_HOST, &config.symbols, TRADE_STREAM);
     let depth_reader = tokio::spawn(ws::run_reader(
         depth_url,
         config.max_connection_age,
@@ -369,41 +218,6 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
     recorded.and(ended)
 }
 
-/// What the live loop does with each message, network aside: it logs every input the message
-/// stands for, shows it to the observer with its seq, then applies it, so the log holds exactly
-/// what the feed saw, in order. A failed connection attempt is counted, not logged: it changes
-/// no book. Public so that a test can drive the live path from a script.
-///
-/// # Errors
-/// Returns the log's error once the writer has stopped.
-pub async fn handle(
-    message: Message,
-    pipeline: &mut Pipeline,
-    log: &mut Log,
-    observer: &mut impl Observer,
-) -> Result<(), LogError> {
-    if let Message::Socket {
-        stream,
-        inbound: Inbound::ConnectFailed { error },
-    } = &message
-    {
-        pipeline.stats_mut().connect_failures += 1;
-        observer.event(LiveEvent::ConnectFailed {
-            stream: *stream,
-            error,
-        });
-        return Ok(());
-    }
-    for entry in entries(message) {
-        let seq = log.append(entry.clone()).await?;
-        observer.input(seq, &entry, pipeline.feed());
-        pipeline.apply(entry.kind, &entry.payload, &mut |event| {
-            observer.event(event);
-        });
-    }
-    Ok(())
-}
-
 /// Creates the run folder and its manifest, then starts the log writer.
 fn start_recording(
     recording: &Recording,
@@ -411,6 +225,7 @@ fn start_recording(
     scales: &BTreeMap<Symbol, Scales>,
 ) -> Result<LogWriter, LiveError> {
     let params = MarketParams {
+        venue: Venue::BinanceUsdm,
         symbols: symbols.to_vec(),
         scales: scales.clone(),
         streams: vec![DEPTH_STREAM.to_owned(), TRADE_STREAM.to_owned()],
@@ -443,23 +258,20 @@ async fn finish_recording(log: LogWriter, run_dir: &Path, clean: bool) -> Result
     })
 }
 
-/// Picks the process-wide TLS crypto provider once. With one provider compiled in rustls would
-/// pick it anyway; pinning it here keeps a future second provider from turning into a panic.
-/// Call it before building any [`Rest`] client or socket outside [`run_live`].
-pub fn install_crypto_provider() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Wall-clock `HH:MM:SSZ` for log lines.
-#[must_use]
-pub fn utc_clock() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    format!(
-        "{:02}:{:02}:{:02}Z",
-        secs / 3600 % 24,
-        secs / 60 % 60,
-        secs % 60
-    )
+    #[test]
+    fn builds_combined_stream_urls() {
+        let symbols = vec!["BTCUSDT".to_owned(), "ETHUSDT".to_owned()];
+        assert_eq!(
+            stream_url(DEPTH_HOST, &symbols, "depth@100ms"),
+            "wss://fstream.binance.com/public/stream?streams=btcusdt@depth@100ms/ethusdt@depth@100ms"
+        );
+        assert_eq!(
+            stream_url(TRADE_HOST, &symbols[..1], "aggTrade"),
+            "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade"
+        );
+    }
 }

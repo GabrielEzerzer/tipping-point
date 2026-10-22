@@ -20,8 +20,8 @@ use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
 use engine::store::writer::LogConfig;
 use engine_harness::api::{
-    Frame, LivePath, Outcome, Server, Socket, fixture, get_arrow, hello, next_frame, next_json,
-    one_batch, read_parquet, script, send_json, ws_connect,
+    Frame, LivePath, Outcome, Script, Server, Socket, fixture, get_arrow, hello, next_frame,
+    next_json, one_batch, read_parquet, script, send_json, ws_connect,
 };
 use serde_json::{Value, json};
 
@@ -188,13 +188,17 @@ struct Played {
 /// The session through the live path with an Arrow subscriber and a coalescing app client
 /// connected from the start, then the log closed and rotated.
 async fn play(dir: PathBuf) -> Outcome<Played> {
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig::default());
     let small = LogConfig {
         max_segment_bytes: 2048,
         ..LogConfig::default()
     };
-    let mut live = LivePath::new(scales, Arc::clone(&hub), &dir, Some(RUN), small)?;
+    let mut live = LivePath::new(venue, scales, Arc::clone(&hub), &dir, Some(RUN), small)?;
     let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
     let url = server.url("/v1/live/book_samples");
     let arrow = tokio::spawn(async move { get_arrow(&url).await });
@@ -213,6 +217,11 @@ async fn play(dir: PathBuf) -> Outcome<Played> {
     }
     // Rotate while the log is still open: the closed segments become Parquet, the newest stays
     // in the log, so a replay now reads the rotated hours through DuckDB and the rest from memory.
+    // The writer thread can lag the loop on a loaded machine; let it catch up first, so the
+    // segments the loop has closed are on disk when rotate looks.
+    while live.log.writer().is_some_and(|writer| writer.queued() > 0) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let run_dir = dir.join("market").join(RUN);
     let early = rotate(&run_dir)?;
     assert!(early.open.is_some() && early.segments >= 2, "{early:?}");
@@ -453,9 +462,14 @@ async fn until_source(socket: &mut Socket, mode: &str) -> Outcome<Value> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_that_fails_partway_fails_at_the_client() -> Outcome {
     let dir = scratch("api-fail");
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig::default());
     let mut live = LivePath::new(
+        venue,
         scales,
         Arc::clone(&hub),
         &dir,
@@ -505,9 +519,14 @@ async fn a_stream_that_fails_partway_fails_at_the_client() -> Outcome {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_producer_that_panics_fails_at_the_client() -> Outcome {
     let dir = scratch("api-panic");
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig::default());
     let mut live = LivePath::new(
+        venue,
         scales,
         Arc::clone(&hub),
         &dir,
@@ -558,12 +577,17 @@ async fn a_producer_that_panics_fails_at_the_client() -> Outcome {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     let dir = scratch("api-gap");
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig {
         ring: Duration::from_millis(400),
         ..HubConfig::default()
     });
     let mut live = LivePath::new(
+        venue,
         scales,
         Arc::clone(&hub),
         &dir,
@@ -719,7 +743,7 @@ async fn replays_send_whole_instants_across_duckdb_chunks() -> Outcome {
 
 /// A market run with three symbols and 1,500 instants of book samples (4,500 rows, one row group).
 fn write_three_symbol_run(run_dir: &Path) -> Outcome {
-    use engine::binance::sync::Level;
+    use engine::market::sync::Level;
     use engine::store::samples::{BookRow as Row, Sample, SampleRows};
 
     let symbols = ["AAAUSDT", "BBBUSDT", "CCCUSDT"];

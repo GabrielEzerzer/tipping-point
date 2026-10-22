@@ -13,11 +13,10 @@ use std::path::{Path, PathBuf};
 use arrow::array::{Array, Int64Array};
 use arrow::record_batch::RecordBatch;
 use duckdb::Connection;
-use engine::binance::live::LiveEvent;
-use engine::binance::messages::{Payload, parse_frame, parse_snapshot};
-use engine::binance::pipeline::SnapshotPayload;
-use engine::binance::sync::BookSync;
-use engine::binance::{Scales, Symbol};
+use engine::market::live::LiveEvent;
+use engine::market::pipeline::SnapshotPayload;
+use engine::market::sync::BookSync;
+use engine::market::{Scales, Symbol};
 use engine::store::StoreError;
 use engine::store::frame::{Frame, Kind, Meta};
 use engine::store::query::{connect, for_each_frame, table_files, window};
@@ -25,6 +24,7 @@ use engine::store::replay::{Replay, replay_log, replay_parquet};
 use engine::store::rotate::{LOCK_FILE, rotate};
 use engine::store::segment::{self, LOG_DIR, recover_run};
 use engine::store::writer::LogConfig;
+use engine::venue::binance::messages::{Payload, parse_frame, parse_snapshot};
 use runs::{fresh_dir, log_frames, synthetic, write_run};
 
 type Outcome = Result<(), Box<dyn Error>>;
@@ -203,8 +203,8 @@ fn book_samples_are_the_book_at_each_instant_of_the_capture_clock() -> Outcome {
                         for symbol in feed.symbols() {
                             let synced = feed.sync(symbol).is_some_and(BookSync::is_synced);
                             let book = feed.book(symbol).filter(|_| synced);
-                            let bid = book.and_then(engine::binance::book::Book::best_bid);
-                            let ask = book.and_then(engine::binance::book::Book::best_ask);
+                            let bid = book.and_then(engine::market::book::Book::best_bid);
+                            let ask = book.and_then(engine::market::book::Book::best_ask);
                             expected.push((
                                 next,
                                 symbol.clone(),

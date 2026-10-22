@@ -9,12 +9,13 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use engine::binance::pipeline::entries;
-use engine::binance::recording::{Record, read_records};
+use engine::market::pipeline::entries;
+use engine::market::recording::{Record, read_records};
 use engine::store::frame::{Frame, Kind, Meta};
 use engine::store::run::{self, BookSample, MarketParams, Producer};
 use engine::store::segment::{self, LOG_DIR, SegmentReader};
 use engine::store::writer::{LogConfig, LogWriter, Summary};
+use engine::venue::Venue;
 
 /// An empty folder of its own under cargo's scratch dir for integration tests.
 pub fn fresh_dir(name: &str) -> PathBuf {
@@ -45,6 +46,7 @@ pub fn meta() -> Meta {
             git_sha: None,
             dirty: None,
         },
+        venue: Venue::BinanceUsdm,
         scales: BTreeMap::new(),
     }
 }
@@ -110,11 +112,12 @@ pub fn write_run(script: &Path, dir: &Path, log: LogConfig) -> (PathBuf, Summary
     let mut records = read_records(BufReader::new(file))
         .expect("records")
         .into_iter();
-    let Some(Record::Scales { scales }) = records.next() else {
+    let Some(Record::Scales { venue, scales }) = records.next() else {
         panic!("a script starts with its scales");
     };
     let run_dir = dir.join(run::MARKET).join("20231114T221320Z-synthetic");
     let params = MarketParams {
+        venue,
         symbols: scales.keys().cloned().collect(),
         scales,
         streams: vec!["depth@100ms".to_owned(), "aggTrade".to_owned()],
@@ -126,7 +129,7 @@ pub fn write_run(script: &Path, dir: &Path, log: LogConfig) -> (PathBuf, Summary
         let message = record
             .into_message()
             .expect("only the first line holds scales");
-        for entry in entries(message) {
+        for entry in entries(venue, message) {
             writer.append_blocking(entry).expect("an append");
         }
     }

@@ -15,8 +15,8 @@ use arrow::record_batch::RecordBatch;
 
 use super::StoreError;
 use super::run::BookSample;
-use crate::binance::feed::Feed;
-use crate::binance::sync::{BookSync, Level};
+use crate::market::feed::Feed;
+use crate::market::sync::{BookSync, Level};
 
 /// A capture-clock jump longer than this many grid instants is skipped rather than filled with
 /// samples of an unchanged book (a day at the default 100 ms).

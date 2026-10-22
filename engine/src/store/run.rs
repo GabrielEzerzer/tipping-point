@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use super::now_ns;
 use super::rotate::TABLES;
 use super::writer::Summary;
-use crate::binance::{Scales, Symbol};
+use crate::market::{Scales, Symbol};
+use crate::venue::Venue;
 
 /// The environment variable naming the data dir.
 pub const DATA_DIR_ENV: &str = "TP_DATA_DIR";
@@ -159,10 +160,19 @@ impl Default for BookSample {
 /// What a market run recorded and how.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketParams {
+    /// The venue whose streams the run holds; one run per venue. Runs recorded before there
+    /// were venues are Binance's.
+    #[serde(default = "binance")]
+    pub venue: Venue,
     pub symbols: Vec<Symbol>,
     pub scales: BTreeMap<Symbol, Scales>,
     pub streams: Vec<String>,
     pub book_sample: BookSample,
+}
+
+/// The venue of every run recorded before manifests said which venue they were.
+fn binance() -> Venue {
+    Venue::BinanceUsdm
 }
 
 /// `manifest.json`: written once, when the run starts.

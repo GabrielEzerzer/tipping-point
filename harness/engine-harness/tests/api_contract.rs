@@ -17,14 +17,15 @@ use engine::api::messages::{
     BookMessage, ClientMessage, LatticeHeader, ServerMessage, SourceMessage, Status, StreamStatus,
     Streams, SymbolStatus, Topic, TradeMessage, Welcome, lattice_frame,
 };
-use engine::binance::Scales;
-use engine::binance::sync::Level;
+use engine::market::Scales;
+use engine::market::sync::Level;
 use engine::store::rotate::rotate;
 use engine::store::samples::{BookRow, Sample};
 use engine::store::writer::LogConfig;
+use engine::venue::Venue;
 use engine_harness::api::{
-    Frame, ISING_RUN, LivePath, Outcome, Server, copy_ising_fixture, decode_stream, fixture,
-    get_arrow, golden, next_frame, next_json, one_batch, script, send_json, ws_connect,
+    Frame, ISING_RUN, LivePath, Outcome, Script, Server, copy_ising_fixture, decode_stream,
+    fixture, get_arrow, golden, next_frame, next_json, one_batch, script, send_json, ws_connect,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -70,7 +71,11 @@ fn results() -> [(&'static str, Value); 4] {
 /// and an Arrow subscriber connected from the start; then results published for the app. The
 /// WebSocket frames, as text, in the order they arrived, and the live Arrow stream's bytes.
 async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> {
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig {
         lossless: true,
         ..HubConfig::default()
@@ -79,7 +84,7 @@ async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> 
         max_segment_bytes: 2048,
         ..LogConfig::default()
     };
-    let mut live = LivePath::new(scales, Arc::clone(&hub), dir, Some(RUN), config)?;
+    let mut live = LivePath::new(venue, scales, Arc::clone(&hub), dir, Some(RUN), config)?;
     let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.to_owned())).await?;
 
     let mut ws = ws_connect(server.addr).await?;
@@ -456,9 +461,9 @@ async fn every_arrow_schema_matches_its_golden_file() -> Outcome {
 async fn protocol_errors_close_with_their_codes() -> Outcome {
     let dir = scratch("api-close");
     let hub = Hub::new(HubConfig::default());
-    let feed = engine::binance::feed::Feed::new(BTreeMap::new());
+    let feed = engine::market::feed::Feed::new(Venue::BinanceUsdm, BTreeMap::new());
     let mut tap = engine::api::hub::LiveTap::new(Arc::clone(&hub));
-    engine::binance::live::Observer::started(&mut tap, &feed, None);
+    engine::market::live::Observer::started(&mut tap, &feed, None);
     let server = Server::start(hub, ApiConfig::new(dir.clone())).await?;
 
     let mut ws = ws_connect(server.addr).await?;
@@ -506,9 +511,9 @@ async fn a_subscription_sent_before_the_welcome_is_answered_after_it() -> Outcom
         next_frame(&mut waiting, Duration::from_millis(300)).await,
         Frame::Silent
     );
-    let feed = engine::binance::feed::Feed::new(BTreeMap::new());
+    let feed = engine::market::feed::Feed::new(Venue::BinanceUsdm, BTreeMap::new());
     let mut tap = engine::api::hub::LiveTap::new(Arc::clone(&hub));
-    engine::binance::live::Observer::started(&mut tap, &feed, None);
+    engine::market::live::Observer::started(&mut tap, &feed, None);
     assert_eq!(next_json(&mut waiting, WAIT).await?["t"], "welcome");
     assert_eq!(
         next_json(&mut waiting, WAIT).await?,

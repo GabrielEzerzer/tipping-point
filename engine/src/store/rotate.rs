@@ -41,10 +41,10 @@ use super::run::{self, MANIFEST, Manifest};
 use super::samples::{Sample, SampleRows, Sampler};
 use super::segment::{self, Ending, LOG_DIR, SegmentReader};
 use super::{StoreError, ms_to_ns};
-use crate::binance::messages::{Payload, RawAggTrade, RawDepthUpdate, parse_frame, parse_snapshot};
-use crate::binance::pipeline::SnapshotPayload;
-use crate::binance::sync::Level;
-use crate::binance::{Scales, Symbol};
+use crate::market::pipeline::SnapshotPayload;
+use crate::market::sync::Level;
+use crate::market::{Scales, Symbol};
+use crate::venue::{Depth, Parsed, RawDepth, RawTrade, Venue};
 
 /// Every table rotate writes, in the order the manifest lists them.
 pub const TABLES: [&str; 5] = [
@@ -107,6 +107,7 @@ pub fn rotate(run_dir: &Path) -> Result<Rotation, StoreError> {
         ..Rotation::default()
     };
     let segments = segment::list(&run_dir.join(LOG_DIR))?;
+    let mut venue = manifest.params.venue;
     let mut scales = manifest.params.scales;
     let mut replay = Replay::new(None);
     let mut sampler = Sampler::new(manifest.params.book_sample);
@@ -118,10 +119,11 @@ pub fn rotate(run_dir: &Path) -> Result<Rotation, StoreError> {
             if frame.kind == Kind::Meta
                 && let Ok(meta) = serde_json::from_str::<Meta>(&frame.payload)
             {
+                venue = meta.venue;
                 scales = meta.scales;
             }
             tables.frames.rows.push(&frame)?;
-            if !tables.push_rows(&frame, &scales)? {
+            if !tables.push_rows(&frame, venue, &scales)? {
                 rotation.unparsed += 1;
             }
             if is_input(frame.kind) {
@@ -339,23 +341,23 @@ impl Tables {
         })
     }
 
-    /// The table rows a frame's content gives. False when a depth, trade or snapshot frame did
-    /// not parse or convert. Content decides the table, as it decides how the feed routes text.
+    /// The table rows a frame's content gives, read by `venue`'s rules. False when a depth,
+    /// trade or snapshot frame did not parse or convert. Content decides the table, as it decides
+    /// how the feed routes text.
     fn push_rows(
         &mut self,
         frame: &Frame,
+        venue: Venue,
         scales: &BTreeMap<Symbol, Scales>,
     ) -> Result<bool, StoreError> {
         match frame.kind {
-            Kind::Depth | Kind::Trade => {
-                match parse_frame(&frame.payload).map(|combined| combined.data) {
-                    Ok(Payload::Depth(raw)) => self.depth.rows.push(frame, &raw, scales),
-                    Ok(Payload::AggTrade(raw)) => self.trades.rows.push(frame, &raw, scales),
-                    Err(_) => Ok(false),
-                }
-            }
+            Kind::Depth | Kind::Trade => match venue.parse(&frame.payload) {
+                Ok(Parsed::Depth(raw)) => self.depth.rows.push(frame, &raw, scales),
+                Ok(Parsed::Trade(raw)) => self.trades.rows.push(frame, &raw, scales),
+                Err(_) => Ok(false),
+            },
             Kind::Snapshot => match serde_json::from_str::<SnapshotPayload>(&frame.payload) {
-                Ok(snapshot) => self.snapshots.rows.push(frame, &snapshot, scales),
+                Ok(snapshot) => self.snapshots.rows.push(frame, venue, &snapshot, scales),
                 Err(_) => Ok(false),
             },
             Kind::Meta | Kind::Control | Kind::SegmentEnd => Ok(true),
@@ -524,26 +526,27 @@ impl DepthRows {
     fn push(
         &mut self,
         frame: &Frame,
-        raw: &RawDepthUpdate,
+        raw: &RawDepth,
         scales: &BTreeMap<Symbol, Scales>,
     ) -> Result<bool, StoreError> {
-        let Some(update) = scales
-            .get(&raw.symbol)
-            .and_then(|s| s.depth_update(raw).ok())
+        let Some(Depth::Update(update)) = scales
+            .get(raw.symbol())
+            .and_then(|scales| raw.convert(*scales).ok())
         else {
             return Ok(false);
         };
+        let ids = raw.ids();
         let (Ok(first), Ok(last), Ok(prev)) = (
-            i64::try_from(raw.first_update_id),
-            i64::try_from(raw.last_update_id),
-            i64::try_from(raw.prev_last_update_id),
+            i64::try_from(ids.first_update_id),
+            i64::try_from(ids.last_update_id),
+            i64::try_from(ids.prev_last_update_id),
         ) else {
             return Ok(false);
         };
         let seq = to_i64(frame.seq)?;
         let (source, transaction) = (
-            ms_to_ns(raw.event_time_ms),
-            ms_to_ns(raw.transaction_time_ms),
+            ms_to_ns(ids.event_time_ms),
+            ms_to_ns(ids.transaction_time_ms),
         );
         let Self {
             levels,
@@ -561,7 +564,7 @@ impl DepthRows {
             source_ts_ns.append_value(source);
             transaction_ts_ns.append_value(transaction);
             capture_ts_ns.append_value(frame.capture_ts_ns);
-            symbol.append_value(&raw.symbol);
+            symbol.append_value(raw.symbol());
             first_update_id.append_value(first);
             last_update_id.append_value(last);
             prev_last_update_id.append_value(prev);
@@ -627,31 +630,35 @@ impl TradeRows {
     fn push(
         &mut self,
         frame: &Frame,
-        raw: &RawAggTrade,
+        raw: &RawTrade,
         scales: &BTreeMap<Symbol, Scales>,
     ) -> Result<bool, StoreError> {
-        let Some(trade) = scales.get(&raw.symbol).and_then(|s| s.agg_trade(raw).ok()) else {
+        let Some(trade) = scales
+            .get(raw.symbol())
+            .and_then(|scales| raw.convert(*scales).ok())
+        else {
             return Ok(false);
         };
+        let ids = raw.ids();
         let id = |value: Option<u64>| value.map(i64::try_from).transpose();
         let (Ok(agg_trade_id), Ok(first), Ok(last)) = (
-            i64::try_from(raw.agg_trade_id),
-            id(raw.first_trade_id),
-            id(raw.last_trade_id),
+            i64::try_from(trade.agg_trade_id),
+            id(ids.first_trade_id),
+            id(ids.last_trade_id),
         ) else {
             return Ok(false);
         };
         self.seq.append_value(to_i64(frame.seq)?);
-        self.source_ts_ns.append_value(ms_to_ns(raw.event_time_ms));
-        self.trade_ts_ns.append_value(ms_to_ns(raw.trade_time_ms));
+        self.source_ts_ns.append_value(ms_to_ns(ids.event_time_ms));
+        self.trade_ts_ns.append_value(ms_to_ns(trade.trade_time_ms));
         self.capture_ts_ns.append_value(frame.capture_ts_ns);
-        self.symbol.append_value(&raw.symbol);
+        self.symbol.append_value(&trade.symbol);
         self.agg_trade_id.append_value(agg_trade_id);
         self.first_trade_id.append_option(first);
         self.last_trade_id.append_option(last);
         self.price.append_value(trade.price);
         self.qty.append_value(trade.qty);
-        self.buyer_is_maker.append_value(raw.buyer_is_maker);
+        self.buyer_is_maker.append_value(trade.buyer_is_maker);
         Ok(true)
     }
 }
@@ -706,12 +713,13 @@ impl SnapshotRows {
     fn push(
         &mut self,
         frame: &Frame,
+        venue: Venue,
         payload: &SnapshotPayload,
         scales: &BTreeMap<Symbol, Scales>,
     ) -> Result<bool, StoreError> {
         let converted = scales.get(&payload.symbol).and_then(|scales| {
-            let raw = parse_snapshot(&payload.body).ok()?;
-            scales.snapshot(&raw).ok()
+            let raw = venue.parse_snapshot(&payload.body).ok()?;
+            raw.convert(*scales).ok()
         });
         let Some(snapshot) = converted else {
             return Ok(false);

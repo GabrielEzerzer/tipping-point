@@ -19,7 +19,7 @@ use serde::Deserialize;
 use super::ipc::{Encoder, Provenance, conform, tagged};
 use super::replay::delay;
 use super::stream::Chunks;
-use crate::binance::{Scales, Symbol};
+use crate::market::{Scales, Symbol};
 use crate::store::run::{self, MANIFEST};
 use crate::store::{StoreError, query};
 

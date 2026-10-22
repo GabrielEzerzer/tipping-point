@@ -2,11 +2,13 @@
 //! units. Prices and quantities arrive as decimal strings and are parsed exactly.
 
 use serde::Deserialize;
-use thiserror::Error;
 
-use super::Scales;
-use super::decimal::{DecimalError, parse_units};
-use super::sync::{DepthUpdate, Level, Snapshot};
+use crate::market::Scales;
+use crate::market::decimal::{DecimalError, parse_units};
+use crate::market::feed::AggTrade;
+use crate::market::sync::{DepthUpdate, Snapshot};
+use crate::store::ms_to_ns;
+use crate::venue::{MessageError, Parsed, RawDepth, RawTrade};
 
 /// One message from a combined stream: `{"stream": "btcusdt@depth@100ms", "data": {...}}`.
 #[derive(Debug, Clone, Deserialize)]
@@ -80,26 +82,6 @@ pub struct RawSnapshot {
     pub asks: Vec<[String; 2]>,
 }
 
-/// An aggregated trade in integer units.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AggTrade {
-    pub symbol: String,
-    pub agg_trade_id: u64,
-    pub price: i64,
-    pub qty: i64,
-    pub trade_time_ms: u64,
-    pub buyer_is_maker: bool,
-}
-
-/// Why a message could not be understood.
-#[derive(Debug, Error)]
-pub enum MessageError {
-    #[error("malformed json: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("bad decimal: {0}")]
-    Decimal(#[from] DecimalError),
-}
-
 /// Parses the text of one combined-stream frame.
 ///
 /// # Errors
@@ -108,12 +90,52 @@ pub fn parse_frame(text: &str) -> Result<CombinedFrame, MessageError> {
     Ok(serde_json::from_str(text)?)
 }
 
+/// Reads one combined-stream frame as a venue frame.
+///
+/// # Errors
+/// Returns an error when the frame is not valid JSON of a known event type.
+pub(crate) fn parse(text: &str) -> Result<Parsed, MessageError> {
+    Ok(match parse_frame(text)?.data {
+        Payload::Depth(raw) => Parsed::Depth(RawDepth::Binance(raw)),
+        Payload::AggTrade(raw) => Parsed::Trade(RawTrade::Binance(raw)),
+    })
+}
+
 /// Parses the body of a REST depth snapshot.
 ///
 /// # Errors
 /// Returns an error when the body is not a valid snapshot.
 pub fn parse_snapshot(body: &str) -> Result<RawSnapshot, MessageError> {
     Ok(serde_json::from_str(body)?)
+}
+
+/// Just the exchange event time `E`, wherever it sits.
+#[derive(Deserialize)]
+struct EventTime {
+    #[serde(rename = "E")]
+    event_time_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct Combined {
+    data: Option<EventTime>,
+}
+
+/// The `E` of a combined-stream frame in nanoseconds, 0 when it has none.
+pub(crate) fn frame_event_time_ns(text: &str) -> i64 {
+    serde_json::from_str::<Combined>(text)
+        .ok()
+        .and_then(|frame| frame.data)
+        .and_then(|data| data.event_time_ms)
+        .map_or(0, ms_to_ns)
+}
+
+/// The `E` of a REST snapshot body in nanoseconds, 0 when it has none.
+pub(crate) fn snapshot_event_time_ns(body: &str) -> i64 {
+    serde_json::from_str::<EventTime>(body)
+        .ok()
+        .and_then(|body| body.event_time_ms)
+        .map_or(0, ms_to_ns)
 }
 
 impl Scales {
@@ -157,23 +179,12 @@ impl Scales {
             buyer_is_maker: raw.buyer_is_maker,
         })
     }
-
-    fn levels(self, pairs: &[[String; 2]]) -> Result<Vec<Level>, DecimalError> {
-        pairs
-            .iter()
-            .map(|[price, qty]| {
-                Ok(Level {
-                    price: parse_units(price, self.price_decimals)?,
-                    qty: parse_units(qty, self.qty_decimals)?,
-                })
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market::sync::Level;
 
     const DEPTH: &str = r#"{"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":1700000000123,"T":1700000000120,"s":"BTCUSDT","U":100,"u":105,"pu":99,"b":[["50000.10","1.500"],["49999.90","0.000"]],"a":[["50000.20","0.250"]]}}"#;
     const TRADE: &str = r#"{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","E":1700000000123,"a":42,"s":"BTCUSDT","p":"50000.10","q":"0.003","f":1,"l":2,"T":1700000000120,"m":true}}"#;
