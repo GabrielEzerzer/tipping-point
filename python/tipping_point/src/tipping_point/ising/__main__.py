@@ -3,7 +3,7 @@
   staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json
   ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x of a pilot record's tau_c
              (or an explicit rate)
-  null       fixed-T null run at epsilon_L = 2, 4 or 6: 400 tau_c of a size a pilot record measured
+  null       fixed-T null run at epsilon_L = 2, 4 or 6: 700 tau_c of a size a pilot record measured
   pilot      measure tau_int of |m| and e at given temperatures; writes tau.json
   tauc       tau_c(L) at Tc from pilot runs (one per L) and its fit A L^z; writes pilot.json
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure

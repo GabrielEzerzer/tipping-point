@@ -49,7 +49,7 @@ BAND = (10.0, -5.0)  # the EWS analysis band in epsilon_L = L (T - Tc) / Tc, hot
 BAND_PER_EPSILON_L = 28.0  # ramp bursts per unit epsilon_L inside it: what dT = 0.005 gives L = 16
 X_SLOW = 0.02  # the slow ramp's Kibble-Zurek point (rate_for), whose cadence a null run copies
 NULL_EPSILON_L = (2.0, 4.0, 6.0)  # fixed-T null runs above Tc, in epsilon_L (#26 call 5)
-NULL_TAU_C = 400  # a null run's measured length in tau_c, longer than a scored ramp segment
+NULL_TAU_C = 700  # a null run's measured length in tau_c: two scored slices of 310-340 tau_c
 
 
 class Schedule(Protocol):

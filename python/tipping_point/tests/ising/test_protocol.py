@@ -166,17 +166,18 @@ def test_the_pre_50_x_values_are_x_times_a() -> None:
         assert protocol.rate_for(32, x_old * 0.052, 0.052, 2.17) == pytest.approx(old, rel=1e-3)
 
 
-def test_null_runs_hold_epsilon_l_for_400_tau_c_at_the_slow_ramps_cadence() -> None:
-    """#26 call 5: a null is one temperature above Tc at a preset epsilon_L, as long as a scored
-    ramp segment and saved like one, and its manifest says which epsilon_L and tau_c made it.
-    A manifest from before the fields existed still rebuilds."""
+def test_null_runs_hold_epsilon_l_for_700_tau_c_at_the_slow_ramps_cadence() -> None:
+    """#26 call 5: a null is one temperature above Tc at a preset epsilon_L, long enough for two
+    scored slices (310-340 tau_c each at x = 0.02) and saved like a ramp segment, and its
+    manifest says which epsilon_L and tau_c made it. A manifest from before the fields existed
+    still rebuilds."""
     assert protocol.NULL_EPSILON_L == (2.0, 4.0, 6.0)
     f = protocol.null_run(64, 4.0, tau_c=1000.0)
     assert f.kind == "fixed" and f.temperatures(1) == (exact.TC * (1 + 4.0 / 64),)
-    assert (f.therm, f.total) == (20_000, 20_000 + 400_000)
+    assert (f.therm, f.total) == (20_000, 20_000 + 700_000)
     assert f.stats_stride == 20  # 50 stats rows per tau_c
     starts = sorted(step for step, (_, frame) in f.frames.items() if frame == 0)
-    per_tau_c = len(starts) / 400  # the slow ramp: 28 bursts per 50 tau_c of cooling
+    per_tau_c = len(starts) / 700  # the slow ramp: 28 bursts per 50 tau_c of cooling
     assert per_tau_c == pytest.approx(protocol.BAND_PER_EPSILON_L * protocol.X_SLOW, rel=0.01)
     assert min(starts) > f.therm and max(f.frames) <= f.total
     params = f.to_json()["params"]

@@ -143,12 +143,13 @@ along domain walls (#50).
   got 3.5 there); the manifest's `schedule.saves` records the gaps and the burst counts.
 
 - **Null runs**, the EWS scorer's negatives: `null --epsilon-L {2,4,6}` for each L, at least 5
-  seeds each, holds T = Tc (1 + epsilon_L / L) for 20 tau_c of thermalisation and 400 tau_c of
-  measurement, with a stats row every tau_c / 50 sweeps and bursts at the slow ramp's in-band
-  cadence. The manifest is a `fixed` schedule whose params add `epsilon_L` and `tau_c`, and
-  complete.json judges the run thermalised like a staircase plateau. One run is 21,886 sweeps
-  at L = 16, 97,236 at 32 and 367,673 at 64; L = 128 is refused until a pilot measures it, since
-  the manifest could not tell a fitted tau_c from a measured one.
+  seeds each, holds T = Tc (1 + epsilon_L / L) for 20 tau_c of thermalisation and 700 tau_c of
+  measurement, two scored slices at x = 0.02 (310-340 tau_c each), with a stats row every
+  tau_c / 50 sweeps and bursts at the slow ramp's in-band cadence. The manifest is a `fixed`
+  schedule whose params add `epsilon_L` and `tau_c`, and complete.json judges the run
+  thermalised like a staircase plateau. One run is 37,519 sweeps at L = 16, 166,689 at 32 and
+  630,295 at 64; L = 128 is refused until a pilot measures it, since the manifest could not tell
+  a fitted tau_c from a measured one.
 
 ## Running the gate
 
