@@ -17,6 +17,7 @@ use engine::api::hub::{Hub, HubConfig};
 use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
 use engine::store::writer::LogConfig;
+use engine_harness::KillOnDrop;
 use engine_harness::api::{
     ISING_RUN, LivePath, Outcome, Server, copy_ising_fixture, fixture, hello, next_json, python,
     script, send_json, ws_connect,
@@ -29,13 +30,14 @@ fn client() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api_client.py")
 }
 
-/// Starts the client with `args`.
-fn spawn(args: &[&str]) -> std::io::Result<std::process::Child> {
+/// Starts the client with `args`, killed if the test ends first.
+fn spawn(args: &[&str]) -> std::io::Result<KillOnDrop> {
     Command::new(python())
         .arg(client())
         .args(args)
         .env("PYTHONUTF8", "1")
         .spawn()
+        .map(KillOnDrop)
 }
 
 /// Waits for a child without blocking the runtime, at most `limit`.
