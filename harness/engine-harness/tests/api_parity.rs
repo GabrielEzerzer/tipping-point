@@ -551,3 +551,69 @@ async fn a_producer_that_panics_fails_at_the_client() -> Outcome {
     fs::remove_dir_all(&dir)?;
     Ok(())
 }
+
+/// Replaying the live run when memory no longer reaches back to the requested start (nothing
+/// rotated, a ring of 400 ms): the client is told how many instants are missing with a book gap,
+/// before the samples memory still holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
+    let dir = scratch("api-gap");
+    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let hub = Hub::new(HubConfig {
+        ring: Duration::from_millis(400),
+        ..HubConfig::default()
+    });
+    let mut live = LivePath::new(
+        scales,
+        Arc::clone(&hub),
+        &dir,
+        Some(RUN),
+        LogConfig::default(),
+    )?;
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+    let url = server.url("/v1/live/book_samples");
+    let arrow = tokio::spawn(async move { get_arrow(&url).await });
+    while hub.arrow_subscribers() == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for message in messages {
+        live.push(message).await?;
+    }
+    hub.end();
+    let (schema, batches) = arrow.await??;
+    let all = book_rows(&one_batch(&schema, &batches)?);
+    let first_ms = all.first().ok_or("the session has samples")?.1;
+    let held = hub.recent(i64::MIN).samples;
+    let first_held_ms = held.first().ok_or("memory holds samples")?.sample_ts_ns / 1_000_000;
+    assert!(
+        first_held_ms > first_ms + 100,
+        "the ring must have dropped samples"
+    );
+
+    let mut viewer = ws_connect(server.addr).await?;
+    hello(&mut viewer).await?;
+    send_json(&mut viewer, &json!({"t": "sub", "topics": ["book"]})).await?;
+    let _ack = next_json(&mut viewer, WAIT).await?;
+    let replay = json!({"t": "replay", "run": RUN, "from_ms": first_ms, "speed": 0});
+    send_json(&mut viewer, &replay).await?;
+    until_replay(&mut viewer).await?;
+    let gap = next_json(&mut viewer, WAIT).await?;
+    let lost = (first_held_ms - first_ms) / 100;
+    assert_eq!(gap, json!({"t": "gap", "topic": "book", "lost": lost}));
+    // Unpaced, the books coalesce to the newest; whatever comes is from memory, after the gap.
+    let (books, _, _) = read_until_ended(&mut viewer).await?;
+    assert!(
+        books.iter().all(|book| book.1 >= first_held_ms),
+        "{books:?}"
+    );
+    let held_rows: Vec<BookRow> = all
+        .iter()
+        .filter(|row| row.1 >= first_held_ms)
+        .cloned()
+        .collect();
+    assert_subsequence(&books, &held_rows, "replay from memory after a gap");
+    live.finish().await?;
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}

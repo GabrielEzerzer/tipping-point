@@ -306,6 +306,13 @@ fn every_server_message_matches_the_catalog() -> Outcome {
         }
         .to_text(),
     );
+    lines.push(
+        ServerMessage::Gap {
+            topic: Topic::Book,
+            lost: 4,
+        }
+        .to_text(),
+    );
     lines.extend(sources.iter().map(|s| ServerMessage::Source(s).to_text()));
     for (topic, data) in &results {
         let topic = Topic::relayed(topic).ok_or("a relayed topic")?;

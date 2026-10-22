@@ -5,6 +5,7 @@
 {"t":"status","ts_ms":1700000000300,"streams":{"depth":{"connected":true,"reconnects":1,"frames_dropped":2},"trades":{"connected":false,"reconnects":0,"frames_dropped":3}},"symbols":{"BTCUSDT":{"synced":true},"ETHUSDT":{"synced":false}},"resyncs":4,"sequence_gaps":1,"snapshot_failures":1,"parse_errors":2}
 {"t":"gap","topic":"trades","lost":12}
 {"t":"gap","topic":"ising","lost":3}
+{"t":"gap","topic":"book","lost":4}
 {"t":"source","mode":"live"}
 {"t":"source","mode":"replay","run":"20231114T221320Z-session","from_ms":1700000000500,"speed":10.0}
 {"t":"source","mode":"paused","run":"20231114T221320Z-session","from_ms":1700000000500,"speed":10.0}

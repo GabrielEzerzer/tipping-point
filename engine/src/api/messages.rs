@@ -300,7 +300,9 @@ pub enum ServerMessage<'a> {
         trades: &'a [TradeMessage],
     },
     Status(&'a Status),
-    /// `lost` messages of an append topic were dropped for this client.
+    /// `lost` messages of an append topic were dropped for this client. On `book`, sent during
+    /// a replay: `lost` grid instants of the run are no longer anywhere the engine can read
+    /// them (memory no longer reaches back to where the rotated hours end).
     Gap {
         topic: Topic,
         lost: u64,

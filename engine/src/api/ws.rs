@@ -583,6 +583,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             match next {
                 Some(Item::Sample(sample)) => self.replay_book = Some(sample),
                 Some(Item::Trade(trade)) => self.replay_trades.push(trade),
+                Some(Item::BookGap(lost)) => {
+                    // Everything before the gap goes out before it.
+                    self.queue_replayed();
+                    if self.sub.has(Topic::Book) {
+                        self.queue(&ServerMessage::Gap {
+                            topic: Topic::Book,
+                            lost,
+                        });
+                    }
+                }
                 Some(Item::End) | None => {
                     // What is left still goes out, then the source says the run is over.
                     self.queue_replayed();

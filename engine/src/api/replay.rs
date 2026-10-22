@@ -32,6 +32,9 @@ const QUEUE: usize = 256;
 pub enum Item {
     Sample(Arc<Sample>),
     Trade(Arc<TradeMessage>),
+    /// This many grid instants are missing before the next sample: memory no longer reaches back
+    /// to where the rotated hours end, or to the requested start.
+    BookGap(u64),
     /// The run is over.
     End,
 }
@@ -147,7 +150,7 @@ async fn feed(
                     match &item {
                         Item::Sample(sample) => last_sample = last_sample.max(sample.sample_ts_ns),
                         Item::Trade(trade) => last_trade = last_trade.max(Some(trade.seq)),
-                        Item::End => {}
+                        Item::BookGap(_) | Item::End => {}
                     }
                     if !pacer.wait(t, &mut paused).await || tx.send(item).await.is_err() {
                         return;
@@ -161,13 +164,20 @@ async fn feed(
     }
     if let Some(hub) = live {
         // The rotated tables are a prefix of the run: memory carries on after them, from the
-        // requested start.
+        // requested start, and says so when it no longer reaches back that far.
         let recent = hub.recent(start_ns.saturating_sub(1));
-        let samples = recent
+        let samples: Vec<Arc<Sample>> = recent
             .samples
             .into_iter()
             .filter(|sample| sample.sample_ts_ns > last_sample)
             .collect();
+        let every = hub.config().book_sample.every_ns;
+        let first = samples.first().map(|sample| sample.sample_ts_ns);
+        if let Some(lost) = missing_instants(last_sample, start_ns, first, every)
+            && tx.send(Item::BookGap(lost)).await.is_err()
+        {
+            return;
+        }
         let trades = recent
             .trades
             .into_iter()
@@ -180,6 +190,33 @@ async fn feed(
         }
     }
     let _ = tx.send(Item::End).await;
+}
+
+/// Grid instants missing between where the replay is (the last sample sent, or else the
+/// requested start) and the first sample memory still holds; `None` when they meet or when there
+/// is nothing to compare. Samples are one grid step apart however quiet the market, so a longer
+/// step is samples lost to the replay.
+fn missing_instants(
+    last_sample: i64,
+    start_ns: i64,
+    first_held: Option<i64>,
+    every_ns: i64,
+) -> Option<u64> {
+    let every_ns = every_ns.max(1);
+    let first = first_held?;
+    let expected = if last_sample != i64::MIN {
+        last_sample.checked_add(every_ns)?
+    } else if start_ns != i64::MIN {
+        // The first grid instant at or after the start.
+        start_ns
+            .div_euclid(every_ns)
+            .checked_add(i64::from(start_ns.rem_euclid(every_ns) != 0))?
+            .checked_mul(every_ns)?
+    } else {
+        return None;
+    };
+    let lost = u64::try_from((first - expected).div_euclid(every_ns)).ok()?;
+    (lost > 0).then_some(lost)
 }
 
 /// What one look at the Parquet found.
@@ -427,6 +464,27 @@ impl Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_longer_than_the_grid_is_instants_lost() {
+        // After the rotated hours: the next sample is due one step after the last one sent.
+        assert_eq!(missing_instants(1_000, i64::MIN, Some(1_100), 100), None);
+        assert_eq!(missing_instants(1_000, i64::MIN, Some(1_400), 100), Some(3));
+        // Nothing rotated: memory must start at the first instant of the requested start.
+        assert_eq!(missing_instants(i64::MIN, 950, Some(1_000), 100), None);
+        assert_eq!(missing_instants(i64::MIN, 1_000, Some(1_500), 100), Some(5));
+        assert_eq!(
+            missing_instants(i64::MIN, i64::MIN, Some(1_500), 100),
+            None,
+            "no start"
+        );
+        assert_eq!(
+            missing_instants(1_000, i64::MIN, None, 100),
+            None,
+            "memory empty"
+        );
+        assert_eq!(missing_instants(1_000, i64::MIN, Some(1_050), 100), None);
+    }
 
     #[test]
     fn any_speed_gives_a_finite_wait() {
