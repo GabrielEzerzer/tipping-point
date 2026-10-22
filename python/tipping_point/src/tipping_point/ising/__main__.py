@@ -1,7 +1,8 @@
 """Command line: python -m tipping_point.ising <command> [options]
 
   staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json
-  ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x (or an explicit rate)
+  ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x of a pilot record's tau_c
+             (or an explicit rate)
   pilot      measure tau_int of |m| and e at given temperatures; writes tau.json
   tauc       tau_c(L) at Tc from pilot runs (one per L) and its fit A L^z; writes pilot.json
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure
@@ -60,8 +61,9 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ramp", parents=[sized, saving], help="linear cooling ramp")
     speed = p.add_mutually_exclusive_group(required=True)
-    speed.add_argument("--x", type=float, help="Kibble-Zurek point: 30 fast, 0.3 slow")
+    speed.add_argument("--x", type=float, help="Kibble-Zurek point: 0.02 slow, 2 fast")
     speed.add_argument("--rate", type=int, help="sweeps per unit T")
+    p.add_argument("--pilot", type=Path, help="pilot.json: --x is read against its A L^z")
     p.add_argument("--pre", type=int, default=1000, help="equilibration sweeps at 3.5")
     p.add_argument("--hold", type=int, default=1000, help="sweeps held at 1.5")
     p.set_defaults(command=_ramp)
@@ -129,9 +131,15 @@ def _staircase(args: argparse.Namespace) -> int:
 
 
 def _ramp(args: argparse.Namespace) -> int:
-    rate = args.rate if args.x is None else protocol.rate_for(args.L, args.x)
+    rate, A, z = args.rate, None, None
+    if args.x is not None:
+        if args.pilot is None:
+            raise SystemExit("--x needs --pilot: x is measured against the record's tau_c = A L^z")
+        fit = pilot.read(args.pilot)["fit"]
+        A, z = fit["A"], fit["z"]
+        rate = protocol.rate_for(args.L, args.x, A, z)
     burst = protocol.Burst(stride=args.burst_stride)
-    schedule = protocol.Ramp(rate, pre=args.pre, hold=args.hold, burst=burst, x=args.x)
+    schedule = protocol.Ramp(rate, pre=args.pre, hold=args.hold, burst=burst, x=args.x, A=A, z=z)
     speed = f"r{rate}" if args.x is None else f"x{args.x:g}"
     tag = f"L{args.L}-ramp-{speed}-s{args.seed}"
     print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))

@@ -114,13 +114,25 @@ def test_ramp_saves_a_burst_every_0_005_of_cooling() -> None:
     assert {b - a for a, b in itertools.pairwise(fast_starts)} == {8}
 
 
-def test_rate_for_puts_every_size_at_the_same_kibble_zurek_point() -> None:
-    """r = L^3.17 / (x Tc): x = 0.3 at L = 128 is the research's ~1.4e7-sweep slow ramp."""
+def test_rate_for_puts_every_size_at_the_same_point_of_the_true_tau() -> None:
+    """x = tau_c(L) / (sweeps per unit epsilon_L) at every L, so the window |epsilon_L| < 1 takes
+    2/x tau_c: 100 at x = 0.02 and 1 at x = 2. Catches a rate that ignores A (pre-#50, the fixed
+    kernel's 2.5x slower tau made every ramp 2.5x faster than its x said) or uses another z."""
+    A, z = 0.13, 2.2
     for L in (16, 32, 64, 128):
-        for x in (30.0, 0.3):
-            r = protocol.rate_for(L, x)
-            assert L**protocol.KZ_EXPONENT / (r * exact.TC) == pytest.approx(x, rel=0.02)
-    assert 2 * protocol.rate_for(128, 0.3) == pytest.approx(1.4e7, rel=0.02)
+        for x in (0.02, 2.0):
+            per_epsilon_L = protocol.rate_for(L, x, A, z) * exact.TC / L
+            assert per_epsilon_L == pytest.approx(A * L**z / x, rel=0.01)
+    slower = protocol.rate_for(64, 0.02, 2.5 * A, z)
+    assert slower == pytest.approx(2.5 * protocol.rate_for(64, 0.02, A, z), rel=1e-6)
+
+
+def test_the_pre_50_x_values_are_x_times_a() -> None:
+    """The old rate L^3.17 / (x Tc) is this rate at x A with z = 2.17: on the pre-#47 kernel
+    (A = 0.052) the nominal 0.3 and 30 were 0.016 and 1.6."""
+    for x_old in (0.3, 30.0):
+        old = 32**3.17 / (x_old * exact.TC)
+        assert protocol.rate_for(32, x_old * 0.052, 0.052, 2.17) == pytest.approx(old, rel=1e-3)
 
 
 def test_fixed_blocks_and_phases() -> None:

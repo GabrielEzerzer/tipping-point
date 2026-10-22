@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 
 import pytest
-from tipping_point.ising import exact, io, protocol
+from tipping_point.ising import exact, io, pilot, protocol
 from tipping_point.ising.__main__ import _taus, main
+
+PILOT = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #50's pilot record
 
 
 def _only_run(root: Path) -> Path:
@@ -47,13 +49,25 @@ def test_validate_cli_passes_and_writes_its_verdicts(tmp_path: Path) -> None:
 
 
 def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
-    """--x picks r from L; the tag and the manifest record both."""
-    argv = ["ramp", "--L", "4", "--x", "30", "--replicas", "2", "--pre", "10", "--hold", "10"]
-    assert main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"]) == 0
+    """--x picks r from L and the pilot record's A L^z; the tag and the manifest record x, the
+    fit it was read against, and r."""
+    argv = ["ramp", "--L", "4", "--x", "2", "--pilot", str(PILOT), "--replicas", "2"]
+    argv += ["--pre", "10", "--hold", "10", "--data-dir", str(tmp_path), "--device", "cpu"]
+    assert main(argv) == 0
     run_dir = _only_run(tmp_path)
-    assert run_dir.name.endswith("-L4-ramp-x30-s1")
+    assert run_dir.name.endswith("-L4-ramp-x2-s1")
     params = io.read_json(run_dir / "manifest.json")["params"]["schedule"]["params"]
-    assert params["x"] == 30.0 and params["rate"] == protocol.rate_for(4, 30.0)
+    fit = pilot.read(PILOT)["fit"]
+    assert (params["x"], params["A"], params["z"]) == (2.0, fit["A"], fit["z"])
+    assert params["rate"] == protocol.rate_for(4, 2.0, fit["A"], fit["z"])
+
+
+def test_ramp_x_needs_a_pilot_record(tmp_path: Path) -> None:
+    """Catches a rate taken from a hidden constant: --x without a record is refused, no run."""
+    argv = ["ramp", "--L", "4", "--x", "2", "--data-dir", str(tmp_path), "--device", "cpu"]
+    with pytest.raises(SystemExit, match="--pilot"):
+        main(argv)
+    assert not (tmp_path / "ising").exists()
 
 
 def test_staircase_cli_reads_taus_from_a_pilot(

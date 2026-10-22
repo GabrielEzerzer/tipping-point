@@ -29,7 +29,6 @@ from .exact import TC
 
 T_HOT, T_COLD = 3.5, 1.5
 GRID = tuple(float(t) for t in np.linspace(T_COLD, T_HOT, 40)[::-1])  # staircase order: hot first
-KZ_EXPONENT = 2.17 + 1.0  # z + 1/nu: Metropolis z = 2.17 (Liu, Polkovnikov, Sandvik 2014), nu = 1
 
 
 @dataclass(frozen=True)
@@ -66,9 +65,20 @@ def dwell(tau: float, min_therm: int = 500, min_meas: int = 2000) -> tuple[int, 
     return max(min_therm, math.ceil(20 * tau)), max(min_meas, math.ceil(100 * tau))
 
 
-def rate_for(L: int, x: float) -> int:
-    """Sweeps per unit T that put size L at the Kibble-Zurek point x = L^(z+1/nu) / (r Tc)."""
-    return max(1, round(L**KZ_EXPONENT / (x * TC)))
+def rate_for(L: int, x: float, A: float, z: float) -> int:
+    """Sweeps per unit T that put size L at the Kibble-Zurek point x of the true tau_c = A L^z
+    (the pilot record's fit; nu = 1):
+
+        r = A L^(z + 1) / (x Tc),   that is   x = tau_c(L) / (r Tc / L),
+
+    tau_c over the sweeps the bath spends per unit of epsilon_L = L (T - Tc) / Tc, the same at
+    every L. The critical window |epsilon_L| < 1 takes 2/x tau_c to cross: the slow ramp, x = 0.02,
+    spends 50 tau_c per unit epsilon_L and ~100 tau_c in the window; the fast one, x = 2, crosses
+    it in ~1 tau_c, the Kibble-Zurek regime #19 asked for. Before #50 the rate was
+    L^3.17 / (x Tc), with no A: its nominal x = 0.3 and 30 are 0.3 A and 30 A here, 0.016 and 1.6
+    on the pre-#47 kernel (A = 0.052).
+    """
+    return max(1, round(A * L ** (z + 1) / (x * TC)))
 
 
 def _bursts(first: int, n: int, saves: int, burst: Burst) -> list[int]:
@@ -172,6 +182,8 @@ class Ramp:
         save_dT: float = 0.005,
         burst: Burst = BURST,
         x: float | None = None,  # the Kibble-Zurek point the rate came from, kept for the record
+        A: float | None = None,  # ... and the tau_c = A L^z fit it was computed against
+        z: float | None = None,
     ) -> None:
         self.params = {
             "rate": rate,
@@ -182,6 +194,8 @@ class Ramp:
             "save_dT": save_dT,
             "burst": asdict(burst),
             "x": x,
+            "A": A,
+            "z": z,
         }
         self.rate, self.T0, self.T1 = rate, T0, T1
         self.t0 = pre  # last step at T0

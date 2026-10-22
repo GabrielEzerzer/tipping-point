@@ -72,7 +72,7 @@ uv run python -m tipping_point.ising validate                        # Gates A-C
 uv run python -m tipping_point.ising pilot --L 16 --sweeps 50000      # tau_int per T -> tau.json
 uv run python -m tipping_point.ising tauc <pilot run> ...             # tau_c(L) at Tc -> pilot.json
 uv run python -m tipping_point.ising staircase --L 16 --tau <pilot run>/tau.json
-uv run python -m tipping_point.ising ramp --L 16 --x 30               # Kibble-Zurek x: 30 fast, 0.3 slow
+uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <record>/pilot.json  # x: 0.02 slow, 2 fast
 uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
 ```
 
@@ -110,6 +110,30 @@ the local slope is 2.15 from L = 16 to 32 but 1.92 from 32 to 64, where 16 repli
 3,690 [3,240, 4,230] sweeps from the fit, to re-measure before the L = 128 runs. The pre-#47
 kernel read 21.3, 85.7 and 376 (A ~ 0.05): its fixed black-then-white order relayed level flips
 along domain walls (#50).
+
+### Protocol (#19)
+
+- **Staircase**, the quasi-static arm: the 40-point grid from 3.5 down to 1.5, each plateau
+  thermalised for max(500, 20 tau) sweeps and measured for max(2000, 100 tau), with tau from a
+  `pilot` run's tau.json at that temperature. The plateau nearest Tc costs 1,043 + 5,211 sweeps
+  at L = 16.
+- **Ramps**, the dynamic arm: linear cooling from 3.5 to 1.5 at r = A L^(z+1) / (x Tc) sweeps per
+  unit T, A and z from the pilot record, so x = tau_c(L) / (sweeps per unit of epsilon_L =
+  L (T - Tc) / Tc) at every L. The slow ramp, x = 0.02, spends 50 tau_c per unit epsilon_L and
+  crosses the critical window |epsilon_L| < 1 in 100 tau_c; the fast one, x = 2, crosses it in one
+  tau_c, the Kibble-Zurek regime. Sweeps with this record (tau_c at L = 128 from the fit):
+
+  | | L = 16 | L = 32 | L = 64 | L = 128 |
+  |---|---|---|---|---|
+  | x = 0.02: critical window | 5,353 | 21,939 | 89,925 | 368,586 |
+  | x = 0.02: whole ramp | 37,742 | 309,390 | 2,536,252 | 20,791,168 |
+  | x = 2: critical window | 54 | 219 | 899 | 3,686 |
+  | x = 2: whole ramp | 378 | 3,094 | 25,362 | 207,912 |
+
+  Before #50 the rate was L^3.17 / (x Tc), with no A, at nominal x = 0.3 and 30. Under this
+  definition those were x = 0.016 and 1.6 on the pre-#47 kernel (A = 0.052), crossing the window
+  in about 130 and 1.3 tau_c; on the fixed kernel, where tau_c is about 2.5 times longer, they
+  are x = 0.030-0.038 and 3.0-3.8.
 
 ## Running the gate
 
