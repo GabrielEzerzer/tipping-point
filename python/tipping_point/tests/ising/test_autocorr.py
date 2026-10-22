@@ -73,3 +73,35 @@ def test_short_series_are_flagged_unreliable() -> None:
     """A series shorter than ~50 tau cannot be trusted, and the result must say so."""
     x = _ar1(0.99, replicas=4, n=2000, seed=5)
     assert not autocorr.estimate(x).reliable
+
+
+@pytest.mark.parametrize(
+    ("replicas", "n_over_tau", "datasets", "band"),
+    [(16, 343, 64, (0.93, 1.0)), (64, 960, 16, (0.97, 1.01))],  # the record's L = 64 and L = 16
+)
+def test_the_window_reads_10_over_n_over_tau_short_at_the_records_geometries(
+    replicas: int, n_over_tau: int, datasets: int, band: tuple[float, float]
+) -> None:
+    """Pins the bias the pilot record carries. Subtracting each series' mean pulls the c = 5
+    windowed tau ~10 / (N / tau) low: 2.9% at the L = 64 run's 16 replicas x 343 tau, 1.0% at
+    L = 16's 64 x 960 tau. AR(1) with tau = 9, averaged over independent datasets of the record's
+    shape so the noise sits well inside the band (measured 0.976 and 0.988)."""
+    n = round(n_over_tau * 9)
+    ratios = [autocorr.estimate(_ar1(0.8, replicas, n, seed)).tau / 9 for seed in range(datasets)]
+    assert band[0] <= np.mean(ratios) <= band[1]
+
+
+def test_replica_bootstrap_spread_is_the_standard_error_over_replicas() -> None:
+    """Catches resampling the wrong axis or the wrong number of rows (either skews the spread by
+    sqrt 2 or more), or not resampling at all: with its window fixed, tau is linear in the
+    replicas' rho, so the bootstrap's spread must be the standard error of the per-replica
+    windowed sums. Its interval must cover the exact tau, 19."""
+    x = _ar1(0.9, replicas=64, n=4000, seed=7)
+    tau = autocorr.estimate(x)
+    draws = autocorr.bootstrap(x, 2000, np.random.default_rng(0))
+    rho = np.stack([autocorr.autocorrelation(row) for row in x])
+    per_replica = 1 + 2 * rho[:, 1 : tau.window + 1].sum(axis=1)
+    assert np.std(draws) == pytest.approx(per_replica.std(ddof=1) / np.sqrt(len(x)), rel=0.15)
+    assert np.median(draws) == pytest.approx(tau.tau, rel=0.02)
+    lo, hi = np.quantile(draws, [0.025, 0.975])
+    assert lo < 19 < hi
