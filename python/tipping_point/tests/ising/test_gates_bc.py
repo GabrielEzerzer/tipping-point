@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from tipping_point.ising import exact, gates, io, kernel, protocol, run
 from tipping_point.ising.__main__ import main
+from torch import Tensor
 
 
 def _passed(checks: list[gates.Check], gate: str) -> list[bool]:
@@ -55,6 +56,24 @@ def test_gate_c_fails_out_of_equilibrium(tmp_path: Path) -> None:
     """Catches tallies before equilibrium: a hot start quenched to 1.5 moves mostly downhill."""
     schedule = protocol.Fixed((1.5,), therm=0, sweeps=20)
     run_dir = run.start(run.Spec(16, 64, seed=7, tally=True), schedule, tmp_path, "quench", "cpu")
+    assert not any(c.passed for c in gates.gate_c(run_dir))
+
+
+def test_gate_c_fails_when_every_level_move_is_taken(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Catches the rule #47 replaced coming back: accepting every dE = 0 move, which traps the
+    lattices whose sites all sit between two up and two down neighbours."""
+    real = kernel.accept_table
+
+    def every_level_move(temperature: Tensor) -> Tensor:
+        table = real(temperature)
+        table[:, 2] = 1.0
+        return table
+
+    monkeypatch.setattr(kernel, "accept_table", every_level_move)
+    schedule = protocol.Fixed((2.5,), therm=200, sweeps=200)
+    run_dir = run.start(run.Spec(8, 32, seed=6, tally=True), schedule, tmp_path, "level", "cpu")
     assert not any(c.passed for c in gates.gate_c(run_dir))
 
 

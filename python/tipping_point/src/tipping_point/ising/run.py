@@ -272,7 +272,10 @@ def _manifest(
             "algorithm": {
                 "name": "checkerboard-metropolis",
                 "order": "black (i + j even) half-sweep, then white",
-                "accept": "u < min(1, exp(-dE/T)); table built in float64, used as float32",
+                "accept": (
+                    "u < min(1, exp(-dE/T)), except u < 1/2 at dE = 0; "
+                    "table built in float64, used as float32"
+                ),
             },
             "rng": {
                 "generator": f"torch.Generator({dev.type})",
