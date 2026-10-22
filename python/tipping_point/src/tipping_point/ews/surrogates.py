@@ -81,3 +81,6 @@ def block_bootstrap(x: np.ndarray, block: int, n: int, rng: np.random.Generator)
     starts = rng.integers(0, length - block + 1, (*x.shape[:-1], n, count))
     index = (starts[..., None] + np.arange(block)).reshape(*starts.shape[:-1], count * block)
     return np.take_along_axis(x[..., None, :], index[..., :length], axis=-1)
+
+
+KINDS = {"phase": phase_randomised, "ar1": ar1_fitted}  # the surrogate tests a prereg may name

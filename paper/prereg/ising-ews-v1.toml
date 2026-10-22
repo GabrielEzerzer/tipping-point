@@ -1,0 +1,145 @@
+# Pre-registration: the classic early-warning baselines on the 2D Ising model (#26, research
+# pass 2026-10-22, owner's calls 1-6 taken as recommended). Not frozen: before the freeze, fill
+# data.tau_c from the #50 pilot record, decide on L = 128 (#19: budget permitting; its tau_c must
+# be in the pilot record), set trials.budget to match, and recalibrate the surrogate test on real
+# fixed-T segments (#28 pre-flight). Units: time in tau_c(L) = tau_int(|m|) at Tc on the fixed
+# kernel; temperature in eps_L = L (T - Tc) / Tc; lags in samples of the cadence.
+
+id = "ising-ews"
+version = 1
+supersedes = ""
+reason = ""
+question = "Do the classic early-warning indicators of |m| warn of the 2D Ising transition on a slow ramp, and do they obey finite-size scaling, so that they can serve as the positive control and the baseline for the latent signals of #28?"
+
+[[hypotheses]]
+name = "static-positive-control"
+statement = "At the staircase plateau nearest Tc, L^2 Var(|m|), the mean of |m| and the skewness of |m| scale with the exact 2D Ising exponents."
+prediction = "Fitted exponents over L lie within 0.1 of 7/4, within 0.02 of -1/8 and within 0.1 of 0 (match verdicts in fss.static); a miss is a pipeline bug, checked before any latent number is read."
+direction = "match"
+
+[[hypotheses]]
+name = "classic-rise"
+statement = "Var(|m|) and the lag-1 autocorrelation of |m| rise before the bath reaches Tc on the slow ramp."
+prediction = "At the headline cell, dense cadence, the AUC of positives against fixed-T nulls has a 95% CI above 0.5 for every L and h."
+direction = "greater"
+
+[[hypotheses]]
+name = "skewness-falls"
+statement = "The skewness of |m| falls as the bath approaches Tc, from the positive value of a disordered lattice towards the negative value it holds at Tc."
+prediction = "At the headline cell, dense cadence, the AUC has a 95% CI below 0.5 for every L and h."
+direction = "less"
+
+[[hypotheses]]
+name = "dynamic-fss"
+statement = "The classic alarms come at a fixed scaled temperature: the first-alarm eps_L of Var(|m|) and AC1(|m|) does not depend on L."
+prediction = "1/nu fitted from the median alarm eps_L over L lies within 0.1 of 1 and its CI excludes 0 (an indicator merely monotone in T gives 1/nu = 0)."
+direction = "match"
+
+[[hypotheses]]
+name = "ac1-reference"
+statement = "At a one-sweep lag, 1 - AC1(|m|) at Tc tracks 1/chi (Halperin), not 1/tau: its exponent is near -gamma/nu = -7/4, not -z."
+prediction = "The fitted exponent of 1 - AC1 (lag one sweep, pairs inside bursts) is negative with a CI excluding 0; the measured value is the reference that latent AC1 is compared with in #28, never z."
+direction = "less"
+
+[data]
+domain = "ising"
+L = [16, 32, 64]
+seeds = [1, 2, 3, 4, 5]
+replicas = 16
+exclusions = []
+
+[data.tau_c]
+source = "pilot"
+pilot_run = "TBD"        # the #50 pilot run: <data dir>/ising/<run>/pilot.json, fixed kernel
+pilot_sha256 = "TBD"
+
+[data.ramps]
+kind = "ramp"
+x = 0.02                 # the slow ramp, r = A L^(z+1) / (x Tc) after #50's recalibration
+
+[data.nulls]
+kind = "fixed"
+eps_L = [2.0, 4.0, 6.0]  # >= 5 seeds each, each run about as long as a positive segment
+
+[data.staircase]
+kind = "staircase"
+temperature = 2.269231   # grid point Tc + 4.5e-5; plateaus failing `thermalised` are dropped
+
+[indicators]
+names = ["variance", "ac", "skewness"]
+observables = ["abs_m", "energy"]   # |m| first; energy per site second
+cadences = ["dense", "matched"]     # parity is claimed against dense, added information against matched
+thin = 0.1
+lag = 1
+detrend = "gaussian"
+
+[event]
+definition = "The bath crosses the exact Tc = 2/ln(1 + sqrt 2), at step t_c in the run's manifest: the same for every replica and signal, and fixed before any data exist."
+horizons = [0.0, 1.0, 2.0]
+segment = 6.0
+
+[scoring]
+positives = "s at the sample where each slow-ramp replica's bath first reaches eps_L = h: the pipeline on the segment from eps_L = h + 6 down to h, plus one window before it, detrended on its own."
+negatives = "s at the end of equal-length, non-overlapping segments of the fixed-T null runs' measured rows (all parameters fixed, Bury et al. 2021)."
+auc = "Mann-Whitney, ties count 1/2, per (indicator, observable, cadence, L, h, window, bandwidth)"
+alpha = 0.05
+ci_level = 0.95
+bootstrap = 2000
+
+[scoring.surrogates]
+primary = "phase"
+secondary = "ar1"
+n = 999
+cells = "headline"
+
+[scoring.alarms]
+far = 0.01               # theta: 1 false alarm per 100 tau_c on one half of the null runs
+report_per = 1000.0      # false alarms per 1000 tau_c on the other half
+band = [2.0, -2.0]       # first alarm sought from eps_L = 2 down to -2; none is a miss
+every = 1.0
+
+[[fss.static]]
+quantity = "l2_var_abs_m"
+role = "positive-control"
+expected = 1.75
+tolerance = 0.1
+
+[[fss.static]]
+quantity = "mean_abs_m"
+role = "positive-control"
+expected = -0.125
+tolerance = 0.02
+
+[[fss.static]]
+quantity = "skewness_abs_m"
+role = "positive-control"
+expected = 0.0
+tolerance = 0.1
+
+[[fss.static]]
+quantity = "tau_int_abs_m"
+role = "descriptive"     # z of local Metropolis, about 2.17; not exact, so not a control
+expected = 2.17
+
+[[fss.static]]
+quantity = "one_minus_ac1"
+role = "reference"       # lag one sweep from burst pairs; the measured kappa is the reference
+
+[fss.dynamic]
+indicators = ["variance", "ac"]
+observable = "abs_m"
+expected_inverse_nu = 1.0
+tolerance = 0.1
+
+[sensitivity]
+window = [10.0, 20.0, 40.0]
+bandwidth = [5.0, 10.0, 20.0]
+headline = { window = 20.0, bandwidth = 10.0 }
+
+[trials]
+budget = 972             # 3 indicators x 2 observables x 2 cadences x 3 L x 3 h x 9 cells
+counted = "One trial per AUC evaluation of an (indicator, observable, cadence, L, h, window, bandwidth) cell, sensitivity cells included; every score run appends its cells to ews/trials.jsonl in the data dir."
+
+[deviations]
+policy = "Any change after the freeze is a new version with a reason, frozen before it is scored; results scored under v1 stay bound to v1 and are reported."
+log = []
