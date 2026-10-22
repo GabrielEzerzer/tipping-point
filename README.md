@@ -51,7 +51,11 @@ cargo run -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the 
 ```
 
 DuckDB is linked from its prebuilt library, which the build downloads once per target dir
-(`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network.
+(`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network. On
+Windows the build also copies `duckdb.dll` next to the binaries (`target/<profile>/`,
+`engine/build.rs`), so `store.exe` and `serve.exe` start from any shell, not only under cargo;
+a binary copied elsewhere needs that DLL beside it. Linux and macOS binaries find the library
+through their rpath.
 
 Recorded fixtures are never committed; the replay tests replay any present locally and skip
 otherwise. The committed tests use synthetic streams and a golden log
