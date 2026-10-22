@@ -1,11 +1,15 @@
 //! The log writer. One thread owns the open segment file. It writes each frame with a single
-//! `write_all` (no `BufWriter`, whose buffer would die with the process), calls `sync_data` at
-//! most a second after any write, and moves to a new segment at every UTC hour or once a
-//! segment reaches 1 GiB. The live loop hands it entries through a bounded queue and waits when
-//! the queue is full, so a stalled disk slows the loop instead of growing memory.
+//! `write_all` (no `BufWriter`, whose buffer would die with the process) and calls `sync_data`
+//! at most a second after any write. The live loop hands it frames through a bounded queue and
+//! waits when the queue is full, so a stalled disk slows the loop instead of growing memory.
 //!
-//! The writer assigns each entry its seq in arrival order. The live loop is the only sender and
-//! logs each input right before applying it, so seq order is the order the feed changed in.
+//! The live loop's handle numbers the frames: [`LogWriter::append`] returns the seq it gave the
+//! entry, so the loop knows the seq of every input it applies. The handle also decides when a
+//! segment ends, at every UTC hour or once a segment reaches 1 GiB, because it sees the clock and
+//! every frame's size; it then queues the segment's end marker and the next segment's Meta with
+//! their own seqs. The thread only writes, and refuses any frame whose seq is not the previous
+//! one plus one. The live loop is the only sender and logs each input right before applying it,
+//! so seq order is the order the feed changed in.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -65,11 +69,32 @@ pub struct Summary {
     pub last_seq: u64,
 }
 
-/// The handle the live loop holds: a queue into the writer thread.
+/// What the handle queues for the writer thread.
+#[derive(Debug)]
+enum Job {
+    /// Write one frame to the open segment.
+    Write(Frame),
+    /// Close the open segment with its marker `end`, sync it, then open the segment named after
+    /// `meta`'s seq and write `meta` first. One job, so a segment is never left half rotated.
+    Rotate { end: Frame, meta: Frame },
+}
+
+/// The handle the live loop holds: it numbers frames, decides rotation, and queues both for the
+/// writer thread.
 #[derive(Debug)]
 pub struct LogWriter {
-    tx: mpsc::Sender<Entry>,
+    tx: mpsc::Sender<Job>,
     thread: JoinHandle<Result<Summary, LogError>>,
+    meta: Meta,
+    max_segment_bytes: u64,
+    rotate_every: Duration,
+    /// The seq the next frame gets.
+    next_seq: u64,
+    /// Frames and bytes queued for the open segment, its Meta included.
+    segment_frames: u64,
+    segment_bytes: u64,
+    /// When the open segment's hour ends.
+    rotate_at_ns: i64,
 }
 
 impl LogWriter {
@@ -87,35 +112,112 @@ impl LogWriter {
         if !segment::list(&log_dir)?.is_empty() {
             return Err(LogError::NotEmpty(log_dir));
         }
+        let now = now_ns();
+        let first = meta_frame(&meta, 0, now);
+        let first_len = first.encoded_len() as u64;
         let queue = config.queue.max(1);
-        let writer = Writer::open(log_dir, meta, config, lock)?;
+        let (max_segment_bytes, rotate_every) = (config.max_segment_bytes, config.rotate_every);
+        let writer = Writer::open(log_dir, config, lock, &first)?;
         let (tx, rx) = mpsc::channel(queue);
         let thread = thread::Builder::new()
             .name("tplog-writer".to_owned())
             .spawn(move || writer.run(rx))
             .map_err(LogError::io(run_dir))?;
-        Ok(Self { tx, thread })
+        Ok(Self {
+            tx,
+            thread,
+            meta,
+            max_segment_bytes,
+            rotate_every,
+            next_seq: 1,
+            segment_frames: 1,
+            segment_bytes: first_len,
+            rotate_at_ns: next_boundary(now, rotate_every),
+        })
     }
 
-    /// Queues one entry, waiting while the queue is full.
+    /// Numbers one entry and queues it, waiting while the queue is full; first ends the segment
+    /// when its hour is over or it has reached its size. Returns the entry's seq.
     ///
     /// # Errors
     /// Returns [`LogError::WriterGone`] once the writer has stopped (call [`Self::finish`] for
     /// its error), or [`FrameError::TooLong`] for a payload over the limit.
-    pub async fn append(&self, entry: Entry) -> Result<(), LogError> {
+    pub async fn append(&mut self, entry: Entry) -> Result<u64, LogError> {
         check(&entry)?;
-        self.tx.send(entry).await.map_err(|_| LogError::WriterGone)
+        let now = now_ns();
+        if self.segment_bytes >= self.max_segment_bytes || now >= self.rotate_at_ns {
+            let job = self.rotation(now);
+            self.tx.send(job).await.map_err(|_| LogError::WriterGone)?;
+            self.rotated(now);
+        }
+        let frame = self.number(entry);
+        let len = frame.encoded_len();
+        self.tx
+            .send(Job::Write(frame))
+            .await
+            .map_err(|_| LogError::WriterGone)?;
+        Ok(self.queued_frame(len))
     }
 
     /// [`Self::append`] for callers outside an async runtime.
     ///
     /// # Errors
     /// As [`Self::append`].
-    pub fn append_blocking(&self, entry: Entry) -> Result<(), LogError> {
+    pub fn append_blocking(&mut self, entry: Entry) -> Result<u64, LogError> {
         check(&entry)?;
+        let now = now_ns();
+        if self.segment_bytes >= self.max_segment_bytes || now >= self.rotate_at_ns {
+            let job = self.rotation(now);
+            self.tx
+                .blocking_send(job)
+                .map_err(|_| LogError::WriterGone)?;
+            self.rotated(now);
+        }
+        let frame = self.number(entry);
+        let len = frame.encoded_len();
         self.tx
-            .blocking_send(entry)
-            .map_err(|_| LogError::WriterGone)
+            .blocking_send(Job::Write(frame))
+            .map_err(|_| LogError::WriterGone)?;
+        Ok(self.queued_frame(len))
+    }
+
+    /// Ends the segment if its hour is over, even with nothing to append, so an idle hour is
+    /// still a segment of its own. The live loop calls this on its timer. True when it rotated.
+    ///
+    /// # Errors
+    /// Returns [`LogError::WriterGone`] once the writer has stopped.
+    pub async fn tick(&mut self) -> Result<bool, LogError> {
+        let now = now_ns();
+        if now < self.rotate_at_ns {
+            return Ok(false);
+        }
+        let job = self.rotation(now);
+        self.tx.send(job).await.map_err(|_| LogError::WriterGone)?;
+        self.rotated(now);
+        Ok(true)
+    }
+
+    /// [`Self::tick`] for callers outside an async runtime.
+    ///
+    /// # Errors
+    /// As [`Self::tick`].
+    pub fn tick_blocking(&mut self) -> Result<bool, LogError> {
+        let now = now_ns();
+        if now < self.rotate_at_ns {
+            return Ok(false);
+        }
+        let job = self.rotation(now);
+        self.tx
+            .blocking_send(job)
+            .map_err(|_| LogError::WriterGone)?;
+        self.rotated(now);
+        Ok(true)
+    }
+
+    /// Frames queued and not yet written: how far the disk is behind the loop.
+    #[must_use]
+    pub fn queued(&self) -> usize {
+        self.tx.max_capacity() - self.tx.capacity()
     }
 
     /// Lets the writer drain the queue, close the last segment with a clean marker and sync
@@ -127,6 +229,53 @@ impl LogWriter {
         drop(self.tx);
         self.thread.join().map_err(|_| LogError::WriterPanicked)?
     }
+
+    /// The entry as the next frame.
+    fn number(&self, entry: Entry) -> Frame {
+        Frame {
+            seq: self.next_seq,
+            kind: entry.kind,
+            source_ts_ns: entry.source_ts_ns,
+            capture_ts_ns: entry.capture_ts_ns,
+            payload: entry.payload,
+        }
+    }
+
+    /// Counts a queued frame of `len` bytes and returns its seq.
+    fn queued_frame(&mut self, len: usize) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.segment_frames += 1;
+        self.segment_bytes += len as u64;
+        seq
+    }
+
+    /// The open segment's marker and the next segment's Meta, with the next two seqs.
+    fn rotation(&self, now: i64) -> Job {
+        let marker = SegmentEnd {
+            last_seq: self.next_seq.checked_sub(1),
+            frames: self.segment_frames,
+            clean: true,
+        };
+        let end = Frame {
+            seq: self.next_seq,
+            kind: Kind::SegmentEnd,
+            source_ts_ns: 0,
+            capture_ts_ns: now,
+            payload: to_json(&marker),
+        };
+        let meta = meta_frame(&self.meta, self.next_seq + 1, now);
+        Job::Rotate { end, meta }
+    }
+
+    /// Counts a queued rotation: two frames, and a new segment holding only its Meta.
+    fn rotated(&mut self, now: i64) {
+        let meta_len = meta_frame(&self.meta, self.next_seq + 1, now).encoded_len();
+        self.next_seq += 2;
+        self.segment_frames = 1;
+        self.segment_bytes = meta_len as u64;
+        self.rotate_at_ns = next_boundary(now, self.rotate_every);
+    }
 }
 
 fn check(entry: &Entry) -> Result<(), LogError> {
@@ -136,60 +285,87 @@ fn check(entry: &Entry) -> Result<(), LogError> {
     Ok(())
 }
 
-/// The writer thread's state: the open segment and the run's counters.
+/// The Meta frame that opens the segment starting at `seq`.
+fn meta_frame(meta: &Meta, seq: u64, now: i64) -> Frame {
+    let meta = Meta {
+        first_seq: seq,
+        ..meta.clone()
+    };
+    Frame {
+        seq,
+        kind: Kind::Meta,
+        source_ts_ns: 0,
+        capture_ts_ns: now,
+        payload: to_json(&meta),
+    }
+}
+
+/// The writer thread's state: the open segment and what it has written.
 #[derive(Debug)]
 struct Writer {
     log_dir: PathBuf,
-    meta: Meta,
     config: LogConfig,
     path: PathBuf,
     file: File,
+    /// The seq the next frame must carry.
     next_seq: u64,
     segment_frames: u64,
-    segment_bytes: u64,
     segments: u64,
-    rotate_at_ns: i64,
     unsynced_since: Option<Instant>,
     _lock: File,
 }
 
 impl Writer {
-    fn open(log_dir: PathBuf, meta: Meta, config: LogConfig, lock: File) -> Result<Self, LogError> {
+    /// Creates the first segment and writes its Meta frame.
+    fn open(
+        log_dir: PathBuf,
+        config: LogConfig,
+        lock: File,
+        meta: &Frame,
+    ) -> Result<Self, LogError> {
         let (path, file) = create_segment(&log_dir, 0)?;
         let mut writer = Self {
             log_dir,
-            meta,
-            rotate_at_ns: next_boundary(now_ns(), config.rotate_every),
             config,
             path,
             file,
             next_seq: 0,
             segment_frames: 0,
-            segment_bytes: 0,
             segments: 1,
             unsynced_since: None,
             _lock: lock,
         };
-        writer.put_meta()?;
+        writer.put(meta)?;
         Ok(writer)
     }
 
-    /// Writes entries as they come until every sender is gone, syncing and rotating on time in
-    /// between. It runs a single-threaded tokio runtime of its own only so that it can wait for
-    /// whichever comes first, the next entry or the next deadline.
-    fn run(mut self, mut rx: mpsc::Receiver<Entry>) -> Result<Summary, LogError> {
+    /// Writes jobs as they come until the handle is gone, syncing on time in between, then
+    /// closes the last segment. It runs a single-threaded tokio runtime of its own only so that
+    /// it can wait for whichever comes first, the next job or the next sync.
+    fn run(mut self, mut rx: mpsc::Receiver<Job>) -> Result<Summary, LogError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .map_err(LogError::io(&self.log_dir))?;
         runtime.block_on(async {
             loop {
-                let deadline = tokio::time::Instant::from_std(self.deadline());
-                match tokio::time::timeout_at(deadline, rx.recv()).await {
-                    Ok(Some(entry)) => self.write(entry)?,
-                    Ok(None) => return Ok::<(), LogError>(()),
-                    Err(_) => self.tick()?,
+                let job = match self.unsynced_since {
+                    Some(since) => {
+                        let due = tokio::time::Instant::from_std(since + self.config.sync_every);
+                        let Ok(job) = tokio::time::timeout_at(due, rx.recv()).await else {
+                            self.sync_if_due()?;
+                            continue;
+                        };
+                        job
+                    }
+                    None => rx.recv().await,
+                };
+                match job {
+                    Some(Job::Write(frame)) => self.put(&frame)?,
+                    Some(Job::Rotate { end, meta }) => self.rotate(&end, &meta)?,
+                    None => return Ok::<(), LogError>(()),
                 }
+                self.sync_if_due()?;
             }
         })?;
         self.close_segment()?;
@@ -198,37 +374,6 @@ impl Writer {
             frames: self.next_seq,
             last_seq: self.next_seq.saturating_sub(1),
         })
-    }
-
-    fn write(&mut self, entry: Entry) -> Result<(), LogError> {
-        if self.segment_bytes >= self.config.max_segment_bytes || now_ns() >= self.rotate_at_ns {
-            self.rotate()?;
-        }
-        self.put(
-            entry.kind,
-            entry.source_ts_ns,
-            entry.capture_ts_ns,
-            entry.payload,
-        )?;
-        self.sync_if_due()
-    }
-
-    fn tick(&mut self) -> Result<(), LogError> {
-        if now_ns() >= self.rotate_at_ns {
-            self.rotate()?;
-        }
-        self.sync_if_due()
-    }
-
-    /// The next moment something is due: a sync, or the end of the segment's hour.
-    fn deadline(&self) -> Instant {
-        let now = Instant::now();
-        let to_rotation = u64::try_from(self.rotate_at_ns.saturating_sub(now_ns())).unwrap_or(0);
-        let rotation = now + Duration::from_nanos(to_rotation);
-        match self.unsynced_since {
-            Some(since) => rotation.min(since + self.config.sync_every),
-            None => rotation,
-        }
     }
 
     fn sync_if_due(&mut self) -> Result<(), LogError> {
@@ -241,53 +386,51 @@ impl Writer {
         Ok(())
     }
 
-    /// Ends the segment: marker, then `sync_all`.
+    /// Ends the last segment: its marker, numbered after the last frame, then `sync_all`.
     fn close_segment(&mut self) -> Result<(), LogError> {
         let marker = SegmentEnd {
             last_seq: self.next_seq.checked_sub(1),
             frames: self.segment_frames,
             clean: true,
         };
-        self.put(Kind::SegmentEnd, 0, now_ns(), to_json(&marker))?;
+        let end = Frame {
+            seq: self.next_seq,
+            kind: Kind::SegmentEnd,
+            source_ts_ns: 0,
+            capture_ts_ns: now_ns(),
+            payload: to_json(&marker),
+        };
+        self.put(&end)?;
+        self.sync_all()
+    }
+
+    fn sync_all(&mut self) -> Result<(), LogError> {
         self.file.sync_all().map_err(LogError::io(&self.path))?;
         self.unsynced_since = None;
         Ok(())
     }
 
-    /// Marker and sync on the old segment, then the new segment named after the next seq,
-    /// starting with its Meta. A log file is never renamed.
-    fn rotate(&mut self) -> Result<(), LogError> {
-        self.close_segment()?;
-        let (path, file) = create_segment(&self.log_dir, self.next_seq)?;
+    /// The marker and a sync on the old segment, then the new segment named after the Meta's
+    /// seq, starting with that Meta. A log file is never renamed.
+    fn rotate(&mut self, end: &Frame, meta: &Frame) -> Result<(), LogError> {
+        self.put(end)?;
+        self.sync_all()?;
+        let (path, file) = create_segment(&self.log_dir, meta.seq)?;
         self.path = path;
         self.file = file;
         self.segment_frames = 0;
-        self.segment_bytes = 0;
         self.segments += 1;
-        self.rotate_at_ns = next_boundary(now_ns(), self.config.rotate_every);
-        self.put_meta()
+        self.put(meta)
     }
 
-    fn put_meta(&mut self) -> Result<(), LogError> {
-        self.meta.first_seq = self.next_seq;
-        let payload = to_json(&self.meta);
-        self.put(Kind::Meta, 0, now_ns(), payload)
-    }
-
-    fn put(
-        &mut self,
-        kind: Kind,
-        source_ts_ns: i64,
-        capture_ts_ns: i64,
-        payload: String,
-    ) -> Result<(), LogError> {
-        let frame = Frame {
-            seq: self.next_seq,
-            kind,
-            source_ts_ns,
-            capture_ts_ns,
-            payload,
-        };
+    /// Writes one frame, which must carry the next seq.
+    fn put(&mut self, frame: &Frame) -> Result<(), LogError> {
+        if frame.seq != self.next_seq {
+            return Err(LogError::OutOfOrder {
+                expected: self.next_seq,
+                got: frame.seq,
+            });
+        }
         let bytes = frame.encode()?;
         let io = LogError::io(&self.path);
         match self.config.split_frames {
@@ -303,7 +446,6 @@ impl Writer {
         }
         self.next_seq += 1;
         self.segment_frames += 1;
-        self.segment_bytes += bytes.len() as u64;
         self.unsynced_since.get_or_insert_with(Instant::now);
         Ok(())
     }
@@ -336,7 +478,10 @@ fn to_json(value: &impl serde::Serialize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::store::run::Producer;
 
     #[test]
     fn segments_end_on_whole_multiples_of_the_rotation_period() {
@@ -346,5 +491,45 @@ mod tests {
         assert_eq!(next_boundary(nanos_per_hour - 1, hour), nanos_per_hour);
         assert_eq!(next_boundary(nanos_per_hour, hour), 2 * nanos_per_hour);
         assert_eq!(next_boundary(5, Duration::ZERO), 6);
+    }
+
+    /// The thread refuses a frame that is not numbered right after the last one it wrote, and
+    /// stops with that error rather than write a log a reader would refuse.
+    #[test]
+    fn the_writer_thread_refuses_a_frame_out_of_order() -> Result<(), LogError> {
+        let dir = std::env::temp_dir().join(format!("tp-writer-order-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).map_err(LogError::io(&dir))?;
+        let meta = Meta {
+            run_id: "order".to_owned(),
+            first_seq: 0,
+            producer: Producer {
+                name: "writer-test".to_owned(),
+                version: crate::version().to_owned(),
+                git_sha: None,
+                dirty: None,
+            },
+            scales: BTreeMap::new(),
+        };
+        let writer = LogWriter::start(&dir, meta, LogConfig::default())?;
+        let skipped = Frame {
+            seq: 2,
+            kind: Kind::Trade,
+            source_ts_ns: 0,
+            capture_ts_ns: 0,
+            payload: "x".to_owned(),
+        };
+        writer
+            .tx
+            .blocking_send(Job::Write(skipped))
+            .map_err(|_| LogError::WriterGone)?;
+        assert!(matches!(
+            writer.finish(),
+            Err(LogError::OutOfOrder {
+                expected: 1,
+                got: 2
+            })
+        ));
+        fs::remove_dir_all(&dir).map_err(LogError::io(&dir))
     }
 }

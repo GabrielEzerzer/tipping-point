@@ -86,6 +86,8 @@ pub enum LogError {
     Frame(#[from] FrameError),
     #[error("the log writer has stopped")]
     WriterGone,
+    #[error("frame numbered {got} where {expected} was due: frames reach the writer in seq order")]
+    OutOfOrder { expected: u64, got: u64 },
     #[error("the log writer panicked")]
     WriterPanicked,
 }

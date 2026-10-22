@@ -78,7 +78,7 @@ async fn record(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         ..LiveConfig::default()
     };
     let mut live = Transcript::default();
-    run_live(config, |event| {
+    run_live(config, |event: LiveEvent<'_>| {
         live.observe(&event);
         match event {
             LiveEvent::Applied { .. } => {}

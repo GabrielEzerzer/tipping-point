@@ -51,7 +51,7 @@ fn main() -> ExitCode {
         },
         scales: BTreeMap::new(),
     };
-    let log = match LogWriter::start(run_dir, meta, config()) {
+    let mut log = match LogWriter::start(run_dir, meta, config()) {
         Ok(log) => log,
         Err(error) => {
             eprintln!("crash-writer: {error}");

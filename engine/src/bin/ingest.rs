@@ -80,7 +80,7 @@ async fn main() -> ExitCode {
             log: LogConfig::default(),
         });
     }
-    let result = run_live(config, |event| match event {
+    let result = run_live(config, |event: LiveEvent<'_>| match event {
         LiveEvent::Report { feed, stats, .. } => print_tops(feed, stats.snapshot_fetches),
         LiveEvent::Applied { .. } => {}
         other => println!("{} {other:?}", utc_clock()),
