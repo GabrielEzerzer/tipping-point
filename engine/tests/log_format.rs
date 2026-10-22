@@ -221,11 +221,13 @@ fn segments_also_end_on_the_clock() -> Result<(), Box<dyn std::error::Error>> {
     let summary = writer.finish()?;
     assert!(summary.segments >= 3, "{summary:?}");
     assert!(ticks >= 2, "{ticks} idle rotations");
-    assert_eq!(before, 1, "seq 0 is the first Meta");
+    // Seq 0 is the first Meta and every rotation takes two seqs, its marker and the next Meta.
+    // An hour can end before the first entry too, so only the total is fixed.
+    assert_eq!(before % 2, 1, "{before}: Meta, then rotations in pairs");
     assert_eq!(
         after,
-        before + 1 + 2 * (summary.segments - 1),
-        "each rotation took two seqs, its marker and the next Meta: {summary:?}"
+        2 * summary.segments,
+        "both entries and every rotation's two frames: {summary:?}"
     );
 
     let mut holder = Vec::new();
