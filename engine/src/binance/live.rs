@@ -1,23 +1,37 @@
-//! The live loop: two socket readers and a REST client around one [`Feed`].
+//! The live loop: two socket readers and a REST client around one [`Pipeline`], recording
+//! every input it applies to a run's log when asked to.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, interval, sleep, sleep_until};
 
-use super::Symbol;
-use super::feed::{Event, Feed, FeedError};
+use super::feed::Feed;
+use super::pipeline::{Applied, Message, Pipeline, entries};
 use super::rest::{Rest, RestError};
-use super::sync::{Outcome, ResyncReason};
+use super::sync::ResyncReason;
 use super::ws::{self, Inbound};
+use super::{Scales, Symbol};
+use crate::store::frame::{Kind, Meta};
+use crate::store::run::{self, BookSample, MarketParams};
+use crate::store::writer::{LogConfig, LogWriter};
+use crate::store::{LogError, now_ns};
+
+/// The depth stream the loop subscribes to.
+pub const DEPTH_STREAM: &str = "depth@100ms";
+/// The trade stream the loop subscribes to.
+pub const TRADE_STREAM: &str = "aggTrade";
 
 /// Knobs for a live run.
 #[derive(Debug, Clone)]
 pub struct LiveConfig {
     pub symbols: Vec<Symbol>,
-    /// Stop after this long; `None` runs until the task is dropped.
+    /// Stop after this long; `None` runs until Ctrl-C or until the task is dropped.
     pub duration: Option<Duration>,
     /// How often a [`LiveEvent::Report`] fires.
     pub report_every: Duration,
@@ -27,6 +41,8 @@ pub struct LiveConfig {
     /// stream. The first fetch after a gap is still immediate.
     pub min_snapshot_interval: Duration,
     pub max_connection_age: Duration,
+    /// Record every input to a new run, or `None` to record nothing.
+    pub record: Option<Recording>,
 }
 
 impl Default for LiveConfig {
@@ -38,15 +54,36 @@ impl Default for LiveConfig {
             channel_capacity: 1024,
             min_snapshot_interval: Duration::from_secs(2),
             max_connection_age: ws::DEFAULT_MAX_CONNECTION_AGE,
+            record: None,
         }
     }
 }
 
+/// Where and how a live run records.
+#[derive(Debug, Clone)]
+pub struct Recording {
+    /// The run folder to create, normally `<data dir>/market/<run_id>/`; it must not exist.
+    pub run_dir: PathBuf,
+    pub log: LogConfig,
+}
+
 /// Which socket an event is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Stream {
     Depth,
     Trades,
+}
+
+impl Stream {
+    /// The kind of frame this socket's text is logged as.
+    #[must_use]
+    pub fn kind(self) -> Kind {
+        match self {
+            Self::Depth => Kind::Depth,
+            Self::Trades => Kind::Trade,
+        }
+    }
 }
 
 /// Counters the sockets and REST produce (the feed keeps its own).
@@ -89,40 +126,60 @@ pub enum LiveEvent<'a> {
     },
     SnapshotFailed {
         symbol: &'a str,
-        error: &'a RestError,
+        error: &'a str,
     },
     Report {
         elapsed: Duration,
         feed: &'a Feed,
         stats: &'a LiveStats,
     },
+    /// One input was applied: what it did, and the feed right after. Fires for every frame,
+    /// so loggers usually skip it; transcripts and replay checks are built from it.
+    Applied {
+        kind: Kind,
+        applied: &'a Applied,
+        feed: &'a Feed,
+    },
 }
 
-/// Why the loop could not start.
+/// A finished snapshot fetch: the symbol, when its reply arrived, and the body or the error.
+type Fetched = (Symbol, i64, Result<String, RestError>);
+
+/// Why the loop could not start or record.
 #[derive(Debug, Error)]
 pub enum LiveError {
     #[error(transparent)]
     Rest(#[from] RestError),
+    #[error("recording: {0}")]
+    Log(#[from] LogError),
+    #[error("recording to {}: {source}", .path.display())]
+    Run { path: PathBuf, source: io::Error },
 }
 
-/// Runs the pipeline live until `config.duration` elapses, calling `on_event` as it goes.
+/// Runs the pipeline live until `config.duration` elapses or Ctrl-C, calling `on_event` as it
+/// goes. When recording, the run folder gets its manifest at the start and `complete.json`
+/// after a clean end.
 ///
 /// # Errors
-/// Returns an error when the REST client cannot be built or the scales cannot be fetched.
+/// Returns an error when the REST client cannot be built, the scales cannot be fetched, or the
+/// recording cannot be created or written.
 pub async fn run_live(
     config: LiveConfig,
     mut on_event: impl FnMut(LiveEvent<'_>),
 ) -> Result<(), LiveError> {
     install_crypto_provider();
     let rest = Rest::new()?;
-    let mut feed = Feed::new(rest.fetch_scales(&config.symbols).await?);
-    let mut stats = LiveStats::default();
-    let mut synced: BTreeSet<Symbol> = BTreeSet::new();
+    let scales = rest.fetch_scales(&config.symbols).await?;
+    let log = match &config.record {
+        Some(recording) => Some(start_recording(recording, &config.symbols, &scales)?),
+        None => None,
+    };
+    let mut pipeline = Pipeline::new(Feed::new(scales));
 
     let (depth_tx, mut depth_rx) = mpsc::channel(config.channel_capacity);
     let (trade_tx, mut trade_rx) = mpsc::channel(config.channel_capacity);
-    let depth_url = ws::stream_url(ws::DEPTH_HOST, &config.symbols, "depth@100ms");
-    let trade_url = ws::stream_url(ws::TRADE_HOST, &config.symbols, "aggTrade");
+    let depth_url = ws::stream_url(ws::DEPTH_HOST, &config.symbols, DEPTH_STREAM);
+    let trade_url = ws::stream_url(ws::TRADE_HOST, &config.symbols, TRADE_STREAM);
     let depth_reader = tokio::spawn(ws::run_reader(
         depth_url,
         config.max_connection_age,
@@ -134,7 +191,7 @@ pub async fn run_live(
         trade_tx,
     ));
 
-    let (snapshot_tx, mut snapshot_rx) = mpsc::channel::<(Symbol, Result<String, RestError>)>(16);
+    let (snapshot_tx, mut snapshot_rx) = mpsc::channel::<Fetched>(16);
     let mut next_fetch_allowed: BTreeMap<Symbol, Instant> = BTreeMap::new();
 
     let start = Instant::now();
@@ -145,39 +202,41 @@ pub async fn run_live(
             .unwrap_or(Duration::from_secs(u64::from(u32::MAX))),
     );
     tokio::pin!(stop);
+    // A ctrl_c future that fails to register resolves at once; it is then disarmed, never
+    // polled again, and only the duration stops the loop.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let mut ctrl_c_armed = true;
     let mut report = interval(config.report_every);
     report.tick().await; // the first tick fires immediately; skip it
 
-    loop {
-        tokio::select! {
-            Some(inbound) = depth_rx.recv() => {
-                handle_depth(inbound, &mut feed, &mut stats, &mut synced, &mut on_event);
-            }
-            Some(inbound) = trade_rx.recv() => {
-                handle_trades(inbound, &mut feed, &mut stats, &mut on_event);
-            }
-            Some((symbol, result)) = snapshot_rx.recv() => {
-                match result {
-                    Ok(body) => match feed.on_snapshot(&symbol, &body) {
-                        Ok(Outcome::NeedsResync(reason)) => on_event(LiveEvent::Resync { symbol: &symbol, reason }),
-                        Ok(_) => {}
-                        Err(_) => stats.snapshot_failures += 1,
-                    },
-                    Err(error) => {
-                        stats.snapshot_failures += 1;
-                        feed.snapshot_failed(&symbol);
-                        on_event(LiveEvent::SnapshotFailed { symbol: &symbol, error: &error });
-                    }
-                }
-                note_sync_change(&symbol, &feed, &mut synced, &mut on_event);
-            }
+    let ended: Result<(), LiveError> = loop {
+        let message = tokio::select! {
+            Some(inbound) = depth_rx.recv() => Message::Socket { stream: Stream::Depth, inbound },
+            Some(inbound) = trade_rx.recv() => Message::Socket { stream: Stream::Trades, inbound },
+            Some((symbol, capture_ns, result)) = snapshot_rx.recv() => Message::Snapshot {
+                symbol,
+                capture_ns,
+                result: result.map_err(|error| error.to_string()),
+            },
             _ = report.tick() => {
-                on_event(LiveEvent::Report { elapsed: start.elapsed(), feed: &feed, stats: &stats });
+                on_event(LiveEvent::Report { elapsed: start.elapsed(), feed: pipeline.feed(), stats: pipeline.stats() });
+                continue;
             }
-            () = &mut stop => break,
+            () = &mut stop => break Ok(()),
+            pressed = &mut ctrl_c, if ctrl_c_armed => {
+                ctrl_c_armed = false;
+                if pressed.is_ok() {
+                    break Ok(());
+                }
+                continue;
+            }
+        };
+        if let Err(error) = handle(message, &mut pipeline, log.as_ref(), &mut on_event).await {
+            break Err(error.into());
         }
 
-        for symbol in feed.snapshots_due() {
+        for symbol in pipeline.feed_mut().snapshots_due() {
             let now = Instant::now();
             let at = next_fetch_allowed
                 .get(&symbol)
@@ -185,176 +244,100 @@ pub async fn run_live(
                 .unwrap_or(now)
                 .max(now);
             next_fetch_allowed.insert(symbol.clone(), at + config.min_snapshot_interval);
-            stats.snapshot_fetches += 1;
+            pipeline.stats_mut().snapshot_fetches += 1;
             let rest = rest.clone();
             let tx = snapshot_tx.clone();
             tokio::spawn(async move {
                 sleep_until(at).await;
                 let result = rest.fetch_snapshot(&symbol).await;
-                let _ = tx.send((symbol, result)).await;
+                let _ = tx.send((symbol, now_ns(), result)).await;
             });
         }
-    }
+    };
 
     depth_reader.abort();
     trade_reader.abort();
+    let recorded = match (log, &config.record) {
+        (Some(log), Some(recording)) => {
+            finish_recording(log, &recording.run_dir, ended.is_ok()).await
+        }
+        _ => Ok(()),
+    };
+    // The writer's own error explains a loop that stopped because the writer did.
+    recorded.and(ended)
+}
+
+/// What the live loop does with each message, network aside: it logs every input the message
+/// stands for, then applies it, so the log holds exactly what the feed saw, in order. A failed
+/// connection attempt is counted, not logged: it changes no book. Public so that a test can
+/// drive the live path from a script.
+///
+/// # Errors
+/// Returns the log's error once the writer has stopped.
+pub async fn handle(
+    message: Message,
+    pipeline: &mut Pipeline,
+    log: Option<&LogWriter>,
+    on_event: &mut impl FnMut(LiveEvent<'_>),
+) -> Result<(), LogError> {
+    if let Message::Socket {
+        stream,
+        inbound: Inbound::ConnectFailed { error },
+    } = &message
+    {
+        pipeline.stats_mut().connect_failures += 1;
+        on_event(LiveEvent::ConnectFailed {
+            stream: *stream,
+            error,
+        });
+        return Ok(());
+    }
+    for entry in entries(message) {
+        if let Some(log) = log {
+            log.append(entry.clone()).await?;
+        }
+        pipeline.apply(entry.kind, &entry.payload, on_event);
+    }
     Ok(())
 }
 
-fn handle_depth(
-    inbound: Inbound,
-    feed: &mut Feed,
-    stats: &mut LiveStats,
-    synced: &mut BTreeSet<Symbol>,
-    on_event: &mut impl FnMut(LiveEvent<'_>),
-) {
-    match inbound {
-        Inbound::Connected { attempt } => on_event(LiveEvent::Connected {
-            stream: Stream::Depth,
-            attempt,
-        }),
-        Inbound::ConnectFailed { error } => {
-            stats.connect_failures += 1;
-            on_event(LiveEvent::ConnectFailed {
-                stream: Stream::Depth,
-                error: &error,
-            });
-        }
-        Inbound::Disconnected {
-            reason,
-            dropped_before,
-        } => {
-            note_dropped(Stream::Depth, dropped_before, stats, on_event);
-            stats.depth_reconnects += 1;
-            on_event(LiveEvent::Disconnected {
-                stream: Stream::Depth,
-                reason: &reason,
-            });
-            invalidate(feed, ResyncReason::Reconnect, synced, on_event);
-        }
-        Inbound::Text {
-            text,
-            dropped_before,
-        } => {
-            if note_dropped(Stream::Depth, dropped_before, stats, on_event) {
-                invalidate(feed, ResyncReason::Backpressure, synced, on_event);
-            }
-            match feed.on_text(&text) {
-                Ok(Event::Depth {
-                    symbol, outcome, ..
-                }) => {
-                    if let Outcome::NeedsResync(reason) = outcome {
-                        on_event(LiveEvent::Resync {
-                            symbol: &symbol,
-                            reason,
-                        });
-                    }
-                    note_sync_change(&symbol, feed, synced, on_event);
-                }
-                // The feed already dropped this symbol's book.
-                Err(FeedError::BadDepth { symbol, .. }) => {
-                    on_event(LiveEvent::Resync {
-                        symbol: &symbol,
-                        reason: ResyncReason::BadFrame,
-                    });
-                    note_sync_change(&symbol, feed, synced, on_event);
-                }
-                // Unreadable, so it may have been any symbol's update: trust no book.
-                Err(FeedError::Message(_)) => {
-                    invalidate(feed, ResyncReason::BadFrame, synced, on_event);
-                }
-                Ok(Event::Trade(_)) | Err(FeedError::Decimal(_) | FeedError::UnknownSymbol(_)) => {}
-            }
-        }
-    }
+/// Creates the run folder and its manifest, then starts the log writer.
+fn start_recording(
+    recording: &Recording,
+    symbols: &[Symbol],
+    scales: &BTreeMap<Symbol, Scales>,
+) -> Result<LogWriter, LiveError> {
+    let params = MarketParams {
+        symbols: symbols.to_vec(),
+        scales: scales.clone(),
+        streams: vec![DEPTH_STREAM.to_owned(), TRADE_STREAM.to_owned()],
+        book_sample: BookSample::default(),
+    };
+    let manifest = run::create(&recording.run_dir, params).map_err(|source| LiveError::Run {
+        path: recording.run_dir.clone(),
+        source,
+    })?;
+    let log = LogWriter::start(
+        &recording.run_dir,
+        Meta::for_run(&manifest),
+        recording.log.clone(),
+    )?;
+    Ok(log)
 }
 
-fn handle_trades(
-    inbound: Inbound,
-    feed: &mut Feed,
-    stats: &mut LiveStats,
-    on_event: &mut impl FnMut(LiveEvent<'_>),
-) {
-    match inbound {
-        Inbound::Connected { attempt } => on_event(LiveEvent::Connected {
-            stream: Stream::Trades,
-            attempt,
-        }),
-        Inbound::ConnectFailed { error } => {
-            stats.connect_failures += 1;
-            on_event(LiveEvent::ConnectFailed {
-                stream: Stream::Trades,
-                error: &error,
-            });
-        }
-        Inbound::Disconnected {
-            reason,
-            dropped_before,
-        } => {
-            note_dropped(Stream::Trades, dropped_before, stats, on_event);
-            stats.trade_reconnects += 1;
-            on_event(LiveEvent::Disconnected {
-                stream: Stream::Trades,
-                reason: &reason,
-            });
-        }
-        Inbound::Text {
-            text,
-            dropped_before,
-        } => {
-            note_dropped(Stream::Trades, dropped_before, stats, on_event);
-            let _ = feed.on_text(&text);
-        }
+/// Closes the log, then writes `complete.json` if the loop itself ended cleanly: a run cut short
+/// by an error stays incomplete even though its log closed properly.
+async fn finish_recording(log: LogWriter, run_dir: &Path, clean: bool) -> Result<(), LiveError> {
+    let summary = tokio::task::spawn_blocking(move || log.finish())
+        .await
+        .map_err(|_| LogError::WriterPanicked)??;
+    if !clean {
+        return Ok(());
     }
-}
-
-/// Counts and reports frames a reader dropped. True when there were any.
-fn note_dropped(
-    stream: Stream,
-    count: u64,
-    stats: &mut LiveStats,
-    on_event: &mut impl FnMut(LiveEvent<'_>),
-) -> bool {
-    if count == 0 {
-        return false;
-    }
-    match stream {
-        Stream::Depth => stats.depth_frames_dropped += count,
-        Stream::Trades => stats.trade_frames_dropped += count,
-    }
-    on_event(LiveEvent::FramesDropped { stream, count });
-    true
-}
-
-fn invalidate(
-    feed: &mut Feed,
-    reason: ResyncReason,
-    synced: &mut BTreeSet<Symbol>,
-    on_event: &mut impl FnMut(LiveEvent<'_>),
-) {
-    for symbol in feed.invalidate_all(reason) {
-        synced.remove(&symbol);
-        on_event(LiveEvent::Resync {
-            symbol: &symbol,
-            reason,
-        });
-    }
-}
-
-fn note_sync_change(
-    symbol: &str,
-    feed: &Feed,
-    synced: &mut BTreeSet<Symbol>,
-    on_event: &mut impl FnMut(LiveEvent<'_>),
-) {
-    let is_synced = feed
-        .sync(symbol)
-        .is_some_and(super::sync::BookSync::is_synced);
-    if is_synced && synced.insert(symbol.to_owned()) {
-        on_event(LiveEvent::Synced { symbol });
-    } else if !is_synced {
-        synced.remove(symbol);
-    }
+    run::complete(run_dir, &summary).map_err(|source| LiveError::Run {
+        path: run_dir.to_owned(),
+        source,
+    })
 }
 
 /// Picks the process-wide TLS crypto provider once. With one provider compiled in rustls would
@@ -376,145 +359,4 @@ pub fn utc_clock() -> String {
         secs / 60 % 60,
         secs % 60
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::binance::Scales;
-
-    const SYMBOL: &str = "BTCUSDT";
-
-    fn frame(first: u64, last: u64, prev: u64, dropped_before: u64) -> Inbound {
-        Inbound::Text {
-            text: format!(
-                r#"{{"stream":"btcusdt@depth@100ms","data":{{"e":"depthUpdate","E":1,"T":1,"s":"BTCUSDT","U":{first},"u":{last},"pu":{prev},"b":[["100.0","1.000"]],"a":[]}}}}"#
-            ),
-            dropped_before,
-        }
-    }
-
-    /// The loop's state around one feed, plus every resync it reported.
-    struct LiveLoop {
-        feed: Feed,
-        stats: LiveStats,
-        synced: BTreeSet<Symbol>,
-        resyncs: Vec<(Symbol, ResyncReason)>,
-    }
-
-    impl LiveLoop {
-        /// BTCUSDT synced at `u = 12`, reached the way the loop reaches it.
-        fn synced() -> Self {
-            let scales = Scales {
-                price_decimals: 1,
-                qty_decimals: 3,
-            };
-            let mut live = Self {
-                feed: Feed::new(BTreeMap::from([(SYMBOL.to_owned(), scales)])),
-                stats: LiveStats::default(),
-                synced: BTreeSet::new(),
-                resyncs: Vec::new(),
-            };
-            live.depth(frame(10, 12, 9, 0));
-            let body =
-                r#"{"lastUpdateId":11,"bids":[["99.0","1.000"]],"asks":[["101.0","1.000"]]}"#;
-            assert_eq!(
-                live.feed.on_snapshot(SYMBOL, body).ok(),
-                Some(Outcome::Applied)
-            );
-            note_sync_change(SYMBOL, &live.feed, &mut live.synced, &mut |_: LiveEvent<
-                '_,
-            >| {});
-            assert!(live.synced.contains(SYMBOL));
-            live
-        }
-
-        fn depth(&mut self, inbound: Inbound) {
-            let resyncs = &mut self.resyncs;
-            let mut on_event = |event: LiveEvent<'_>| {
-                if let LiveEvent::Resync { symbol, reason } = event {
-                    resyncs.push((symbol.to_owned(), reason));
-                }
-            };
-            handle_depth(
-                inbound,
-                &mut self.feed,
-                &mut self.stats,
-                &mut self.synced,
-                &mut on_event,
-            );
-        }
-
-        fn has_book(&self) -> bool {
-            self.feed.book(SYMBOL).is_some()
-        }
-    }
-
-    #[test]
-    fn frames_dropped_under_backpressure_drop_the_book() {
-        let mut live = LiveLoop::synced();
-        // This update chains (pu = 12), so only the drop count says frames were lost.
-        live.depth(frame(13, 13, 12, 1));
-        assert!(!live.has_book());
-        assert_eq!(live.stats.depth_frames_dropped, 1);
-        assert_eq!(
-            live.resyncs,
-            vec![(SYMBOL.to_owned(), ResyncReason::Backpressure)]
-        );
-        assert!(live.synced.is_empty());
-    }
-
-    #[test]
-    fn a_reconnect_drops_the_book_and_asks_for_a_fresh_snapshot() {
-        let mut live = LiveLoop::synced();
-        live.depth(Inbound::Disconnected {
-            reason: "no frames for 30s".to_owned(),
-            dropped_before: 2,
-        });
-        assert!(!live.has_book());
-        assert_eq!(live.stats.depth_reconnects, 1);
-        assert_eq!(
-            live.stats.depth_frames_dropped, 2,
-            "drops just before it count"
-        );
-        assert_eq!(
-            live.resyncs,
-            vec![(SYMBOL.to_owned(), ResyncReason::Reconnect)]
-        );
-
-        // On the new connection even an update that would have chained waits for a snapshot.
-        live.depth(frame(13, 13, 12, 0));
-        assert!(!live.has_book());
-        assert_eq!(live.feed.snapshots_due(), vec![SYMBOL.to_owned()]);
-    }
-
-    #[test]
-    fn a_depth_frame_that_does_not_convert_unsyncs_its_symbol() {
-        let mut live = LiveLoop::synced();
-        let finer_than_the_tick = r#"{"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":1,"T":1,"s":"BTCUSDT","U":13,"u":13,"pu":12,"b":[["100.05","1.000"]],"a":[]}}"#;
-        live.depth(Inbound::Text {
-            text: finer_than_the_tick.to_owned(),
-            dropped_before: 0,
-        });
-        assert!(!live.has_book());
-        assert!(live.synced.is_empty());
-        assert_eq!(
-            live.resyncs,
-            vec![(SYMBOL.to_owned(), ResyncReason::BadFrame)]
-        );
-    }
-
-    #[test]
-    fn an_unreadable_depth_frame_drops_every_book() {
-        let mut live = LiveLoop::synced();
-        live.depth(Inbound::Text {
-            text: "not json".to_owned(),
-            dropped_before: 0,
-        });
-        assert!(!live.has_book());
-        assert_eq!(
-            live.resyncs,
-            vec![(SYMBOL.to_owned(), ResyncReason::BadFrame)]
-        );
-    }
 }

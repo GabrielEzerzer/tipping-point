@@ -8,7 +8,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+arrow.workspace = true
+crc.workspace = true
+duckdb.workspace = true
 futures-util.workspace = true
+parquet.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true

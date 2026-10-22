@@ -1,27 +1,22 @@
-//! Records raw depth frames and the snapshots they pair with, so a replay can drive the same
-//! pipeline offline. Output goes to the gitignored `harness/fixtures/recorded/` and is never
-//! committed.
+//! Records a live session the way production records one: the live loop with its log on, into
+//! a run under the gitignored `harness/fixtures/recorded/` (`market/<run_id>/`), plus the live
+//! loop's own transcript (`live-transcript.json`) for the replay-equals-live check. It then
+//! replays the log and says whether the replay matched. Recordings are never committed.
 //!
-//! `cargo run -p engine-harness --bin record -- [--seconds N] [--out PATH]`
+//! `cargo run -p engine-harness --bin record -- [--seconds N] [--out DIR]`
 
-use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use engine::binance::live::install_crypto_provider;
-use engine::binance::recording::{Record, now_ms, read_records, replay, write_record};
-use engine::binance::rest::Rest;
-use engine::binance::ws::{self, Inbound};
-use tokio::sync::mpsc;
-use tokio::time::sleep;
+use engine::binance::live::{LiveConfig, LiveEvent, Recording, run_live, utc_clock};
+use engine::store::replay::replay_log;
+use engine::store::run;
+use engine::store::writer::LogConfig;
+use engine_harness::transcript::Transcript;
 
-const SYMBOLS: [&str; 2] = ["BTCUSDT", "ETHUSDT"];
-/// Frames queue here while the loop fetches snapshots, so nothing is dropped during that.
-const CHANNEL_CAPACITY: usize = 8192;
-/// The stream must be open before the snapshot is asked for, or the snapshot cannot bridge.
-const SNAPSHOT_AFTER: Duration = Duration::from_secs(2);
+/// Where the live loop's transcript goes, inside the run folder.
+const TRANSCRIPT: &str = "live-transcript.json";
 
 struct Args {
     seconds: u64,
@@ -30,12 +25,10 @@ struct Args {
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     // From this crate's manifest, not the cwd: `harness/fixtures/recorded/` is the one place
-    // `.gitignore` keeps recordings out of the repo and the replay test looks.
+    // `.gitignore` keeps recordings out of the repo and the replay tests look.
     let mut parsed = Args {
         seconds: 60,
-        out: Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../fixtures/recorded")
-            .join(format!("depth-{}.jsonl", now_ms())),
+        out: Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/recorded"),
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -47,7 +40,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     .map_err(|_| format!("--seconds wants a whole number, got {value:?}"))?;
             }
             "--out" => parsed.out = PathBuf::from(value),
-            _ => return Err("usage: record [--seconds N] [--out PATH]".to_owned()),
+            _ => return Err("usage: record [--seconds N] [--out DIR]".to_owned()),
         }
     }
     Ok(parsed)
@@ -73,79 +66,57 @@ async fn main() -> ExitCode {
 }
 
 async fn record(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    install_crypto_provider();
-    let symbols: Vec<String> = SYMBOLS.iter().map(|s| (*s).to_owned()).collect();
-    let rest = Rest::new()?;
-    let scales = rest.fetch_scales(&symbols).await?;
-
-    if let Some(dir) = args.out.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let mut out = BufWriter::new(File::create(&args.out)?);
-    write_record(&mut out, &Record::Scales { scales })?;
-
-    let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-    let url = ws::stream_url(ws::DEPTH_HOST, &symbols, "depth@100ms");
-    let reader = tokio::spawn(ws::run_reader(url, ws::DEFAULT_MAX_CONNECTION_AGE, tx));
-
-    let stop = sleep(Duration::from_secs(args.seconds));
-    tokio::pin!(stop);
-    let snapshot_due = sleep(SNAPSHOT_AFTER);
-    tokio::pin!(snapshot_due);
-    let mut snapshots_taken = false;
-    let (mut frames, mut dropped, mut disconnects) = (0u64, 0u64, 0u64);
-
-    loop {
-        tokio::select! {
-            Some(inbound) = rx.recv() => match inbound {
-                Inbound::Text { text, dropped_before } => {
-                    dropped += dropped_before;
-                    write_record(&mut out, &Record::Frame { t_ms: now_ms(), text })?;
-                    frames += 1;
-                }
-                Inbound::Connected { attempt } => eprintln!("connected (attempt {attempt})"),
-                Inbound::ConnectFailed { error } => eprintln!("connect failed: {error}"),
-                Inbound::Disconnected { reason, dropped_before } => {
-                    dropped += dropped_before;
-                    disconnects += 1;
-                    eprintln!("disconnected: {reason} (the recording now has a gap)");
-                }
-            },
-            () = &mut snapshot_due, if !snapshots_taken => {
-                snapshots_taken = true;
-                for symbol in &symbols {
-                    let body = rest.fetch_snapshot(symbol).await?;
-                    eprintln!("snapshot {symbol}: {} bytes", body.len());
-                    write_record(&mut out, &Record::Snapshot { t_ms: now_ms(), symbol: symbol.clone(), body })?;
-                }
+    let run_dir = run::market_run_dir(&args.out, "btceth")?;
+    eprintln!("{} recording to {}", utc_clock(), run_dir.display());
+    let config = LiveConfig {
+        duration: Some(Duration::from_secs(args.seconds)),
+        report_every: Duration::from_secs(10),
+        record: Some(Recording {
+            run_dir: run_dir.clone(),
+            log: LogConfig::default(),
+        }),
+        ..LiveConfig::default()
+    };
+    let mut live = Transcript::default();
+    run_live(config, |event| {
+        live.observe(&event);
+        match event {
+            LiveEvent::Applied { .. } => {}
+            LiveEvent::Report { feed, .. } => {
+                let stats = feed.stats();
+                eprintln!(
+                    "{} applied={} trades={} resyncs={}",
+                    utc_clock(),
+                    stats.applied,
+                    stats.trades,
+                    stats.resyncs
+                );
             }
-            () = &mut stop => break,
+            other => eprintln!("{} {other:?}", utc_clock()),
         }
-    }
-    reader.abort();
-    out.flush()?;
-    drop(out);
+    })
+    .await?;
+    live.save(&run_dir.join(TRANSCRIPT))?;
 
+    let mut replayed = Transcript::default();
+    let replay = replay_log(&run_dir, None, &mut |event| replayed.observe(&event))?;
     eprintln!(
-        "wrote {} ({frames} frames, {dropped} dropped, {disconnects} disconnects)",
-        args.out.display()
+        "wrote {} ({} frames, {} inputs, {} the feed could not use)",
+        run_dir.display(),
+        replay.report.frames,
+        replay.report.inputs,
+        replay.report.errors
     );
-    let feed = replay(read_records(BufReader::new(File::open(&args.out)?))?)?;
-    let stats = feed.stats();
-    eprintln!(
-        "replay check: applied={} buffered={} stale={} resyncs={} crossed={} synced={}",
-        stats.applied,
-        stats.buffered,
-        stats.dropped_stale,
-        stats.resyncs,
-        stats.crossed,
-        feed.symbols()
-            .filter(|s| feed
-                .sync(s)
-                .is_some_and(engine::binance::sync::BookSync::is_synced))
-            .count()
-    );
-    Ok(())
+    match live.first_difference(&replayed) {
+        None => {
+            eprintln!(
+                "replay check: the log replays exactly as it ran live ({} inputs)",
+                live.steps.len()
+            );
+            Ok(())
+        }
+        Some(difference) => Err(format!("replay check failed at {difference}").into()),
+    }
 }
 
 #[cfg(test)]
@@ -161,15 +132,14 @@ mod tests {
         let args = parse(&[]).expect("no flags is valid");
         assert_eq!(args.seconds, 60);
         let recorded = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/recorded");
-        assert_eq!(args.out.parent(), Some(recorded.as_path()));
-        assert_eq!(args.out.extension(), Some(std::ffi::OsStr::new("jsonl")));
+        assert_eq!(args.out, recorded);
     }
 
     #[test]
     fn takes_seconds_and_out_and_refuses_anything_else() {
-        let args = parse(&["--seconds", "5", "--out", "x.jsonl"]).expect("valid flags");
+        let args = parse(&["--seconds", "5", "--out", "data"]).expect("valid flags");
         assert_eq!(args.seconds, 5);
-        assert_eq!(args.out, PathBuf::from("x.jsonl"));
+        assert_eq!(args.out, PathBuf::from("data"));
         assert_eq!(
             parse(&["--seconds"]).err().as_deref(),
             Some("--seconds wants a value")

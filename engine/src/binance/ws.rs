@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, connect_async};
 
 use super::Symbol;
+use crate::store::now_ns;
 
 /// Routed path that serves `@depth@100ms`.
 pub const DEPTH_HOST: &str = "wss://fstream.binance.com/public/stream";
@@ -32,19 +33,28 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// the WebSocket upgrade) still unfinished after this long is given up and retried.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// What the reader sends down its channel.
+/// What the reader sends down its channel. `capture_ns` is the wall clock when the reader saw
+/// it happen, stamped here because messages can wait in the channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inbound {
     /// A connection is open; `attempt` counts connections since the reader started.
-    Connected { attempt: u32 },
+    Connected { attempt: u32, capture_ns: i64 },
     /// A connection attempt failed; the reader will back off and retry.
     ConnectFailed { error: String },
     /// A text frame. `dropped_before` is how many frames were discarded on a full channel
     /// since the last frame that got through.
-    Text { text: String, dropped_before: u64 },
+    Text {
+        text: String,
+        dropped_before: u64,
+        capture_ns: i64,
+    },
     /// The connection ended; the reader will reconnect. Any book is now stale. `dropped_before`
     /// counts frames discarded since the last one that got through, as on [`Inbound::Text`].
-    Disconnected { reason: String, dropped_before: u64 },
+    Disconnected {
+        reason: String,
+        dropped_before: u64,
+        capture_ns: i64,
+    },
 }
 
 /// Combined-stream URL for the given symbols and stream suffix, e.g. `depth@100ms`.
@@ -86,7 +96,11 @@ pub async fn run_reader(url: String, max_age: Duration, tx: mpsc::Sender<Inbound
             }
         };
         backoff = INITIAL_BACKOFF;
-        if tx.send(Inbound::Connected { attempt }).await.is_err() {
+        let notice = Inbound::Connected {
+            attempt,
+            capture_ns: now_ns(),
+        };
+        if tx.send(notice).await.is_err() {
             return;
         }
         let Some(disconnected) = read_until_closed(socket, max_age, &tx).await else {
@@ -127,6 +141,7 @@ where
                 let frame = Inbound::Text {
                     text: text.to_string(),
                     dropped_before: dropped,
+                    capture_ns: now_ns(),
                 };
                 match tx.try_send(frame) {
                     Ok(()) => dropped = 0,
@@ -148,6 +163,7 @@ where
     Some(Inbound::Disconnected {
         reason,
         dropped_before: dropped,
+        capture_ns: now_ns(),
     })
 }
 
@@ -168,11 +184,23 @@ mod tests {
         )
     }
 
-    fn text(text: &str, dropped_before: u64) -> Inbound {
-        Inbound::Text {
-            text: text.to_owned(),
-            dropped_before,
+    /// A received text frame's text and drop count; its capture time is the wall clock.
+    fn text_of(inbound: Option<Inbound>) -> Option<(String, u64)> {
+        match inbound? {
+            Inbound::Text {
+                text,
+                dropped_before,
+                capture_ns,
+            } => {
+                assert!(capture_ns > 0, "stamped on arrival");
+                Some((text, dropped_before))
+            }
+            _ => None,
         }
+    }
+
+    fn text(text: &str, dropped_before: u64) -> (String, u64) {
+        (text.to_owned(), dropped_before)
     }
 
     #[tokio::test(start_paused = true)]
@@ -193,12 +221,16 @@ mod tests {
         }
         let ended = reader.await.expect("reader task");
 
-        assert_eq!(
-            ended,
-            Some(Inbound::Disconnected {
-                reason: "no frames for 30s".to_owned(),
-                dropped_before: 0
-            })
+        assert!(
+            matches!(
+                &ended,
+                Some(Inbound::Disconnected {
+                    reason,
+                    dropped_before: 0,
+                    capture_ns,
+                }) if reason == "no frames for 30s" && *capture_ns > 0
+            ),
+            "{ended:?}"
         );
         assert_eq!(
             start.elapsed().as_secs(),
@@ -206,7 +238,10 @@ mod tests {
             "30 s after the last frame, at 40 s"
         );
         for i in 0..3 {
-            assert_eq!(rx.try_recv().ok(), Some(text(&format!("frame {i}"), 0)));
+            assert_eq!(
+                text_of(rx.try_recv().ok()),
+                Some(text(&format!("frame {i}"), 0))
+            );
         }
         drop(exchange);
     }
@@ -233,7 +268,7 @@ mod tests {
             ),
             "{ended:?}"
         );
-        assert_eq!(rx.try_recv().ok(), Some(text("frame 0", 0)));
+        assert_eq!(text_of(rx.try_recv().ok()), Some(text("frame 0", 0)));
     }
 
     #[tokio::test]

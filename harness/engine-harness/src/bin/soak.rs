@@ -139,6 +139,7 @@ async fn soak(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             }
             previous = (feed_stats, *stats);
         }
+        LiveEvent::Applied { .. } => {}
         other => println!("{} {other:?}", utc_clock()),
     })
     .await?;
