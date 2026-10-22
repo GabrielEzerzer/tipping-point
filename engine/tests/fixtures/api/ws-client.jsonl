@@ -1,0 +1,8 @@
+{"t":"hello","v":1}
+{"t":"sub","topics":["book","trades","status","meters","jev","pnl","lattice","ising"]}
+{"t":"sub","topics":["book","status"],"symbols":["BTCUSDT"],"levels":5,"backfill_s":30.0}
+{"t":"replay","run":"20231114T221320Z-session","from_ms":1700000000500,"speed":10.0}
+{"t":"seek","to_ms":1700000001000}
+{"t":"pause"}
+{"t":"play"}
+{"t":"live"}

@@ -1,0 +1,20 @@
+{
+  "format": 1,
+  "domain": "ising",
+  "run_id": "20261022T000000Z-fixture",
+  "producer": {
+    "name": "make_ising_fixture",
+    "version": "0",
+    "git_sha": null
+  },
+  "started_ns": 0,
+  "key": "step",
+  "tables": [
+    "stats",
+    "configs"
+  ],
+  "params": {
+    "L": 4,
+    "replicas": 2
+  }
+}

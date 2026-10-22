@@ -1,6 +1,8 @@
-//! Shared harness code: transcripts for the replay-equals-live checks, and the payloads the
-//! crash-injection writer writes.
+//! Shared harness code: transcripts for the replay-equals-live checks, the payloads the
+//! crash-injection writer writes, and the in-process server and clients of the API checks.
 
+pub mod api;
+pub mod load;
 pub mod transcript;
 
 /// The payload of the `i`-th entry the crash writer appends: a known function of `i`, of varying

@@ -1,0 +1,264 @@
+//! Synthetic market load for the API's load test: valid Binance frames at any rate, so both books
+//! stay synced and every input takes the live path it would take live. Plus the instrument's
+//! small helpers: percentiles and the process's peak memory.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use engine::binance::decimal::format_units;
+use engine::binance::live::Stream;
+use engine::binance::pipeline::Message;
+use engine::binance::ws::Inbound;
+use engine::binance::{Scales, Symbol};
+
+/// Levels each side of a snapshot holds.
+const LEVELS: i64 = 20;
+const QTY_DECIMALS: u32 = 3;
+
+/// One symbol's side of the generator: the update chain and where its book sits.
+#[derive(Debug)]
+struct Book {
+    symbol: String,
+    stream: String,
+    price_decimals: u32,
+    /// Mid price in ticks.
+    mid: i64,
+    last_id: u64,
+    bridged: bool,
+    step: i64,
+}
+
+impl Book {
+    fn new(symbol: &str, price_decimals: u32, mid: i64) -> Self {
+        Self {
+            symbol: symbol.to_owned(),
+            stream: symbol.to_lowercase(),
+            price_decimals,
+            mid,
+            last_id: 1000,
+            bridged: false,
+            step: 0,
+        }
+    }
+
+    fn price(&self, ticks: i64) -> String {
+        format_units(ticks, self.price_decimals)
+    }
+
+    fn snapshot(&self, ms: i64) -> String {
+        let side = |sign: i64| -> Vec<String> {
+            (1..=LEVELS)
+                .map(|i| format!("[\"{}\",\"1.000\"]", self.price(self.mid + sign * i)))
+                .collect()
+        };
+        format!(
+            "{{\"lastUpdateId\":{},\"E\":{ms},\"T\":{ms},\"bids\":[{}],\"asks\":[{}]}}",
+            self.last_id,
+            side(-1).join(","),
+            side(1).join(",")
+        )
+    }
+
+    /// The next update of the chain: the first one bridges the snapshot (`U <= lastUpdateId <=
+    /// u`), every later one follows the last (`pu` = the last `u`).
+    fn update(&mut self, ms: i64) -> String {
+        let (first, last, prev) = if self.bridged {
+            (self.last_id + 1, self.last_id + 1, self.last_id)
+        } else {
+            self.bridged = true;
+            (self.last_id, self.last_id + 1, self.last_id - 1)
+        };
+        self.last_id = last;
+        self.step += 1;
+        let depth = 1 + self.step % LEVELS;
+        let qty = format_units(1 + self.step % 7, QTY_DECIMALS);
+        format!(
+            "{{\"stream\":\"{}@depth@100ms\",\"data\":{{\"e\":\"depthUpdate\",\"E\":{ms},\"T\":{ms},\"s\":\"{}\",\"U\":{first},\"u\":{last},\"pu\":{prev},\"b\":[[\"{}\",\"{qty}\"]],\"a\":[[\"{}\",\"{qty}\"]]}}}}",
+            self.stream,
+            self.symbol,
+            self.price(self.mid - depth),
+            self.price(self.mid + depth)
+        )
+    }
+}
+
+/// Makes the frames: an opening (both sockets connected, a snapshot per symbol), then depth
+/// updates and aggregated trades in any mix.
+#[derive(Debug)]
+pub struct Generator {
+    books: Vec<Book>,
+    turn: usize,
+    trade_id: u64,
+}
+
+impl Default for Generator {
+    fn default() -> Self {
+        Self {
+            books: vec![
+                Book::new("BTCUSDT", 1, 500_000),
+                Book::new("ETHUSDT", 2, 300_000),
+            ],
+            turn: 0,
+            trade_id: 0,
+        }
+    }
+}
+
+impl Generator {
+    /// The scales the frames are written at.
+    #[must_use]
+    pub fn scales(&self) -> BTreeMap<Symbol, Scales> {
+        self.books
+            .iter()
+            .map(|book| {
+                let scales = Scales {
+                    price_decimals: book.price_decimals,
+                    qty_decimals: QTY_DECIMALS,
+                };
+                (book.symbol.clone(), scales)
+            })
+            .collect()
+    }
+
+    /// Both sockets connected, then a snapshot per symbol.
+    #[must_use]
+    pub fn opening(&self, capture_ns: i64) -> Vec<Message> {
+        let connected = |stream| Message::Socket {
+            stream,
+            inbound: Inbound::Connected {
+                attempt: 1,
+                capture_ns,
+            },
+        };
+        let mut out = vec![connected(Stream::Depth), connected(Stream::Trades)];
+        for book in &self.books {
+            out.push(Message::Snapshot {
+                symbol: book.symbol.clone(),
+                capture_ns,
+                result: Ok(book.snapshot(capture_ns / 1_000_000)),
+            });
+        }
+        out
+    }
+
+    /// The next depth update, the symbols in turn.
+    pub fn depth(&mut self, capture_ns: i64) -> Message {
+        let count = self.books.len();
+        let book = &mut self.books[self.turn % count];
+        self.turn += 1;
+        Message::Socket {
+            stream: Stream::Depth,
+            inbound: Inbound::Text {
+                text: book.update(capture_ns / 1_000_000),
+                dropped_before: 0,
+                capture_ns,
+            },
+        }
+    }
+
+    /// The next aggregated trade, the symbols in turn.
+    pub fn trade(&mut self, capture_ns: i64) -> Message {
+        self.trade_id += 1;
+        let count = self.books.len();
+        let book = &self.books[usize::try_from(self.trade_id).unwrap_or(0) % count];
+        let ms = capture_ns / 1_000_000;
+        let id = self.trade_id;
+        let text = format!(
+            "{{\"stream\":\"{}@aggTrade\",\"data\":{{\"e\":\"aggTrade\",\"E\":{ms},\"a\":{id},\"s\":\"{}\",\"p\":\"{}\",\"q\":\"0.010\",\"f\":{id},\"l\":{id},\"T\":{ms},\"m\":{}}}}}",
+            book.stream,
+            book.symbol,
+            book.price(book.mid),
+            id.is_multiple_of(2)
+        );
+        Message::Socket {
+            stream: Stream::Trades,
+            inbound: Inbound::Text {
+                text,
+                dropped_before: 0,
+                capture_ns,
+            },
+        }
+    }
+}
+
+/// The `p`-th percentile (0 to 100) of durations, nearest rank; zero for none.
+#[must_use]
+pub fn percentile(durations: &mut [Duration], p: f64) -> Duration {
+    if durations.is_empty() {
+        return Duration::ZERO;
+    }
+    durations.sort_unstable();
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let rank = ((p / 100.0) * durations.len() as f64).ceil() as usize;
+    durations[rank.clamp(1, durations.len()) - 1]
+}
+
+/// The process's peak memory in bytes, when the platform says: the peak working set on Windows
+/// (asked of PowerShell), `VmHWM` on Linux.
+#[must_use]
+pub fn peak_memory_bytes() -> Option<u64> {
+    if cfg!(windows) {
+        let pid = std::process::id();
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("(Get-Process -Id {pid}).PeakWorkingSet64"),
+            ])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    } else {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kib * 1024)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use engine::binance::feed::Feed;
+    use engine::binance::pipeline::{Pipeline, entries};
+
+    use super::*;
+
+    /// The frames keep both books synced however many follow, and every one converts.
+    #[test]
+    fn generated_frames_keep_both_books_synced() {
+        let mut generator = Generator::default();
+        let mut pipeline = Pipeline::new(Feed::new(generator.scales()));
+        let mut messages = generator.opening(1_000_000_000);
+        for i in 0..200 {
+            messages.push(generator.depth(1_000_000_000 + i));
+            messages.push(generator.trade(1_000_000_000 + i));
+        }
+        for message in messages {
+            for entry in entries(message) {
+                let applied = pipeline.apply(entry.kind, &entry.payload, &mut |_| {});
+                assert_eq!(applied.error(), None, "{}", entry.payload);
+            }
+        }
+        let feed = pipeline.feed();
+        for symbol in ["BTCUSDT", "ETHUSDT"] {
+            assert!(
+                feed.sync(symbol)
+                    .is_some_and(engine::binance::sync::BookSync::is_synced)
+            );
+        }
+        assert_eq!(feed.stats().resyncs, 0);
+        assert_eq!(feed.stats().trades, 200);
+    }
+
+    #[test]
+    fn percentiles_are_nearest_rank() {
+        let mut values: Vec<Duration> = (1..=100).map(Duration::from_millis).collect();
+        assert_eq!(percentile(&mut values, 50.0), Duration::from_millis(50));
+        assert_eq!(percentile(&mut values, 99.0), Duration::from_millis(99));
+        assert_eq!(percentile(&mut [], 99.0), Duration::ZERO);
+    }
+}

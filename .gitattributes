@@ -1,2 +1,5 @@
 * text=auto eol=lf
 *.tplog binary
+*.parquet binary
+*.arrows binary
+*.bin binary
