@@ -383,12 +383,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 run: Some(run.clone()),
                 from_ms: *from_ms,
                 speed: Some(*speed),
+                error: None,
             },
             Mode::Live | Mode::Ended => SourceMessage {
                 mode,
                 run: None,
                 from_ms: None,
                 speed: None,
+                error: None,
             },
         };
         self.queue(&ServerMessage::Source(&message));
@@ -593,8 +595,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                         });
                     }
                 }
-                Some(Item::End) | None => {
-                    // What is left still goes out, then the source says the run is over.
+                Some(Item::End | Item::Failed(_)) | None => {
+                    // What is left still goes out, then the source says the run is over, or
+                    // that the replay failed and why.
+                    let error = match next {
+                        Some(Item::Failed(reason)) => Some(reason),
+                        None => Some("the replay stopped".to_owned()),
+                        _ => None,
+                    };
                     self.queue_replayed();
                     let run = match &self.mode {
                         Mode::Replay { run, .. } => Some(run.clone()),
@@ -602,10 +610,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                     };
                     self.mode = Mode::Ended;
                     let message = SourceMessage {
-                        mode: "ended",
+                        mode: if error.is_some() { "failed" } else { "ended" },
                         run,
                         from_ms: None,
                         speed: None,
+                        error,
                     };
                     self.queue(&ServerMessage::Source(&message));
                     return;

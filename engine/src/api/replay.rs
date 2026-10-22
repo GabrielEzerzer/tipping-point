@@ -37,6 +37,9 @@ pub enum Item {
     BookGap(u64),
     /// The run is over.
     End,
+    /// The replay could not go on (a damaged or vanished Parquet file, a `DuckDB` error): not
+    /// the end of the run.
+    Failed(String),
 }
 
 /// A running replay. Dropping it stops it.
@@ -139,10 +142,18 @@ async fn feed(
     let mut last_trade: Option<u64> = None;
     loop {
         let slice = tables.clone();
-        let Ok(Ok(found)) =
-            tokio::task::spawn_blocking(move || slice_or_next(&slice, cursor)).await
-        else {
-            break;
+        let found = match tokio::task::spawn_blocking(move || slice_or_next(&slice, cursor)).await {
+            Ok(Ok(found)) => found,
+            Ok(Err(error)) => {
+                let _ = tx.send(Item::Failed(error.to_string())).await;
+                return;
+            }
+            Err(stopped) => {
+                let _ = tx
+                    .send(Item::Failed(format!("the replay stopped: {stopped}")))
+                    .await;
+                return;
+            }
         };
         match found {
             Found::Items(items, next) => {
@@ -150,7 +161,7 @@ async fn feed(
                     match &item {
                         Item::Sample(sample) => last_sample = last_sample.max(sample.sample_ts_ns),
                         Item::Trade(trade) => last_trade = last_trade.max(Some(trade.seq)),
-                        Item::BookGap(_) | Item::End => {}
+                        Item::BookGap(_) | Item::End | Item::Failed(_) => {}
                     }
                     if !pacer.wait(t, &mut paused).await || tx.send(item).await.is_err() {
                         return;

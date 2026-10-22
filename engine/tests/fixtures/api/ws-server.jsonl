@@ -10,6 +10,7 @@
 {"t":"source","mode":"replay","run":"20231114T221320Z-session","from_ms":1700000000500,"speed":10.0}
 {"t":"source","mode":"paused","run":"20231114T221320Z-session","from_ms":1700000000500,"speed":10.0}
 {"t":"source","mode":"ended","run":"20231114T221320Z-session"}
+{"t":"source","mode":"failed","run":"20231114T221320Z-session","error":"parquet: no magic bytes at the end of the file"}
 {"t":"meters","data":{"ac1":0.5,"latent":1.5,"symbol":"BTCUSDT","ts_ms":1700000002000,"variance":0.25}}
 {"t":"jev","data":{"label":"regime_shift","p":0.8,"symbol":"BTCUSDT","ts_ms":1700000002000}}
 {"t":"pnl","data":{"pnl":-2.5,"position":1,"symbol":"BTCUSDT","ts_ms":1700000002000}}

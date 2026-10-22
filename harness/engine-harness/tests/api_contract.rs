@@ -280,12 +280,17 @@ fn every_server_message_matches_the_catalog() -> Outcome {
         run: run.map(str::to_owned),
         from_ms,
         speed,
+        error: None,
     };
     let sources = [
         source("live", None, None, None),
         source("replay", Some(RUN), Some(1_700_000_000_500), Some(10.0)),
         source("paused", Some(RUN), Some(1_700_000_000_500), Some(10.0)),
         source("ended", Some(RUN), None, None),
+        SourceMessage {
+            error: Some("parquet: no magic bytes at the end of the file".to_owned()),
+            ..source("failed", Some(RUN), None, None)
+        },
     ];
     let results = results();
     let mut lines = vec![ServerMessage::Welcome(&welcome).to_text()];

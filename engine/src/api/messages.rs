@@ -280,7 +280,9 @@ impl Status {
 /// Where a connection's book and trades come from, sent whenever that changes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SourceMessage {
-    /// `live`, `replay`, `paused`, or `ended` (a replay ran out, or the live feed stopped).
+    /// `live`, `replay`, `paused`, `ended` (a replay ran out, or the live feed stopped), or
+    /// `failed` (a replay could not go on; `error` says why). After `ended` and `failed` nothing
+    /// comes until `replay` or `live`.
     pub mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
@@ -288,6 +290,8 @@ pub struct SourceMessage {
     pub from_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Every text frame the engine sends.

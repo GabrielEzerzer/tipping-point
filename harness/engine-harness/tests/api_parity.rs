@@ -617,3 +617,40 @@ async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     fs::remove_dir_all(&dir)?;
     Ok(())
 }
+
+/// A replay that cannot go on (a damaged Parquet file it reaches) tells the client it failed and
+/// why, never that the run ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replay_that_fails_says_so_and_never_ended() -> Outcome {
+    let played = play(scratch("api-replay-fail")).await?;
+    let mut files: Vec<PathBuf> = fs::read_dir(played.run_dir.join("book_samples"))?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<_, _>>()?;
+    files.sort();
+    let last = files.last().ok_or("book_samples files")?;
+    assert!(files.len() >= 2, "the replay starts on a good file");
+    let bytes = fs::read(last)?;
+    fs::write(last, &bytes[..bytes.len() / 2])?;
+
+    let mut viewer = ws_connect(played.server.addr).await?;
+    hello(&mut viewer).await?;
+    send_json(&mut viewer, &json!({"t": "sub", "topics": ["book"]})).await?;
+    let _ack = next_json(&mut viewer, WAIT).await?;
+    send_json(&mut viewer, &json!({"t": "replay", "run": RUN, "speed": 0})).await?;
+    until_replay(&mut viewer).await?;
+    let outcome = loop {
+        let message = next_json(&mut viewer, WAIT).await?;
+        if message["t"] == "source" {
+            break message;
+        }
+    };
+    assert_eq!(outcome["mode"], "failed", "{outcome}");
+    assert_eq!(outcome["run"], RUN);
+    assert!(
+        outcome["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{outcome}"
+    );
+    played.server.stop().await;
+    fs::remove_dir_all(&played.dir)?;
+    Ok(())
+}
