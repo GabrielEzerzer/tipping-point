@@ -3,6 +3,7 @@ complete.json, failed plateaus, a missing or altered pilot record, slots empty o
 
 import hashlib
 import json
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ from ews_planted import (
 from tipping_point.ews import fss, ising
 from tipping_point.ising import io, protocol, run
 from tipping_point.ising.exact import TC
+
+V1 = Path(__file__).resolve().parents[4] / "paper" / "prereg" / "ising-ews-v1.toml"
 
 
 def _data(**changes: object) -> dict:
@@ -160,6 +163,37 @@ def test_a_null_block_that_failed_its_check_is_dropped_and_counted(tmp_path: Pat
     inputs = ising.select(*ising.find_runs(tmp_path), _data(L=[16], seeds=[1]))[16]
     assert [b for _, b in inputs.nulls] == [0]
     assert inputs.dropped == ["20261023T000000Z-L16-null-s1 block 1"]
+
+
+def test_a_null_block_without_a_verdict_is_refused(tmp_path: Path) -> None:
+    """Review round 1: a fixed run from before #50 carries no thermalised verdict and was read
+    as a null block anyway. Nothing then says it is equilibrium, so it is refused."""
+    write_run(tmp_path, "L16-ramp-s1", ramp(16), 16, 1, ramp_values(16))
+    write_run(tmp_path, "L16-qs-s1", staircase(), 16, 1, plateau_values(16))
+    write_run(tmp_path, "L16-null-s1", nulls(16, 500), 16, 1, ramp_values(16), verdicts=False)
+    with pytest.raises(ising.IsingDataError, match="no thermalised verdict"):
+        ising.select(*ising.find_runs(tmp_path), _data(L=[16], seeds=[1]))
+
+
+def test_a_staircase_without_the_fss_plateau_is_an_error(tmp_path: Path) -> None:
+    """Review round 1: a staircase with no plateau at the static-fit temperature was skipped
+    silently, so its L could leave the fit with nothing counted. A plateau that failed its
+    check is dropped and counted; a missing one is an error."""
+    doc = tomllib.loads(V1.read_text("utf-8"))
+    elsewhere = protocol.Staircase(
+        [2.0, 2.0], temperatures=(3.0, 2.8), warmup=0, min_therm=50, min_meas=200, saves=10
+    )
+    missing = ising.open_run(write_run(tmp_path, "L16-qs-s1", elsewhere, 16, 1, plateau_values(16)))
+    inputs = ising.Inputs(ramps=[], nulls=[], staircases=[missing], dropped=[])
+    rng = np.random.default_rng(0)
+    with pytest.raises(ising.IsingDataError, match="no plateau at T"):
+        ising._static(doc, {16: inputs}, rng)
+    failed = write_run(
+        tmp_path, "L16-qs-s2", staircase(), 16, 2, plateau_values(16), failed=(PLATEAU,)
+    )
+    inputs = ising.Inputs(ramps=[], nulls=[], staircases=[ising.open_run(failed)], dropped=[])
+    with pytest.raises(ising.IsingDataError, match="usable at"):  # dropped, so no size is left
+        ising._static(doc, {16: inputs}, rng)
 
 
 def test_the_pilot_record_from_50_reads(tmp_path: Path) -> None:

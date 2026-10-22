@@ -311,10 +311,11 @@ def _close(a: float, b: float) -> bool:
     return math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-6)
 
 
-def _thermalised(run: Run, temperature: float) -> bool:
-    """False when complete.json's thermalised check failed at that temperature."""
-    checks = run.checks.get("thermalised", [])
-    return not any(_close(c["temperature"], temperature) and not c["passed"] for c in checks)
+def _thermalised(run: Run, temperature: float) -> bool | None:
+    """complete.json's thermalised verdict at a temperature: passed, failed, or None when the
+    run recorded none there (runs from before #50 checked only staircases)."""
+    checks = [c for c in run.checks.get("thermalised", []) if _close(c["temperature"], temperature)]
+    return all(c["passed"] for c in checks) if checks else None
 
 
 def _slots(run: Run, data: dict[str, Any]) -> list[tuple[Any, ...]]:
@@ -343,8 +344,9 @@ def select(
 ) -> dict[int, Inputs]:
     """For each L, exactly one complete run per (kind, seed) and one null block per
     (seed, eps_L). A slot left empty or filled twice, or a matching run that has not completed,
-    is an error; listing a run in data.exclusions takes it out. A null block that failed its
-    thermalised check fills its slot but is dropped from scoring and counted."""
+    is an error; listing a run in data.exclusions takes it out. A null block is read as
+    equilibrium, so it needs complete.json's thermalised verdict: without one it is refused,
+    and one that failed fills its slot but is dropped from scoring and counted."""
     excluded = {e["run_id"] for e in data["exclusions"]}
     pending = [r.run_id for r in incomplete if r.run_id not in excluded and _slots(r, data)]
     if pending:
@@ -379,7 +381,16 @@ def select(
         if short:
             raise IsingDataError(f"fewer than {data['replicas']} replicas per block: {short}")
         blocks = [filled[k][0] for k in wanted if k[1] == "null"]
-        passed = [(r, b) for r, b in blocks if _thermalised(r, _block_temperature(r, b))]
+        verdicts = [_thermalised(r, _block_temperature(r, b)) for r, b in blocks]
+        unchecked = [
+            f"{r.run_id} block {b}" for (r, b), v in zip(blocks, verdicts, strict=True) if v is None
+        ]
+        if unchecked:
+            raise IsingDataError(
+                f"null blocks with no thermalised verdict in complete.json: {unchecked}; "
+                "rerun them as null runs, or exclude them"
+            )
+        passed = [block for block, v in zip(blocks, verdicts, strict=True) if v]
         if not passed:
             raise IsingDataError(f"L = {L}: every null block failed its thermalised check")
         chosen[L] = Inputs(
@@ -789,7 +800,9 @@ def _static(
             dropped += lost
             here = [t for t in kept if _close(t, T)]
             if not here:
-                continue  # failed its thermalised check: counted above, not scored
+                if _thermalised(run, T) is False:
+                    continue  # failed its thermalised check: counted above, not scored
+                raise IsingDataError(f"{run.run_id}: no plateau at T = {T} for the static fit")
             plateau = kept[here[0]]
             dense[L].append(plateau.abs_m)
             strides[L] = int(run.schedule["stats_strides"][int(plateau.segment[0])])

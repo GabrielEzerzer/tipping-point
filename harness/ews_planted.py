@@ -50,9 +50,11 @@ def write_run(
     values: Values,
     failed: tuple[float, ...] = (),
     complete: bool = True,
+    verdicts: bool = True,
 ) -> Path:
     """A run folder as the simulator leaves it, with per-site |m| and e from
-    values(steps, temperatures (steps, lattices), rng) -> two (steps, lattices) arrays."""
+    values(steps, temperatures (steps, lattices), rng) -> two (steps, lattices) arrays.
+    `verdicts` = False leaves complete.json without thermalised checks, as before #50."""
     rng = np.random.default_rng([seed, L, len(tag)])
     run_dir = root / "ising" / f"20261023T000000Z-{tag}"
     run_dir.mkdir(parents=True)
@@ -106,7 +108,9 @@ def write_run(
     if complete:
         # complete.json's thermalised verdicts: one per staircase plateau, or per null block
         plateaus = []
-        if schedule.kind == "staircase":
+        if not verdicts:
+            pass
+        elif schedule.kind == "staircase":
             plateaus = sorted({float(T) for T in temps[:, 0]})
         elif schedule.kind == "fixed":
             plateaus = [float(T) for T in temps[0]]
