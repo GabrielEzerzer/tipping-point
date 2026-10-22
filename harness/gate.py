@@ -232,7 +232,13 @@ LEGS: list[Leg] = [
     Leg("ruff-check", ["ruff", "check"], judge_ruff_check),
     Leg("ruff-format", ["ruff", "format", "--check"], judge_ruff_format),
     Leg("pyright", ["pyright"], judge_pyright),
-    Leg("pytest", ["pytest", f"--junitxml={JUNIT}", "-q"], _judge_pytest_from_disk),
+    # -c pins the config pytest_dirs reads: a pytest.toml or pytest.ini would otherwise
+    # outrank pyproject.toml, and pytest would collect from dirs the floor never checks
+    Leg(
+        "pytest",
+        ["pytest", "-c", "pyproject.toml", f"--junitxml={JUNIT}", "-q"],
+        _judge_pytest_from_disk,
+    ),
 ]
 
 

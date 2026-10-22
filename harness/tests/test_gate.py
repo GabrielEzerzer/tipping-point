@@ -306,6 +306,27 @@ def test_pytest_dirs_read_native_toml_testpaths(tmp_path) -> None:
     assert gate.pytest_dirs(pyproject) == ["libs", "harness/tests"]
 
 
+def test_pytest_leg_pins_the_config_pytest_dirs_reads(tmp_path) -> None:
+    # pytest.toml outranks pyproject.toml: unpinned, pytest collects b/ while the floor checks a/
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\ntestpaths = ["a"]\n', encoding="utf-8"
+    )
+    (tmp_path / "pytest.toml").write_text('[pytest]\ntestpaths = ["b"]\n', encoding="utf-8")
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        test_file = tmp_path / name / f"test_{name}.py"
+        test_file.write_text(f"def test_{name}():\n    pass\n", encoding="utf-8")
+    (leg,) = [leg for leg in gate.LEGS if leg.name == "pytest"]
+    junit = tmp_path / "junit.xml"
+    argv = [f"--junitxml={junit}" if a.startswith("--junitxml=") else a for a in leg.argv]
+    proc = subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False)
+    dirs = gate.pytest_dirs(tmp_path / "pyproject.toml")
+    assert dirs == ["a"]
+    verdict = gate.judge_pytest(proc.returncode, junit.read_text(encoding="utf-8"), dirs)
+    assert verdict.green, verdict.source
+    assert leg.argv[leg.argv.index("-c") + 1] == "pyproject.toml"
+
+
 def test_pytest_leg_reads_the_dirs_from_the_real_pyproject(monkeypatch) -> None:
     # real JUnit from when only the python package had tests: harness/tests contributed none
     monkeypatch.setattr(gate, "JUNIT", FIXTURES / "junit-green.xml")
