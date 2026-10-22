@@ -1,7 +1,7 @@
 //! The engine's binaries start outside cargo. `cargo run` and `cargo test` put
-//! `target/<profile>/deps`, where DuckDB's library lands, on `PATH`; a shell, a Tauri sidecar or
+//! `target/<profile>/deps`, where `DuckDB`'s library lands, on `PATH`; a shell, a Tauri sidecar or
 //! a copied folder does not. Each binary runs here with nothing of cargo's in its environment and
-//! a `PATH` of system folders only, so it can load DuckDB only from beside itself (#52).
+//! a `PATH` of system folders only, so it can load `DuckDB` only from beside itself (#52).
 
 use std::path::Path;
 use std::process::{Command, Output};

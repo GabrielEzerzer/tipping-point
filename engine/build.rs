@@ -1,7 +1,7 @@
-//! Puts DuckDB's shared library next to the engine's binaries (`store`, `serve`), so that they
+//! Puts `DuckDB`'s shared library next to the engine's binaries (`store`, `serve`), so that they
 //! start from a plain shell, a Tauri sidecar or a copied folder, not only under cargo (#52).
 //!
-//! The build links DuckDB's prebuilt library, which libduckdb-sys downloads into
+//! The build links `DuckDB`'s prebuilt library, which libduckdb-sys downloads into
 //! `target/duckdb-download/` and copies only into `target/<profile>/deps/`, the folder cargo
 //! puts on `PATH` for `cargo run` and `cargo test`. Windows has no rpath: a binary run any other
 //! way looks for `duckdb.dll` beside itself, then on `PATH`, and fails to start without it.
