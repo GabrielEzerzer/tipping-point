@@ -241,6 +241,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let url = format!("ws://{}/", listener.local_addr().expect("local address"));
         let (tx, mut rx) = mpsc::channel(16);
+        // Before the spawn: the reader fixes its deadline when it dials and the paused clock jumps
+        // to exactly that, so wall time spent reaching pause() falls inside the 30 s, not on top.
         let start = Instant::now();
         let reader = tokio::spawn(run_reader(url, Duration::from_hours(1), tx));
 
