@@ -5,7 +5,8 @@ A  exact enumeration at L = 4: the final snapshot's P(E) and P(|M|) (G-test), an
 B  local Boltzmann identity on saved configs, any L: flipping a site with n unsatisfied bonds gives
    one with 4 - n at energy cost 8 - 4n, so P(n=4) = e^(-8/T) P(n=0) and P(n=3) = e^(-4/T) P(n=1)
 C  detailed balance of each half-sweep: in equilibrium accepted flips costing +d and -d balance
-   (d = 4, 8), and moves that do not raise the energy are always accepted
+   (d = 4, 8); moves that lower the energy are always accepted, and moves that leave it
+   unchanged half the time
 independence  replicas share no randomness: their |M| series are uncorrelated
 thermalised   each plateau's mean |m| is the same over both halves of its measurement window,
               and the window is at least 50 of the plateau's own tau long
@@ -155,12 +156,15 @@ def gate_c(run_dir: Path) -> list[Check]:
 
         # accepted(+d) - accepted(-d) per replica, for black d = 4, 8 then white d = 4, 8
         ts = [t_statistic(accepted(c, d) - accepted(c, -d)) for c in (0, 1) for d in (4, 8)]
-        free = here & (balance["delta_e"] <= 0)
-        always = bool(np.array_equal(balance["accepted"][free], balance["attempted"][free]))
-        passed = max(abs(t) for t in ts) <= Z_MAX and always
+        level = here & (balance["delta_e"] == 0)
+        tried = _per_replica(balance, level, "attempted")
+        t_half = t_statistic(_per_replica(balance, level, "accepted") - tried / 2)
+        downhill = here & (balance["delta_e"] < 0)
+        always = bool(np.array_equal(balance["accepted"][downhill], balance["attempted"][downhill]))
+        passed = max(abs(t) for t in [*ts, t_half]) <= Z_MAX and always
         detail = (
             f"accepted(+d) - accepted(-d) t = {', '.join(f'{t:+.2f}' for t in ts)}; "
-            f"dE <= 0 always accepted: {always}"
+            f"dE = 0 accepted half the time t={t_half:+.2f}; dE < 0 always accepted: {always}"
         )
         checks.append(Check("C", float(T), bool(passed), detail))
     return checks

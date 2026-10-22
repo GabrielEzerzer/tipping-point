@@ -46,6 +46,8 @@ uv run python -m tipping_point.ising ramp --L 16 --x 30               # Kibble-Z
 uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
 ```
 
+At Tc alone (seed 1) the L = 16 pilot reads tau(|m|) = 52.8 (binning 49.0) and tau(e) = 27.5 (#47).
+
 ## Running the gate
 
 ```sh

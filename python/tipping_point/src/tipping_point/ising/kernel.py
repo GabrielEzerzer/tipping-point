@@ -21,9 +21,18 @@ def checkerboard(L: int, device: torch.device | str) -> Tensor:
 
 
 def accept_table(temperature: Tensor) -> Tensor:
-    """(B,) float64 temperatures -> (B, 5) float32 min(1, e^(-dE/T)) for dE = -8, -4, 0, 4, 8."""
+    """(B,) float64 temperatures -> (B, 5) float32 acceptance for dE = -8, -4, 0, 4, 8:
+    min(1, e^(-dE/T)), except 1/2 at dE = 0.
+
+    Accepting every dE = 0 move traps a lattice whose sites all have two up and two down
+    neighbours: each half-sweep flips every site of its colour, so it oscillates x <-> -x for
+    ever (36 such states at L = 4, cut off from the rest). Both directions of a dE = 0 move get
+    the same 1/2, so detailed balance and the stationary distribution are unchanged.
+    """
     delta_e = torch.arange(-8.0, 9.0, 4.0, dtype=torch.float64, device=temperature.device)
-    return torch.exp(-delta_e / temperature[:, None]).clamp(max=1.0).float()
+    table = torch.exp(-delta_e / temperature[:, None]).clamp(max=1.0)
+    table[:, 2] = 0.5  # dE = 0
+    return table.float()
 
 
 def neighbour_sum(s: Tensor) -> Tensor:
