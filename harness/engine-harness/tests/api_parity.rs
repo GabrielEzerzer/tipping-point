@@ -654,3 +654,115 @@ async fn a_replay_that_fails_says_so_and_never_ended() -> Outcome {
     fs::remove_dir_all(&played.dir)?;
     Ok(())
 }
+
+/// With three symbols an instant's rows straddle `DuckDB`'s chunks (2,048 rows end mid-instant).
+/// A replay still sends whole instants (one per batch when paced, several when not) and every row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replays_send_whole_instants_across_duckdb_chunks() -> Outcome {
+    const THREE: &str = "20261022T000000Z-three";
+    let dir = scratch("api-instants");
+    write_three_symbol_run(&dir.join("market").join(THREE))?;
+    let server = Server::start(Hub::new(HubConfig::default()), ApiConfig::new(dir.clone())).await?;
+
+    // A table read hands `DuckDB`'s chunks on as they come: some end mid-instant.
+    let url = server.url(&format!("/v1/table/market/{THREE}/book_samples"));
+    let (schema, raw) = get_arrow(&url).await?;
+    let sizes: Vec<usize> = raw.iter().map(RecordBatch::num_rows).collect();
+    assert!(
+        sizes.iter().any(|rows| rows % 3 != 0),
+        "no chunk straddles an instant: {sizes:?}"
+    );
+    let stored = one_batch(&schema, &raw)?;
+
+    for speed in ["0", "100000"] {
+        let url = server.url(&format!("/v1/live/book_samples?run={THREE}&speed={speed}"));
+        let (schema, batches) = get_arrow(&url).await?;
+        assert_eq!(
+            one_batch(&schema, &batches)?,
+            stored,
+            "speed {speed}: every row"
+        );
+        let times = |batch: &RecordBatch| int64(batch, "sample_ts_ns").values().to_vec();
+        for batch in &batches {
+            let ts = times(batch);
+            assert_eq!(
+                ts.len() % 3,
+                0,
+                "speed {speed}: a batch with part of an instant"
+            );
+            if speed != "0" {
+                assert!(
+                    ts.iter().all(|t| *t == ts[0]),
+                    "speed {speed}: one instant per batch"
+                );
+            }
+        }
+        for pair in batches.windows(2) {
+            assert_ne!(
+                times(&pair[0]).last(),
+                times(&pair[1]).first(),
+                "an instant split"
+            );
+        }
+    }
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A market run with three symbols and 1,500 instants of book samples (4,500 rows, one row group).
+fn write_three_symbol_run(run_dir: &Path) -> Outcome {
+    use engine::binance::sync::Level;
+    use engine::store::samples::{BookRow as Row, Sample, SampleRows};
+
+    let symbols = ["AAAUSDT", "BBBUSDT", "CCCUSDT"];
+    let scales: serde_json::Map<String, Value> = symbols
+        .iter()
+        .map(|s| {
+            (
+                (*s).to_owned(),
+                json!({"price_decimals": 1, "qty_decimals": 3}),
+            )
+        })
+        .collect();
+    fs::create_dir_all(run_dir.join("book_samples"))?;
+    let manifest = json!({
+        "format": 1, "domain": "market", "run_id": run_dir.file_name().and_then(|n| n.to_str()),
+        "key": "seq", "tables": ["book_samples"], "params": {"scales": scales},
+    });
+    fs::write(run_dir.join("manifest.json"), manifest.to_string())?;
+    let mut rows = SampleRows::new(2);
+    for i in 0..1500_i64 {
+        let sample = Sample {
+            sample_ts_ns: 1_700_000_000_000_000_000 + i * 100_000_000,
+            seq: i,
+            rows: symbols
+                .iter()
+                .map(|symbol| Row {
+                    symbol: (*symbol).to_owned(),
+                    synced: true,
+                    last_update_id: Some(i),
+                    bids: vec![Level {
+                        price: 1000 - i % 7,
+                        qty: 1 + i % 5,
+                    }],
+                    asks: vec![Level {
+                        price: 1001 + i % 3,
+                        qty: 2,
+                    }],
+                })
+                .collect(),
+        };
+        rows.push(&sample);
+    }
+    let batch = rows.take()?;
+    let file = fs::File::create(
+        run_dir
+            .join("book_samples")
+            .join(format!("{:020}.parquet", 0)),
+    )?;
+    let mut writer = parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}

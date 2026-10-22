@@ -2,8 +2,9 @@
 
 Offline work (training on Kaggle, experiments, baselines) reads a run's Parquet directly with
 `read`, following the shared layout `<root>/<domain>/<run_id>/<table>/<first_key:020>.parquet`.
-The engine is only on the live path: `live` streams book samples as Arrow record batches (one
-per 100 ms grid instant, one row per symbol), `table` reads a range of any table through the
+The engine is only on the live path: `live` streams book samples as Arrow record batches, each
+one or more whole 100 ms grid instants with one row per symbol (one instant per batch live; a
+backfill or an unpaced replay sends several), `table` reads a range of any table through the
 engine, and `publish` hands results (meters, Jev labels, P&L) back for the app.
 
 Every stream keeps the stored schema, with `tp.schema = "<table>/<major>"` in its metadata. A

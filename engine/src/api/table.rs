@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::array::{Array, Int64Array, RecordBatch};
+use arrow::compute::concat_batches;
 use arrow::datatypes::SchemaRef;
 use duckdb::params_from_iter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -267,8 +268,9 @@ impl Table {
         Ok(Some(encoder.finish()?))
     }
 
-    /// A market run's book samples as if live: one batch per grid instant, paced at `speed`
-    /// times the capture clock (0 for no pacing, whole `DuckDB` chunks at a time).
+    /// A market run's book samples as if live, paced at `speed` times the capture clock. Every
+    /// batch holds whole instants: one per batch when paced, as many as a `DuckDB` chunk holds
+    /// at speed 0 (no pacing).
     ///
     /// # Errors
     /// Returns the error that stopped the stream; the response has been aborted by then.
@@ -298,31 +300,78 @@ impl Table {
         conn.execute_batch("SET preserve_insertion_order = true")?;
         let mut statement = conn.prepare(&self.sql(schema, None, None))?;
         drop(statement.stream_arrow([])?);
-        let mut clock: Option<(Instant, i64)> = None;
+        let mut out = Instants {
+            speed,
+            clock: None,
+            encoder: &mut encoder,
+            chunks,
+            runtime,
+        };
+        // An instant's rows can straddle two `DuckDB` chunks (with three symbols, 2,048 rows end
+        // mid-instant): the last instant of each chunk waits for the next one.
+        let mut carried: Option<RecordBatch> = None;
         while let Some(chunk) = statement.step()? {
-            let batch = conform(&RecordBatch::from(&chunk), schema)?;
-            let pieces = if speed > 0.0 {
-                instants(&batch)?
-            } else {
-                vec![batch]
-            };
-            for piece in pieces {
-                if piece.num_rows() == 0 {
-                    continue;
-                }
-                if speed > 0.0 {
-                    pace(&mut clock, first_time(&piece)?, speed);
-                }
-                if chunks
-                    .send_blocking(runtime, encoder.batch(&piece)?)
-                    .is_err()
-                {
-                    return Ok(None);
-                }
+            let mut batch = conform(&RecordBatch::from(&chunk), schema)?;
+            if let Some(head) = carried.take() {
+                batch = concat_batches(schema, [&head, &batch])?;
             }
+            let last = last_instant_start(&batch)?;
+            carried = Some(batch.slice(last, batch.num_rows() - last));
+            if !out.send(&batch.slice(0, last))? {
+                return Ok(None);
+            }
+        }
+        if let Some(rest) = carried
+            && !out.send(&rest)?
+        {
+            return Ok(None);
         }
         Ok(Some(encoder.finish()?))
     }
+}
+
+/// Sends whole instants of book samples, paced or not.
+struct Instants<'a> {
+    speed: f64,
+    clock: Option<(Instant, i64)>,
+    encoder: &'a mut Encoder,
+    chunks: &'a mut Chunks,
+    runtime: &'a tokio::runtime::Handle,
+}
+
+impl Instants<'_> {
+    /// Sends `batch`, whole instants only: one batch per instant when paced, all at once when
+    /// not. False once the client left or was cut.
+    fn send(&mut self, batch: &RecordBatch) -> Result<bool, StoreError> {
+        if batch.num_rows() == 0 {
+            return Ok(true);
+        }
+        let pieces = if self.speed > 0.0 {
+            instants(batch)?
+        } else {
+            vec![batch.clone()]
+        };
+        for piece in pieces {
+            if self.speed > 0.0 {
+                pace(&mut self.clock, first_time(&piece)?, self.speed);
+            }
+            let message = self.encoder.batch(&piece)?;
+            if self.chunks.send_blocking(self.runtime, message).is_err() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Where the last instant of a batch of book samples starts: its rows run to the end.
+fn last_instant_start(batch: &RecordBatch) -> Result<usize, StoreError> {
+    let times = sample_times(batch)?;
+    let mut start = times.len();
+    while start > 0 && times.value(start - 1) == times.value(times.len() - 1) {
+        start -= 1;
+    }
+    Ok(start)
 }
 
 /// Ends a stream as it went: finished with its end marker when it ran to the end, aborted on an
