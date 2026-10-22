@@ -4,6 +4,7 @@
 then reads every table of the market run and of the Ising run through the engine and compares
 each with a direct `pyarrow.dataset` read of the same Parquet, replays the run as if live,
 compares the saved live rows with the rotated Parquet, and publishes a meter back for the app.
+`cut` reads streams an engine cuts partway and requires every one to raise.
 
 Every batch is checked for what a model consumer relies on: a column the schema declares
 non-nullable holds no null, and every null-free numeric column goes to torch with
@@ -13,6 +14,7 @@ non-nullable holds no null, and every null-free numeric column goes to torch wit
 from __future__ import annotations
 
 import argparse
+import http.client
 import sys
 from collections.abc import Iterable
 from pathlib import Path
@@ -115,6 +117,23 @@ def tables(args: argparse.Namespace) -> None:
     engine.publish("meters", METER, args.url)
 
 
+def cut(args: argparse.Namespace) -> None:
+    """Streams the engine cuts partway must raise, never read as complete tables."""
+    openers = {
+        "replay": lambda: engine.live(args.url, run=args.run, speed=0),
+        "table": lambda: engine.table("market", args.run, "frames", args.url),
+    }
+    complete = []
+    for name, opener in openers.items():
+        try:
+            with opener() as stream:
+                table = stream.read_all()
+        except (OSError, pa.ArrowException, http.client.HTTPException):
+            continue
+        complete.append(f"{name} read {table.num_rows} rows as complete")
+    check(not complete, "; ".join(complete))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -129,8 +148,11 @@ def main(argv: list[str] | None = None) -> int:
     second.add_argument("--run", required=True)
     second.add_argument("--ising-run", required=True)
     second.add_argument("--live", type=Path, required=True)
+    third = commands.add_parser("cut")
+    third.add_argument("--url", required=True)
+    third.add_argument("--run", required=True)
     args = parser.parse_args(argv)
-    {"live": live, "tables": tables}[args.command](args)
+    {"live": live, "tables": tables, "cut": cut}[args.command](args)
     print(f"{args.command}: ok")
     return 0
 

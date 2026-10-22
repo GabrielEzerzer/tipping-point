@@ -16,6 +16,7 @@ use std::time::Duration;
 use arrow::array::{Array, BooleanArray, Int64Array, RecordBatch, StringArray};
 use engine::api::ApiConfig;
 use engine::api::hub::{Hub, HubConfig};
+use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
 use engine::store::writer::LogConfig;
 use engine_harness::api::{
@@ -462,7 +463,7 @@ async fn a_stream_that_fails_partway_fails_at_the_client() -> Outcome {
         LogConfig::default(),
     )?;
     let config = ApiConfig {
-        fail_after: Some(3),
+        fault: Some(Fault::Abort { after: 3 }),
         ..ApiConfig::new(dir.clone())
     };
     let server = Server::start(Arc::clone(&hub), config).await?;
@@ -492,6 +493,60 @@ async fn a_stream_that_fails_partway_fails_at_the_client() -> Outcome {
         replay.is_err(),
         "a cut replay must not read as complete: {replay:?}"
     );
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A producer that panics partway, as a bug would, aborts its response as an error does: the
+/// client never reads the well-formed prefix as a complete table, on the live stream (an async
+/// producer) or on a replay and a table read (producers on blocking threads). The server serves
+/// on. A replay speed so slow its waits would overflow the clock is refused, not a panic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_producer_that_panics_fails_at_the_client() -> Outcome {
+    let dir = scratch("api-panic");
+    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let hub = Hub::new(HubConfig::default());
+    let mut live = LivePath::new(
+        scales,
+        Arc::clone(&hub),
+        &dir,
+        Some(RUN),
+        LogConfig::default(),
+    )?;
+    let config = ApiConfig {
+        fault: Some(Fault::Panic { after: 1 }),
+        ..ApiConfig::new(dir.clone())
+    };
+    let server = Server::start(Arc::clone(&hub), config).await?;
+    let url = server.url("/v1/live/book_samples");
+    let arrow = tokio::spawn(async move { get_arrow(&url).await });
+    while hub.arrow_subscribers() == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for message in messages {
+        live.push(message).await?;
+    }
+    hub.end();
+    let cut = arrow.await?;
+    // The HTTP body itself fails: a body that ended cleanly without the end marker would read as
+    // complete to pyarrow, so a missing marker alone is not enough.
+    let body_failed =
+        |read: &Result<_, String>| read.as_ref().is_err_and(|e| e.starts_with("body"));
+    assert!(body_failed(&cut), "the live stream ended cleanly: {cut:?}");
+    live.finish().await?;
+    rotate(&dir.join("market").join(RUN))?;
+    for path in [
+        format!("/v1/live/book_samples?run={RUN}&speed=0"),
+        format!("/v1/table/market/{RUN}/frames"),
+    ] {
+        let read = get_arrow(&server.url(&path)).await;
+        assert!(body_failed(&read), "{path} ended cleanly: {read:?}");
+    }
+    let health = reqwest::get(server.url("/v1/health")).await?;
+    assert_eq!(health.status(), 200, "the server serves on");
+    let slow = server.url(&format!("/v1/live/book_samples?run={RUN}&speed=1e-300"));
+    assert_eq!(reqwest::get(slow).await?.status(), 400);
     server.stop().await;
     fs::remove_dir_all(&dir)?;
     Ok(())

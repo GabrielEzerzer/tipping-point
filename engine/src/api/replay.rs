@@ -364,6 +364,25 @@ fn trades_of(batch: &RecordBatch) -> Result<Vec<(i64, Arc<TradeMessage>)>, Store
         .collect())
 }
 
+/// The slowest replay a client may ask for, besides 0 (as fast as possible): a thousandth of
+/// real time, a 100 ms instant every 100 s.
+pub const MIN_SPEED: f64 = 1e-3;
+
+/// A replay speed a client may ask for: 0, or a finite number at least [`MIN_SPEED`].
+#[must_use]
+pub fn valid_speed(speed: f64) -> bool {
+    speed.is_finite() && speed >= 0.0 && !(0.0 < speed && speed < MIN_SPEED)
+}
+
+/// The wait until an item `elapsed_ns` after the first on the capture clock is due, at `speed`
+/// times real time. Capped at a day, so no speed and no gap in a run can overflow the clock.
+pub(crate) fn delay(elapsed_ns: i64, speed: f64) -> Duration {
+    const LONGEST: Duration = Duration::from_hours(24);
+    #[allow(clippy::cast_precision_loss)]
+    let seconds = elapsed_ns.max(0) as f64 / 1e9 / speed;
+    Duration::try_from_secs_f64(seconds).map_or(LONGEST, |wait| wait.min(LONGEST))
+}
+
 /// Spaces items out at `speed` times the capture clock, and holds them while paused.
 struct Pacer {
     speed: f64,
@@ -393,10 +412,8 @@ impl Pacer {
                 return true;
             }
             let (wall, t0) = *self.origin.get_or_insert((Instant::now(), t));
-            #[allow(clippy::cast_precision_loss)]
-            let after = Duration::from_secs_f64((t - t0).max(0) as f64 / 1e9 / self.speed);
             tokio::select! {
-                () = sleep_until(wall + after) => return true,
+                () = sleep_until(wall + delay(t - t0, self.speed)) => return true,
                 changed = paused.changed() => {
                     if changed.is_err() {
                         return false;
@@ -410,6 +427,24 @@ impl Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn any_speed_gives_a_finite_wait() {
+        assert_eq!(delay(1_000_000_000, 1.0), Duration::from_secs(1));
+        assert_eq!(delay(1_000_000_000, 10.0), Duration::from_millis(100));
+        assert_eq!(delay(-5, 1.0), Duration::ZERO);
+        let day = Duration::from_hours(24);
+        assert_eq!(delay(1_000_000_000, 1e-300), day, "no panic, capped");
+        assert_eq!(delay(i64::MAX, f64::MIN_POSITIVE), day);
+        assert_eq!(
+            delay(1, 0.0),
+            day,
+            "callers never pace at 0, but it must not panic"
+        );
+        assert!(valid_speed(0.0) && valid_speed(MIN_SPEED) && valid_speed(1e9));
+        assert!(!valid_speed(1e-300) && !valid_speed(-1.0) && !valid_speed(f64::NAN));
+        assert!(!valid_speed(f64::INFINITY));
+    }
 
     #[test]
     fn a_trade_at_a_sample_instant_goes_first() {

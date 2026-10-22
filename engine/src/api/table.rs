@@ -7,7 +7,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use arrow::array::{Array, Int64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
@@ -16,6 +16,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 
 use super::ipc::{Encoder, Provenance, conform, tagged};
+use super::replay::delay;
 use super::stream::Chunks;
 use crate::binance::{Scales, Symbol};
 use crate::store::run::{self, MANIFEST};
@@ -218,7 +219,7 @@ impl Table {
 
     /// Streams the rows whose key is in `[start, end)` into `chunks`, in `schema` (from
     /// [`Self::schema`]): the schema message, one batch per `DuckDB` chunk, then the end marker.
-    /// Runs on a blocking thread. An error aborts the response.
+    /// Runs on a blocking thread. An error, or a panic, aborts the response.
     ///
     /// # Errors
     /// Returns the error that stopped the stream; the response has been aborted by then.
@@ -226,16 +227,15 @@ impl Table {
         &self,
         schema: &SchemaRef,
         (start, end): (Option<i64>, Option<i64>),
-        chunks: &mut Chunks,
+        mut chunks: Chunks,
         runtime: &tokio::runtime::Handle,
     ) -> Result<(), StoreError> {
-        let result = self.stream_inner(schema, start, end, chunks, runtime);
-        if let Err(error) = &result {
-            chunks.abort(&error.to_string());
-        }
-        result
+        let streamed = self.stream_inner(schema, start, end, &mut chunks, runtime);
+        finish(streamed, chunks, runtime)
     }
 
+    /// The batches, then the end-of-stream chunk to finish with; `None` when the client left or
+    /// was cut.
     fn stream_inner(
         &self,
         schema: &SchemaRef,
@@ -243,10 +243,10 @@ impl Table {
         end: Option<i64>,
         chunks: &mut Chunks,
         runtime: &tokio::runtime::Handle,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         let (mut encoder, header) = Encoder::new(Arc::clone(schema))?;
         if chunks.send_blocking(runtime, header).is_err() {
-            return Ok(());
+            return Ok(None);
         }
         let conn = query::connect()?;
         conn.execute_batch("SET preserve_insertion_order = true")?;
@@ -261,12 +261,10 @@ impl Table {
                 .send_blocking(runtime, encoder.batch(&batch)?)
                 .is_err()
             {
-                return Ok(());
+                return Ok(None);
             }
         }
-        // A client gone or cut on purpose ends the stream; it is not an error.
-        let _ = chunks.send_blocking(runtime, encoder.finish()?);
-        Ok(())
+        Ok(Some(encoder.finish()?))
     }
 
     /// A market run's book samples as if live: one batch per grid instant, paced at `speed`
@@ -278,14 +276,11 @@ impl Table {
         &self,
         schema: &SchemaRef,
         speed: f64,
-        chunks: &mut Chunks,
+        mut chunks: Chunks,
         runtime: &tokio::runtime::Handle,
     ) -> Result<(), StoreError> {
-        let result = self.replay_inner(schema, speed, chunks, runtime);
-        if let Err(error) = &result {
-            chunks.abort(&error.to_string());
-        }
-        result
+        let streamed = self.replay_inner(schema, speed, &mut chunks, runtime);
+        finish(streamed, chunks, runtime)
     }
 
     fn replay_inner(
@@ -294,10 +289,10 @@ impl Table {
         speed: f64,
         chunks: &mut Chunks,
         runtime: &tokio::runtime::Handle,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         let (mut encoder, header) = Encoder::new(Arc::clone(schema))?;
         if chunks.send_blocking(runtime, header).is_err() {
-            return Ok(());
+            return Ok(None);
         }
         let conn = query::connect()?;
         conn.execute_batch("SET preserve_insertion_order = true")?;
@@ -322,13 +317,31 @@ impl Table {
                     .send_blocking(runtime, encoder.batch(&piece)?)
                     .is_err()
                 {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
-        // A client gone or cut on purpose ends the stream; it is not an error.
-        let _ = chunks.send_blocking(runtime, encoder.finish()?);
-        Ok(())
+        Ok(Some(encoder.finish()?))
+    }
+}
+
+/// Ends a stream as it went: finished with its end marker when it ran to the end, aborted on an
+/// error. A client that left or was cut needs nothing more: dropping `chunks` aborts.
+fn finish(
+    streamed: Result<Option<Vec<u8>>, StoreError>,
+    mut chunks: Chunks,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(), StoreError> {
+    match streamed {
+        Ok(Some(end)) => {
+            let _ = chunks.finish_blocking(runtime, end);
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => {
+            chunks.abort(&error.to_string());
+            Err(error)
+        }
     }
 }
 
@@ -366,9 +379,7 @@ fn first_time(batch: &RecordBatch) -> Result<i64, StoreError> {
 /// starting at the first instant.
 fn pace(clock: &mut Option<(Instant, i64)>, t: i64, speed: f64) {
     let (wall, t0) = *clock.get_or_insert((Instant::now(), t));
-    #[allow(clippy::cast_precision_loss)]
-    let after = Duration::from_secs_f64(((t - t0).max(0) as f64 / 1e9) / speed);
-    if let Some(wait) = (wall + after).checked_duration_since(Instant::now()) {
+    if let Some(wait) = (wall + delay(t - t0, speed)).checked_duration_since(Instant::now()) {
         std::thread::sleep(wait);
     }
 }

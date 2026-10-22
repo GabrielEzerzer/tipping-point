@@ -54,7 +54,7 @@ use tower::ServiceExt;
 use hub::{Hub, LiveItem, live_schema};
 use ipc::{Encoder, STREAM_TYPE};
 use messages::{PROTOCOL, Topic};
-use stream::{Chunks, Kill};
+use stream::{Chunks, Fault, Kill};
 use table::{DOMAINS, TableError, locate};
 
 use crate::store::run::{self, COMPLETE, MANIFEST, MARKET};
@@ -91,8 +91,8 @@ pub struct ApiConfig {
     pub ws_stall: Duration,
     /// An Arrow client whose connection takes nothing for this long is cut.
     pub arrow_stall: Duration,
-    /// Harness only: every Arrow stream fails after this many batches. `None` in production.
-    pub fail_after: Option<u64>,
+    /// Harness only: a failure every Arrow stream meets partway. `None` in production.
+    pub fault: Option<Fault>,
 }
 
 impl ApiConfig {
@@ -104,7 +104,7 @@ impl ApiConfig {
             origins: DEFAULT_ORIGINS.iter().map(|&o| o.to_owned()).collect(),
             ws_stall: Duration::from_secs(10),
             arrow_stall: Duration::from_secs(10),
-            fail_after: None,
+            fault: None,
         }
     }
 }
@@ -295,7 +295,7 @@ fn body_for(api: &Api, kill: Option<Extension<Kill>>) -> (Chunks, Body) {
     stream::channel(
         kill.map(|Extension(kill)| kill),
         api.config.arrow_stall,
-        api.config.fail_after,
+        api.config.fault,
     )
 }
 
@@ -322,14 +322,20 @@ async fn live_samples(
     kill: Option<Extension<Kill>>,
 ) -> Result<Response, ApiError> {
     let backfill = seconds(query.backfill_s, "backfill_s")?;
-    let speed = seconds(query.speed, "speed")?.unwrap_or(1.0);
+    let speed = query.speed.unwrap_or(1.0);
+    if !replay::valid_speed(speed) {
+        return Err(bad_request(format!(
+            "speed is 0 (as fast as possible) or at least {}",
+            replay::MIN_SPEED
+        )));
+    }
     if let Some(run) = query.run {
         let table = locate(&api.config.data_dir, MARKET, &run, "book_samples")?;
         let schema = blocking_schema(table.clone()).await?;
-        let (mut chunks, body) = body_for(&api, kill);
+        let (chunks, body) = body_for(&api, kill);
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            let _ = table.replay_samples(&schema, speed, &mut chunks, &runtime);
+            let _ = table.replay_samples(&schema, speed, chunks, &runtime);
         });
         return Ok(arrow_response(body));
     }
@@ -405,8 +411,11 @@ async fn live_stream(
             }
         }
     }
-    if let Ok(end) = encoder.finish() {
-        let _ = chunks.send(end).await;
+    match encoder.finish() {
+        Ok(end) => {
+            let _ = chunks.finish(end).await;
+        }
+        Err(_) => chunks.abort("cannot end the stream"),
     }
 }
 
@@ -424,10 +433,10 @@ async fn table_stream(
 ) -> Result<Response, ApiError> {
     let table = locate(&api.config.data_dir, &domain, &run, &name)?;
     let schema = blocking_schema(table.clone()).await?;
-    let (mut chunks, body) = body_for(&api, kill);
+    let (chunks, body) = body_for(&api, kill);
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        let _ = table.stream(&schema, (range.start, range.end), &mut chunks, &runtime);
+        let _ = table.stream(&schema, (range.start, range.end), chunks, &runtime);
     });
     Ok(arrow_response(body))
 }

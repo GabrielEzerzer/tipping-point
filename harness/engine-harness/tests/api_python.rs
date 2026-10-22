@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use engine::api::ApiConfig;
 use engine::api::hub::{Hub, HubConfig};
+use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
 use engine::store::writer::LogConfig;
 use engine_harness::api::{
@@ -138,6 +139,43 @@ async fn the_python_client_reads_every_stream_and_publishes_back() -> Outcome {
     };
     assert_eq!(meter["data"]["from"], "python");
     assert_eq!(meter["data"]["symbol"], "BTCUSDT");
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A stream whose producer panics partway raises in the Python client: the engine aborts the
+/// response, so pyarrow never reads the prefix it got as a complete table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_cut_by_a_producer_panic_raises_in_python() -> Outcome {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("api-python-cut-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let hub = Hub::new(HubConfig::default());
+    let mut live = LivePath::new(
+        scales,
+        Arc::clone(&hub),
+        &dir,
+        Some(RUN),
+        LogConfig::default(),
+    )?;
+    for message in messages {
+        live.push(message).await?;
+    }
+    hub.end();
+    live.finish().await?;
+    rotate(&dir.join("market").join(RUN))?;
+    let config = ApiConfig {
+        fault: Some(Fault::Panic { after: 1 }),
+        ..ApiConfig::new(dir.clone())
+    };
+    let server = Server::start(hub, config).await?;
+    let url = server.url("");
+    let mut cutter = spawn(&["cut", "--url", &url, "--run", RUN])?;
+    let status = wait(&mut cutter, Duration::from_secs(180)).await?;
+    assert!(status.success(), "python cut: {status}");
     server.stop().await;
     fs::remove_dir_all(&dir)?;
     Ok(())

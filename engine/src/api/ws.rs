@@ -546,8 +546,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     }
 
     fn replay(&mut self, run: String, from_ms: Option<i64>, speed: f64) -> Result<(), Closing> {
-        if !speed.is_finite() || speed < 0.0 {
-            return Err(bad("speed must be 0 (as fast as possible) or more"));
+        if !super::replay::valid_speed(speed) {
+            return Err(bad(format!(
+                "speed is 0 (as fast as possible) or at least {}",
+                super::replay::MIN_SPEED
+            )));
         }
         let replay = Replay::start(
             &self.api.config.data_dir,
