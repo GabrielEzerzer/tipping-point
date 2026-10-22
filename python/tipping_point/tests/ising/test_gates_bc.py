@@ -116,11 +116,12 @@ def test_a_dwell_from_a_tau_seven_times_too_small_fails_the_thermalisation_check
 
 
 def test_dwelled_plateaus_pass_the_thermalisation_check(tmp_path: Path) -> None:
-    """Positive control: plateaus held well past 20 tau, then measured for ~100 tau of |m|
-    (L = 16: tau ~ 4 at 3.0, ~14 at 2.5), agree across halves and time reliably."""
+    """Positive control: plateaus held for 20 tau or more, then measured for ~100 tau of |m|,
+    agree across halves and time reliably."""
+    # tau of |m| from the L = 16 pilot after the dE = 0 rule of #47: 6.8 at 3.0, 33.7 at 2.5
     schedule = protocol.Staircase(
-        [4.0, 14.0], temperatures=(3.0, 2.5), warmup=300, min_therm=300, min_meas=1000
+        [7.0, 34.0], temperatures=(3.0, 2.5), warmup=300, min_therm=300, min_meas=1000
     )
-    assert schedule.meas == [1000, 1400]
+    assert schedule.meas == [1000, 3400]
     run_dir = run.start(run.Spec(16, 32, seed=11), schedule, tmp_path, "dwelled", "cpu")
     assert _thermalised(run_dir) == [True, True]
