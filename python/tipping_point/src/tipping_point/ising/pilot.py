@@ -12,9 +12,10 @@ L, each holding a block at exactly Tc with a stats row every sweep, and writes
     "per_L": {                  one entry per size, keyed by str(L):
       "16": {
         "tau_c": ...,           Sokal tau_int of |m|, 1 + 2 sum rho(t) with window c = 5, sweeps
+        "tau_c_ci": [lo, hi],   95% bootstrap over replicas; optional for readers
         "tau_c_binning": ...,   the binning cross-check of tau_c
         "tau_e": ...,           Sokal tau_int of the energy per site
-        "n_over_tau": ...,      measured sweeps / tau_c: independent samples per replica, >= 50
+        "n_over_tau": ...,      measured sweeps / tau_c, at least MIN_N_OVER_TAU = 300
         "replicas": ..., "sweeps": ..., "seed": ...   the pilot run's
       }, ...
     },
@@ -24,6 +25,10 @@ L, each holding a block at exactly Tc with a stats row every sweep, and writes
   }
 
 `tau_c(record, L)` reads a measured size from per_L and any other size from the fit.
+
+Subtracting each series' mean pulls the windowed estimate about 10 / (N / tau) low (2c over
+N / tau, c = 5), so a size is recorded only from N >= 300 tau_c: at most ~3% short. The record's
+L = 64 entry (343 tau_c) reads ~3% low and L = 16 (960 tau_c) ~1%; test_autocorr pins both.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from . import autocorr, io
 from .exact import TC
 
 DRAWS = 2000  # bootstrap resamples per size
+MIN_N_OVER_TAU = 300  # measured sweeps per tau_c below which the estimate reads > 3% short
 _QUANTILES = (0.025, 0.975)  # 95% intervals
 _ENTRY_KEYS = ("tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps", "seed")
 
@@ -76,8 +82,15 @@ def measure(
     tau_m, tau_e = autocorr.estimate(m), autocorr.estimate(e)
     if not tau_m.reliable:
         raise ValueError(f"{run_dir.name}: tau of |m| at Tc is unreliable ({tau_m}); run longer")
+    if m.shape[1] < MIN_N_OVER_TAU * tau_m.tau:
+        raise ValueError(
+            f"{run_dir.name}: {m.shape[1] / tau_m.tau:.0f} tau_c of |m| at Tc, need "
+            f"{MIN_N_OVER_TAU}: the estimate reads ~10 / (N / tau) short; run longer"
+        )
+    boot = autocorr.bootstrap(m, draws, np.random.default_rng([seed, L]))
     entry = {
         "tau_c": tau_m.tau,
+        "tau_c_ci": np.quantile(boot, _QUANTILES).tolist(),
         "tau_c_binning": tau_m.binning,
         "tau_e": tau_e.tau,
         "n_over_tau": m.shape[1] / tau_m.tau,
@@ -85,7 +98,6 @@ def measure(
         "sweeps": m.shape[1],
         "seed": manifest["params"]["seed"],
     }
-    boot = autocorr.bootstrap(m, draws, np.random.default_rng([seed, L]))
     return L, entry, boot, producer["git_sha"] + ("-dirty" if producer["dirty"] else "")
 
 
@@ -131,8 +143,8 @@ def write(record: dict[str, Any], root: Path) -> Path:
 
 
 def read(path: Path) -> dict[str, Any]:
-    """A pilot record, refused unless it has every field above, every tau_c, A and z is a finite
-    positive number, and every size held at least 50 tau_c."""
+    """A pilot record, refused unless it has every field above (tau_c_ci may be absent), every
+    tau_c, A and z is a finite positive number, and every size held at least 300 tau_c."""
     record = io.read_json(Path(path))
     per_L, fit = record.get("per_L"), record.get("fit")
     if not (
@@ -149,7 +161,7 @@ def read(path: Path) -> dict[str, Any]:
             and all(key in entry for key in _ENTRY_KEYS)
             and _positive(entry["tau_c"])
             and _positive(entry["n_over_tau"])
-            and entry["n_over_tau"] >= 50
+            and entry["n_over_tau"] >= MIN_N_OVER_TAU
         ):
             raise ValueError(f"{path}: bad per_L entry {L}: {entry}")
     if not (

@@ -3,7 +3,7 @@
   staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json
   ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x of a pilot record's tau_c
              (or an explicit rate)
-  null       fixed-T null run at epsilon_L = 2, 4 or 6 above Tc, 400 tau_c of the pilot record
+  null       fixed-T null run at epsilon_L = 2, 4 or 6: 400 tau_c of a size a pilot record measured
   pilot      measure tau_int of |m| and e at given temperatures; writes tau.json
   tauc       tau_c(L) at Tc from pilot runs (one per L) and its fit A L^z; writes pilot.json
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure
@@ -77,7 +77,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=protocol.NULL_EPSILON_L,
         help="scaled temperature L (T - Tc) / Tc",
     )
-    p.add_argument("--pilot", type=Path, required=True, help="pilot.json: tau_c sets the length")
+    p.add_argument("--pilot", type=Path, required=True, help="pilot.json that measured --L")
     p.set_defaults(command=_null)
 
     p = sub.add_parser("pilot", parents=[sized], help="measure tau_int")
@@ -161,7 +161,10 @@ def _ramp(args: argparse.Namespace) -> int:
 
 
 def _null(args: argparse.Namespace) -> int:
-    tau_c = pilot.tau_c(pilot.read(args.pilot), args.L)
+    record = pilot.read(args.pilot)
+    if str(args.L) not in record["per_L"]:
+        raise SystemExit(f"{args.pilot} measured no tau_c at L = {args.L}; pilot that size first")
+    tau_c = pilot.tau_c(record, args.L)
     burst = protocol.Burst(stride=args.burst_stride)
     schedule = protocol.null_run(args.L, args.epsilon_L, tau_c, burst)
     tag = f"L{args.L}-null-e{args.epsilon_L:g}-s{args.seed}"
@@ -219,9 +222,11 @@ def _tauc(args: argparse.Namespace) -> int:
         raise SystemExit(str(refused)) from None
     path = pilot.write(record, args.data_dir)
     for L, p in record["per_L"].items():
+        lo, hi = p["tau_c_ci"]
         print(
-            f"L={L:<4} tau_c={p['tau_c']:.1f}  binning {p['tau_c_binning']:.1f}  "
-            f"tau(e)={p['tau_e']:.1f}  N/tau={p['n_over_tau']:.0f}  "
+            f"L={L:<4} tau_c={p['tau_c']:.1f} [{lo:.1f}, {hi:.1f}]  "
+            f"binning {p['tau_c_binning']:.1f}  tau(e)={p['tau_e']:.1f}  "
+            f"N/tau={p['n_over_tau']:.0f}  "
             f"({p['replicas']} replicas x {p['sweeps']:,} sweeps, seed {p['seed']})"
         )
     fit = record["fit"]

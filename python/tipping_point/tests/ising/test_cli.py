@@ -102,6 +102,15 @@ def test_null_run_is_a_complete_thermalised_fixed_run_naming_epsilon_l_and_tau_c
         main([*argv[:4], "3", *argv[5:], "--data-dir", str(tmp_path / "x"), "--device", "cpu"])
 
 
+def test_null_run_refuses_a_size_the_record_did_not_measure(tmp_path: Path) -> None:
+    """Catches a null run's length resting on the fit's extrapolation, which its manifest could
+    not tell from a measurement: the record has no L = 128, so the run is refused, none started."""
+    argv = ["null", "--L", "128", "--epsilon-L", "4", "--pilot", str(PILOT)]
+    with pytest.raises(SystemExit, match="L = 128"):
+        main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"])
+    assert not (tmp_path / "ising").exists()
+
+
 def test_staircase_cli_reads_taus_from_a_pilot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

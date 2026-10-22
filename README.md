@@ -92,23 +92,25 @@ uv run python -m tipping_point.ising tauc <L16 run> <L32 run> <L64 run>    # -> 
 
 `pilot.json` is `{"kernel_commit", "per_L": {"16": {...}, ...}, "fit": {"A", "z", "A_ci", "z_ci"}}`,
 each `per_L` entry `{"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps", "seed"}`
-(field notes in `ising/pilot.py`). A size missing from `per_L` reads tau_c = A L^z. `tauc` refuses
-a run that is incomplete, never held exactly Tc, or is too short for its own tau (N < 50 tau).
+plus `"tau_c_ci"` (95%, optional for readers; field notes in `ising/pilot.py`). A size missing from
+`per_L` reads tau_c = A L^z. `tauc` refuses a run that is incomplete, never held exactly Tc, or
+holds fewer than 300 tau_c: subtracting each series' mean pulls the windowed estimate about
+10 / (N / tau) low, so a recorded tau_c is at most ~3% short (`test_autocorr` pins the bias).
 
 The record on the fixed kernel (#47; commit 5aac98e, CPU, seed 1), copied to
 `python/tipping_point/tests/fixtures/ising_pilot.json`:
 
-| L | replicas x sweeps | tau_c = tau(\|m\|) | binning | tau(e) | N / tau_c |
+| L | replicas x sweeps | tau_c = tau(\|m\|) [95% CI] | binning | tau(e) | N / tau_c |
 |---|---|---|---|---|---|
-| 16 | 64 x 50,000 | 52.1 | 50.5 | 26.1 | 960 |
-| 32 | 64 x 100,000 | 231.5 | 223.2 | 92.5 | 432 |
-| 64 | 16 x 300,000 | 875.4 | 851.2 | 318.9 | 343 |
+| 16 | 64 x 50,000 | 52.1 [50.5, 53.9] | 50.5 | 26.1 | 960 |
+| 32 | 64 x 100,000 | 231.5 [219.9, 244.3] | 223.2 | 92.5 | 432 |
+| 64 | 16 x 300,000 | 875.4 [797.2, 969.3] | 851.2 | 318.9 | 343 |
 
 Fit: A = 0.190 [0.149, 0.238], z = 2.04 [1.96, 2.11], 95% CIs from a bootstrap over replicas.
 That z sits below the 2.17 of Liu, Polkovnikov and Sandvik's Kibble-Zurek collapse for Metropolis:
 the local slope is 2.15 from L = 16 to 32 but 1.92 from 32 to 64, where 16 replicas leave tau_c
-5% uncertain (bootstrap s.d.; 95% interval [797, 969]). tau_c at L = 128 is an extrapolation,
-3,690 [3,240, 4,230] sweeps from the fit, to re-measure before the L = 128 runs. The pre-#47
+5% uncertain (bootstrap s.d.). tau_c at L = 128 is an extrapolation, 3,690 [3,240, 4,230]
+sweeps from the fit, to re-measure before the L = 128 runs. The pre-#47
 kernel read 21.3, 85.7 and 376 (A ~ 0.05): its fixed black-then-white order relayed level flips
 along domain walls (#50).
 
@@ -145,7 +147,8 @@ along domain walls (#50).
   measurement, with a stats row every tau_c / 50 sweeps and bursts at the slow ramp's in-band
   cadence. The manifest is a `fixed` schedule whose params add `epsilon_L` and `tau_c`, and
   complete.json judges the run thermalised like a staircase plateau. One run is 21,886 sweeps
-  at L = 16, 97,236 at 32, 367,673 at 64 and 1,548,063 at 128.
+  at L = 16, 97,236 at 32 and 367,673 at 64; L = 128 is refused until a pilot measures it, since
+  the manifest could not tell a fitted tau_c from a measured one.
 
 ## Running the gate
 

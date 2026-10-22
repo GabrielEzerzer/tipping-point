@@ -23,7 +23,8 @@ def _pilot_run(root: Path, L: int, T: float = exact.TC, sweeps: int = 3000) -> P
 def test_tauc_writes_the_record_from_pilot_runs_at_tc(tmp_path: Path) -> None:
     """End to end: two pilots at Tc, then `tauc`. The record names the runs' commit, takes each
     tau from the same estimator as the pilot's own tau.json, and fits a line through them."""
-    runs = [_pilot_run(tmp_path, L) for L in (8, 4)]  # out of order on purpose
+    # out of order on purpose; tau_c is ~12 at L = 8 and ~3 at L = 4, so both hold >= 300 tau_c
+    runs = [_pilot_run(tmp_path, 8, sweeps=6000), _pilot_run(tmp_path, 4)]
     assert main(["tauc", *map(str, runs), "--data-dir", str(tmp_path), "--draws", "200"]) == 0
     (path,) = (tmp_path / "ising").glob("*-tauc-L4-8/pilot.json")
     record = pilot.read(path)
@@ -36,6 +37,7 @@ def test_tauc_writes_the_record_from_pilot_runs_at_tc(tmp_path: Path) -> None:
         entry = record["per_L"][str(io.read_json(run_dir / "manifest.json")["params"]["L"])]
         assert set(entry) == {
             "tau_c",
+            "tau_c_ci",
             "tau_c_binning",
             "tau_e",
             "n_over_tau",
@@ -48,8 +50,9 @@ def test_tauc_writes_the_record_from_pilot_runs_at_tc(tmp_path: Path) -> None:
             own["binning"],
             own["tau_energy"],
         )
-        assert (entry["replicas"], entry["sweeps"], entry["seed"]) == (32, 3000, 1)
-        assert entry["n_over_tau"] == pytest.approx(3000 / entry["tau_c"])
+        assert entry["tau_c_ci"][0] < entry["tau_c"] < entry["tau_c_ci"][1]
+        assert (entry["replicas"], entry["sweeps"], entry["seed"]) == (32, own["sweeps"], 1)
+        assert entry["n_over_tau"] == pytest.approx(own["sweeps"] / entry["tau_c"])
     fit = record["fit"]
     for L in (4, 8):  # two sizes: the least-squares line runs through both
         assert fit["A"] * L ** fit["z"] == pytest.approx(record["per_L"][str(L)]["tau_c"])
@@ -58,18 +61,23 @@ def test_tauc_writes_the_record_from_pilot_runs_at_tc(tmp_path: Path) -> None:
 
 
 def test_tauc_refuses_runs_that_cannot_pin_tau_c(tmp_path: Path) -> None:
-    """A pilot that never held exactly Tc, one too short for its own tau, two runs of one size,
-    or a run that did not finish: each is refused before any record exists."""
+    """A pilot that never held exactly Tc, two runs of one size, a run that did not finish, or
+    one too short: each is refused before any record exists. Short means under 300 tau_c, not
+    just the 50 the estimator needs to find a window: ~120 tau_c reads ~8% low and passes that."""
     hot = _pilot_run(tmp_path / "hot", 4, T=3.0, sweeps=50)
-    short = _pilot_run(tmp_path / "short", 8, sweeps=20)
-    at_tc = _pilot_run(tmp_path / "tc", 4)  # reliable: a duplicate is refused as a duplicate
+    short = _pilot_run(tmp_path / "short", 8, sweeps=1500)  # ~120 tau_c, a window and all
+    at_tc = _pilot_run(tmp_path / "tc", 4)  # ~900 tau_c: a duplicate is refused as a duplicate
     unfinished = _pilot_run(tmp_path / "unfinished", 8, sweeps=50)
     (unfinished / "complete.json").unlink()
-    for runs in ([hot, at_tc], [short, at_tc], [at_tc, at_tc], [unfinished, at_tc]):
-        argv = ["tauc", *map(str, runs), "--data-dir", str(tmp_path / "out"), "--draws", "10"]
+    cases = {"hot": hot, "short": short, "twice": at_tc, "unfinished": unfinished}
+    refusals = {}
+    for name, run_dir in cases.items():
+        argv = ["tauc", str(run_dir), str(at_tc), "--data-dir", str(tmp_path / "out")]
         with pytest.raises(SystemExit) as refused:
-            main(argv)
-        assert isinstance(refused.value.code, str), runs  # a message, exit status 1
+            main([*argv, "--draws", "10"])
+        refusals[name] = refused.value.code
+    assert all(isinstance(message, str) for message in refusals.values())  # exit status 1
+    assert "need 300" in str(refusals["short"])
     assert not (tmp_path / "out").exists()
 
 
@@ -83,6 +91,7 @@ def test_the_committed_record_reads_and_extrapolates() -> None:
         assert pilot.tau_c(record, int(L)) == entry["tau_c"]
         assert entry["tau_c"] == pytest.approx(A * int(L) ** z, rel=0.1)  # the fit runs close by
         assert entry["n_over_tau"] == pytest.approx(entry["sweeps"] / entry["tau_c"])
+        assert entry["tau_c_ci"][0] < entry["tau_c"] < entry["tau_c_ci"][1]
     assert pilot.tau_c(record, 128) == pytest.approx(A * 128**z)
 
 
@@ -92,7 +101,7 @@ def test_the_committed_record_reads_and_extrapolates() -> None:
         lambda r: r.pop("kernel_commit"),
         lambda r: r["per_L"]["32"].pop("tau_e"),
         lambda r: r["per_L"]["16"].update(tau_c=0.0),
-        lambda r: r["per_L"]["64"].update(n_over_tau=20.0),  # held only 20 tau_c
+        lambda r: r["per_L"]["64"].update(n_over_tau=200.0),  # 200 tau_c reads ~5% short
         lambda r: r["fit"].update(z=float("nan")),
         lambda r: r["fit"].pop("A_ci"),
         lambda r: r.update(per_L={}),
