@@ -73,3 +73,19 @@ def test_short_series_are_flagged_unreliable() -> None:
     """A series shorter than ~50 tau cannot be trusted, and the result must say so."""
     x = _ar1(0.99, replicas=4, n=2000, seed=5)
     assert not autocorr.estimate(x).reliable
+
+
+def test_replica_bootstrap_spread_is_the_standard_error_over_replicas() -> None:
+    """Catches resampling the wrong axis or the wrong number of rows (either skews the spread by
+    sqrt 2 or more), or not resampling at all: with its window fixed, tau is linear in the
+    replicas' rho, so the bootstrap's spread must be the standard error of the per-replica
+    windowed sums. Its interval must cover the exact tau, 19."""
+    x = _ar1(0.9, replicas=64, n=4000, seed=7)
+    tau = autocorr.estimate(x)
+    draws = autocorr.bootstrap(x, 2000, np.random.default_rng(0))
+    rho = np.stack([autocorr.autocorrelation(row) for row in x])
+    per_replica = 1 + 2 * rho[:, 1 : tau.window + 1].sum(axis=1)
+    assert np.std(draws) == pytest.approx(per_replica.std(ddof=1) / np.sqrt(len(x)), rel=0.15)
+    assert np.median(draws) == pytest.approx(tau.tau, rel=0.02)
+    lo, hi = np.quantile(draws, [0.025, 0.975])
+    assert lo < 19 < hi

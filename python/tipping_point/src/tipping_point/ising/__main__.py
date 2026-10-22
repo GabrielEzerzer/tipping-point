@@ -3,6 +3,7 @@
   staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json
   ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x (or an explicit rate)
   pilot      measure tau_int of |m| and e at given temperatures; writes tau.json
+  tauc       tau_c(L) at Tc from pilot runs (one per L) and its fit A L^z; writes pilot.json
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure
   resume     continue a crashed or stopped run from its checkpoint
 
@@ -22,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from . import autocorr, io, protocol, run
+from . import autocorr, io, pilot, protocol, run
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -72,6 +73,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--therm", type=int, default=2000)
     p.add_argument("--sweeps", type=int, default=20_000, help="measured sweeps")
     p.set_defaults(command=_pilot)
+
+    p = sub.add_parser("tauc", help="tau_c(L) at Tc and its fit A L^z -> pilot.json")
+    p.add_argument("runs", type=Path, nargs="+", help="complete pilot runs at Tc, one per L")
+    p.add_argument("--data-dir", type=Path, default=os.environ.get("TP_DATA_DIR"))
+    p.add_argument("--draws", type=int, default=pilot.DRAWS, help="bootstrap resamples")
+    p.set_defaults(command=_tauc)
 
     p = sub.add_parser("validate", parents=[common], help="Gates A-C on a small L = 4 run")
     p.add_argument("--replicas", type=int, default=4096, help="per temperature")
@@ -157,11 +164,7 @@ def _measure(run_dir: Path, L: int) -> list[dict[str, Any]]:
     columns = {name: stats[name].to_numpy() for name in stats.column_names}
     points = []
     for T in np.unique(columns["temperature"]):
-        mine = (columns["phase"] == 1) & (columns["temperature"] == T)
-        steps = len(np.unique(columns["step"][mine]))
-        # rows are in (step, replica) order: reshape, then one row per replica
-        m = np.abs(columns["magnetisation"][mine]).reshape(steps, -1).T / L**2
-        e = columns["energy"][mine].reshape(steps, -1).T / L**2
+        m, e = pilot.series(columns, T, L)
         tau_m, tau_e = autocorr.estimate(m), autocorr.estimate(e)
         points.append(
             {
@@ -170,12 +173,33 @@ def _measure(run_dir: Path, L: int) -> list[dict[str, Any]]:
                 "window": tau_m.window,
                 "binning": tau_m.binning,
                 "tau_energy": tau_e.tau,
-                "sweeps": steps,
+                "sweeps": m.shape[1],
                 "replicas": m.shape[0],
                 "reliable": tau_m.reliable,
             }
         )
     return points
+
+
+def _tauc(args: argparse.Namespace) -> int:
+    try:
+        record = pilot.record(args.runs, args.draws)
+    except ValueError as refused:
+        raise SystemExit(str(refused)) from None
+    path = pilot.write(record, args.data_dir)
+    for L, p in record["per_L"].items():
+        print(
+            f"L={L:<4} tau_c={p['tau_c']:.1f}  binning {p['tau_c_binning']:.1f}  "
+            f"tau(e)={p['tau_e']:.1f}  N/tau={p['n_over_tau']:.0f}  "
+            f"({p['replicas']} replicas x {p['sweeps']:,} sweeps, seed {p['seed']})"
+        )
+    fit = record["fit"]
+    print(
+        f"tau_c = A L^z:  A = {fit['A']:.4f} [{fit['A_ci'][0]:.4f}, {fit['A_ci'][1]:.4f}]  "
+        f"z = {fit['z']:.3f} [{fit['z_ci'][0]:.3f}, {fit['z_ci'][1]:.3f}]"
+    )
+    print(path)
+    return 0
 
 
 def _validate(args: argparse.Namespace) -> int:

@@ -70,12 +70,46 @@ Runs follow the shared layout `<data dir>/ising/<run_id>/` (`manifest.json`, Par
 ```sh
 uv run python -m tipping_point.ising validate                        # Gates A-C on a small L = 4 run
 uv run python -m tipping_point.ising pilot --L 16 --sweeps 50000      # tau_int per T -> tau.json
+uv run python -m tipping_point.ising tauc <pilot run> ...             # tau_c(L) at Tc -> pilot.json
 uv run python -m tipping_point.ising staircase --L 16 --tau <pilot run>/tau.json
 uv run python -m tipping_point.ising ramp --L 16 --x 30               # Kibble-Zurek x: 30 fast, 0.3 slow
 uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
 ```
 
-At Tc alone (seed 1) the L = 16 pilot reads tau(|m|) = 52.8 (binning 49.0) and tau(e) = 27.5 (#47).
+### The pilot record: tau_c(L)
+
+The time unit of everything downstream (ramp rates, null-run lengths, the EWS scorer's windows) is
+tau_c(L) = tau_int(|m|) at exactly Tc, read from a pilot record and never from a constant. Run one
+pilot per L at Tc, then `tauc` fits tau_c = A L^z and writes the record:
+
+```sh
+uv run python -m tipping_point.ising pilot --L 16 --T 2.269185314213022 --replicas 64 --therm 2000 --sweeps 50000
+uv run python -m tipping_point.ising pilot --L 32 --T 2.269185314213022 --replicas 64 --therm 10000 --sweeps 100000
+uv run python -m tipping_point.ising pilot --L 64 --T 2.269185314213022 --replicas 16 --therm 40000 --sweeps 300000
+uv run python -m tipping_point.ising tauc <L16 run> <L32 run> <L64 run>    # -> <data dir>/ising/<id>-tauc-L16-32-64/pilot.json
+```
+
+`pilot.json` is `{"kernel_commit", "per_L": {"16": {...}, ...}, "fit": {"A", "z", "A_ci", "z_ci"}}`,
+each `per_L` entry `{"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps", "seed"}`
+(field notes in `ising/pilot.py`). A size missing from `per_L` reads tau_c = A L^z. `tauc` refuses
+a run that is incomplete, never held exactly Tc, or is too short for its own tau (N < 50 tau).
+
+The record on the fixed kernel (#47; commit 5aac98e, CPU, seed 1), copied to
+`python/tipping_point/tests/fixtures/ising_pilot.json`:
+
+| L | replicas x sweeps | tau_c = tau(\|m\|) | binning | tau(e) | N / tau_c |
+|---|---|---|---|---|---|
+| 16 | 64 x 50,000 | 52.1 | 50.5 | 26.1 | 960 |
+| 32 | 64 x 100,000 | 231.5 | 223.2 | 92.5 | 432 |
+| 64 | 16 x 300,000 | 875.4 | 851.2 | 318.9 | 343 |
+
+Fit: A = 0.190 [0.149, 0.238], z = 2.04 [1.96, 2.11], 95% CIs from a bootstrap over replicas.
+That z sits below the 2.17 of Liu, Polkovnikov and Sandvik's Kibble-Zurek collapse for Metropolis:
+the local slope is 2.15 from L = 16 to 32 but 1.92 from 32 to 64, where 16 replicas leave tau_c
+5% uncertain (bootstrap s.d.; 95% interval [797, 969]). tau_c at L = 128 is an extrapolation,
+3,690 [3,240, 4,230] sweeps from the fit, to re-measure before the L = 128 runs. The pre-#47
+kernel read 21.3, 85.7 and 376 (A ~ 0.05): its fixed black-then-white order relayed level flips
+along domain walls (#50).
 
 ## Running the gate
 
