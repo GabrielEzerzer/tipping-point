@@ -398,7 +398,8 @@ pub async fn next_json(socket: &mut Socket, wait: Duration) -> Outcome<Value> {
 /// # Errors
 /// Returns what came instead.
 pub async fn hello(socket: &mut Socket) -> Outcome<Value> {
-    send_json(socket, &serde_json::json!({"t": "hello", "v": 1})).await?;
+    let v = engine::api::messages::PROTOCOL;
+    send_json(socket, &serde_json::json!({"t": "hello", "v": v})).await?;
     let welcome = next_json(socket, Duration::from_secs(10)).await?;
     if welcome["t"] != "welcome" {
         return Err(format!("wanted welcome, got {welcome}").into());

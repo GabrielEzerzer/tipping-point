@@ -6,6 +6,10 @@
 //!
 //! The hub also keeps the recent past in memory, book samples and trades, so a reader can
 //! start with a backfill and a replay can cover the hour the rotate step has not reached yet.
+//!
+//! Several venues can feed one hub, each from its own live loop through its own [`LiveTap`]:
+//! every sample, trade and status says its venue, the newest book is kept per venue, and the
+//! status a client sees holds each venue's own.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -15,8 +19,10 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{broadcast, watch};
 
-use super::ipc::{Encoder, Provenance, tagged};
-use super::messages::{Status, StreamStatus, Streams, SymbolStatus, Topic, TradeMessage};
+use super::ipc::{Encoder, Origin, Provenance, tagged};
+use super::messages::{
+    Status, StreamStatus, Streams, SymbolStatus, Topic, TradeMessage, VenueStatus,
+};
 use crate::market::feed::{Event, Feed};
 use crate::market::live::{LiveEvent, LiveStats, Observer, Stream};
 use crate::market::pipeline::Applied;
@@ -25,6 +31,7 @@ use crate::market::{Scales, Symbol};
 use crate::store::run::{BookSample, MARKET};
 use crate::store::samples::{Sample, SampleRows, Sampler};
 use crate::store::writer::Entry;
+use crate::venue::Venue;
 
 /// How much the hub keeps and how far a reader may fall behind.
 #[derive(Debug, Clone)]
@@ -42,6 +49,9 @@ pub struct HubConfig {
     /// Harness only: also keep every message in one channel in publish order, so a lossless
     /// client sees all of them, uncoalesced. `false` in production.
     pub lossless: bool,
+    /// The venues whose live feeds this hub serves: it counts as started, and welcomes clients,
+    /// once every one of them has started.
+    pub venues: Vec<Venue>,
 }
 
 impl Default for HubConfig {
@@ -53,16 +63,33 @@ impl Default for HubConfig {
             trades_capacity: 16 * 1024,
             relay_capacity: 1024,
             lossless: false,
+            venues: vec![Venue::BinanceUsdm],
         }
     }
 }
 
-/// What the live feed is, known once it starts.
+/// What the live feed is, known once every venue's has started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
+    pub venues: BTreeMap<Venue, VenueSource>,
+}
+
+/// One venue's live feed: its symbols' scales, and the run it records, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VenueSource {
     pub scales: BTreeMap<Symbol, Scales>,
-    /// The run being recorded, if any.
     pub run: Option<String>,
+}
+
+impl Source {
+    /// The venue whose feed records `run`, if any does.
+    #[must_use]
+    pub fn venue_recording(&self, run: &str) -> Option<Venue> {
+        self.venues
+            .iter()
+            .find(|(_, feed)| feed.run.as_deref() == Some(run))
+            .map(|(venue, _)| *venue)
+    }
 }
 
 /// One grid instant as the live feed published it.
@@ -94,8 +121,9 @@ pub enum Ordered {
     End,
 }
 
-/// Latest-wins relayed results, by the `symbol` they carry ("" for none).
-pub type Latest = Arc<BTreeMap<String, Arc<Value>>>;
+/// Latest-wins values by key: relayed results by the venue and symbol they name (empty for
+/// none), books by venue.
+pub type Latest<K = String, V = Value> = Arc<BTreeMap<K, Arc<V>>>;
 
 /// Counts for instruments.
 #[derive(Debug, Default)]
@@ -107,22 +135,22 @@ pub struct Counters {
     pub ws_clients: AtomicUsize,
 }
 
-/// The recent past.
+/// The recent past, every venue's.
 #[derive(Debug, Default)]
 struct Ring {
     samples: VecDeque<Arc<Sample>>,
     /// Each with its capture time, the clock samples are on.
     trades: VecDeque<(i64, Arc<TradeMessage>)>,
-    /// The run's first sample instant, kept after the ring lets that sample go.
-    first_sample: Option<i64>,
+    /// Each venue's first sample instant, kept after the ring lets that sample go.
+    first_sample: BTreeMap<Venue, i64>,
 }
 
-/// Book samples and trades from memory, each trade with its capture time.
+/// One venue's book samples and trades from memory, each trade with its capture time.
 #[derive(Debug)]
 pub struct Recent {
     pub samples: Vec<Arc<Sample>>,
     pub trades: Vec<(i64, Arc<TradeMessage>)>,
-    /// The run's first sample instant, whether or not memory still holds it.
+    /// The venue's first sample instant, whether or not memory still holds it.
     pub first_sample: Option<i64>,
 }
 
@@ -138,10 +166,13 @@ pub struct Backfill {
 #[derive(Debug)]
 pub struct Hub {
     config: HubConfig,
+    /// The venues' feeds started so far; [`Self::source`] once all have.
+    feeds: Mutex<BTreeMap<Venue, VenueSource>>,
     source: watch::Sender<Option<Arc<Source>>>,
     ring: Mutex<Ring>,
     samples: broadcast::Sender<LiveItem>,
-    book: watch::Sender<Option<Arc<Published>>>,
+    /// The newest book of each venue.
+    book: watch::Sender<Latest<Venue, Published>>,
     trades: broadcast::Sender<Arc<TradeMessage>>,
     status: watch::Sender<Option<Arc<Status>>>,
     meters: watch::Sender<Latest>,
@@ -165,9 +196,10 @@ impl Hub {
             jev: broadcast::channel(config.relay_capacity.max(1)).0,
             ising: broadcast::channel(config.relay_capacity.max(1)).0,
             config,
+            feeds: Mutex::new(BTreeMap::new()),
             source: watch::channel(None).0,
             ring: Mutex::new(Ring::default()),
-            book: watch::channel(None).0,
+            book: watch::channel(Arc::default()).0,
             status: watch::channel(None).0,
             meters: watch::channel(Latest::default()).0,
             pnl: watch::channel(Latest::default()).0,
@@ -201,10 +233,22 @@ impl Hub {
         i64::try_from(self.config.ring.as_nanos()).unwrap_or(i64::MAX)
     }
 
-    /// The live feed has started.
-    pub fn start(&self, source: Source) {
-        self.source.send_replace(Some(Arc::new(source)));
-        self.changed();
+    /// A venue's live feed has started. The hub has, once every venue it serves has.
+    pub fn start(&self, venue: Venue, feed: VenueSource) {
+        let mut feeds = self.feeds.lock().unwrap_or_else(PoisonError::into_inner);
+        feeds.insert(venue, feed);
+        if self
+            .config
+            .venues
+            .iter()
+            .all(|venue| feeds.contains_key(venue))
+        {
+            let source = Source {
+                venues: feeds.clone(),
+            };
+            self.source.send_replace(Some(Arc::new(source)));
+            self.changed();
+        }
     }
 
     /// The live feed, once it has started.
@@ -231,7 +275,7 @@ impl Hub {
         {
             let mut ring = self.ring();
             let t = published.sample.sample_ts_ns;
-            ring.first_sample.get_or_insert(t);
+            ring.first_sample.entry(published.sample.venue).or_insert(t);
             ring.samples.push_back(Arc::clone(&published.sample));
             let oldest = t.saturating_sub(self.ring_ns());
             while ring
@@ -245,7 +289,10 @@ impl Hub {
             let _ = self.samples.send(LiveItem::Sample(Arc::clone(&published)));
         }
         self.counters.samples.fetch_add(1, Ordering::Relaxed);
-        self.book.send_replace(Some(Arc::clone(&published)));
+        let venue = published.sample.venue;
+        self.book.send_modify(|books| {
+            Arc::make_mut(books).insert(venue, Arc::clone(&published));
+        });
         self.order(Ordered::Sample(published));
         self.changed();
     }
@@ -266,21 +313,29 @@ impl Hub {
         self.changed();
     }
 
-    pub fn publish_status(&self, status: Status) {
-        let status = Arc::new(status);
-        self.status.send_replace(Some(Arc::clone(&status)));
-        self.order(Ordered::Status(status));
+    /// A venue's status changed: the status clients see takes it in, beside the other venues'.
+    pub fn publish_status(&self, venue: Venue, status: VenueStatus) {
+        let mut merged = None;
+        self.status.send_modify(|current| {
+            let mut next = current.as_deref().cloned().unwrap_or_default();
+            next.ts_ms = next.ts_ms.max(status.ts_ms);
+            next.venues.insert(venue, status);
+            let next = Arc::new(next);
+            merged = Some(Arc::clone(&next));
+            *current = Some(next);
+        });
+        if let Some(merged) = merged {
+            self.order(Ordered::Status(merged));
+        }
         self.changed();
     }
 
-    /// A result from the Python side, for the app.
+    /// A result from the Python side, for the app. Latest-wins topics keep one result per venue
+    /// and symbol, as the result names them.
     pub fn relay(&self, topic: Topic, data: Value) {
         let data = Arc::new(data);
-        let key = data
-            .get("symbol")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let field = |name: &str| data.get(name).and_then(Value::as_str).unwrap_or_default();
+        let key = format!("{} {}", field("venue"), field("symbol"));
         match topic {
             Topic::Meters => self.meters.send_modify(|latest| {
                 Arc::make_mut(latest).insert(key, Arc::clone(&data));
@@ -348,25 +403,25 @@ impl Hub {
         (Backfill { samples, trades }, rx)
     }
 
-    /// Book samples and trades still in memory from after `after_ns`, in time order: the part
-    /// of the live run the rotate step has not reached.
+    /// `venue`'s book samples and trades still in memory from after `after_ns`, in time order:
+    /// the part of its live run the rotate step has not reached.
     #[must_use]
-    pub fn recent(&self, after_ns: i64) -> Recent {
+    pub fn recent(&self, venue: Venue, after_ns: i64) -> Recent {
         let ring = self.ring();
         Recent {
             samples: ring
                 .samples
                 .iter()
-                .filter(|s| s.sample_ts_ns > after_ns)
+                .filter(|s| s.venue == venue && s.sample_ts_ns > after_ns)
                 .cloned()
                 .collect(),
             trades: ring
                 .trades
                 .iter()
-                .filter(|(t, _)| *t > after_ns)
+                .filter(|(t, trade)| trade.venue == venue && *t > after_ns)
                 .cloned()
                 .collect(),
-            first_sample: ring.first_sample,
+            first_sample: ring.first_sample.get(&venue).copied(),
         }
     }
 
@@ -387,8 +442,9 @@ impl Hub {
         self.changed.subscribe()
     }
 
+    /// The newest book of each venue.
     #[must_use]
-    pub fn watch_book(&self) -> watch::Receiver<Option<Arc<Published>>> {
+    pub fn watch_book(&self) -> watch::Receiver<Latest<Venue, Published>> {
         self.book.subscribe()
     }
 
@@ -437,20 +493,22 @@ fn backfill_of<T>(
     ring.iter().skip(start)
 }
 
-/// The live loop's observer for the API: it samples the book before each input with rotate's
-/// sampler, so the live stream holds exactly the `book_samples` rows rotate writes later, and
-/// publishes trades and every change of status.
+/// A venue's live loop's observer for the API: it samples the book before each input with
+/// rotate's sampler, so the live stream holds exactly the `book_samples` rows rotate writes later,
+/// and publishes trades and every change of the venue's status. One per venue.
 #[derive(Debug)]
 pub struct LiveTap {
     hub: Arc<Hub>,
     sampler: Sampler,
     rows: SampleRows,
     encoder: Option<Encoder>,
+    /// The venue, known once the loop starts.
+    venue: Option<Venue>,
     /// The seq and capture time of the input being applied.
     input: Option<(u64, i64)>,
     depth_connected: bool,
     trades_connected: bool,
-    last_status: Option<Status>,
+    last_status: Option<VenueStatus>,
 }
 
 impl LiveTap {
@@ -462,6 +520,7 @@ impl LiveTap {
             sampler: Sampler::new(sample),
             rows: SampleRows::new(sample.levels),
             encoder: None,
+            venue: None,
             input: None,
             depth_connected: false,
             trades_connected: false,
@@ -490,9 +549,9 @@ impl LiveTap {
         });
     }
 
-    fn status(&self, feed: &Feed, stats: &LiveStats, ts_ms: i64) -> Status {
+    fn status(&self, feed: &Feed, stats: &LiveStats, ts_ms: i64) -> VenueStatus {
         let counters = feed.stats();
-        Status {
+        VenueStatus {
             ts_ms,
             streams: Streams {
                 depth: StreamStatus {
@@ -521,7 +580,7 @@ impl LiveTap {
     }
 }
 
-/// The schema of the live `book_samples` stream for a source.
+/// The schema of the live `book_samples` stream for a source: every venue's runs and scales.
 #[must_use]
 pub fn live_schema(source: &Source, levels: usize) -> arrow::datatypes::SchemaRef {
     tagged(
@@ -529,8 +588,18 @@ pub fn live_schema(source: &Source, levels: usize) -> arrow::datatypes::SchemaRe
         &Provenance {
             table: "book_samples",
             domain: MARKET,
-            run: source.run.as_deref().unwrap_or_default(),
-            scales: Some(&source.scales),
+            origin: Origin::Market {
+                runs: source
+                    .venues
+                    .iter()
+                    .filter_map(|(venue, feed)| Some((*venue, feed.run.as_deref()?)))
+                    .collect(),
+                scales: source
+                    .venues
+                    .iter()
+                    .map(|(venue, feed)| (*venue, &feed.scales))
+                    .collect(),
+            },
         },
     )
 }
@@ -541,13 +610,20 @@ impl Observer for LiveTap {
             .symbols()
             .filter_map(|symbol| Some((symbol.clone(), feed.scales(symbol)?)))
             .collect();
-        let source = Source {
+        let venue = feed.venue();
+        let started = VenueSource {
             scales,
             run: run_id.map(str::to_owned),
         };
+        // Every venue's samples go out in one stream schema; this tap's batches only need its
+        // fields, which are the same for every venue, so its own provenance will do.
+        let source = Source {
+            venues: BTreeMap::from([(venue, started.clone())]),
+        };
         let schema = live_schema(&source, self.sampler.levels());
         self.encoder = Encoder::new(schema).ok().map(|(encoder, _header)| encoder);
-        self.hub.start(source);
+        self.venue = Some(venue);
+        self.hub.start(venue, started);
     }
 
     fn input(&mut self, seq: u64, entry: &Entry, feed: &Feed) {
@@ -574,17 +650,18 @@ impl Observer for LiveTap {
                 stats,
                 ..
             } => {
-                let Some((seq, captured_ns)) = self.input else {
+                let (Some((seq, captured_ns)), Some(venue)) = (self.input, self.venue) else {
                     return;
                 };
                 if let Applied::Frame(Ok(Event::Trade(trade))) = applied {
                     self.hub.publish_trade(
                         captured_ns,
                         TradeMessage {
+                            venue,
                             symbol: trade.symbol.clone(),
                             seq,
                             ts_ms: trade.trade_time_ms,
-                            id: trade.agg_trade_id,
+                            id: trade.trade_id.clone(),
                             px: trade.price,
                             qty: trade.qty,
                             buyer_is_maker: trade.buyer_is_maker,
@@ -598,7 +675,7 @@ impl Observer for LiveTap {
                     .is_some_and(|last| last.same_as(&status))
                 {
                     self.last_status = Some(status.clone());
-                    self.hub.publish_status(status);
+                    self.hub.publish_status(venue, status);
                 }
             }
             _ => {}
@@ -638,25 +715,23 @@ mod tests {
     }
 
     #[test]
-    fn relayed_results_keep_the_latest_per_symbol() {
+    fn relayed_results_keep_the_latest_per_venue_and_symbol() {
         let hub = Hub::new(HubConfig::default());
         let meters = hub
             .watch_relayed(Topic::Meters)
             .expect("a latest-wins topic");
-        hub.relay(
-            Topic::Meters,
-            serde_json::json!({"symbol": "BTCUSDT", "v": 1}),
-        );
-        hub.relay(
-            Topic::Meters,
-            serde_json::json!({"symbol": "BTCUSDT", "v": 2}),
-        );
-        hub.relay(
-            Topic::Meters,
-            serde_json::json!({"symbol": "ETHUSDT", "v": 3}),
-        );
+        let meter = |venue: &str, symbol: &str, v: i32| serde_json::json!({"venue": venue, "symbol": symbol, "v": v});
+        hub.relay(Topic::Meters, meter("binance-usdm", "BTCUSDT", 1));
+        hub.relay(Topic::Meters, meter("binance-usdm", "BTCUSDT", 2));
+        hub.relay(Topic::Meters, meter("binance-usdm", "ETHUSDT", 3));
+        hub.relay(Topic::Meters, meter("bybit-linear", "BTCUSDT", 4));
         let latest = meters.borrow().clone();
-        assert_eq!(latest.len(), 2);
-        assert_eq!(latest["BTCUSDT"]["v"], 2);
+        let mut values: Vec<i64> = latest.values().filter_map(|v| v["v"].as_i64()).collect();
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            vec![2, 3, 4],
+            "one per venue and symbol, the newest"
+        );
     }
 }

@@ -1,8 +1,8 @@
-{"t":"welcome","v":1,"mode":"live","run":"20231114T221320Z-session","levels":20,"sample_every_ms":100,"symbols":[{"symbol":"BTCUSDT","price_decimals":1,"qty_decimals":3},{"symbol":"ETHUSDT","price_decimals":2,"qty_decimals":3}],"topics":["book","trades","status","meters","jev","pnl","lattice","ising"]}
-{"t":"book","symbol":"BTCUSDT","ts_ms":1700000000300,"seq":12,"synced":true,"last_update_id":106,"bids":[[499990,500],[499980,3000]],"asks":[[500010,1500]]}
-{"t":"book","symbol":"ETHUSDT","ts_ms":1700000000300,"seq":12,"synced":false,"last_update_id":null,"bids":[],"asks":[]}
-{"t":"trades","trades":[{"symbol":"BTCUSDT","seq":5,"ts_ms":1700000000149,"id":1,"px":500005,"qty":10,"buyer_is_maker":false}]}
-{"t":"status","ts_ms":1700000000300,"streams":{"depth":{"connected":true,"reconnects":1,"frames_dropped":2},"trades":{"connected":false,"reconnects":0,"frames_dropped":3}},"symbols":{"BTCUSDT":{"synced":true},"ETHUSDT":{"synced":false}},"resyncs":4,"sequence_gaps":1,"snapshot_failures":1,"parse_errors":2}
+{"t":"welcome","v":2,"mode":"live","runs":{"binance-usdm":"20231114T221320Z-session"},"levels":20,"sample_every_ms":100,"symbols":[{"venue":"binance-usdm","symbol":"BTCUSDT","price_decimals":1,"qty_decimals":3},{"venue":"binance-usdm","symbol":"ETHUSDT","price_decimals":2,"qty_decimals":3}],"topics":["book","trades","status","meters","jev","pnl","lattice","ising"]}
+{"t":"book","venue":"binance-usdm","symbol":"BTCUSDT","ts_ms":1700000000300,"seq":12,"synced":true,"last_update_id":106,"bids":[[499990,500],[499980,3000]],"asks":[[500010,1500]]}
+{"t":"book","venue":"binance-usdm","symbol":"ETHUSDT","ts_ms":1700000000300,"seq":12,"synced":false,"last_update_id":null,"bids":[],"asks":[]}
+{"t":"trades","trades":[{"venue":"binance-usdm","symbol":"BTCUSDT","seq":5,"ts_ms":1700000000149,"id":"1","px":500005,"qty":10,"buyer_is_maker":false}]}
+{"t":"status","ts_ms":1700000000300,"venues":{"binance-usdm":{"ts_ms":1700000000300,"streams":{"depth":{"connected":true,"reconnects":1,"frames_dropped":2},"trades":{"connected":false,"reconnects":0,"frames_dropped":3}},"symbols":{"BTCUSDT":{"synced":true},"ETHUSDT":{"synced":false}},"resyncs":4,"sequence_gaps":1,"snapshot_failures":1,"parse_errors":2}}}
 {"t":"gap","topic":"trades","lost":12}
 {"t":"gap","topic":"ising","lost":3}
 {"t":"gap","topic":"book","lost":4}

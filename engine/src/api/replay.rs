@@ -21,6 +21,7 @@ use crate::market::sync::Level;
 use crate::store::run::MARKET;
 use crate::store::samples::{BookRow, Sample};
 use crate::store::{StoreError, query};
+use crate::venue::Venue;
 
 /// The capture-clock span read from Parquet at a time.
 const SLICE_NS: i64 = 10_000_000_000;
@@ -76,10 +77,8 @@ impl Replay {
         from_ms: Option<i64>,
         speed: f64,
     ) -> Result<Self, TableError> {
-        let live = hub
-            .started()
-            .and_then(|source| source.run.clone())
-            .is_some_and(|live| live == run);
+        // The venue whose live feed records this run, if one does: memory carries the run on.
+        let live = hub.started().and_then(|source| source.venue_recording(run));
         let open = |name: &str| -> Result<Option<(Table, SchemaRef)>, TableError> {
             match locate(data_dir, MARKET, run, name) {
                 Ok(table) => {
@@ -92,9 +91,9 @@ impl Replay {
         };
         let tables = Tables {
             samples: open("book_samples")?,
-            trades: open("agg_trades")?,
+            trades: open("trades")?,
         };
-        if tables.samples.is_none() && !live {
+        if tables.samples.is_none() && live.is_none() {
             return Err(TableError::NotFound(format!(
                 "market run {run:?} has no book samples to replay"
             )));
@@ -104,7 +103,7 @@ impl Replay {
         let start_ns = from_ms.map_or(i64::MIN, |ms| ms.saturating_mul(1_000_000));
         let task = tokio::spawn(feed(
             tables,
-            live.then_some(hub),
+            live.map(|venue| (hub, venue)),
             start_ns,
             speed,
             tx,
@@ -126,10 +125,11 @@ impl Replay {
     }
 }
 
-/// Sends the run's items from `from_ns` on, paced, then [`Item::End`].
+/// Sends the run's items from `from_ns` on, paced, then [`Item::End`]. `live` is the hub and the
+/// venue whose live feed records the run, when one does.
 async fn feed(
     tables: Tables,
-    live: Option<Arc<Hub>>,
+    live: Option<(Arc<Hub>, Venue)>,
     start_ns: i64,
     speed: f64,
     tx: mpsc::Sender<Item>,
@@ -173,10 +173,10 @@ async fn feed(
             Found::Done => break,
         }
     }
-    if let Some(hub) = live {
+    if let Some((hub, venue)) = live {
         // The rotated tables are a prefix of the run: memory carries on after them, from the
         // requested start, and says so when it no longer reaches back that far.
-        let recent = hub.recent(start_ns.saturating_sub(1));
+        let recent = hub.recent(venue, start_ns.saturating_sub(1));
         let samples: Vec<Arc<Sample>> = recent
             .samples
             .into_iter()
@@ -322,15 +322,28 @@ fn missing(name: &str) -> StoreError {
     )))
 }
 
+fn strings<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray, StoreError> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| missing(name))
+}
+
+/// The venue a row names.
+fn venue_at(venues: &StringArray, row: usize) -> Result<Venue, StoreError> {
+    venues
+        .value(row)
+        .parse()
+        .map_err(|error: String| StoreError::Arrow(arrow::error::ArrowError::SchemaError(error)))
+}
+
 /// `book_samples` rows back into samples, one per instant.
 fn samples_of(batch: &RecordBatch) -> Result<Vec<Arc<Sample>>, StoreError> {
     let times = int64(batch, "sample_ts_ns")?;
     let seqs = int64(batch, "seq")?;
     let ids = int64(batch, "last_update_id")?;
-    let symbols = batch
-        .column_by_name("symbol")
-        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-        .ok_or_else(|| missing("symbol"))?;
+    let venues = strings(batch, "venue")?;
+    let symbols = strings(batch, "symbol")?;
     let synced = batch
         .column_by_name("synced")
         .and_then(|column| column.as_any().downcast_ref::<BooleanArray>())
@@ -371,12 +384,15 @@ fn samples_of(batch: &RecordBatch) -> Result<Vec<Arc<Sample>>, StoreError> {
             bids: levels_at(&bids, row),
             asks: levels_at(&asks, row),
         };
-        let t = times.value(row);
+        let (t, venue) = (times.value(row), venue_at(venues, row)?);
         match out.last_mut() {
-            Some(sample) if sample.sample_ts_ns == t => sample.rows.push(book),
+            Some(sample) if sample.sample_ts_ns == t && sample.venue == venue => {
+                sample.rows.push(book);
+            }
             _ => out.push(Sample {
                 sample_ts_ns: t,
                 seq: seqs.value(row),
+                venue,
                 rows: vec![book],
             }),
         }
@@ -384,36 +400,35 @@ fn samples_of(batch: &RecordBatch) -> Result<Vec<Arc<Sample>>, StoreError> {
     Ok(out.into_iter().map(Arc::new).collect())
 }
 
-/// `agg_trades` rows back into trade messages, each with its capture time.
+/// `trades` rows back into trade messages, each with its capture time.
 fn trades_of(batch: &RecordBatch) -> Result<Vec<(i64, Arc<TradeMessage>)>, StoreError> {
     let seqs = int64(batch, "seq")?;
     let traded = int64(batch, "trade_ts_ns")?;
     let captured = int64(batch, "capture_ts_ns")?;
-    let ids = int64(batch, "agg_trade_id")?;
     let prices = int64(batch, "price")?;
     let qtys = int64(batch, "qty")?;
-    let symbols = batch
-        .column_by_name("symbol")
-        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-        .ok_or_else(|| missing("symbol"))?;
+    let venues = strings(batch, "venue")?;
+    let symbols = strings(batch, "symbol")?;
+    let ids = strings(batch, "trade_id")?;
     let makers = batch
         .column_by_name("buyer_is_maker")
         .and_then(|column| column.as_any().downcast_ref::<BooleanArray>())
         .ok_or_else(|| missing("buyer_is_maker"))?;
-    Ok((0..batch.num_rows())
+    (0..batch.num_rows())
         .map(|row| {
             let trade = TradeMessage {
+                venue: venue_at(venues, row)?,
                 symbol: symbols.value(row).to_owned(),
                 seq: u64::try_from(seqs.value(row)).unwrap_or_default(),
                 ts_ms: u64::try_from(traded.value(row).div_euclid(1_000_000)).unwrap_or_default(),
-                id: u64::try_from(ids.value(row)).unwrap_or_default(),
+                id: ids.value(row).to_owned(),
                 px: prices.value(row),
                 qty: qtys.value(row),
                 buyer_is_maker: makers.value(row),
             };
-            (captured.value(row), Arc::new(trade))
+            Ok((captured.value(row), Arc::new(trade)))
         })
-        .collect())
+        .collect()
 }
 
 /// The slowest replay a client may ask for, besides 0 (as fast as possible): a thousandth of
@@ -526,14 +541,16 @@ mod tests {
         let sample = Arc::new(Sample {
             sample_ts_ns: 100,
             seq: 1,
+            venue: Venue::BinanceUsdm,
             rows: Vec::new(),
         });
         let trade = |seq: u64| {
             Arc::new(TradeMessage {
+                venue: Venue::BinanceUsdm,
                 symbol: "BTCUSDT".to_owned(),
                 seq,
                 ts_ms: 0,
-                id: seq,
+                id: seq.to_string(),
                 px: 1,
                 qty: 1,
                 buyer_is_maker: false,

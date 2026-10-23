@@ -144,6 +144,7 @@ async fn the_python_client_reads_every_stream_and_publishes_back() -> Outcome {
         }
     };
     assert_eq!(meter["data"]["from"], "python");
+    assert_eq!(meter["data"]["venue"], "binance-usdm");
     assert_eq!(meter["data"]["symbol"], "BTCUSDT");
     server.stop().await;
     fs::remove_dir_all(&dir)?;

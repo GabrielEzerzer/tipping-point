@@ -11,14 +11,16 @@
 //! |---|---|
 //! | `frames` | log frame, a lossless copy |
 //! | `depth_updates` | price level in a depth update |
-//! | `agg_trades` | aggregated trade |
-//! | `snapshots` | price level in a REST snapshot |
+//! | `trades` | trade |
+//! | `snapshots` | price level in a snapshot (Binance's REST, Bybit's in-band) |
 //! | `book_samples` | symbol and instant on a grid of the capture clock |
 //!
-//! Times are Int64 nanoseconds since the epoch, update and trade ids are Int64, and prices and
-//! quantities are integer units at the run's scales (kept in its manifest and every Meta).
-//! Rows go in seq order. Book samples are made by [`super::samples`], the code the live API
-//! samples with too.
+//! Every row but a frame's says its `venue`: one run holds one venue, but a symbol names a book
+//! only together with its venue. Times are Int64 nanoseconds since the epoch, update ids are
+//! Int64 (each venue's continuity id is `last_update_id`; the ids only some venues send are
+//! nullable), trade ids are strings (Bybit's are UUIDs), and prices and quantities are integer
+//! units at the run's scales (kept in its manifest and every Meta). Rows go in seq order. Book
+//! samples are made by [`super::samples`], the code the live API samples with too.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -42,7 +44,7 @@ use super::samples::{Sample, SampleRows, Sampler};
 use super::segment::{self, Ending, LOG_DIR, SegmentReader};
 use super::{StoreError, ms_to_ns};
 use crate::market::pipeline::SnapshotPayload;
-use crate::market::sync::Level;
+use crate::market::sync::{DepthUpdate, Level, Snapshot};
 use crate::market::{Scales, Symbol};
 use crate::venue::{Depth, Parsed, RawDepth, RawTrade, Venue};
 
@@ -50,7 +52,7 @@ use crate::venue::{Depth, Parsed, RawDepth, RawTrade, Venue};
 pub const TABLES: [&str; 5] = [
     "frames",
     "depth_updates",
-    "agg_trades",
+    "trades",
     "snapshots",
     "book_samples",
 ];
@@ -352,12 +354,25 @@ impl Tables {
     ) -> Result<bool, StoreError> {
         match frame.kind {
             Kind::Depth | Kind::Trade => match venue.parse(&frame.payload) {
-                Ok(Parsed::Depth(raw)) => self.depth.rows.push(frame, &raw, scales),
-                Ok(Parsed::Trade(raw)) => self.trades.rows.push(frame, &raw, scales),
+                Ok(Parsed::Depth(raw)) => {
+                    let Some(depth) = scales
+                        .get(raw.symbol())
+                        .and_then(|scales| raw.convert(*scales).ok())
+                    else {
+                        return Ok(false);
+                    };
+                    match depth {
+                        Depth::Update(update) => self.depth.rows.push(frame, venue, &raw, &update),
+                    }
+                }
+                Ok(Parsed::Trade(raw)) => self.trades.rows.push(frame, venue, &raw, scales),
                 Err(_) => Ok(false),
             },
             Kind::Snapshot => match serde_json::from_str::<SnapshotPayload>(&frame.payload) {
-                Ok(snapshot) => self.snapshots.rows.push(frame, venue, &snapshot, scales),
+                Ok(snapshot) => self
+                    .snapshots
+                    .rows
+                    .push_rest(frame, venue, &snapshot, scales),
                 Err(_) => Ok(false),
             },
             Kind::Meta | Kind::Control | Kind::SegmentEnd => Ok(true),
@@ -500,6 +515,7 @@ struct DepthRows {
     source_ts_ns: Int64Builder,
     transaction_ts_ns: Int64Builder,
     capture_ts_ns: Int64Builder,
+    venue: StringBuilder,
     symbol: StringBuilder,
     first_update_id: Int64Builder,
     last_update_id: Int64Builder,
@@ -512,12 +528,13 @@ impl DepthRows {
         let mut fields = vec![
             int64("seq"),
             int64("source_ts_ns"),
-            int64("transaction_ts_ns"),
+            Field::new("transaction_ts_ns", DataType::Int64, true),
             int64("capture_ts_ns"),
+            Field::new("venue", DataType::Utf8, false),
             Field::new("symbol", DataType::Utf8, false),
-            int64("first_update_id"),
+            Field::new("first_update_id", DataType::Int64, true),
             int64("last_update_id"),
-            int64("prev_last_update_id"),
+            Field::new("prev_last_update_id", DataType::Int64, true),
         ];
         fields.extend(LevelColumns::fields());
         Arc::new(Schema::new(fields))
@@ -526,27 +543,23 @@ impl DepthRows {
     fn push(
         &mut self,
         frame: &Frame,
+        venue: Venue,
         raw: &RawDepth,
-        scales: &BTreeMap<Symbol, Scales>,
+        update: &DepthUpdate,
     ) -> Result<bool, StoreError> {
-        let Some(Depth::Update(update)) = scales
-            .get(raw.symbol())
-            .and_then(|scales| raw.convert(*scales).ok())
-        else {
-            return Ok(false);
-        };
         let ids = raw.ids();
+        let id = |value: Option<u64>| value.map(i64::try_from).transpose();
         let (Ok(first), Ok(last), Ok(prev)) = (
-            i64::try_from(ids.first_update_id),
+            id(ids.first_update_id),
             i64::try_from(ids.last_update_id),
-            i64::try_from(ids.prev_last_update_id),
+            id(ids.prev_last_update_id),
         ) else {
             return Ok(false);
         };
         let seq = to_i64(frame.seq)?;
         let (source, transaction) = (
             ms_to_ns(ids.event_time_ms),
-            ms_to_ns(ids.transaction_time_ms),
+            ids.transaction_time_ms.map(ms_to_ns),
         );
         let Self {
             levels,
@@ -554,6 +567,7 @@ impl DepthRows {
             source_ts_ns,
             transaction_ts_ns,
             capture_ts_ns,
+            venue: venues,
             symbol,
             first_update_id,
             last_update_id,
@@ -562,12 +576,13 @@ impl DepthRows {
         levels.push(&update.bids, &update.asks, || {
             seqs.append_value(seq);
             source_ts_ns.append_value(source);
-            transaction_ts_ns.append_value(transaction);
+            transaction_ts_ns.append_option(transaction);
             capture_ts_ns.append_value(frame.capture_ts_ns);
+            venues.append_value(venue.id());
             symbol.append_value(raw.symbol());
-            first_update_id.append_value(first);
+            first_update_id.append_option(first);
             last_update_id.append_value(last);
-            prev_last_update_id.append_value(prev);
+            prev_last_update_id.append_option(prev);
         });
         Ok(true)
     }
@@ -584,6 +599,7 @@ impl Rows for DepthRows {
             column(self.source_ts_ns.finish()),
             column(self.transaction_ts_ns.finish()),
             column(self.capture_ts_ns.finish()),
+            column(self.venue.finish()),
             column(self.symbol.finish()),
             column(self.first_update_id.finish()),
             column(self.last_update_id.finish()),
@@ -594,15 +610,17 @@ impl Rows for DepthRows {
     }
 }
 
-/// `agg_trades`: one row per aggregated trade.
+/// `trades`: one row per trade. `first_trade_id` and `last_trade_id` are the trades an
+/// aggregated trade covers (Binance's); null for a venue that sends trades one by one.
 #[derive(Default)]
 struct TradeRows {
     seq: Int64Builder,
     source_ts_ns: Int64Builder,
     trade_ts_ns: Int64Builder,
     capture_ts_ns: Int64Builder,
+    venue: StringBuilder,
     symbol: StringBuilder,
-    agg_trade_id: Int64Builder,
+    trade_id: StringBuilder,
     first_trade_id: Int64Builder,
     last_trade_id: Int64Builder,
     price: Int64Builder,
@@ -617,8 +635,9 @@ impl TradeRows {
             int64("source_ts_ns"),
             int64("trade_ts_ns"),
             int64("capture_ts_ns"),
+            Field::new("venue", DataType::Utf8, false),
             Field::new("symbol", DataType::Utf8, false),
-            int64("agg_trade_id"),
+            Field::new("trade_id", DataType::Utf8, false),
             Field::new("first_trade_id", DataType::Int64, true),
             Field::new("last_trade_id", DataType::Int64, true),
             int64("price"),
@@ -630,6 +649,7 @@ impl TradeRows {
     fn push(
         &mut self,
         frame: &Frame,
+        venue: Venue,
         raw: &RawTrade,
         scales: &BTreeMap<Symbol, Scales>,
     ) -> Result<bool, StoreError> {
@@ -641,19 +661,16 @@ impl TradeRows {
         };
         let ids = raw.ids();
         let id = |value: Option<u64>| value.map(i64::try_from).transpose();
-        let (Ok(agg_trade_id), Ok(first), Ok(last)) = (
-            i64::try_from(trade.agg_trade_id),
-            id(ids.first_trade_id),
-            id(ids.last_trade_id),
-        ) else {
+        let (Ok(first), Ok(last)) = (id(ids.first_trade_id), id(ids.last_trade_id)) else {
             return Ok(false);
         };
         self.seq.append_value(to_i64(frame.seq)?);
         self.source_ts_ns.append_value(ms_to_ns(ids.event_time_ms));
         self.trade_ts_ns.append_value(ms_to_ns(trade.trade_time_ms));
         self.capture_ts_ns.append_value(frame.capture_ts_ns);
+        self.venue.append_value(venue.id());
         self.symbol.append_value(&trade.symbol);
-        self.agg_trade_id.append_value(agg_trade_id);
+        self.trade_id.append_value(&trade.trade_id);
         self.first_trade_id.append_option(first);
         self.last_trade_id.append_option(last);
         self.price.append_value(trade.price);
@@ -674,8 +691,9 @@ impl Rows for TradeRows {
             column(self.source_ts_ns.finish()),
             column(self.trade_ts_ns.finish()),
             column(self.capture_ts_ns.finish()),
+            column(self.venue.finish()),
             column(self.symbol.finish()),
-            column(self.agg_trade_id.finish()),
+            column(self.trade_id.finish()),
             column(self.first_trade_id.finish()),
             column(self.last_trade_id.finish()),
             column(self.price.finish()),
@@ -686,12 +704,14 @@ impl Rows for TradeRows {
     }
 }
 
-/// `snapshots`: one row per level of a REST snapshot.
+/// `snapshots`: one row per level of a snapshot: a REST body (Binance) or a whole book sent on
+/// the stream (Bybit).
 #[derive(Default)]
 struct SnapshotRows {
     seq: Int64Builder,
     source_ts_ns: Int64Builder,
     capture_ts_ns: Int64Builder,
+    venue: StringBuilder,
     symbol: StringBuilder,
     last_update_id: Int64Builder,
     levels: LevelColumns,
@@ -703,6 +723,7 @@ impl SnapshotRows {
             int64("seq"),
             int64("source_ts_ns"),
             int64("capture_ts_ns"),
+            Field::new("venue", DataType::Utf8, false),
             Field::new("symbol", DataType::Utf8, false),
             int64("last_update_id"),
         ];
@@ -710,7 +731,8 @@ impl SnapshotRows {
         Arc::new(Schema::new(fields))
     }
 
-    fn push(
+    /// The rows of a REST snapshot frame.
+    fn push_rest(
         &mut self,
         frame: &Frame,
         venue: Venue,
@@ -724,6 +746,16 @@ impl SnapshotRows {
         let Some(snapshot) = converted else {
             return Ok(false);
         };
+        self.push(frame, venue, &payload.symbol, &snapshot)
+    }
+
+    fn push(
+        &mut self,
+        frame: &Frame,
+        venue: Venue,
+        symbol_name: &str,
+        snapshot: &Snapshot,
+    ) -> Result<bool, StoreError> {
         let Ok(update_id) = i64::try_from(snapshot.last_update_id) else {
             return Ok(false);
         };
@@ -733,6 +765,7 @@ impl SnapshotRows {
             seq: seqs,
             source_ts_ns,
             capture_ts_ns,
+            venue: venues,
             symbol,
             last_update_id,
         } = self;
@@ -740,7 +773,8 @@ impl SnapshotRows {
             seqs.append_value(seq);
             source_ts_ns.append_value(frame.source_ts_ns);
             capture_ts_ns.append_value(frame.capture_ts_ns);
-            symbol.append_value(&payload.symbol);
+            venues.append_value(venue.id());
+            symbol.append_value(symbol_name);
             last_update_id.append_value(update_id);
         });
         Ok(true)
@@ -757,6 +791,7 @@ impl Rows for SnapshotRows {
             column(self.seq.finish()),
             column(self.source_ts_ns.finish()),
             column(self.capture_ts_ns.finish()),
+            column(self.venue.finish()),
             column(self.symbol.finish()),
             column(self.last_update_id.finish()),
         ];

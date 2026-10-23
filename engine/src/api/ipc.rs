@@ -3,8 +3,11 @@
 //! compression and no dictionaries on loopback.
 //!
 //! A stream's schema is the stored one with the engine's metadata: `tp.schema` is
-//! `"<table>/<major>"` (adding a column keeps the major, a rename or type change bumps it),
-//! plus `tp.domain`, `tp.run` and, for market runs, `tp.scales`.
+//! `"<table>/<major>"` (adding a column keeps the major, a rename, a type change or a change of
+//! what keys a row bumps it) and `tp.domain`. An Ising stream adds `tp.run`; a market stream adds
+//! `tp.runs` and `tp.scales`, JSON objects keyed by venue (a market stream can carry several
+//! venues live, each recording its own run): `{"<venue>": "<run>"}` and
+//! `{"<venue>": {"<symbol>": {"price_decimals", "qty_decimals"}}}`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -17,41 +20,75 @@ use arrow::ipc::MetadataVersion;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 
 use crate::market::{Scales, Symbol};
+use crate::store::run::MARKET;
+use crate::venue::Venue;
 
 /// The media type of an Arrow IPC stream.
 pub const STREAM_TYPE: &str = "application/vnd.apache.arrow.stream";
 /// The schema-metadata key naming a stream's table and major version.
 pub const SCHEMA_KEY: &str = "tp.schema";
-/// Every table's major version in this release.
-pub const MAJOR: u32 = 1;
+
+/// A table's major version. The market tables whose rows name a book or a trade are at 2: their
+/// rows became keyed by venue as well as symbol, `trades` (once `agg_trades`) took string ids,
+/// and `depth_updates` made the ids only some venues send nullable. The rest are at 1.
+#[must_use]
+pub fn major(domain: &str, table: &str) -> u32 {
+    let keyed_by_venue = matches!(
+        table,
+        "depth_updates" | "trades" | "snapshots" | "book_samples"
+    );
+    if domain == MARKET && keyed_by_venue {
+        2
+    } else {
+        1
+    }
+}
 
 /// What a stream's schema says about where its rows come from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provenance<'a> {
     pub table: &'a str,
     pub domain: &'a str,
-    /// The run, empty for a live feed that records nothing.
-    pub run: &'a str,
-    pub scales: Option<&'a BTreeMap<Symbol, Scales>>,
+    pub origin: Origin<'a>,
+}
+
+/// The runs a stream's rows come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin<'a> {
+    /// One run of a domain without venues (Ising).
+    Run(&'a str),
+    /// Market rows: the run each venue records (a venue recording nothing has none) and each
+    /// venue's scales.
+    Market {
+        runs: BTreeMap<Venue, &'a str>,
+        scales: BTreeMap<Venue, &'a BTreeMap<Symbol, Scales>>,
+    },
 }
 
 /// `schema` with its metadata replaced by the engine's.
 ///
 /// # Panics
-/// Never: scales are plain numbers and always serialize.
+/// Never: runs and scales are plain strings and numbers and always serialize.
 #[must_use]
 pub fn tagged(schema: &Schema, provenance: &Provenance<'_>) -> SchemaRef {
+    let major = major(provenance.domain, provenance.table);
     let mut metadata = HashMap::from([
         (
             SCHEMA_KEY.to_owned(),
-            format!("{}/{MAJOR}", provenance.table),
+            format!("{}/{major}", provenance.table),
         ),
         ("tp.domain".to_owned(), provenance.domain.to_owned()),
-        ("tp.run".to_owned(), provenance.run.to_owned()),
     ]);
-    if let Some(scales) = provenance.scales {
-        let json = serde_json::to_string(scales).expect("scales always serialize");
-        metadata.insert("tp.scales".to_owned(), json);
+    match &provenance.origin {
+        Origin::Run(run) => {
+            metadata.insert("tp.run".to_owned(), (*run).to_owned());
+        }
+        Origin::Market { runs, scales } => {
+            let runs = serde_json::to_string(runs).expect("runs always serialize");
+            let scales = serde_json::to_string(scales).expect("scales always serialize");
+            metadata.insert("tp.runs".to_owned(), runs);
+            metadata.insert("tp.scales".to_owned(), scales);
+        }
     }
     Arc::new(Schema::new_with_metadata(schema.fields().clone(), metadata))
 }
@@ -205,8 +242,7 @@ mod tests {
         let provenance = Provenance {
             table: "stats",
             domain: "ising",
-            run: "r",
-            scales: None,
+            origin: Origin::Run("r"),
         };
         let schema = tagged(&stored(), &provenance);
         let (mut encoder, mut bytes) = Encoder::new(schema.clone())?;
@@ -215,10 +251,7 @@ mod tests {
         bytes.extend(encoder.finish()?);
         let reader = StreamReader::try_new(bytes.as_slice(), None)?;
         assert_eq!(reader.schema(), schema);
-        assert_eq!(
-            reader.schema().metadata()[SCHEMA_KEY],
-            format!("stats/{MAJOR}")
-        );
+        assert_eq!(reader.schema().metadata()[SCHEMA_KEY], "stats/1");
         let batches = reader.collect::<Result<Vec<_>, _>>()?;
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 1);

@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::market::Scales;
 use crate::market::decimal::{DecimalError, parse_units};
-use crate::market::feed::AggTrade;
+use crate::market::feed::Trade;
 use crate::market::sync::{DepthUpdate, Snapshot};
 use crate::store::ms_to_ns;
 use crate::venue::{MessageError, Parsed, RawDepth, RawTrade};
@@ -165,14 +165,14 @@ impl Scales {
         })
     }
 
-    /// Converts a raw aggregated trade into integer units.
+    /// Converts a raw aggregated trade into integer units; its id becomes the trade id.
     ///
     /// # Errors
     /// Returns an error when the price or quantity is not representable at this scale.
-    pub fn agg_trade(&self, raw: &RawAggTrade) -> Result<AggTrade, DecimalError> {
-        Ok(AggTrade {
+    pub fn agg_trade(&self, raw: &RawAggTrade) -> Result<Trade, DecimalError> {
+        Ok(Trade {
             symbol: raw.symbol.clone(),
-            agg_trade_id: raw.agg_trade_id,
+            trade_id: raw.agg_trade_id.to_string(),
             price: parse_units(&raw.price, self.price_decimals)?,
             qty: parse_units(&raw.qty, self.qty_decimals)?,
             trade_time_ms: raw.trade_time_ms,
@@ -238,7 +238,7 @@ mod tests {
         };
         assert_eq!((raw.first_trade_id, raw.last_trade_id), (Some(1), Some(2)));
         let trade = BTC.agg_trade(&raw)?;
-        assert_eq!(trade.agg_trade_id, 42);
+        assert_eq!(trade.trade_id, "42");
         assert_eq!(trade.price, 500_001);
         assert_eq!(trade.qty, 3);
         assert!(trade.buyer_is_maker);

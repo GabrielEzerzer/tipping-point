@@ -12,14 +12,17 @@ use super::sync::{BookSync, Outcome, ResyncReason};
 use super::{Scales, Symbol};
 use crate::venue::{Depth, MessageError, Parsed, Venue};
 
-/// An aggregated trade in integer units.
+/// One trade in integer units.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AggTrade {
+pub struct Trade {
     pub symbol: String,
-    pub agg_trade_id: u64,
+    /// The venue's id for it, as text: Binance numbers its aggregated trades, Bybit uses UUIDs.
+    pub trade_id: String,
     pub price: i64,
     pub qty: i64,
     pub trade_time_ms: u64,
+    /// True when the buyer was the maker (the seller crossed the spread), whatever the venue
+    /// calls it.
     pub buyer_is_maker: bool,
 }
 
@@ -54,7 +57,7 @@ pub enum Event {
         outcome: Outcome,
         crossed: bool,
     },
-    Trade(AggTrade),
+    Trade(Trade),
 }
 
 /// Why a frame or snapshot could not be fed.

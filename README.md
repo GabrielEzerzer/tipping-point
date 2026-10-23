@@ -40,7 +40,7 @@ dropped under backpressure, failed snapshots) — to an append-only binary log: 
 payload, CRC-32C, one `write_all` per frame, `sync_data` every second, a new segment every UTC hour
 or 1 GiB. A crash can only tear the tail; recovery cuts it back to the last good frame and refuses
 damage in the middle. An offline step rotates closed segments into Parquet (`frames`,
-`depth_updates`, `agg_trades`, `snapshots`, `book_samples`), and DuckDB queries and replays it
+`depth_updates`, `trades`, `snapshots`, `book_samples`), and DuckDB queries and replays it
 through the same pipeline the live loop runs.
 
 Runs live in `<data dir>/market/<run_id>/` (`manifest.json`, `log/`, one Parquet file per table per
@@ -82,12 +82,12 @@ cargo run -p engine --bin serve -- --script <file.jsonl> --speed 10 --port 0   #
 
 | route | what |
 |---|---|
-| `GET /v1/health` | alive, protocol version, whether the live feed has started or ended |
-| `GET /v1/runs` | every run in the data dir, by domain |
+| `GET /v1/health` | alive, protocol version, whether the live feed has started or ended, the run each venue records |
+| `GET /v1/runs` | every run in the data dir, by domain, a market run with its venue |
 | `GET /v1/live/book_samples` | Arrow IPC stream: live book samples, each batch one or more whole 100 ms instants (one per batch live; a backfill or an unpaced replay sends several); `?backfill_s=` first replays that much of the recent past from memory (no gap, no overlap), `?run=&speed=` replays a recorded run instead |
 | `GET /v1/table/{domain}/{run}/{table}` | Arrow IPC stream: any table of a market or Ising run, `?start=&end=` a range of its key, read through DuckDB and cast back to the schema stored in the Parquet footer |
 | `POST /v1/publish/{topic}` | a JSON result (`meters`, `jev`, `pnl`, `ising`) relayed to the app |
-| `GET /v1/ws` | the app's WebSocket: JSON `book` (top 20 per symbol), `trades`, `status`, and the relayed topics; replay and seek of recorded runs; binary frames carry only Ising lattices |
+| `GET /v1/ws` | the app's WebSocket (protocol 2): JSON `book` (top 20 per venue and symbol), `trades`, `status` (per venue), and the relayed topics; replay and seek of recorded runs; binary frames carry only Ising lattices |
 
 - **Live samples come from rotate's own sampler** (`store/samples.rs`), each row carrying the log
   seq of the last frame applied, which the live loop now assigns: the live stream equals the
@@ -98,6 +98,10 @@ cargo run -p engine --bin serve -- --script <file.jsonl> --speed 10 --port 0   #
   lossless or cut, its response aborted so a reader never takes it for a short table.
 - **Times on the wire are milliseconds** (`ts_ms`), prices and quantities integer ticks and lots at
   the scales sent in `welcome`; storage keeps nanoseconds.
+- **Venues:** two venues can share a symbol (Binance and Bybit both say `BTCUSDT`), so every
+  message, table row and Arrow stream that names a symbol names its `venue` too; trade ids are
+  strings (Bybit's are UUIDs). A market stream's `tp.runs` and `tp.scales` are keyed by venue; the
+  market tables keyed by venue are at schema major 2.
 - **Checks on every request:** `Host` must name the server (stops DNS rebinding) and a browser's
   `Origin` must be on the allowlist (the Tauri webview, the Vite dev server, `--allow-origin`).
 - **Replay and scrub:** rotated hours come from Parquet through DuckDB, the hour not yet rotated

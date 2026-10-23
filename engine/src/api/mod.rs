@@ -3,8 +3,8 @@
 //!
 //! | route | what |
 //! |---|---|
-//! | `GET /v1/health` | JSON: alive, protocol version, whether the live feed has started |
-//! | `GET /v1/runs` | JSON: every recorded run in the data dir, by domain |
+//! | `GET /v1/health` | JSON: alive, protocol version, whether the live feed has started, the run each venue records |
+//! | `GET /v1/runs` | JSON: every recorded run in the data dir, by domain, a market run with its venue |
 //! | `GET /v1/live/book_samples` | Arrow stream: live book samples, each batch one or more whole 100 ms instants (one per batch live); `?backfill_s=` starts with that much of the recent past, `?run=&speed=` replays a recorded run instead |
 //! | `GET /v1/table/{domain}/{run}/{table}` | Arrow stream: any table of a market or Ising run, `?start=&end=` a range of its key, through `DuckDB`, in the stored schema |
 //! | `POST /v1/publish/{topic}` | JSON object: a result (`meters`, `jev`, `pnl`, `ising`) relayed to the app |
@@ -59,6 +59,7 @@ use table::{DOMAINS, TableError, locate};
 
 use crate::store::run::{self, COMPLETE, MANIFEST, MARKET};
 use crate::store::samples::{Sample, SampleRows};
+use crate::venue::Venue;
 
 /// The port `serve` listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 7731;
@@ -245,16 +246,22 @@ async fn health(State(api): State<Arc<Api>>) -> Json<Value> {
     } else {
         "starting"
     };
+    let runs: serde_json::Map<String, Value> = source
+        .iter()
+        .flat_map(|source| source.venues.iter())
+        .filter_map(|(venue, feed)| Some((venue.id().to_owned(), json!(feed.run.as_ref()?))))
+        .collect();
     Json(json!({
         "status": "ok",
         "v": PROTOCOL,
         "engine": crate::version(),
         "source": state,
-        "run": source.and_then(|source| source.run.clone()),
+        "runs": runs,
     }))
 }
 
-/// Every run with a manifest, by domain: id, start, key, tables, and whether it ended cleanly.
+/// Every run with a manifest, by domain: id, start, key, tables, whether it ended cleanly, and
+/// a market run's venue (Binance's, for runs recorded before runs said).
 async fn runs(State(api): State<Arc<Api>>) -> Result<Json<Value>, ApiError> {
     let data_dir = api.config.data_dir.clone();
     let listed = tokio::task::spawn_blocking(move || {
@@ -265,13 +272,21 @@ async fn runs(State(api): State<Arc<Api>>) -> Result<Json<Value>, ApiError> {
                 let Ok(manifest) = run::read_json::<Value>(&run_dir.join(MANIFEST)) else {
                     continue;
                 };
-                runs.push(json!({
+                let mut listed = json!({
                     "run": manifest.get("run_id"),
                     "started_ns": manifest.get("started_ns"),
                     "key": manifest.get("key"),
                     "tables": manifest.get("tables"),
                     "complete": run_dir.join(COMPLETE).is_file(),
-                }));
+                });
+                if domain == MARKET {
+                    let venue = manifest
+                        .pointer("/params/venue")
+                        .cloned()
+                        .unwrap_or_else(|| json!(Venue::BinanceUsdm));
+                    listed["venue"] = venue;
+                }
+                runs.push(listed);
             }
             out.insert(domain.to_owned(), Value::Array(runs));
         }

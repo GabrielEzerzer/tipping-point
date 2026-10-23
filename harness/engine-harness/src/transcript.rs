@@ -34,8 +34,9 @@ pub struct Step {
 }
 
 /// Bumped whenever what a step records changes, so that a transcript saved by an older harness
-/// is recognised as such rather than read as a replay that differs.
-pub const FORMAT: u32 = 1;
+/// is recognised as such rather than read as a replay that differs. 2: trades carry their id as
+/// a string (venues).
+pub const FORMAT: u32 = 2;
 
 /// Every applied input of a run, in order.
 #[derive(Debug, Clone, Serialize, Deserialize)]

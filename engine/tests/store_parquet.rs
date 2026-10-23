@@ -163,7 +163,7 @@ fn rotated_parquet_holds_exactly_what_the_log_holds() -> Outcome {
         count(&conn, &run_dir, "depth_updates")?,
         i64::try_from(depth_levels)?
     );
-    assert_eq!(count(&conn, &run_dir, "agg_trades")?, trades);
+    assert_eq!(count(&conn, &run_dir, "trades")?, trades);
     assert_eq!(
         count(&conn, &run_dir, "snapshots")?,
         i64::try_from(snapshot_levels)?

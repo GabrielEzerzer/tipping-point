@@ -19,6 +19,7 @@ use engine::api::hub::{Hub, HubConfig};
 use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
 use engine::store::writer::LogConfig;
+use engine::venue::Venue;
 use engine_harness::api::{
     Frame, LivePath, Outcome, Script, Server, Socket, fixture, get_arrow, hello, next_frame,
     next_json, one_batch, read_parquet, script, send_json, ws_connect,
@@ -35,8 +36,10 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// One `book_samples` row as a book message carries it.
+/// One `book_samples` row as a book message carries it: venue, symbol, instant (ms), seq,
+/// synced, last update id, bids, asks.
 type BookRow = (
+    String,
     String,
     i64,
     i64,
@@ -55,10 +58,13 @@ fn int64<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int64Array {
 
 /// The rows of `book_samples` batches, as book messages would carry them.
 fn book_rows(batch: &RecordBatch) -> Vec<BookRow> {
-    let symbols = batch
-        .column_by_name("symbol")
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        .expect("a symbol column");
+    let strings = |name: &str| {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .unwrap_or_else(|| panic!("a {name} column"))
+    };
+    let (venues, symbols) = (strings("venue"), strings("symbol"));
     let synced = batch
         .column_by_name("synced")
         .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
@@ -80,6 +86,7 @@ fn book_rows(batch: &RecordBatch) -> Vec<BookRow> {
     (0..batch.num_rows())
         .map(|row| {
             (
+                venues.value(row).to_owned(),
                 symbols.value(row).to_owned(),
                 times.value(row) / 1_000_000,
                 seqs.value(row),
@@ -106,6 +113,7 @@ fn book_of(message: &Value) -> BookRow {
             .collect()
     };
     (
+        message["venue"].as_str().expect("venue").to_owned(),
         message["symbol"].as_str().expect("symbol").to_owned(),
         message["ts_ms"].as_i64().expect("ts_ms"),
         message["seq"].as_i64().expect("seq"),
@@ -128,15 +136,18 @@ fn assert_subsequence(messages: &[BookRow], rows: &[BookRow], what: &str) {
         };
         at += offset + 1;
     }
-    let mut last_rows: BTreeMap<&str, &BookRow> = BTreeMap::new();
+    let mut last_rows: BTreeMap<(&str, &str), &BookRow> = BTreeMap::new();
     for row in rows {
-        last_rows.insert(&row.0, row);
+        last_rows.insert((&row.0, &row.1), row);
     }
-    let mut last_messages: BTreeMap<&str, &BookRow> = BTreeMap::new();
+    let mut last_messages: BTreeMap<(&str, &str), &BookRow> = BTreeMap::new();
     for message in messages {
-        last_messages.insert(&message.0, message);
+        last_messages.insert((&message.0, &message.1), message);
     }
-    assert_eq!(last_messages, last_rows, "{what}: the last book per symbol");
+    assert_eq!(
+        last_messages, last_rows,
+        "{what}: the last book per venue and symbol"
+    );
 }
 
 /// Skips what the live feed sent before the replay began (the newest live book goes to every
@@ -281,7 +292,7 @@ async fn the_api_serves_exactly_what_is_stored() -> Outcome {
     // Live book messages: an in-order subsequence of the rows, and every trade arrived.
     let rows = book_rows(&stored);
     assert_subsequence(&played.live_books, &rows, "live");
-    let (_, trades) = read_parquet(&played.run_dir, "agg_trades")?;
+    let (_, trades) = read_parquet(&played.run_dir, "trades")?;
     let trades: usize = trades.iter().map(RecordBatch::num_rows).sum();
     assert_eq!(
         played.live_trades.len(),
@@ -312,7 +323,7 @@ async fn check_table_reads(played: &Played) -> Outcome {
     let tables = [
         "frames",
         "depth_updates",
-        "agg_trades",
+        "trades",
         "snapshots",
         "book_samples",
     ];
@@ -385,18 +396,18 @@ async fn check_replays(played: &Played, stored: &RecordBatch, rows: &[BookRow]) 
         "replayed trades are the live ones"
     );
 
-    let from_ms = rows[rows.len() / 2].1;
+    let from_ms = rows[rows.len() / 2].2;
     let seek = json!({"t": "replay", "run": RUN, "from_ms": from_ms, "speed": 0});
     send_json(&mut viewer, &seek).await?;
     until_replay(&mut viewer).await?;
     let (sought, _, _) = read_until_ended(&mut viewer).await?;
     assert!(
-        sought.iter().all(|book| book.1 >= from_ms),
+        sought.iter().all(|book| book.2 >= from_ms),
         "nothing before the seek"
     );
     let later: Vec<BookRow> = rows
         .iter()
-        .filter(|row| row.1 >= from_ms)
+        .filter(|row| row.2 >= from_ms)
         .cloned()
         .collect();
     assert_subsequence(&sought, &later, "replay after a seek");
@@ -411,7 +422,7 @@ async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
     let played = play(scratch("api-controls")).await?;
     let (stored_schema, stored_batches) = read_parquet(&played.run_dir, "book_samples")?;
     let rows = book_rows(&one_batch(&stored_schema, &stored_batches)?);
-    let (first_ms, last_ms) = (rows[0].1, rows[rows.len() - 1].1);
+    let (first_ms, last_ms) = (rows[0].2, rows[rows.len() - 1].2);
     let mut viewer = ws_connect(played.server.addr).await?;
     hello(&mut viewer).await?;
     send_json(&mut viewer, &json!({"t": "sub", "topics": ["book"]})).await?;
@@ -436,7 +447,7 @@ async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
     assert_eq!(sought["from_ms"], to_ms);
     let (books, _, _) = read_until_ended(&mut viewer).await?;
     assert!(
-        !books.is_empty() && books.iter().all(|book| book.1 >= to_ms),
+        !books.is_empty() && books.iter().all(|book| book.2 >= to_ms),
         "{books:?}"
     );
 
@@ -606,8 +617,8 @@ async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     hub.end();
     let (schema, batches) = arrow.await??;
     let all = book_rows(&one_batch(&schema, &batches)?);
-    let first_ms = all.first().ok_or("the session has samples")?.1;
-    let held = hub.recent(i64::MIN).samples;
+    let first_ms = all.first().ok_or("the session has samples")?.2;
+    let held = hub.recent(Venue::BinanceUsdm, i64::MIN).samples;
     let first_held_ms = held.first().ok_or("memory holds samples")?.sample_ts_ns / 1_000_000;
     assert!(
         first_held_ms > first_ms + 100,
@@ -627,12 +638,12 @@ async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     // Unpaced, the books coalesce to the newest; whatever comes is from memory, after the gap.
     let (books, _, _) = read_until_ended(&mut viewer).await?;
     assert!(
-        books.iter().all(|book| book.1 >= first_held_ms),
+        books.iter().all(|book| book.2 >= first_held_ms),
         "{books:?}"
     );
     let held_rows: Vec<BookRow> = all
         .iter()
-        .filter(|row| row.1 >= first_held_ms)
+        .filter(|row| row.2 >= first_held_ms)
         .cloned()
         .collect();
     assert_subsequence(&books, &held_rows, "replay from memory after a gap");
@@ -767,6 +778,7 @@ fn write_three_symbol_run(run_dir: &Path) -> Outcome {
         let sample = Sample {
             sample_ts_ns: 1_700_000_000_000_000_000 + i * 100_000_000,
             seq: i,
+            venue: Venue::BinanceUsdm,
             rows: symbols
                 .iter()
                 .map(|symbol| Row {

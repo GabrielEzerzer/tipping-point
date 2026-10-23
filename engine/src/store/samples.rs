@@ -1,6 +1,8 @@
-//! Book samples: the book of each symbol on a fixed grid of the capture clock, the rows of the
-//! `book_samples` table. Rotate makes them from the log and the live API makes them in the live
-//! loop with this same code, so the live stream holds exactly the rows rotate writes later.
+//! Book samples: the book of each of a venue's symbols on a fixed grid of the capture clock, the
+//! rows of the `book_samples` table. Rotate makes them from the log and the live API makes them
+//! in the live loop with this same code, so the live stream holds exactly the rows rotate writes
+//! later. The grid is absolute (multiples of the spacing since the epoch), so two venues' samples
+//! join exactly on `sample_ts_ns`.
 //!
 //! A sample at instant `t` is the book after every input captured at or before `t`, the capture
 //! clock taken as a running maximum so that a clock step back cannot reorder anything. Its
@@ -17,6 +19,7 @@ use super::StoreError;
 use super::run::BookSample;
 use crate::market::feed::Feed;
 use crate::market::sync::{BookSync, Level};
+use crate::venue::Venue;
 
 /// A capture-clock jump longer than this many grid instants is skipped rather than filled with
 /// samples of an unchanged book (a day at the default 100 ms).
@@ -61,12 +64,13 @@ impl BookRow {
     }
 }
 
-/// Every symbol's [`BookRow`] at one grid instant.
+/// Every one of a venue's symbols' [`BookRow`] at one grid instant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sample {
     pub sample_ts_ns: i64,
-    /// The last frame applied before the instant.
+    /// The last frame applied before the instant, in the venue's run.
     pub seq: i64,
+    pub venue: Venue,
     /// One per symbol, in symbol order.
     pub rows: Vec<BookRow>,
 }
@@ -89,6 +93,7 @@ impl Sample {
         Ok(Self {
             sample_ts_ns,
             seq,
+            venue: feed.venue(),
             rows,
         })
     }
@@ -192,12 +197,14 @@ impl Iterator for Instants {
     }
 }
 
-/// `book_samples` rows being gathered: one row per symbol and grid instant, the top `levels` of
-/// each side in wide columns (`bid_px_0..`, `bid_qty_0..`, `ask_px_0..`, `ask_qty_0..`).
+/// `book_samples` rows being gathered: one row per venue, symbol and grid instant, the top
+/// `levels` of each side in wide columns (`bid_px_0..`, `bid_qty_0..`, `ask_px_0..`,
+/// `ask_qty_0..`).
 #[derive(Debug)]
 pub struct SampleRows {
     levels: usize,
     sample_ts_ns: Int64Builder,
+    venue: StringBuilder,
     symbol: StringBuilder,
     seq: Int64Builder,
     last_update_id: Int64Builder,
@@ -213,6 +220,7 @@ impl SampleRows {
         Self {
             levels,
             sample_ts_ns: Int64Builder::new(),
+            venue: StringBuilder::new(),
             symbol: StringBuilder::new(),
             seq: Int64Builder::new(),
             last_update_id: Int64Builder::new(),
@@ -226,6 +234,7 @@ impl SampleRows {
     pub fn schema(levels: usize) -> SchemaRef {
         let mut fields = vec![
             Field::new("sample_ts_ns", DataType::Int64, false),
+            Field::new("venue", DataType::Utf8, false),
             Field::new("symbol", DataType::Utf8, false),
             Field::new("seq", DataType::Int64, false),
             Field::new("last_update_id", DataType::Int64, true),
@@ -254,6 +263,7 @@ impl SampleRows {
     pub fn push(&mut self, sample: &Sample) {
         for row in &sample.rows {
             self.sample_ts_ns.append_value(sample.sample_ts_ns);
+            self.venue.append_value(sample.venue.id());
             self.symbol.append_value(&row.symbol);
             self.seq.append_value(sample.seq);
             self.last_update_id.append_option(row.last_update_id);
@@ -276,6 +286,7 @@ impl SampleRows {
         let column = |array: arrow::array::Int64Array| -> ArrayRef { Arc::new(array) };
         let mut columns: Vec<ArrayRef> = vec![
             column(self.sample_ts_ns.finish()),
+            Arc::new(self.venue.finish()),
             Arc::new(self.symbol.finish()),
             column(self.seq.finish()),
             column(self.last_update_id.finish()),
@@ -332,9 +343,10 @@ mod tests {
     #[test]
     fn the_schema_is_keys_then_wide_levels() {
         let samples = SampleRows::schema(2);
-        assert_eq!(samples.fields().len(), 5 + 4 * 2);
-        assert_eq!(samples.field(5).name(), "bid_px_0");
-        assert_eq!(samples.field(7).name(), "bid_qty_0");
-        assert_eq!(samples.field(12).name(), "ask_qty_1");
+        assert_eq!(samples.fields().len(), 6 + 4 * 2);
+        assert_eq!(samples.field(1).name(), "venue");
+        assert_eq!(samples.field(6).name(), "bid_px_0");
+        assert_eq!(samples.field(8).name(), "bid_qty_0");
+        assert_eq!(samples.field(13).name(), "ask_qty_1");
     }
 }

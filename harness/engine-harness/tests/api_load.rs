@@ -161,7 +161,9 @@ async fn stalled_app(addr: std::net::SocketAddr) -> Outcome<WebSocketStream<TcpS
     let stream = stalled_socket(addr).await?;
     let (mut socket, _) = client_async(format!("ws://{addr}/v1/ws"), stream).await?;
     socket
-        .send(WsMessage::text(json!({"t": "hello", "v": 1}).to_string()))
+        .send(WsMessage::text(
+            json!({"t": "hello", "v": engine::api::messages::PROTOCOL}).to_string(),
+        ))
         .await?;
     socket
         .send(WsMessage::text(

@@ -8,7 +8,7 @@
 //! when the close can still be sent, and dropped otherwise. None of this reaches the live loop:
 //! the hub never waits on a reader.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -40,6 +40,7 @@ use super::messages::{
 use super::replay::{Item, Replay};
 use super::table::TableError;
 use crate::store::samples::Sample;
+use crate::venue::Venue;
 
 /// Client messages are small; a bigger one is a bad request.
 const MAX_MESSAGE: usize = 64 * 1024;
@@ -122,6 +123,8 @@ fn bad(reason: impl Into<String>) -> Closing {
 #[derive(Debug)]
 struct Sub {
     topics: BTreeSet<Topic>,
+    /// `None` for every venue.
+    venues: Option<BTreeSet<Venue>>,
     /// `None` for every symbol.
     symbols: Option<BTreeSet<String>>,
     levels: usize,
@@ -132,10 +135,15 @@ impl Sub {
         self.topics.contains(&topic)
     }
 
-    fn wants(&self, symbol: &str) -> bool {
-        self.symbols
+    /// True when the client takes `venue`'s `symbol`: both filters let it through.
+    fn wants(&self, venue: Venue, symbol: &str) -> bool {
+        self.venues
             .as_ref()
-            .is_none_or(|symbols| symbols.contains(symbol))
+            .is_none_or(|venues| venues.contains(&venue))
+            && self
+                .symbols
+                .as_ref()
+                .is_none_or(|symbols| symbols.contains(symbol))
     }
 }
 
@@ -161,7 +169,7 @@ struct Connection<S> {
     mode: Mode,
     outbox: Vec<Message>,
     changed: watch::Receiver<u64>,
-    book: watch::Receiver<Option<Arc<Published>>>,
+    book: watch::Receiver<Latest<Venue, Published>>,
     status: watch::Receiver<Option<Arc<Status>>>,
     meters: watch::Receiver<Latest>,
     pnl: watch::Receiver<Latest>,
@@ -171,8 +179,8 @@ struct Connection<S> {
     jev: Option<broadcast::Receiver<Arc<Value>>>,
     ising: Option<broadcast::Receiver<Arc<Value>>>,
     ordered: Option<broadcast::Receiver<Ordered>>,
-    /// The newest book instant sent.
-    last_book: i64,
+    /// The newest book instant sent, per venue.
+    last_book: BTreeMap<Venue, i64>,
     status_due: bool,
     told_ended: bool,
     replay_book: Option<Arc<Sample>>,
@@ -201,6 +209,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             ws,
             sub: Sub {
                 topics: BTreeSet::new(),
+                venues: None,
                 symbols: None,
                 levels,
             },
@@ -209,7 +218,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             trades: None,
             jev: None,
             ising: None,
-            last_book: i64::MIN,
+            last_book: BTreeMap::new(),
             status_due: false,
             told_ended: false,
             replay_book: None,
@@ -261,8 +270,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         };
         let config = hub.config();
         let welcome = Welcome::new(
-            &source.scales,
-            source.run.clone(),
+            &source,
             config.book_sample.levels,
             config.book_sample.every_ns,
         );
@@ -352,7 +360,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 
     fn queue_book(&mut self, sample: &Sample) {
         for row in &sample.rows {
-            if self.sub.wants(&row.symbol) {
+            if self.sub.wants(sample.venue, &row.symbol) {
                 let book = BookMessage::new(sample, row, self.sub.levels);
                 self.outbox
                     .push(Message::text(ServerMessage::Book(&book).to_text()));
@@ -363,7 +371,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     fn queue_trades(&mut self, trades: &[Arc<TradeMessage>]) {
         let wanted: Vec<TradeMessage> = trades
             .iter()
-            .filter(|trade| self.sub.wants(&trade.symbol))
+            .filter(|trade| self.sub.wants(trade.venue, &trade.symbol))
             .map(|trade| TradeMessage::clone(trade))
             .collect();
         if !wanted.is_empty() {
@@ -438,10 +446,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             ClientMessage::Hello { .. } => Err(bad("hello was already said")),
             ClientMessage::Sub {
                 topics,
+                venues,
                 symbols,
                 levels,
                 backfill_s,
-            } => self.subscribe(topics, symbols, levels, backfill_s),
+            } => self.subscribe(
+                topics,
+                venues.map(|venues| venues.into_iter().collect()),
+                symbols.map(|symbols| symbols.into_iter().collect()),
+                levels,
+                backfill_s,
+            ),
             ClientMessage::Replay {
                 run,
                 from_ms,
@@ -475,7 +490,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             }
             ClientMessage::Live => {
                 self.mode = Mode::Live;
-                self.last_book = i64::MIN;
+                self.last_book.clear();
                 self.book.mark_changed();
                 self.trades = self
                     .sub
@@ -490,7 +505,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     fn subscribe(
         &mut self,
         topics: Vec<Topic>,
-        symbols: Option<Vec<String>>,
+        venues: Option<BTreeSet<Venue>>,
+        symbols: Option<BTreeSet<String>>,
         levels: Option<usize>,
         backfill_s: Option<f64>,
     ) -> Result<(), Closing> {
@@ -505,7 +521,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         let most = hub.config().book_sample.levels;
         self.sub = Sub {
             topics: topics.into_iter().collect(),
-            symbols: symbols.map(|symbols| symbols.into_iter().collect()),
+            venues,
+            symbols,
             levels: levels.unwrap_or(most).clamp(1, most),
         };
         self.jev = self
@@ -524,13 +541,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         self.pnl.mark_changed();
         self.status.mark_changed();
         if matches!(self.mode, Mode::Live) && self.ordered.is_none() {
-            self.last_book = i64::MIN;
+            self.last_book.clear();
             let (past, trades) = hub.subscribe_trades(backfill);
             self.trades = self.sub.has(Topic::Trades).then_some(trades);
             if self.sub.has(Topic::Book) {
                 for sample in &past.samples {
                     self.queue_book(sample);
-                    self.last_book = self.last_book.max(sample.sample_ts_ns);
+                    let last = self.last_book.entry(sample.venue).or_insert(i64::MIN);
+                    *last = (*last).max(sample.sample_ts_ns);
                 }
             }
             if self.sub.has(Topic::Trades) {
@@ -736,12 +754,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         // everything drained below is everything there was, and `ended` goes out after it.
         let ended = self.api.hub.has_ended();
         // Only while subscribed, so the newest book is still unsent when a subscription starts.
+        // Each venue's newest book goes out unless it went already.
         if self.sub.has(Topic::Book) && self.book.has_changed().unwrap_or(false) {
             let latest = self.book.borrow_and_update().clone();
-            if let Some(published) = latest
-                && published.sample.sample_ts_ns > self.last_book
-            {
-                self.last_book = published.sample.sample_ts_ns;
+            let fresh: Vec<&Arc<Published>> = latest
+                .iter()
+                .filter(|(venue, published)| {
+                    let last = self.last_book.entry(**venue).or_insert(i64::MIN);
+                    let newer = published.sample.sample_ts_ns > *last;
+                    *last = (*last).max(published.sample.sample_ts_ns);
+                    newer
+                })
+                .map(|(_, published)| published)
+                .collect();
+            for published in fresh {
                 self.queue_book(&published.sample);
             }
         }

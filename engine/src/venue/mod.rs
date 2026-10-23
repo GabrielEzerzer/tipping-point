@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::market::decimal::DecimalError;
-use crate::market::feed::AggTrade;
+use crate::market::feed::Trade;
 use crate::market::sync::{DepthUpdate, Snapshot};
 use crate::market::{Scales, Symbol};
 
@@ -130,14 +130,15 @@ pub enum Depth {
 }
 
 /// What a `depth_updates` row holds besides the levels: the frame's exchange times and the ids
-/// its venue chains updates by.
+/// its venue chains updates by. Every venue has a message time and an update id the book is at
+/// after the frame; the rest only some venues send (Binance's `T`, `U` and `pu`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepthIds {
     pub event_time_ms: u64,
-    pub transaction_time_ms: u64,
-    pub first_update_id: u64,
+    pub transaction_time_ms: Option<u64>,
+    pub first_update_id: Option<u64>,
     pub last_update_id: u64,
-    pub prev_last_update_id: u64,
+    pub prev_last_update_id: Option<u64>,
 }
 
 impl RawDepth {
@@ -173,10 +174,10 @@ impl RawDepth {
         match self {
             Self::Binance(raw) => DepthIds {
                 event_time_ms: raw.event_time_ms,
-                transaction_time_ms: raw.transaction_time_ms,
-                first_update_id: raw.first_update_id,
+                transaction_time_ms: Some(raw.transaction_time_ms),
+                first_update_id: Some(raw.first_update_id),
                 last_update_id: raw.last_update_id,
-                prev_last_update_id: raw.prev_last_update_id,
+                prev_last_update_id: Some(raw.prev_last_update_id),
             },
         }
     }
@@ -228,7 +229,7 @@ impl RawTrade {
     ///
     /// # Errors
     /// Returns an error when the price or quantity is not representable at this scale.
-    pub fn convert(&self, scales: Scales) -> Result<AggTrade, DecimalError> {
+    pub fn convert(&self, scales: Scales) -> Result<Trade, DecimalError> {
         match self {
             Self::Binance(raw) => scales.agg_trade(raw),
         }

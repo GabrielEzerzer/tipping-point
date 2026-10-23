@@ -26,9 +26,18 @@ import torch
 from tipping_point import engine
 from tipping_point.ising import io as ising_io
 
-MARKET_TABLES = ("frames", "depth_updates", "agg_trades", "snapshots", "book_samples")
+MARKET_TABLES = ("frames", "depth_updates", "trades", "snapshots", "book_samples")
 ISING_TABLES = ("stats", "configs")
-METER = {"symbol": "BTCUSDT", "ts_ms": 1700000002000, "variance": 0.125, "from": "python"}
+# The market tables keyed by venue are at major 2; frames and the Ising tables at 1.
+MAJORS = {"depth_updates": 2, "trades": 2, "snapshots": 2, "book_samples": 2}
+VENUE = "binance-usdm"
+METER = {
+    "venue": VENUE,
+    "symbol": "BTCUSDT",
+    "ts_ms": 1700000002000,
+    "variance": 0.125,
+    "from": "python",
+}
 
 
 def check(condition: bool, message: str) -> None:
@@ -72,17 +81,25 @@ def same(api: pa.Table, direct: pa.Table, where: str) -> None:
 
 def read_stream(stream: engine.Stream, table: str, where: str) -> pa.Table:
     with stream:
-        check(engine.schema_id(stream.schema) == f"{table}/1", f"{where}: schema id")
+        major = MAJORS.get(table, 1)
+        check(engine.schema_id(stream.schema) == f"{table}/{major}", f"{where}: schema id")
         return pa.Table.from_batches(check_batches(stream, where), schema=stream.schema)
+
+
+def check_venue(table: pa.Table, where: str) -> None:
+    """A market table of the run holds its one venue in every row."""
+    check(set(table.column("venue").to_pylist()) == {VENUE}, f"{where}: venue column")
 
 
 def live(args: argparse.Namespace) -> None:
     stream = engine.live(args.url, backfill_s=args.backfill_s, timeout=120)
     metadata = stream.schema.metadata or {}
     check(metadata.get(b"tp.domain") == b"market", "live: domain")
-    check(metadata.get(b"tp.run") == args.run.encode(), "live: run")
+    check(engine.runs(stream.schema) == {VENUE: args.run}, "live: runs")
+    check("BTCUSDT" in engine.scales(stream.schema)[VENUE], "live: scales")
     table = read_stream(stream, "book_samples", "live")
     check(table.num_rows > 0, "live: no rows")
+    check_venue(table, "live")
     with pa.OSFile(str(args.out), "wb") as sink, pa.ipc.new_file(sink, table.schema) as writer:
         writer.write_table(table)
 
@@ -90,8 +107,15 @@ def live(args: argparse.Namespace) -> None:
 def tables(args: argparse.Namespace) -> None:
     root = Path(args.root)
     for name in MARKET_TABLES:
-        api = read_stream(engine.table("market", args.run, name, args.url), name, name)
+        stream = engine.table("market", args.run, name, args.url)
+        check(engine.runs(stream.schema) == {VENUE: args.run}, f"{name}: runs")
+        api = read_stream(stream, name, name)
         same(api, engine.read(root, "market", args.run, name), f"market/{name}")
+        if name != "frames":
+            check_venue(api, name)
+    trades = engine.read(root, "market", args.run, "trades")
+    check(pa.types.is_string(trades.schema.field("trade_id").type), "trades: ids are strings")
+    check(trades.num_rows > 0, "trades: rows")
     ranged = read_stream(
         engine.table("market", args.run, "frames", args.url, start=10, end=20), "frames", "range"
     )
