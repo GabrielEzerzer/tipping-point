@@ -2,13 +2,18 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
 from tipping_point.ising import exact, gates, io, pilot, protocol
-from tipping_point.ising.__main__ import _taus, main
+from tipping_point.ising.__main__ import _number, _taus, main
 
 PILOT = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #50's pilot record
+# The engine's run-name rule as a literal: store::run::run_id's tag charset (ASCII letters,
+# digits, '-' and '_'; engine/src/store/run.rs), which api::table::safe applies to the whole run
+# id, at most 128 characters, before any read (engine/src/api/table.rs).
+ENGINE_RUN_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 def _only_run(root: Path) -> Path:
@@ -71,6 +76,43 @@ def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
         "stale": False,
     }
     assert manifest["algorithm"]["kernel_sha256"] == pilot.kernel_sha256()
+
+
+def test_every_run_id_the_cli_makes_opens_through_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches #67: the pre-registered slow ramp, x = 0.02, was named x0.02, a run the engine
+    lists and then refuses to open. Every command that starts a run, with its numbers at their
+    presets, and tauc's record folder, gets an id the engine's name filter accepts."""
+    monkeypatch.setattr(protocol, "dwell", lambda tau, *_: (2, 6))  # plateaus of 8 sweeps
+    monkeypatch.setattr(protocol, "NULL_TAU_C", 2)  # null runs of ~100 sweeps
+    small = ["--replicas", "2", "--data-dir", str(tmp_path), "--device", "cpu"]
+    ramp = ["ramp", "--L", "4", "--pre", "10", "--hold", "10"]
+    commands = [
+        ["pilot", "--L", "4", "--T", "3.0", "--therm", "0", "--sweeps", "2"],
+        ["staircase", "--L", "4", "--tau", "1", "--warmup", "0", "--saves", "0"],
+        *([*ramp, "--x", x, "--pilot", str(PILOT)] for x in ("0.02", "2")),
+        [*ramp, "--rate", "50"],
+        *(["null", "--L", "16", "--epsilon-L", e, "--pilot", str(PILOT)] for e in ("2", "4", "6")),
+    ]
+    for argv in commands:
+        assert main([*argv, *small]) == 0, argv
+    argv = ["validate", "--replicas", "256", "--therm", "100", "--sweeps", "100"]
+    main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"])  # its verdicts do not matter
+    pilot.write(pilot.read(PILOT), tmp_path)  # the folder tauc writes its record to
+    names = [p.name for p in (tmp_path / "ising").iterdir()]
+    assert len(names) == len(commands) + 2
+    assert [name for name in names if not ENGINE_RUN_NAME.fullmatch(name)] == []
+    assert any(name.endswith("-L4-ramp-x0p02-s1") for name in names)
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(0.02, "0p02"), (2.0, "2"), (1 / 3, "0p333333"), (1e-5, "1e-05"), (1e20, "1e20")],
+)
+def test_numbers_in_tags_keep_to_the_engines_charset(value: float, text: str) -> None:
+    """Any --x the parser takes, not just the presets: no '.' and no '+'."""
+    assert _number(value) == text and ENGINE_RUN_NAME.fullmatch(f"x{text}")
 
 
 def test_ramp_manifest_records_the_save_schedule_it_ran(tmp_path: Path) -> None:

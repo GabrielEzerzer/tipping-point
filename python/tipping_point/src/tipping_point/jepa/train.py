@@ -50,7 +50,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from .. import __version__
+from .. import __version__, engine
 from ..ising import io
 from . import monitor, objective
 from .data import Dataset, reload
@@ -615,7 +615,7 @@ def start(
     end (or to a collapse, when the config stops on one)."""
     dev = torch.device(device or default_device())
     flags = deterministic(dev)
-    run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{tag}"
+    run_id = engine.run_id(tag)
     run_dir = Path(root) / "jepa" / run_id
     trainer = _Trainer(run_dir, run_id, config, data, dev)
     run_dir.mkdir(parents=True)

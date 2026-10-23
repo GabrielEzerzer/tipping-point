@@ -11,7 +11,9 @@
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure
   resume     continue a crashed or stopped run from its checkpoint
 
-Runs land in <data dir>/ising/<run_id>/; the data dir is --data-dir or $TP_DATA_DIR.
+Runs land in <data dir>/ising/<run_id>/; the data dir is --data-dir or $TP_DATA_DIR. A run id
+is the UTC start plus a tag in the engine's charset, a number's '.' written 'p' (x = 0.02 is
+x0p02), so the engine can open every run.
 """
 
 from __future__ import annotations
@@ -114,6 +116,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _number(value: float) -> str:
+    """A number as a run tag holds it: 0.02 -> 0p02, 1e+20 -> 1e20. The engine opens no run
+    whose name has a '.' (or a '+')."""
+    return f"{value:g}".replace(".", "p").replace("+", "")
+
+
 def _spec(args: argparse.Namespace) -> run.Spec:
     init = getattr(args, "init", "hot")
     return run.Spec(args.L, args.replicas, args.seed, init, checkpoint_every=args.checkpoint_every)
@@ -175,7 +183,7 @@ def _ramp(args: argparse.Namespace) -> int:
     schedule = protocol.Ramp(
         rate, args.L, pre=args.pre, hold=args.hold, burst=burst, x=args.x, A=A, z=z
     )
-    speed = f"r{rate}" if args.x is None else f"x{args.x:g}"
+    speed = f"r{rate}" if args.x is None else f"x{_number(args.x)}"
     tag = f"L{args.L}-ramp-{speed}-s{args.seed}"
     print(run.start(_spec(args), schedule, args.data_dir, tag, args.device, stamp))
     return 0
@@ -188,7 +196,7 @@ def _null(args: argparse.Namespace) -> int:
     tau_c = pilot.tau_c(record, args.L)
     burst = protocol.Burst(stride=args.burst_stride)
     schedule = protocol.null_run(args.L, args.epsilon_L, tau_c, burst)
-    tag = f"L{args.L}-null-e{args.epsilon_L:g}-s{args.seed}"
+    tag = f"L{args.L}-null-e{_number(args.epsilon_L)}-s{args.seed}"
     print(run.start(_spec(args), schedule, args.data_dir, tag, args.device, stamp))
     return 0
 

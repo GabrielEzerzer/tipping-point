@@ -45,12 +45,12 @@ import hashlib
 import math
 import re
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from .. import engine
 from . import autocorr, io
 from .exact import TC
 
@@ -160,7 +160,7 @@ def record(run_dirs: Sequence[Path], draws: int = DRAWS, seed: int = 0) -> dict[
 def write(record: dict[str, Any], root: Path) -> Path:
     """Write <root>/ising/<run_id>/pilot.json, the run_id naming its sizes; return the path."""
     sizes = "-".join(record["per_L"])
-    run_dir = Path(root) / "ising" / f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-tauc-L{sizes}"
+    run_dir = Path(root) / "ising" / engine.run_id(f"tauc-L{sizes}")
     run_dir.mkdir(parents=True)
     io.write_json(run_dir / "pilot.json", record)
     return run_dir / "pilot.json"

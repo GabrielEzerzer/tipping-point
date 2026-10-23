@@ -11,7 +11,6 @@ import platform
 import subprocess
 import time
 from dataclasses import asdict, dataclass, fields
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,7 @@ import pyarrow as pa
 import torch
 from torch import Tensor
 
-from .. import __version__
+from .. import __version__, engine
 from . import gates, io, kernel, protocol
 from .exact import TC
 from .pilot import kernel_sha256
@@ -62,7 +61,7 @@ def start(
             f"uint16: at most {MAX_LATTICES:,} (replicas per temperature x temperatures)"
         )
     dev = torch.device(device or default_device())
-    run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{tag}"
+    run_id = engine.run_id(tag)
     run_dir = Path(root) / "ising" / run_id
     run_dir.mkdir(parents=True)
     io.write_json(run_dir / "manifest.json", _manifest(spec, schedule, run_id, dev, pilot))

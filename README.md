@@ -116,7 +116,10 @@ default 5 s. The Python round trip (`api_python`) runs the repository's `.venv` 
 `python/tipping_point/src/tipping_point/ising/` simulates the 2D Ising model with checkerboard
 Metropolis in PyTorch: int8 spins, a batch of independent replicas, one seeded generator per run.
 Runs follow the shared layout `<data dir>/ising/<run_id>/` (`manifest.json`, Parquet chunks under
-`stats/`, `configs/`, `balance/`, and `complete.json` after a clean end). The data dir is
+`stats/`, `configs/`, `balance/`, and `complete.json` after a clean end). A run id is the UTC start
+time plus a tag in the engine's charset (`tipping_point.engine.run_id`: ASCII letters, digits, `-`
+and `_`), so a number's `.` is written `p`, as in `20261023T010000Z-L16-ramp-x0p02-s1`; the
+engine's API opens no other name. The data dir is
 `--data-dir` or `$TP_DATA_DIR`, outside the repository; `--device` defaults to CUDA when available.
 
 ```sh

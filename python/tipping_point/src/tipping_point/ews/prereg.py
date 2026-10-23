@@ -24,14 +24,13 @@ import subprocess
 import time
 import tomllib
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .. import __version__
+from .. import __version__, engine
 from ..ising import io
 
 PREREG_DIR = Path("paper") / "prereg"
@@ -396,7 +395,7 @@ def write_result(
 ) -> Path:
     """A scoring run's output in the shared layout: manifest.json first, each non-empty table as
     <table>/00000000000000000000.parquet keyed by `cell`, and complete.json once all are synced."""
-    run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{prereg.name}"
+    run_id = engine.run_id(prereg.name)
     run_dir = Path(data_dir) / "ews" / run_id
     run_dir.mkdir(parents=True)
     filled = {name: rows for name, rows in tables.items() if rows}

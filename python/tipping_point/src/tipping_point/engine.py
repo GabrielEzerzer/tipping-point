@@ -1,7 +1,8 @@
 """The engine seam: Parquet reads that need no engine, and the engine's local HTTP API.
 
 Offline work (training on Kaggle, experiments, baselines) reads a run's Parquet directly with
-`read`, following the shared layout `<root>/<domain>/<run_id>/<table>/<first_key:020>.parquet`.
+`read`, following the shared layout `<root>/<domain>/<run_id>/<table>/<first_key:020>.parquet`;
+`run_id` names a new run by the engine's rule, so the engine can open it.
 The engine is only on the live path: `live` streams book samples as Arrow record batches, each
 one or more whole 100 ms grid instants with one row per symbol (one instant per batch live; a
 backfill or an unpaced replay sends several), `table` reads a range of any table through the
@@ -21,8 +22,10 @@ Stdlib and pyarrow only.
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -35,6 +38,18 @@ import pyarrow.ipc
 DEFAULT_URL = "http://127.0.0.1:7731"
 STREAM_TYPE = "application/vnd.apache.arrow.stream"
 SCHEMA_KEY = b"tp.schema"
+_TAG = re.compile(r"[A-Za-z0-9_-]+")  # store::run::run_id's charset (engine/src/store/run.rs)
+_MAX_TAG = 128 - len("YYYYMMDDTHHMMSSZ-")  # the API opens names of <= 128 (api/table.rs, safe)
+
+
+def run_id(tag: str) -> str:
+    """A new run's id, the UTC start time plus a tag (20261021T140512Z-L16-ramp-x0p02-s1), by
+    the engine's rule (store::run::run_id): the tag holds only ASCII letters, digits, '-' and
+    '_', and the whole id at most 128 characters. The API lists a run of any other name but
+    refuses to open it (a '.' among them). Readers take any name already on disk."""
+    if not (_TAG.fullmatch(tag) and len(tag) <= _MAX_TAG):
+        raise ValueError(f"run tag {tag!r} must be 1-{_MAX_TAG} ASCII letters, digits, '-' or '_'")
+    return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{tag}"
 
 
 def read(
