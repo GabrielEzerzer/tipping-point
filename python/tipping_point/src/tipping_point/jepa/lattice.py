@@ -137,8 +137,17 @@ def masks(
 
 def fixed_masks(n: int, spec: MaskSpec, seed: int, count: int) -> tuple[Tensor, Tensor]:
     """`count` masks drawn once from `seed` on the CPU: the evaluation masks of readouts, the same
-    for every frame of a size and for every checkpoint of a run."""
-    return masks(count, n, spec, torch.Generator().manual_seed(seed), "cpu")
+    for every frame of a size and for every checkpoint of a run. One that leaves the context empty
+    is refused (possible at 8 cells a side, where a few small blocks and a 4 x 4 with their buffers
+    can cover every cell): every surprise read through it would be meaningless."""
+    hidden, keep = masks(count, n, spec, torch.Generator().manual_seed(seed), "cpu")
+    blind = [k for k in range(count) if not bool(keep[k].any())]
+    if blind:
+        raise ValueError(
+            f"evaluation masks {blind} of seed {seed} leave no context at {n} cells a side: "
+            "train another model seed"
+        )
+    return hidden, keep
 
 
 # ---------------------------------------------------------------- networks
@@ -298,11 +307,6 @@ class Jepa(nn.Module):
         """(context features, predicted target features) for frames seen through `keep`."""
         context = self.context(spins, keep)
         return context, self.predictor(context, keep, delta)
-
-    def embed(self, spins: Tensor) -> Tensor:
-        """The frame embedding readouts use: target-encoder features averaged over cells (a mean,
-        not AdaptiveAvgPool2d, whose CUDA backward is nondeterministic), (B, dim)."""
-        return self.target(spins).mean((-2, -1))
 
 
 def parameters(module: nn.Module) -> int:

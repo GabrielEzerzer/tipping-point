@@ -54,7 +54,18 @@ from .. import __version__
 from ..ising import io
 from . import monitor, objective
 from .data import Dataset, reload
-from .lattice import PATCH, Jepa, MaskSpec, ModelSpec, augment, canonical, masks, pairs, parameters
+from .lattice import (
+    PATCH,
+    Jepa,
+    MaskSpec,
+    ModelSpec,
+    augment,
+    canonical,
+    fixed_masks,
+    masks,
+    pairs,
+    parameters,
+)
 from .lattice import unpack as unpack_spins
 from .monitor import Detector, Floors
 from .readout import Pca, fit_pca
@@ -152,6 +163,12 @@ def seeds(master: int) -> dict[str, int]:
         name: int(np.random.SeedSequence([master, k]).generate_state(1, np.uint64)[0])
         for k, name in enumerate(STREAMS)
     }
+
+
+def evaluation_masks(config: Config, L: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The (hidden, keep) masks surprise is measured through at size L: drawn once from the
+    training's seed, so a run's checkpoints, trained or not, see the same ones."""
+    return fixed_masks(L // PATCH, config.mask, seeds(config.seed)["eval_masks"], config.eval_masks)
 
 
 def default_device() -> str:
@@ -334,6 +351,8 @@ class _Trainer:
         self.aug_gen = torch.Generator(device=device).manual_seed(self.seeds["augment"])
         self.detector = Detector(config.floors, config.patience)
         self.step = 0
+        for L in self.sizes:  # drawn now: a mask with no context refuses the run before it starts
+            evaluation_masks(config, L)
         self.monitor_batches = self._monitor_batches()
         self.train_rows: list[dict[str, Any]] = []
         self.monitor_rows: list[dict[str, Any]] = []
@@ -607,16 +626,6 @@ def start(
     return run_dir
 
 
-def discard_after(run_dir: Path, step: int) -> None:
-    """Remove what a crash left: temp files, and table chunks begun after the checkpoint."""
-    for path in run_dir.rglob("*.tmp"):
-        path.unlink()
-    for name in TABLES:
-        for path in io.chunks(run_dir, name):
-            if int(path.stem) > step:
-                path.unlink()
-
-
 def resume(run_dir: Path, data: Dataset | None = None, device: str | None = None) -> Path:
     """Continue a crashed or stopped training from its checkpoint, on the device and torch version
     it started on. Without `data`, the bursts are reloaded from the runs the manifest names,
@@ -638,7 +647,7 @@ def resume(run_dir: Path, data: Dataset | None = None, device: str | None = None
         raise RuntimeError(f"{run_dir.name} trained on sizes {manifest['params']['sizes']}")
     trainer = _Trainer(run_dir, manifest["run_id"], config, data, dev)
     trainer.restore(torch.load(run_dir / "checkpoint.pt", weights_only=True, map_location="cpu"))
-    discard_after(run_dir, trainer.step)
+    io.discard_after(run_dir, trainer.step, TABLES)
     trainer.run()
     return run_dir
 

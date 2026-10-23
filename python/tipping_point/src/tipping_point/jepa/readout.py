@@ -41,6 +41,7 @@ def readouts(
     hidden cells, averaged over the K masks. One pass of the target encoder serves both."""
     with torch.autocast(spins.device.type, enabled=False):
         features = model.target(spins)
+        # a mean over cells, not AdaptiveAvgPool2d, whose CUDA backward is nondeterministic
         embedding = features.mean((-2, -1))
         if hidden is None or keep is None:
             return embedding, None

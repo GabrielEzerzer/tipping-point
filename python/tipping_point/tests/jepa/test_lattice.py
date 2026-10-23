@@ -108,6 +108,28 @@ def test_masks_hide_lattice_unit_blocks_and_buffer_the_context(L: int) -> None:
     assert all(torch.equal(a, b) for a, b in zip(first, again, strict=True))
 
 
+def test_an_evaluation_mask_that_leaves_no_context_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a fixed mask whose buffers cover every cell (possible at L = 16, though no seed in
+    20,000 drew one): every surprise read through it, at that size and for every checkpoint of
+    the model seed, would be meaningless."""
+    real = lattice.masks
+
+    def second_blind(
+        B: int, n: int, spec: MaskSpec, gen: torch.Generator, device: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden, keep = real(B, n, spec, gen, device)
+        keep[1:] = False
+        return hidden, keep
+
+    monkeypatch.setattr(lattice, "masks", second_blind)
+    with pytest.raises(ValueError, match=r"evaluation masks \[1\] of seed 7 leave no context"):
+        fixed_masks(8, MaskSpec(), 7, 2)
+    monkeypatch.undo()
+    assert fixed_masks(8, MaskSpec(), 7, 2)[1].flatten(1).any(1).all()
+
+
 def test_the_default_encoder_is_the_research_size_and_sees_exactly_14_sites() -> None:
     """Catches an encoder that sees further than 14 sites: then it is no longer one local
     function at every L, and its pooled variance stops being a translation average of local

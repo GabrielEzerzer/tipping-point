@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import IO, Any
 
@@ -144,11 +144,12 @@ def read_table(run_dir: Path, name: str) -> pa.Table:
     return pa.concat_tables(pq.read_table(p) for p in paths)
 
 
-def discard_after(run_dir: Path, step: int) -> None:
-    """Remove what a crash left behind: temp files and chunks begun after the checkpoint `step`."""
+def discard_after(run_dir: Path, step: int, tables: Sequence[str] = TABLES) -> None:
+    """Remove what a crash left behind: temp files, and chunks of `tables` begun after the
+    checkpoint `step` (the JEPA's training passes its own tables)."""
     for path in run_dir.rglob("*.tmp"):
         path.unlink()
-    for name in TABLES:
+    for name in tables:
         for path in chunks(run_dir, name):
             if int(path.stem) > step:
                 path.unlink()

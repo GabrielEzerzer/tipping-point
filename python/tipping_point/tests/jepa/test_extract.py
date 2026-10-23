@@ -2,6 +2,7 @@
 keyed and ordered like configs, readable the way the EWS adapter reads configs, its manifest
 naming the checkpoint by sha256, written once and resumable."""
 
+import dataclasses
 import hashlib
 import shutil
 from pathlib import Path
@@ -13,9 +14,10 @@ import pytest
 import torch
 from tipping_point.ews import ising as ews_ising
 from tipping_point.ising import io
-from tipping_point.jepa import extract, train
+from tipping_point.jepa import data, extract, train
 from tipping_point.jepa.data import DataError
 from tipping_point.jepa.lattice import canonical
+from tipping_point.jepa.monitor import Floors
 from tipping_point.jepa.readout import readouts
 
 
@@ -36,7 +38,7 @@ def test_latents_round_trip_on_a_simulator_run(ising: jepa_ising.Ising, ramp_lat
     assert np.isfinite(readout).all() and (readout[0] > 0).all()  # surprise, then pc_1..pc_8
     ckpt = train.load_model(ising.training / train.FINAL)
     assert ckpt.pca is not None
-    hidden, keep = extract.evaluation_masks(ckpt.config, jepa_ising.L)
+    hidden, keep = train.evaluation_masks(ckpt.config, jepa_ising.L)
     rows = np.array([0, 1, configs.num_rows // 2, configs.num_rows - 1])
     spins = torch.from_numpy(io.unpack_column(configs["spins"].take(rows), jepa_ising.L))
     embedding, surprise = readouts(ckpt.model, canonical(spins, 2), hidden, keep)
@@ -103,6 +105,27 @@ def test_the_untrained_twin_extracts_end_to_end(
     untrained = extract.read(ising.runs["ramp"], twin.name)["surprise"].to_numpy()
     assert not np.array_equal(trained, untrained)
     assert set(extract.available(ising.runs["ramp"])) == {twin.name, ramp_latents.name}
+
+
+def test_extract_refuses_a_training_that_stopped_early(
+    tmp_path: Path, ising: jepa_ising.Ising
+) -> None:
+    """Catches latents from a collapsed or interrupted training passing for a finished one: its
+    final.pt would give a full table naming only its step. Here a real training stops at step 1
+    of 8 (floors no model can meet, patience 2), and its final.pt is refused with the verdict its
+    complete.json records; its untrained twin is still a valid null."""
+    dataset = data.load(ising.root, [ising.runs["train"].name], [ising.runs["val"].name])
+    config = dataclasses.replace(
+        jepa_ising.CONFIG, floors=Floors(spatial_std=100.0), monitor_every=1, patience=2
+    )
+    training = train.start(config, dataset, tmp_path, "stopped", "cpu")
+    done = io.read_json(training / "complete.json")
+    assert done["stopped_early"] and done["collapse"]["collapsed_at"] == 1
+    with pytest.raises(
+        DataError, match=r"step 1 of 8, .*records a collapse at step 1 \(L16 spatial"
+    ):
+        extract.extract(training / train.FINAL, ising.runs["ramp"], "cpu")
+    assert not (ising.runs["ramp"] / extract.LATENTS / f"{training.name}-step0000001").exists()
 
 
 def test_a_latents_table_is_written_once_and_resumes_after_an_interruption(

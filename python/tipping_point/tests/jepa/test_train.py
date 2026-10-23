@@ -19,7 +19,7 @@ import pytest
 import torch
 from tipping_point.ews.ising import open_run
 from tipping_point.ising import io
-from tipping_point.jepa import data, train
+from tipping_point.jepa import data, lattice, train
 from tipping_point.jepa.lattice import Jepa, unpack
 
 SHORT = jepa_toy.config(steps=12, checkpoint_every=4, monitor_every=4, pca_frames=128)
@@ -100,6 +100,23 @@ def test_resume_after_a_crash_continues_bit_for_bit(
     assert _same_weights(run_dir / train.FINAL, straight / train.FINAL)
     with pytest.raises(RuntimeError, match="already complete"):
         train.resume(run_dir, small)
+
+
+def test_training_refuses_to_start_on_an_evaluation_mask_without_context(
+    tmp_path: Path, small: data.Dataset, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches an empty evaluation mask found only at extraction, after the GPU hours are spent."""
+
+    def blind(
+        B: int, n: int, spec: lattice.MaskSpec, gen: torch.Generator, device: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        full = torch.ones(B, n, n, dtype=torch.bool)
+        return full, ~full
+
+    monkeypatch.setattr(lattice, "masks", blind)
+    with pytest.raises(ValueError, match="leave no context"):
+        train.start(SHORT, small, tmp_path, "blind", "cpu")
+    assert not (tmp_path / "jepa").exists()
 
 
 def test_the_twin_is_the_untrained_model_saved_before_any_update(toy_run: Path) -> None:

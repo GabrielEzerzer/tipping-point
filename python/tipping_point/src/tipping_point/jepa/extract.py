@@ -30,20 +30,19 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
-from torch import Tensor
 
 from .. import __version__
 from ..ews.ising import Run, open_run
 from ..ising import io
 from .data import DataError, packed_spins
-from .lattice import PATCH, canonical, fixed_masks, unpack
+from .lattice import canonical, unpack
 from .readout import batches, readouts
 from .train import (
     Checkpoint,
-    Config,
     code_version,
     default_device,
     deterministic,
+    evaluation_masks,
     gpu_name,
     load_model,
     seeds,
@@ -67,10 +66,18 @@ def folder(dataset_run: Path, run_id: str, step: int) -> Path:
     return Path(dataset_run) / LATENTS / f"{run_id}-step{step:07d}"
 
 
-def evaluation_masks(config: Config, L: int) -> tuple[Tensor, Tensor]:
-    """The (hidden, keep) masks surprise is measured through at size L: drawn once from the
-    training's seed, so a run's checkpoints, trained or not, see the same ones."""
-    return fixed_masks(L // PATCH, config.mask, seeds(config.seed)["eval_masks"], config.eval_masks)
+def _ending(checkpoint: Path) -> str:
+    """How the checkpoint's training ended, from its complete.json, for a refusal."""
+    for training in (checkpoint.parent, checkpoint.parent.parent):
+        done = training / "complete.json"
+        if done.is_file():
+            record = io.read_json(done)
+            collapse = record.get("collapse", {})
+            if collapse.get("collapsed"):
+                fired = "; ".join((collapse.get("first_fired") or {}).get("fired", []))
+                return f"{done} records a collapse at step {collapse['collapsed_at']} ({fired})"
+            return f"{done} records stopped_early = {record.get('stopped_early')}"
+    return "its training has no complete.json (running or crashed)"
 
 
 def _manifest(out: Path, run: Run, ckpt: Checkpoint, device: torch.device) -> dict[str, Any]:
@@ -132,6 +139,12 @@ def extract(
     pca = ckpt.pca
     if pca is None:
         raise DataError(f"{checkpoint} holds no PCA basis: extract from final.pt or the twin")
+    if 0 < ckpt.step < ckpt.config.steps:  # the twin is step 0, a finished training's last step
+        raise DataError(
+            f"{checkpoint} is step {ckpt.step} of {ckpt.config.steps}, so its training stopped "
+            f"early: {_ending(Path(checkpoint))}. Latents come from a training that ran to its "
+            "end, or from its untrained twin"
+        )
     chunks = io.chunks(run.path, "configs")
     if not chunks:
         raise DataError(f"{run.run_id}: no configs table, so no saved frames")

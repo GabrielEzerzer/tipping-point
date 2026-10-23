@@ -13,9 +13,9 @@ import pytest
 import torch
 from tipping_point.ising import io
 from tipping_point.jepa import lattice, probes, train
-from tipping_point.jepa.extract import evaluation_masks
 from tipping_point.jepa.lattice import canonical, channel_norm
 from tipping_point.jepa.readout import readouts
+from tipping_point.jepa.train import evaluation_masks
 
 
 def _table(run_dir: Path, name: str) -> dict[str, np.ndarray]:
