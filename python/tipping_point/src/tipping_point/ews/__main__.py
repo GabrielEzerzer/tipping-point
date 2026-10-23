@@ -153,8 +153,13 @@ def _score(args: argparse.Namespace) -> int:
         },
         "dropped": evaluation.dropped,
     }
-    inputs = [
-        {"domain": "ising", "run_id": r.run_id, "complete_sha256": r.complete_sha256}
+    inputs = [  # pilot: the stamp of the record a ramp or null run was made with (#55)
+        {
+            "domain": "ising",
+            "run_id": r.run_id,
+            "complete_sha256": r.complete_sha256,
+            "pilot": r.params.get("pilot"),
+        }
         for r in evaluation.inputs
     ]
     run_dir = prereg.write_result(args.data_dir, pre, ref, evaluation.tables, inputs, params)

@@ -142,15 +142,29 @@ uv run python -m tipping_point.ising pilot --L 64 --T 2.269185314213022 --replic
 uv run python -m tipping_point.ising tauc <L16 run> <L32 run> <L64 run>    # -> <data dir>/ising/<id>-tauc-L16-32-64/pilot.json
 ```
 
-`pilot.json` is `{"kernel_commit", "per_L": {"16": {...}, ...}, "fit": {"A", "z", "A_ci", "z_ci"}}`,
-each `per_L` entry `{"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps", "seed"}`
-plus `"tau_c_ci"` (95%, optional for readers; field notes in `ising/pilot.py`). A size missing from
-`per_L` reads tau_c = A L^z. `tauc` refuses a run that is incomplete, never held exactly Tc, or
-holds fewer than 300 tau_c: subtracting each series' mean pulls the windowed estimate about
-10 / (N / tau) low, so a recorded tau_c is at most ~3% short (`test_autocorr` pins the bias).
+`pilot.json` is `{"kernel_commit", "kernel_sha256", "per_L": {"16": {...}, ...}, "fit": {"A", "z",
+"A_ci", "z_ci"}}`, each `per_L` entry `{"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas",
+"sweeps", "seed"}` plus `"tau_c_ci"` (95%, optional for readers; field notes in `ising/pilot.py`).
+A size missing from `per_L` reads tau_c = A L^z. `tauc` refuses a run that is incomplete, never
+held exactly Tc, or holds fewer than 300 tau_c: subtracting each series' mean pulls the windowed
+estimate about 10 / (N / tau) low, so a recorded tau_c is at most ~3% short (`test_autocorr` pins
+the bias).
+
+**A stale record is refused.** `kernel_sha256` is the sha256 of `ising/kernel.py` (the sweep and
+its acceptance table) that the pilot runs ran; every run's manifest records its own as
+`params.algorithm.kernel_sha256`. `ramp --x` and `null` refuse a record whose `kernel_sha256` is
+not the running kernel's, since its tau_c would clock another kernel. The commit cannot decide
+this: it moves with every merge, kernel or not. A record written before #55 has no
+`kernel_sha256` and counts as stale. `--allow-stale-pilot` uses a stale record anyway, with a
+warning. Either way the run's manifest names the record it read as `params.pilot`:
+`{"path", "sha256", "kernel_commit", "kernel_sha256", "stale"}`, and EWS results repeat that stamp
+for each input run. #50's record below predates the field, so ramps and nulls read against the
+copy in the data dir need `--allow-stale-pilot` until the pilot is re-run. Its numbers still
+stand: `kernel.py` is byte for byte the one at 5aac98e.
 
 The record on the fixed kernel (#47; commit 5aac98e, CPU, seed 1), copied to
-`python/tipping_point/tests/fixtures/ising_pilot.json`:
+`python/tipping_point/tests/fixtures/ising_pilot.json` with `kernel_sha256` added (the sha256 of
+`kernel.py` at 5aac98e):
 
 | L | replicas x sweeps | tau_c = tau(\|m\|) [95% CI] | binning | tau(e) | N / tau_c |
 |---|---|---|---|---|---|

@@ -51,10 +51,12 @@ def write_run(
     failed: tuple[float, ...] = (),
     complete: bool = True,
     verdicts: bool = True,
+    pilot: dict[str, Any] | None = None,
 ) -> Path:
     """A run folder as the simulator leaves it, with per-site |m| and e from
     values(steps, temperatures (steps, lattices), rng) -> two (steps, lattices) arrays.
-    `verdicts` = False leaves complete.json without thermalised checks, as before #50."""
+    `verdicts` = False leaves complete.json without thermalised checks, as before #50; `pilot`
+    is the pilot-record stamp a ramp or null run's manifest carries (#55)."""
     rng = np.random.default_rng([seed, L, len(tag)])
     run_dir = root / "ising" / f"20261023T000000Z-{tag}"
     run_dir.mkdir(parents=True)
@@ -74,6 +76,7 @@ def write_run(
             "blocks": schedule.blocks,
             "Tc": TC,
             "schedule": schedule.to_json(),
+            **({"pilot": pilot} if pilot is not None else {}),
         },
     }
     io.write_json(run_dir / "manifest.json", manifest)

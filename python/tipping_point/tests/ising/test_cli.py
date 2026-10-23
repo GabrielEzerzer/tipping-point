@@ -1,5 +1,6 @@
 """The command line end to end: pilot smoke, validate, ramp and staircase on tiny settings."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -50,16 +51,26 @@ def test_validate_cli_passes_and_writes_its_verdicts(tmp_path: Path) -> None:
 
 def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
     """--x picks r from L and the pilot record's A L^z; the tag and the manifest record x, the
-    fit it was read against, and r."""
+    fit it was read against, and r, and the manifest names the record (#55)."""
     argv = ["ramp", "--L", "4", "--x", "2", "--pilot", str(PILOT), "--replicas", "2"]
     argv += ["--pre", "10", "--hold", "10", "--data-dir", str(tmp_path), "--device", "cpu"]
     assert main(argv) == 0
     run_dir = _only_run(tmp_path)
     assert run_dir.name.endswith("-L4-ramp-x2-s1")
-    params = io.read_json(run_dir / "manifest.json")["params"]["schedule"]["params"]
-    fit = pilot.read(PILOT)["fit"]
+    manifest = io.read_json(run_dir / "manifest.json")["params"]
+    params = manifest["schedule"]["params"]
+    record = pilot.read(PILOT)
+    fit = record["fit"]
     assert (params["x"], params["A"], params["z"]) == (2.0, fit["A"], fit["z"])
     assert params["rate"] == protocol.rate_for(4, 2.0, fit["A"], fit["z"])
+    assert manifest["pilot"] == {
+        "path": str(PILOT.resolve()),
+        "sha256": hashlib.sha256(PILOT.read_bytes()).hexdigest(),
+        "kernel_commit": record["kernel_commit"],
+        "kernel_sha256": record["kernel_sha256"],
+        "stale": False,
+    }
+    assert manifest["algorithm"]["kernel_sha256"] == pilot.kernel_sha256()
 
 
 def test_ramp_manifest_records_the_save_schedule_it_ran(tmp_path: Path) -> None:
@@ -94,12 +105,41 @@ def test_null_run_is_a_complete_thermalised_fixed_run_naming_epsilon_l_and_tau_c
     schedule = io.read_json(run_dir / "manifest.json")["params"]["schedule"]
     params, tau_c = schedule["params"], pilot.tau_c(pilot.read(PILOT), 16)
     assert schedule["kind"] == "fixed" and (params["epsilon_L"], params["tau_c"]) == (6.0, tau_c)
+    stamp = io.read_json(run_dir / "manifest.json")["params"]["pilot"]
+    assert stamp == pilot.stamp(PILOT, pilot.read(PILOT)) and stamp["stale"] is False
     assert params["temperatures"] == [exact.TC * (1 + 6 / 16)]
     (check,) = io.read_json(run_dir / "complete.json")["checks"]["thermalised"]
     assert check["passed"], check
     assert all(c.passed for c in gates.gate_b(run_dir))  # its bursts sample Boltzmann, as any run's
     with pytest.raises(SystemExit):
         main([*argv[:4], "3", *argv[5:], "--data-dir", str(tmp_path / "x"), "--device", "cpu"])
+
+
+def test_ramp_and_null_refuse_a_stale_record_unless_allowed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Catches #55 at the command line: a record without kernel_sha256 (the shape of every record
+    written before it) is refused by ramp and null with no run started; --allow-stale-pilot runs
+    with a warning, and the manifest's stamp says stale."""
+    record = json.loads(PILOT.read_text(encoding="utf-8"))
+    del record["kernel_sha256"]
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps(record), encoding="utf-8")
+    ramp = ["ramp", "--L", "4", "--x", "2", "--pilot", str(old), "--replicas", "2"]
+    ramp += ["--pre", "10", "--hold", "10", "--data-dir", str(tmp_path / "d"), "--device", "cpu"]
+    null = ["null", "--L", "16", "--epsilon-L", "4", "--pilot", str(old)]
+    null += ["--data-dir", str(tmp_path / "d"), "--device", "cpu"]
+    for argv in (ramp, null):
+        with pytest.raises(SystemExit) as refused:
+            main(argv)
+        message = str(refused.value.code)
+        assert "records no kernel_sha256" in message and "--allow-stale-pilot" in message
+    assert not (tmp_path / "d").exists()
+    assert main([*ramp, "--allow-stale-pilot"]) == 0
+    assert "records no kernel_sha256" in capsys.readouterr().err
+    stamp = io.read_json(_only_run(tmp_path / "d") / "manifest.json")["params"]["pilot"]
+    assert stamp["stale"] is True and stamp["kernel_sha256"] is None
+    assert stamp["kernel_commit"] == record["kernel_commit"]
 
 
 def test_null_run_refuses_a_size_the_record_did_not_measure(tmp_path: Path) -> None:

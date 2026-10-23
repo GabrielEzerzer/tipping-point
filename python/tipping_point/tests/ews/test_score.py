@@ -187,11 +187,13 @@ def test_score_writes_stamped_results_and_logs_every_cell(planted: Any, tmp_path
     assert manifest["params"]["prereg"]["sha256"] == demo.sha256
     assert manifest["params"]["prereg"]["tag"] == "prereg/demo-v1"
     assert manifest["params"]["pilot"]["tau_c"] == {"16": 4.0, "32": 8.0}
-    inputs = {i["run_id"]: i["complete_sha256"] for i in manifest["params"]["inputs"]}
+    inputs = {i["run_id"]: i for i in manifest["params"]["inputs"]}
     assert len(inputs) == 12  # 2 sizes x 2 seeds x (ramp, null, staircase)
-    for run_folder in planted.runs.values():
+    for tag, run_folder in planted.runs.items():
         digest = hashlib.sha256((run_folder / "complete.json").read_bytes()).hexdigest()
-        assert inputs[run_folder.name] == digest
+        assert inputs[run_folder.name]["complete_sha256"] == digest
+        # each ramp and null names the pilot record it was made with (#55); staircases none
+        assert inputs[run_folder.name]["pilot"] == planted.stamps.get(tag)
     auc = pq.read_table(run_dir / "auc" / f"{0:020d}.parquet").to_pylist()
     assert len(auc) == prereg.cells(demo.doc) == 32
     rise = {(r["cadence"], r["L"], r["h"]): r["auc"] for r in auc if r["indicator"] == "variance"}

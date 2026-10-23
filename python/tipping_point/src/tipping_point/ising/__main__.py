@@ -4,6 +4,8 @@
   ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x of a pilot record's tau_c
              (or an explicit rate)
   null       fixed-T null run at epsilon_L = 2, 4 or 6: 700 tau_c of a size a pilot record measured
+             (ramp and null refuse a stale record, one that did not measure the running kernel,
+             unless --allow-stale-pilot; their manifests record the record as params.pilot)
   pilot      measure tau_int of |m| and e at given temperatures; writes tau.json
   tauc       tau_c(L) at Tc from pilot runs (one per L) and its fit A L^z; writes pilot.json
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure
@@ -49,6 +51,12 @@ def _parser() -> argparse.ArgumentParser:
     sized.add_argument("--replicas", type=int, default=16, help="per temperature")
     saving = argparse.ArgumentParser(add_help=False)
     saving.add_argument("--burst-stride", type=int, default=1, help="sweeps between burst frames")
+    piloted = argparse.ArgumentParser(add_help=False)
+    piloted.add_argument(
+        "--allow-stale-pilot",
+        action="store_true",
+        help="use a pilot record that did not measure the running kernel (stamped stale)",
+    )
 
     parser = argparse.ArgumentParser(prog="python -m tipping_point.ising", description=__doc__)
     sub = parser.add_subparsers(required=True)
@@ -60,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--init", choices=["hot", "cold"], default="hot")
     p.set_defaults(command=_staircase)
 
-    p = sub.add_parser("ramp", parents=[sized, saving], help="linear cooling ramp")
+    p = sub.add_parser("ramp", parents=[sized, saving, piloted], help="linear cooling ramp")
     speed = p.add_mutually_exclusive_group(required=True)
     speed.add_argument("--x", type=float, help="Kibble-Zurek point: 0.02 slow, 2 fast")
     speed.add_argument("--rate", type=int, help="sweeps per unit T")
@@ -69,7 +77,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--hold", type=int, default=1000, help="sweeps held at 1.5")
     p.set_defaults(command=_ramp)
 
-    p = sub.add_parser("null", parents=[sized, saving], help="fixed-T null run above Tc")
+    p = sub.add_parser("null", parents=[sized, saving, piloted], help="fixed-T null run above Tc")
     p.add_argument(
         "--epsilon-L",
         type=float,
@@ -142,13 +150,26 @@ def _staircase(args: argparse.Namespace) -> int:
     return 0
 
 
+def _record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The --pilot record, refused when damaged or stale (unless --allow-stale-pilot), and the
+    stamp the run's manifest carries."""
+    try:
+        record = pilot.read(args.pilot, args.allow_stale_pilot)
+    except ValueError as refused:
+        raise SystemExit(str(refused)) from None
+    why = pilot.stale(record)
+    if why:
+        print(f"warning: {args.pilot}: {why}; used anyway (--allow-stale-pilot)", file=sys.stderr)
+    return record, pilot.stamp(args.pilot, record)
+
+
 def _ramp(args: argparse.Namespace) -> int:
-    rate, A, z = args.rate, None, None
+    rate, A, z, stamp = args.rate, None, None, None
     if args.x is not None:
         if args.pilot is None:
             raise SystemExit("--x needs --pilot: x is measured against the record's tau_c = A L^z")
-        fit = pilot.read(args.pilot)["fit"]
-        A, z = fit["A"], fit["z"]
+        record, stamp = _record(args)
+        A, z = record["fit"]["A"], record["fit"]["z"]
         rate = protocol.rate_for(args.L, args.x, A, z)
     burst = protocol.Burst(stride=args.burst_stride)
     schedule = protocol.Ramp(
@@ -156,19 +177,19 @@ def _ramp(args: argparse.Namespace) -> int:
     )
     speed = f"r{rate}" if args.x is None else f"x{args.x:g}"
     tag = f"L{args.L}-ramp-{speed}-s{args.seed}"
-    print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))
+    print(run.start(_spec(args), schedule, args.data_dir, tag, args.device, stamp))
     return 0
 
 
 def _null(args: argparse.Namespace) -> int:
-    record = pilot.read(args.pilot)
+    record, stamp = _record(args)
     if str(args.L) not in record["per_L"]:
         raise SystemExit(f"{args.pilot} measured no tau_c at L = {args.L}; pilot that size first")
     tau_c = pilot.tau_c(record, args.L)
     burst = protocol.Burst(stride=args.burst_stride)
     schedule = protocol.null_run(args.L, args.epsilon_L, tau_c, burst)
     tag = f"L{args.L}-null-e{args.epsilon_L:g}-s{args.seed}"
-    print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))
+    print(run.start(_spec(args), schedule, args.data_dir, tag, args.device, stamp))
     return 0
 
 

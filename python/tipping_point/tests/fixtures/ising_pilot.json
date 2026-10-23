@@ -1,5 +1,6 @@
 {
   "kernel_commit": "5aac98e20a97233f84a7b30d7079645675b12c05",
+  "kernel_sha256": "197acfe347462373092e4c9fa04388c0602cabe2a8cd1652ac67c208e09ca6a7",
   "per_L": {
     "16": {
       "tau_c": 52.1071689923909,
