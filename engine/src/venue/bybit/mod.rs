@@ -3,5 +3,6 @@
 //! in band, a snapshot then deltas whose update id runs on by one). It has no live loop yet; the
 //! venue is read from its archive, or from a script.
 
+pub mod archive;
 pub mod messages;
 pub mod sync;

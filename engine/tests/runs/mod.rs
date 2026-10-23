@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use engine::market::pipeline::entries;
 use engine::market::recording::{Record, read_records};
 use engine::store::frame::{Frame, Kind, Meta};
-use engine::store::run::{self, BookSample, MarketParams, Producer};
+use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams, Producer};
 use engine::store::segment::{self, LOG_DIR, SegmentReader};
 use engine::store::writer::{LogConfig, LogWriter, Summary};
 use engine::venue::Venue;
@@ -122,6 +122,8 @@ pub fn write_run(script: &Path, dir: &Path, log: LogConfig) -> (PathBuf, Summary
         scales,
         streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
         book_sample: BookSample::default(),
+        clock: Clock::Capture,
+        source: DataSource::Live,
     };
     let manifest = run::create(&run_dir, params).expect("a run folder");
     let mut writer = LogWriter::start(&run_dir, Meta::for_run(&manifest), log).expect("a writer");

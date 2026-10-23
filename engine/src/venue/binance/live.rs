@@ -19,7 +19,7 @@ use crate::market::pipeline::{Message, Pipeline};
 use crate::market::ws;
 use crate::market::{Scales, Symbol};
 use crate::store::frame::Meta;
-use crate::store::run::{self, BookSample, MarketParams};
+use crate::store::run::{self, BookSample, Clock, DataSource, MarketParams};
 use crate::store::writer::{LogConfig, LogWriter};
 use crate::store::{LogError, now_ns};
 use crate::venue::Venue;
@@ -231,6 +231,8 @@ fn start_recording(
         scales: scales.clone(),
         streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
         book_sample: BookSample::default(),
+        clock: Clock::Capture,
+        source: DataSource::Live,
     };
     let manifest = run::create(&recording.run_dir, params).map_err(|source| LiveError::Run {
         path: recording.run_dir.clone(),

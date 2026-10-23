@@ -30,7 +30,7 @@ use engine::market::pipeline::Pipeline;
 use engine::market::recording::{Record, read_records};
 use engine::store::frame::Meta;
 use engine::store::rotate::rotate;
-use engine::store::run::{self, BookSample, MarketParams};
+use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams};
 use engine::store::segment::{self, LOG_DIR};
 use engine::store::writer::{LogConfig, LogWriter};
 use engine::venue::Venue;
@@ -247,6 +247,8 @@ async fn play_script(
                 scales: scales.clone(),
                 streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
                 book_sample: BookSample::default(),
+                clock: Clock::Capture,
+                source: DataSource::Live,
             };
             let manifest = run::create(run_dir, params)?;
             let writer = LogWriter::start(run_dir, Meta::for_run(&manifest), LogConfig::default())?;

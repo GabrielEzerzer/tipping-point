@@ -18,7 +18,7 @@ use engine::market::sync::BookSync;
 use engine::store::frame::{Kind, Meta};
 use engine::store::replay::{replay_log, replay_parquet};
 use engine::store::rotate::rotate;
-use engine::store::run::{self, BookSample, MarketParams};
+use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams};
 use engine::store::segment::{self, LOG_DIR, SegmentReader};
 use engine::store::writer::{Entry, LogConfig, LogWriter};
 use engine_harness::transcript::{FORMAT, Transcript};
@@ -93,6 +93,8 @@ async fn a_session_with_every_fault_replays_exactly_as_it_ran() -> Outcome {
         scales: scales.clone(),
         streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
         book_sample: BookSample::default(),
+        clock: Clock::Capture,
+        source: DataSource::Live,
     };
     let manifest = run::create(&run_dir, params)?;
     // Small segments, so the replays also cross segment boundaries.

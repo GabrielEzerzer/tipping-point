@@ -3,6 +3,7 @@
 //! diff stream, then the `pu` chain), its REST client for scales and snapshots ([`rest`]), and
 //! its live loop ([`live`]: two combined-stream sockets, depth and aggregated trades).
 
+pub mod archive;
 pub mod live;
 pub mod messages;
 pub mod rest;

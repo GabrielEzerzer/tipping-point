@@ -57,6 +57,33 @@ cargo run -p engine --bin store -- rotate <run dir>               # closed segme
 cargo run -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the books from the log or the Parquet
 ```
 
+### Historical archives
+
+`store import` turns one downloaded archive day into a run: Bybit's free linear order-book
+archive (`<yyyy-mm-dd>_<SYMBOL>_ob200.data.zip`: 200 levels every 100 ms, 500 before 2025-08-21;
+the source of book features) or Binance's USD-M aggregated trades
+(`<SYMBOL>-aggTrades-<yyyy-mm-dd>.zip`: the source of labels). Each record goes through its
+venue's adapter as the frame the live stream would have carried, into the same pipeline and
+sampler the live loop and rotate run, and out as Parquet in
+`<data dir>/market/<yyyymmdd>T000000Z-<venue>-<symbol>/`: book samples for a book and trades for
+trades by default, `--tables` for more (`frames`, `depth_updates`, `snapshots`). There is no
+binary log: the downloaded file is the lossless copy, named in the manifest with its URL, size and
+SHA-256 (checked against Binance's `.CHECKSUM` when one sits beside it). An archive run runs on
+the exchange's clock (`clock: exchange`), so join it to live runs on exchange time, never on
+capture time. Its scales come from a pre-scan of the file, not from today's exchange info, and
+`complete.json` keeps the integrity checks: records, gaps in the venue's id chain, snapshots,
+times outside the day, and what the pipeline made of them. Re-running is safe; another archive
+for the same run is refused. Binance's archives are CC BY-NC-SA 4.0: anything derived from them
+and published carries that licence and the "Binance Vision" attribution.
+
+```sh
+cargo run -p engine --bin store -- import <archive> [--data-dir DIR] [--tables T,...]
+```
+
+Downloaded days stay local (`harness/fixtures/archives/`, gitignored; the import tests read any
+found there). The committed tests use tiny synthetic archives in each venue's format
+(`engine/tests/fixtures/archives/`, made by `harness/engine-harness/tests/make_archive_fixtures.py`).
+
 DuckDB is linked from its prebuilt library, which the build downloads once per target dir
 (`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network. On
 Windows the build also copies `duckdb.dll` next to the binaries (`target/<profile>/`,

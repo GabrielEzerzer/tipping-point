@@ -4,6 +4,7 @@
 //! pipeline, storage, the API) is shared, and reaches a venue's own code by matching on
 //! [`Venue`].
 
+pub mod archive;
 pub mod binance;
 pub mod bybit;
 

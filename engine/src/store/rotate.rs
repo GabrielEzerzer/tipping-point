@@ -1,5 +1,7 @@
 //! The offline rotate step: every closed log segment becomes one Parquet file per table, named
-//! after the segment's first seq, so each file traces back to exactly one segment.
+//! after the segment's first seq, so each file traces back to exactly one segment. What it does
+//! with each frame ([`Ingest`]) is also what an archive import does with each archive record, so
+//! an archive's books and samples come from the same code as a log's.
 //!
 //! It is safe to re-run. Outputs that exist are skipped, temp files an interrupted run left are
 //! deleted first, and a file only appears by renaming a synced temp file to a new name. One
@@ -39,11 +41,12 @@ use parquet::file::properties::WriterProperties;
 
 use super::frame::{Frame, Kind, Meta};
 use super::replay::Replay;
-use super::run::{self, MANIFEST, Manifest};
+use super::run::{self, BookSample, MANIFEST, Manifest};
 use super::samples::{Sample, SampleRows, Sampler};
 use super::segment::{self, Ending, LOG_DIR, SegmentReader};
 use super::{StoreError, ms_to_ns};
-use crate::market::pipeline::SnapshotPayload;
+use crate::market::live::LiveEvent;
+use crate::market::pipeline::{Replayed, SnapshotPayload};
 use crate::market::sync::{DepthUpdate, Level, Snapshot};
 use crate::market::{Scales, Symbol};
 use crate::venue::{Depth, Parsed, RawDepth, RawTrade, Venue};
@@ -109,38 +112,19 @@ pub fn rotate(run_dir: &Path) -> Result<Rotation, StoreError> {
         ..Rotation::default()
     };
     let segments = segment::list(&run_dir.join(LOG_DIR))?;
-    let mut venue = manifest.params.venue;
-    let mut scales = manifest.params.scales;
-    let mut replay = Replay::new(None);
-    let mut sampler = Sampler::new(manifest.params.book_sample);
+    let params = manifest.params;
+    let mut ingest = Ingest::new(params.venue, params.scales, params.book_sample);
     for (index, (first_seq, path)) in segments.iter().enumerate() {
-        let mut tables =
-            Tables::open(run_dir, *first_seq, sampler.levels(), &mut rotation.skipped)?;
+        let mut tables = Tables::open(
+            run_dir,
+            *first_seq,
+            ingest.levels(),
+            &TABLES,
+            &mut rotation.skipped,
+        )?;
         let mut reader = SegmentReader::open(path)?;
         while let Some(frame) = reader.next_frame()? {
-            if frame.kind == Kind::Meta
-                && let Ok(meta) = serde_json::from_str::<Meta>(&frame.payload)
-            {
-                venue = meta.venue;
-                scales = meta.scales;
-            }
-            tables.frames.rows.push(&frame)?;
-            if !tables.push_rows(&frame, venue, &scales)? {
-                rotation.unparsed += 1;
-            }
-            if is_input(frame.kind) {
-                // Before the input is applied: each instant it passes is the book without it.
-                let instants = sampler.instants(frame.capture_ts_ns);
-                if let Some(pipeline) = replay.pipeline() {
-                    let seq = to_i64(frame.seq)? - 1;
-                    for t in instants {
-                        let sample = Sample::of_feed(pipeline.feed(), t, seq, sampler.levels())?;
-                        tables.samples.rows.push(&sample);
-                    }
-                }
-            }
-            replay.push(&frame, &mut |_| {})?;
-            tables.flush_full()?;
+            ingest.frame(&frame, &mut tables, &mut |_| {})?;
         }
         if let Some(Ending::Closed(_)) = reader.ending() {
             rotation.segments += 1;
@@ -153,8 +137,89 @@ pub fn rotate(run_dir: &Path) -> Result<Rotation, StoreError> {
             rotation.open = Some(path.clone());
         }
     }
-    rotation.skipped_samples = sampler.skipped();
+    rotation.unparsed = ingest.unparsed;
+    rotation.skipped_samples = ingest.sampler.skipped();
     Ok(rotation)
+}
+
+/// What rotate and an archive import do with every frame, in seq order from the run's Meta at
+/// seq 0: its table rows, the book samples its capture time passes (taken before it is applied:
+/// each instant it passes is the book without it), then the frame itself through the pipeline
+/// a replay runs, which is the one the live loop runs.
+pub(super) struct Ingest {
+    replay: Replay,
+    sampler: Sampler,
+    venue: Venue,
+    scales: BTreeMap<Symbol, Scales>,
+    /// Depth, trade and snapshot frames that gave no rows because they did not parse or convert.
+    pub(super) unparsed: u64,
+}
+
+impl Ingest {
+    /// Before the first frame: the venue and scales to read table rows with until a Meta says
+    /// otherwise, and the book sampling.
+    pub(super) fn new(venue: Venue, scales: BTreeMap<Symbol, Scales>, sample: BookSample) -> Self {
+        Self {
+            replay: Replay::new(None),
+            sampler: Sampler::new(sample),
+            venue,
+            scales,
+            unparsed: 0,
+        }
+    }
+
+    /// Levels a book sample keeps per side.
+    pub(super) fn levels(&self) -> usize {
+        self.sampler.levels()
+    }
+
+    /// Takes the next frame.
+    ///
+    /// # Errors
+    /// As [`Replay::push`], or when a row does not fit its table.
+    pub(super) fn frame(
+        &mut self,
+        frame: &Frame,
+        tables: &mut Tables,
+        on_event: &mut impl FnMut(LiveEvent<'_>),
+    ) -> Result<(), StoreError> {
+        if frame.kind == Kind::Meta
+            && let Ok(meta) = serde_json::from_str::<Meta>(&frame.payload)
+        {
+            self.venue = meta.venue;
+            self.scales = meta.scales;
+        }
+        if tables.frames.enabled {
+            tables.frames.rows.push(frame)?;
+        }
+        if !tables.push_rows(frame, self.venue, &self.scales)? {
+            self.unparsed += 1;
+        }
+        if is_input(frame.kind) {
+            let instants = self.sampler.instants(frame.capture_ts_ns);
+            if let Some(pipeline) = self.replay.pipeline() {
+                let seq = to_i64(frame.seq)? - 1;
+                for t in instants {
+                    let sample = Sample::of_feed(pipeline.feed(), t, seq, self.sampler.levels())?;
+                    if tables.samples.enabled {
+                        tables.samples.rows.push(&sample);
+                    }
+                }
+            }
+        }
+        self.replay.push(frame, on_event)?;
+        tables.flush_full()
+    }
+
+    /// The pipeline in its final state with what it made of the inputs, and the grid instants
+    /// left unsampled across clock jumps of over a day.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::NoFrames`] when no frame was ever taken.
+    pub(super) fn finish(self) -> Result<(Replayed, u64), StoreError> {
+        let skipped = self.sampler.skipped();
+        Ok((self.replay.finish()?, skipped))
+    }
 }
 
 /// Frames the feed takes; Meta and `SegmentEnd` are bookkeeping.
@@ -165,8 +230,8 @@ fn is_input(kind: Kind) -> bool {
     )
 }
 
-/// Deletes `*.parquet.tmp` files a crashed rotate left in the table folders.
-fn clean_temp_files(run_dir: &Path) -> Result<u64, StoreError> {
+/// Deletes `*.parquet.tmp` files a crashed rotate or import left in the table folders.
+pub(super) fn clean_temp_files(run_dir: &Path) -> Result<u64, StoreError> {
     let mut cleaned = 0;
     for table in TABLES {
         let dir = run_dir.join(table);
@@ -214,13 +279,25 @@ trait Rows {
     fn take(&mut self) -> Result<RecordBatch, StoreError>;
 }
 
-/// A table for one segment: its rows, and where they go (`None` when its file already exists).
+/// A table for one segment: whether the run has it at all, its rows, where they go (`None` when
+/// its file already exists, or the run has no such table), and how many went.
 struct Table<R> {
+    enabled: bool,
     rows: R,
     output: Option<Output>,
+    written: u64,
 }
 
 impl<R: Rows> Table<R> {
+    fn new(enabled: bool, rows: R, output: Option<Output>) -> Self {
+        Self {
+            enabled,
+            rows,
+            output,
+            written: 0,
+        }
+    }
+
     fn flush(&mut self) -> Result<(), StoreError> {
         if self.rows.len() == 0 {
             return Ok(());
@@ -228,6 +305,7 @@ impl<R: Rows> Table<R> {
         let batch = self.rows.take()?;
         if let Some(output) = &mut self.output {
             output.writer.write(&batch)?;
+            self.written += batch.num_rows() as u64;
         }
         Ok(())
     }
@@ -239,12 +317,16 @@ impl<R: Rows> Table<R> {
         Ok(())
     }
 
-    fn finish(mut self, written: &mut Vec<PathBuf>) -> Result<(), StoreError> {
+    /// Writes what is left and makes the file appear; the rows it holds, when it was written.
+    fn finish(mut self, written: &mut Vec<PathBuf>) -> Result<Option<u64>, StoreError> {
         self.flush()?;
-        if let Some(output) = self.output {
-            written.push(output.finish()?);
+        match self.output {
+            Some(output) => {
+                written.push(output.finish()?);
+                Ok(Some(self.written))
+            }
+            None => Ok(None),
         }
-        Ok(())
     }
 }
 
@@ -294,8 +376,9 @@ impl Output {
     }
 }
 
-/// The five tables of one segment.
-struct Tables {
+/// The tables of one segment (one archive, in an import): the five a log rotates into, only
+/// those of `enabled` written.
+pub(super) struct Tables {
     frames: Table<FrameRows>,
     depth: Table<DepthRows>,
     trades: Table<TradeRows>,
@@ -304,42 +387,40 @@ struct Tables {
 }
 
 impl Tables {
-    fn open(
+    /// Starts each enabled table's file for the segment starting at `first_seq`, unless it
+    /// exists (counted in `skipped`).
+    pub(super) fn open(
         run_dir: &Path,
         first_seq: u64,
         levels: usize,
+        enabled: &[&str],
         skipped: &mut u64,
     ) -> Result<Self, StoreError> {
         let name = format!("{first_seq:020}.parquet");
-        let mut table = |table: &str, schema: SchemaRef| {
-            Output::create(run_dir.join(table).join(&name), schema, skipped)
-        };
-        let frames = table(TABLES[0], FrameRows::schema())?;
-        let depth = table(TABLES[1], DepthRows::schema())?;
-        let trades = table(TABLES[2], TradeRows::schema())?;
-        let snapshots = table(TABLES[3], SnapshotRows::schema())?;
-        let samples = table(TABLES[4], SampleRows::schema(levels))?;
+        let mut table =
+            |table: &str, schema: SchemaRef| -> Result<(bool, Option<Output>), StoreError> {
+                if !enabled.contains(&table) {
+                    return Ok((false, None));
+                }
+                let output = Output::create(run_dir.join(table).join(&name), schema, skipped)?;
+                Ok((true, output))
+            };
+        let (on, frames) = table(TABLES[0], FrameRows::schema())?;
+        let frames = Table::new(on, FrameRows::default(), frames);
+        let (on, depth) = table(TABLES[1], DepthRows::schema())?;
+        let depth = Table::new(on, DepthRows::default(), depth);
+        let (on, trades) = table(TABLES[2], TradeRows::schema())?;
+        let trades = Table::new(on, TradeRows::default(), trades);
+        let (on, snapshots) = table(TABLES[3], SnapshotRows::schema())?;
+        let snapshots = Table::new(on, SnapshotRows::default(), snapshots);
+        let (on, samples) = table(TABLES[4], SampleRows::schema(levels))?;
+        let samples = Table::new(on, SampleRows::new(levels), samples);
         Ok(Self {
-            frames: Table {
-                rows: FrameRows::default(),
-                output: frames,
-            },
-            depth: Table {
-                rows: DepthRows::default(),
-                output: depth,
-            },
-            trades: Table {
-                rows: TradeRows::default(),
-                output: trades,
-            },
-            snapshots: Table {
-                rows: SnapshotRows::default(),
-                output: snapshots,
-            },
-            samples: Table {
-                rows: SampleRows::new(levels),
-                output: samples,
-            },
+            frames,
+            depth,
+            trades,
+            snapshots,
+            samples,
         })
     }
 
@@ -353,34 +434,46 @@ impl Tables {
         scales: &BTreeMap<Symbol, Scales>,
     ) -> Result<bool, StoreError> {
         match frame.kind {
-            Kind::Depth | Kind::Trade => match venue.parse(&frame.payload) {
-                Ok(Parsed::Depth(raw)) => {
-                    let Some(depth) = scales
-                        .get(raw.symbol())
-                        .and_then(|scales| raw.convert(*scales).ok())
-                    else {
-                        return Ok(false);
-                    };
-                    match depth {
-                        Depth::Update(update) => self.depth.rows.push(frame, venue, &raw, &update),
-                        Depth::Book(snapshot) => {
-                            self.snapshots
+            Kind::Depth | Kind::Trade => {
+                if !(self.depth.enabled || self.trades.enabled || self.snapshots.enabled) {
+                    return Ok(true);
+                }
+                match venue.parse(&frame.payload) {
+                    Ok(Parsed::Depth(raw)) => {
+                        let Some(depth) = scales
+                            .get(raw.symbol())
+                            .and_then(|scales| raw.convert(*scales).ok())
+                        else {
+                            return Ok(false);
+                        };
+                        match depth {
+                            Depth::Update(update) if self.depth.enabled => {
+                                self.depth.rows.push(frame, venue, &raw, &update)
+                            }
+                            Depth::Book(snapshot) if self.snapshots.enabled => self
+                                .snapshots
                                 .rows
-                                .push(frame, venue, raw.symbol(), &snapshot)
+                                .push(frame, venue, raw.symbol(), &snapshot),
+                            Depth::Update(_) | Depth::Book(_) => Ok(true),
                         }
                     }
+                    Ok(Parsed::Trade(raw)) if self.trades.enabled => {
+                        self.trades.rows.push(frame, venue, &raw, scales)
+                    }
+                    Ok(Parsed::Trade(_)) => Ok(true),
+                    Err(_) => Ok(false),
                 }
-                Ok(Parsed::Trade(raw)) => self.trades.rows.push(frame, venue, &raw, scales),
-                Err(_) => Ok(false),
-            },
-            Kind::Snapshot => match serde_json::from_str::<SnapshotPayload>(&frame.payload) {
-                Ok(snapshot) => self
-                    .snapshots
-                    .rows
-                    .push_rest(frame, venue, &snapshot, scales),
-                Err(_) => Ok(false),
-            },
-            Kind::Meta | Kind::Control | Kind::SegmentEnd => Ok(true),
+            }
+            Kind::Snapshot if self.snapshots.enabled => {
+                match serde_json::from_str::<SnapshotPayload>(&frame.payload) {
+                    Ok(snapshot) => self
+                        .snapshots
+                        .rows
+                        .push_rest(frame, venue, &snapshot, scales),
+                    Err(_) => Ok(false),
+                }
+            }
+            Kind::Snapshot | Kind::Meta | Kind::Control | Kind::SegmentEnd => Ok(true),
         }
     }
 
@@ -392,15 +485,27 @@ impl Tables {
         self.samples.flush_full()
     }
 
-    fn finish(self, written: &mut Vec<PathBuf>) -> Result<(), StoreError> {
-        self.frames.finish(written)?;
-        self.depth.finish(written)?;
-        self.trades.finish(written)?;
-        self.snapshots.finish(written)?;
-        self.samples.finish(written)
+    /// Writes every enabled table's file that was missing. Returns the rows each file written
+    /// holds, by table.
+    pub(super) fn finish(
+        self,
+        written: &mut Vec<PathBuf>,
+    ) -> Result<BTreeMap<String, u64>, StoreError> {
+        let rows = [
+            (TABLES[0], self.frames.finish(written)?),
+            (TABLES[1], self.depth.finish(written)?),
+            (TABLES[2], self.trades.finish(written)?),
+            (TABLES[3], self.snapshots.finish(written)?),
+            (TABLES[4], self.samples.finish(written)?),
+        ];
+        Ok(rows
+            .into_iter()
+            .filter_map(|(table, rows)| Some((table.to_owned(), rows?)))
+            .collect())
     }
 
-    fn abandon(self) {
+    /// Drops every file being written, leaving nothing behind.
+    pub(super) fn abandon(self) {
         let outputs = [
             self.frames.output,
             self.depth.output,

@@ -1,10 +1,18 @@
-//! Upkeep for recorded runs.
+//! Upkeep for recorded runs, and archive imports.
 //!
 //! ```text
 //! store recover <run dir>              close a crashed run's newest segment, cutting a torn tail
 //! store rotate <run dir>               write Parquet for every closed segment (safe to re-run)
 //! store replay <run dir> [--parquet]   replay the log (or its Parquet) and show what it rebuilt
+//! store import <archive> [--data-dir DIR] [--url URL] [--tables T,...]
+//!                                      a downloaded archive day into its run (safe to re-run)
 //! ```
+//!
+//! An import reads Bybit's order-book archive (`<date>_<SYMBOL>_ob<N>.data.zip`) or Binance's
+//! aggregated trades (`<SYMBOL>-aggTrades-<date>.zip`) into `<data dir>/market/<run_id>/`, the
+//! data dir being `--data-dir`, `TP_DATA_DIR` or the per-user default. By default it writes book
+//! samples for an order book and trades for trades; `--tables` names others (`frames`,
+//! `depth_updates`, `snapshots`).
 //!
 //! `cargo run -p engine --bin store -- rotate <run dir>`
 
@@ -13,22 +21,36 @@ use std::process::ExitCode;
 
 use engine::market::pipeline::Replayed;
 use engine::market::sync::BookSync;
+use engine::store::import::{ImportConfig, import};
 use engine::store::replay::{replay_log, replay_parquet};
 use engine::store::rotate::rotate;
+use engine::store::run;
 use engine::store::segment::recover_run;
 
-const USAGE: &str =
-    "usage: store recover <run dir> | store rotate <run dir> | store replay <run dir> [--parquet]";
+const USAGE: &str = "usage: store recover <run dir> | store rotate <run dir> | store replay <run dir> [--parquet] \
+                     | store import <archive> [--data-dir DIR] [--url URL] [--tables T,...]";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Recover(PathBuf),
     Rotate(PathBuf),
-    Replay { run_dir: PathBuf, parquet: bool },
+    Replay {
+        run_dir: PathBuf,
+        parquet: bool,
+    },
+    Import {
+        archive: PathBuf,
+        data_dir: Option<PathBuf>,
+        url: Option<String>,
+        tables: Option<Vec<String>>,
+    },
 }
 
 fn parse_args(args: &[String]) -> Result<Command, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let ["import", archive, options @ ..] = args.as_slice() {
+        return parse_import(archive, options);
+    }
     match args.as_slice() {
         ["recover", run_dir] => Ok(Command::Recover(PathBuf::from(run_dir))),
         ["rotate", run_dir] => Ok(Command::Rotate(PathBuf::from(run_dir))),
@@ -42,6 +64,28 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
         }),
         _ => Err(USAGE.to_owned()),
     }
+}
+
+fn parse_import(archive: &str, options: &[&str]) -> Result<Command, String> {
+    let (mut data_dir, mut url, mut tables) = (None, None, None);
+    let mut it = options.iter();
+    while let Some(&flag) = it.next() {
+        let value = it.next().ok_or_else(|| format!("{flag} wants a value"))?;
+        match flag {
+            "--data-dir" if data_dir.is_none() => data_dir = Some(PathBuf::from(value)),
+            "--url" if url.is_none() => url = Some((*value).to_owned()),
+            "--tables" if tables.is_none() => {
+                tables = Some(value.split(',').map(str::to_owned).collect());
+            }
+            _ => return Err(USAGE.to_owned()),
+        }
+    }
+    Ok(Command::Import {
+        archive: PathBuf::from(archive),
+        data_dir,
+        url,
+        tables,
+    })
 }
 
 fn main() -> ExitCode {
@@ -101,6 +145,50 @@ fn run(command: &Command) -> Result<(), Box<dyn std::error::Error>> {
                 replay_log(run_dir, None, &mut |_| {})?
             };
             print_replay(run_dir, &replayed);
+        }
+        Command::Import {
+            archive,
+            data_dir,
+            url,
+            tables,
+        } => {
+            let config = ImportConfig {
+                data_dir: data_dir.clone().unwrap_or_else(run::data_dir),
+                url: url.clone(),
+                tables: tables.clone(),
+            };
+            let imported = import(archive, &config, &mut |_| {})?;
+            if imported.done_before {
+                println!(
+                    "{}: imported already, nothing to do",
+                    imported.run_dir.display()
+                );
+            }
+            for path in &imported.written {
+                println!("wrote {}", path.display());
+            }
+            let rows: Vec<String> = imported
+                .rows
+                .iter()
+                .map(|(table, rows)| format!("{table}={rows}"))
+                .collect();
+            println!("{}: {}", imported.run_dir.display(), rows.join(" "));
+            let check = &imported.integrity;
+            println!(
+                "records={} outside_day={} id_gaps={} trade_id_gaps={} snapshots={} errors={} resyncs={} crossed={}",
+                check.records,
+                check.outside_day,
+                check.id_gaps,
+                check
+                    .trade_id_gaps
+                    .map_or_else(|| "-".to_owned(), |n| n.to_string()),
+                check
+                    .snapshots
+                    .map_or_else(|| "-".to_owned(), |n| n.to_string()),
+                check.errors,
+                check.resyncs,
+                check.crossed
+            );
         }
     }
     Ok(())
@@ -166,6 +254,22 @@ mod tests {
                 parquet: true
             })
         );
+        assert_eq!(
+            parse(&[
+                "import",
+                "a.zip",
+                "--tables",
+                "frames,book_samples",
+                "--data-dir",
+                "d"
+            ]),
+            Ok(Command::Import {
+                archive: PathBuf::from("a.zip"),
+                data_dir: Some(PathBuf::from("d")),
+                url: None,
+                tables: Some(vec!["frames".to_owned(), "book_samples".to_owned()]),
+            })
+        );
     }
 
     #[test]
@@ -176,6 +280,10 @@ mod tests {
             &["rotate", "a", "b"],
             &["delete", "r"],
             &["replay", "r", "--duckdb"],
+            &["import"],
+            &["import", "a.zip", "--url"],
+            &["import", "a.zip", "--speed", "1"],
+            &["import", "a.zip", "--url", "x", "--url", "y"],
         ] {
             assert!(parse(raw).is_err(), "{raw:?}");
         }
