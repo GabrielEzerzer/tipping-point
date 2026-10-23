@@ -34,7 +34,7 @@ use engine::store::run::{self, BookSample, MarketParams};
 use engine::store::segment::{self, LOG_DIR};
 use engine::store::writer::{LogConfig, LogWriter};
 use engine::venue::Venue;
-use engine::venue::binance::live::{DEPTH_STREAM, LiveConfig, Recording, TRADE_STREAM, run_live};
+use engine::venue::binance::live::{LiveConfig, Recording, run_live};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, sleep_until};
@@ -245,7 +245,7 @@ async fn play_script(
                 venue,
                 symbols: scales.keys().cloned().collect(),
                 scales: scales.clone(),
-                streams: vec![DEPTH_STREAM.to_owned(), TRADE_STREAM.to_owned()],
+                streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
                 book_sample: BookSample::default(),
             };
             let manifest = run::create(run_dir, params)?;

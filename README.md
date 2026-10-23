@@ -23,7 +23,10 @@ around it. What differs between venues (wire format, sync rule, scales, endpoint
 `engine/src/venue/`, reached by matching on `enum Venue`. `venue/binance/` keeps a correct local
 order book for BTCUSDT and ETHUSDT from the USD-M depth stream (REST snapshot plus diffs,
 sequence-gap detection, resync, backpressure) and reads aggTrades; its sync rule is a pure state
-machine (`sync.rs`).
+machine (`sync.rs`). `venue/bybit/` reads Bybit's linear order book, which comes in band (a
+snapshot, then deltas whose update id runs on by one; a skipped id drops the book until the next
+snapshot); it has no live loop yet and is read from Bybit's archive. One run holds one venue, and
+one `serve` hub takes several venues' loops at once.
 
 ```sh
 cargo run -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs

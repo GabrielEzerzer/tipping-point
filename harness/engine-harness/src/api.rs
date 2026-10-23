@@ -21,6 +21,7 @@ use engine::market::feed::Feed;
 use engine::market::live::{LiveEvent, Log, Observer, handle};
 use engine::market::pipeline::{Message, Pipeline};
 use engine::market::recording::{Record, read_records};
+use engine::market::ws::Inbound;
 use engine::market::{Scales, Symbol};
 use engine::store::frame::Meta;
 use engine::store::run::{self, BookSample, MarketParams};
@@ -177,7 +178,7 @@ impl LivePath {
                     venue,
                     symbols: scales.keys().cloned().collect(),
                     scales: scales.clone(),
-                    streams: vec!["depth@100ms".to_owned(), "aggTrade".to_owned()],
+                    streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
                     book_sample: BookSample::default(),
                 };
                 let manifest = run::create(&run_dir, params)?;
@@ -235,6 +236,42 @@ pub struct Script {
     pub venue: Venue,
     pub scales: BTreeMap<Symbol, Scales>,
     pub messages: Vec<Message>,
+}
+
+/// When a live-loop message was captured; a failed connection attempt carries no time.
+#[must_use]
+pub fn captured(message: &Message) -> i64 {
+    match message {
+        Message::Socket { inbound, .. } => match inbound {
+            Inbound::Connected { capture_ns, .. }
+            | Inbound::Text { capture_ns, .. }
+            | Inbound::Disconnected { capture_ns, .. } => *capture_ns,
+            Inbound::ConnectFailed { .. } => i64::MIN,
+        },
+        Message::Snapshot { capture_ns, .. } => *capture_ns,
+    }
+}
+
+/// Two venues' messages as their loops would meet them: in capture order, each script's own order
+/// kept, `first`'s message first on a tie. Each comes with 0 (from `first`) or 1 (from `second`).
+#[must_use]
+pub fn merged(first: Vec<Message>, second: Vec<Message>) -> Vec<(usize, Message)> {
+    let (mut first, mut second) = (first.into_iter().peekable(), second.into_iter().peekable());
+    let mut out = Vec::new();
+    loop {
+        let take_first = match (first.peek(), second.peek()) {
+            (Some(a), Some(b)) => captured(a) <= captured(b),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return out,
+        };
+        let next = if take_first {
+            first.next().map(|message| (0, message))
+        } else {
+            second.next().map(|message| (1, message))
+        };
+        out.extend(next);
+    }
 }
 
 /// Reads a script.

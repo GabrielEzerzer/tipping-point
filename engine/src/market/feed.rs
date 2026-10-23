@@ -37,6 +37,10 @@ pub struct Stats {
     pub applied: u64,
     pub buffered: u64,
     pub dropped_stale: u64,
+    /// Updates dropped because no book was there and none was coming but the venue's next
+    /// snapshot (Bybit's rule).
+    pub skipped: u64,
+    /// Snapshots fed: REST bodies, and whole books sent on the stream.
     pub snapshots: u64,
     /// Times a trustworthy book was thrown away, by reason.
     pub resyncs: u64,
@@ -172,11 +176,24 @@ impl Feed {
                 let Some(sync) = self.syncs.get_mut(&symbol) else {
                     return Err(FeedError::UnknownSymbol(symbol));
                 };
-                let outcome = match depth {
-                    Depth::Update(update) => sync.on_event(update),
+                let (outcome, crossed) = match depth {
+                    Depth::Update(update) => {
+                        let outcome = sync.on_event(update);
+                        let crossed = sync.book().is_some_and(Book::is_crossed);
+                        self.count(outcome, crossed);
+                        (outcome, crossed)
+                    }
+                    // Counted as a snapshot, as a REST one is; its install is no applied update.
+                    Depth::Book(snapshot) => {
+                        let installed = sync.on_snapshot(&snapshot);
+                        let crossed = sync.book().is_some_and(Book::is_crossed);
+                        self.stats.snapshots += 1;
+                        for (outcome, crossed) in installed.drained {
+                            self.count(outcome, crossed);
+                        }
+                        (installed.outcome, crossed)
+                    }
                 };
-                let crossed = sync.book().is_some_and(Book::is_crossed);
-                self.count(outcome, crossed);
                 Ok(Event::Depth {
                     symbol,
                     outcome,
@@ -273,6 +290,7 @@ impl Feed {
             }
             Outcome::Buffered => self.stats.buffered += 1,
             Outcome::DroppedStale => self.stats.dropped_stale += 1,
+            Outcome::Skipped => self.stats.skipped += 1,
             Outcome::NeedsResync(reason) => {
                 self.stats.resyncs += 1;
                 match reason {
@@ -484,6 +502,87 @@ mod tests {
         let event = feed.on_text(&depth(13, 13, 12, r#"[["102.0","1.000"]]"#, "[]"))?;
         assert!(matches!(event, Event::Depth { crossed: true, .. }));
         assert_eq!(feed.stats().crossed, 1);
+        Ok(())
+    }
+
+    fn bybit_feed() -> Feed {
+        Feed::new(
+            Venue::BybitLinear,
+            BTreeMap::from([(
+                "BTCUSDT".to_owned(),
+                Scales {
+                    price_decimals: 1,
+                    qty_decimals: 3,
+                },
+            )]),
+        )
+    }
+
+    /// A Bybit order-book message, as its stream and archive send one.
+    fn bybit(kind: &str, u: u64, bids: &str, asks: &str) -> String {
+        format!(
+            r#"{{"topic":"orderbook.200.BTCUSDT","type":"{kind}","ts":1,"data":{{"s":"BTCUSDT","b":{bids},"a":{asks},"u":{u},"seq":7}},"cts":1}}"#
+        )
+    }
+
+    #[test]
+    fn a_bybit_book_comes_on_the_stream_and_chains_on_u() -> Result<(), FeedError> {
+        let mut feed = bybit_feed();
+        let early = feed.on_text(&bybit("delta", 41, r#"[["100.0","1.000"]]"#, "[]"))?;
+        assert!(matches!(
+            early,
+            Event::Depth {
+                outcome: Outcome::Skipped,
+                ..
+            }
+        ));
+        assert_eq!(
+            feed.snapshots_due(),
+            Vec::<String>::new(),
+            "nothing to fetch"
+        );
+        let book = r#"[["100.0","1.000"],["99.0","2.000"]]"#;
+        feed.on_text(&bybit("snapshot", 42, book, r#"[["101.0","1.000"]]"#))?;
+        assert!(feed.sync("BTCUSDT").is_some_and(BookSync::is_synced));
+        feed.on_text(&bybit("delta", 43, r#"[["100.0","0"]]"#, "[]"))?;
+        assert_eq!(
+            feed.book("BTCUSDT")
+                .and_then(Book::best_bid)
+                .map(|l| l.price),
+            Some(990)
+        );
+        let gap = feed.on_text(&bybit("delta", 45, "[]", "[]"))?;
+        assert!(matches!(
+            gap,
+            Event::Depth {
+                outcome: Outcome::NeedsResync(ResyncReason::SequenceGap {
+                    expected: 43,
+                    got: 44
+                }),
+                ..
+            }
+        ));
+        feed.on_text(&bybit("delta", 46, "[]", "[]"))?;
+        // A restart: the stream starts over at u = 1 with a whole book.
+        feed.on_text(&bybit("snapshot", 1, book, "[]"))?;
+        feed.on_text(&bybit("delta", 2, r#"[["98.0","1.000"]]"#, "[]"))?;
+        assert_eq!(feed.sync("BTCUSDT").and_then(BookSync::last_id), Some(2));
+        let stats = feed.stats();
+        assert_eq!(
+            (
+                stats.snapshots,
+                stats.applied,
+                stats.skipped,
+                stats.sequence_gaps
+            ),
+            (2, 2, 2, 1)
+        );
+        assert!(matches!(
+            feed.on_snapshot("BTCUSDT", "{}"),
+            Err(FeedError::Message(MessageError::NoRestSnapshots(
+                Venue::BybitLinear
+            )))
+        ));
         Ok(())
     }
 }

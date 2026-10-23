@@ -532,8 +532,8 @@
     ],
     "metadata": {
       "tp.domain": "market",
-      "tp.runs": "{\"binance-usdm\":\"20231114T221320Z-session\"}",
-      "tp.scales": "{\"binance-usdm\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}}",
+      "tp.runs": "{\"binance-usdm\":\"20231114T221320Z-session\",\"bybit-linear\":\"20231114T221320Z-bybit\"}",
+      "tp.scales": "{\"binance-usdm\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}},\"bybit-linear\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":2}}}",
       "tp.schema": "book_samples/2"
     }
   },

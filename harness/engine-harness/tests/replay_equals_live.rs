@@ -91,7 +91,7 @@ async fn a_session_with_every_fault_replays_exactly_as_it_ran() -> Outcome {
         venue,
         symbols: scales.keys().cloned().collect(),
         scales: scales.clone(),
-        streams: vec!["depth@100ms".to_owned(), "aggTrade".to_owned()],
+        streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
         book_sample: BookSample::default(),
     };
     let manifest = run::create(&run_dir, params)?;

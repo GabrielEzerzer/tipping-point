@@ -5,6 +5,7 @@
 //! [`Venue`].
 
 pub mod binance;
+pub mod bybit;
 
 use std::fmt;
 use std::str::FromStr;
@@ -16,6 +17,7 @@ use crate::market::decimal::DecimalError;
 use crate::market::feed::Trade;
 use crate::market::sync::{DepthUpdate, Snapshot};
 use crate::market::{Scales, Symbol};
+use crate::store::ms_to_ns;
 
 /// An exchange market the engine reads. Its id names it in run tags, manifests, tables and
 /// messages.
@@ -24,17 +26,31 @@ pub enum Venue {
     /// Binance USD-M perpetual futures.
     #[serde(rename = "binance-usdm")]
     BinanceUsdm,
+    /// Bybit v5 linear (USDT) perpetual futures.
+    #[serde(rename = "bybit-linear")]
+    BybitLinear,
 }
 
 impl Venue {
     /// Every venue, in id order.
-    pub const ALL: [Self; 1] = [Self::BinanceUsdm];
+    pub const ALL: [Self; 2] = [Self::BinanceUsdm, Self::BybitLinear];
 
     /// The venue's id: lower case, digits and `-`, safe in a run tag.
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {
             Self::BinanceUsdm => "binance-usdm",
+            Self::BybitLinear => "bybit-linear",
+        }
+    }
+
+    /// The streams the venue's live feed reads, as a run's manifest lists them: Binance's diff
+    /// depth and aggregated trades, Bybit's 200-level order book.
+    #[must_use]
+    pub fn streams(self) -> &'static [&'static str] {
+        match self {
+            Self::BinanceUsdm => &[binance::live::DEPTH_STREAM, binance::live::TRADE_STREAM],
+            Self::BybitLinear => &["orderbook.200"],
         }
     }
 
@@ -45,6 +61,7 @@ impl Venue {
     pub fn parse(self, text: &str) -> Result<Parsed, MessageError> {
         match self {
             Self::BinanceUsdm => binance::messages::parse(text),
+            Self::BybitLinear => bybit::messages::parse(text),
         }
     }
 
@@ -54,16 +71,19 @@ impl Venue {
     pub fn event_time_ns(self, text: &str) -> i64 {
         match self {
             Self::BinanceUsdm => binance::messages::frame_event_time_ns(text),
+            Self::BybitLinear => bybit::messages::frame_event_time_ns(text),
         }
     }
 
     /// Reads the body of a snapshot fetched from the venue's REST API.
     ///
     /// # Errors
-    /// Returns an error when the body is not a snapshot this venue sends.
+    /// Returns an error when the body is not a snapshot this venue sends, and always for a venue
+    /// whose snapshots come on its stream.
     pub fn parse_snapshot(self, body: &str) -> Result<RawSnapshot, MessageError> {
         match self {
             Self::BinanceUsdm => binance::messages::parse_snapshot(body).map(RawSnapshot::Binance),
+            Self::BybitLinear => Err(MessageError::NoRestSnapshots(self)),
         }
     }
 
@@ -73,6 +93,7 @@ impl Venue {
     pub fn snapshot_time_ns(self, body: &str) -> i64 {
         match self {
             Self::BinanceUsdm => binance::messages::snapshot_event_time_ns(body),
+            Self::BybitLinear => 0,
         }
     }
 }
@@ -104,6 +125,8 @@ pub enum MessageError {
     Json(#[from] serde_json::Error),
     #[error("bad decimal: {0}")]
     Decimal(#[from] DecimalError),
+    #[error("{0} sends its snapshots on its stream, not over REST")]
+    NoRestSnapshots(Venue),
 }
 
 /// One frame of a venue's stream, read by that venue's rules: what it is and whose, its prices
@@ -120,6 +143,7 @@ pub enum Parsed {
 #[derive(Debug, Clone)]
 pub enum RawDepth {
     Binance(binance::messages::RawDepthUpdate),
+    Bybit(bybit::messages::RawBook),
 }
 
 /// What a depth frame does to a book, in integer units.
@@ -127,6 +151,8 @@ pub enum RawDepth {
 pub enum Depth {
     /// A change to chain onto the book.
     Update(DepthUpdate),
+    /// A whole book sent on the stream (Bybit's snapshots), replacing whatever the book held.
+    Book(Snapshot),
 }
 
 /// What a `depth_updates` row holds besides the levels: the frame's exchange times and the ids
@@ -147,6 +173,7 @@ impl RawDepth {
     pub fn symbol(&self) -> &str {
         match self {
             Self::Binance(raw) => &raw.symbol,
+            Self::Bybit(raw) => &raw.data.symbol,
         }
     }
 
@@ -155,6 +182,7 @@ impl RawDepth {
     pub fn into_symbol(self) -> Symbol {
         match self {
             Self::Binance(raw) => raw.symbol,
+            Self::Bybit(raw) => raw.data.symbol,
         }
     }
 
@@ -165,6 +193,7 @@ impl RawDepth {
     pub fn convert(&self, scales: Scales) -> Result<Depth, DecimalError> {
         match self {
             Self::Binance(raw) => scales.depth_update(raw).map(Depth::Update),
+            Self::Bybit(raw) => raw.convert(scales),
         }
     }
 
@@ -179,7 +208,20 @@ impl RawDepth {
                 last_update_id: raw.last_update_id,
                 prev_last_update_id: Some(raw.prev_last_update_id),
             },
+            Self::Bybit(raw) => DepthIds {
+                event_time_ms: raw.ts,
+                transaction_time_ms: raw.cts,
+                first_update_id: None,
+                last_update_id: raw.data.update_id,
+                prev_last_update_id: None,
+            },
         }
+    }
+
+    /// The exchange time of the frame, in nanoseconds since the epoch.
+    #[must_use]
+    pub fn event_time_ns(&self) -> i64 {
+        ms_to_ns(self.ids().event_time_ms)
     }
 }
 

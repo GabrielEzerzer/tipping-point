@@ -224,11 +224,12 @@ fn start_recording(
     symbols: &[Symbol],
     scales: &BTreeMap<Symbol, Scales>,
 ) -> Result<LogWriter, LiveError> {
+    let venue = Venue::BinanceUsdm;
     let params = MarketParams {
-        venue: Venue::BinanceUsdm,
+        venue,
         symbols: symbols.to_vec(),
         scales: scales.clone(),
-        streams: vec![DEPTH_STREAM.to_owned(), TRADE_STREAM.to_owned()],
+        streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
         book_sample: BookSample::default(),
     };
     let manifest = run::create(&recording.run_dir, params).map_err(|source| LiveError::Run {

@@ -1,7 +1,7 @@
 //! What every venue's sync rule shares: price levels and depth changes in integer units, what a
 //! rule did with an input, why a book stopped being trustworthy, and [`BookSync`], one symbol's
 //! book kept by its venue's rule. The rules themselves live with their venues
-//! ([`crate::venue::binance::sync`]).
+//! ([`crate::venue::binance::sync`], [`crate::venue::bybit::sync`]).
 //!
 //! Every rule keeps the same promises: a book is trusted only from a snapshot to the first
 //! evidence of loss; a level holds an absolute quantity and a zero removes it; and a book is
@@ -9,7 +9,7 @@
 //! backpressure, an unreadable frame).
 
 use super::book::Book;
-use crate::venue::{Venue, binance};
+use crate::venue::{Venue, binance, bybit};
 
 /// One price level in integer units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +46,9 @@ pub enum Outcome {
     Buffered,
     /// Older than what the book already holds; ignored.
     DroppedStale,
+    /// No book to apply it to and none to wait for: the venue sends its books on its stream, so
+    /// the update is dropped until the next snapshot comes.
+    Skipped,
     /// The book is no longer trustworthy and was cleared; fetch a fresh snapshot.
     NeedsResync(ResyncReason),
 }
@@ -82,6 +85,7 @@ pub enum ResyncReason {
 #[derive(Debug)]
 pub enum BookSync {
     Binance(binance::sync::BookSync),
+    Bybit(bybit::sync::BookSync),
 }
 
 impl BookSync {
@@ -90,6 +94,7 @@ impl BookSync {
     pub fn new(venue: Venue) -> Self {
         match venue {
             Venue::BinanceUsdm => Self::Binance(binance::sync::BookSync::new()),
+            Venue::BybitLinear => Self::Bybit(bybit::sync::BookSync::new()),
         }
     }
 
@@ -97,6 +102,7 @@ impl BookSync {
     pub fn on_event(&mut self, update: DepthUpdate) -> Outcome {
         match self {
             Self::Binance(sync) => sync.on_event(update),
+            Self::Bybit(sync) => sync.on_event(&update),
         }
     }
 
@@ -104,6 +110,7 @@ impl BookSync {
     pub fn on_snapshot(&mut self, snapshot: &Snapshot) -> SnapshotOutcome {
         match self {
             Self::Binance(sync) => sync.on_snapshot(snapshot),
+            Self::Bybit(sync) => sync.on_snapshot(snapshot),
         }
     }
 
@@ -111,6 +118,7 @@ impl BookSync {
     pub fn invalidate(&mut self, reason: ResyncReason) -> Outcome {
         match self {
             Self::Binance(sync) => sync.invalidate(reason),
+            Self::Bybit(sync) => sync.invalidate(reason),
         }
     }
 
@@ -119,6 +127,7 @@ impl BookSync {
     pub fn needs_snapshot(&self) -> bool {
         match self {
             Self::Binance(sync) => sync.needs_snapshot(),
+            Self::Bybit(sync) => sync.needs_snapshot(),
         }
     }
 
@@ -127,6 +136,7 @@ impl BookSync {
     pub fn is_synced(&self) -> bool {
         match self {
             Self::Binance(sync) => sync.is_synced(),
+            Self::Bybit(sync) => sync.is_synced(),
         }
     }
 
@@ -135,6 +145,7 @@ impl BookSync {
     pub fn book(&self) -> Option<&Book> {
         match self {
             Self::Binance(sync) => sync.book(),
+            Self::Bybit(sync) => sync.book(),
         }
     }
 
@@ -143,6 +154,7 @@ impl BookSync {
     pub fn last_id(&self) -> Option<u64> {
         match self {
             Self::Binance(sync) => sync.last_id(),
+            Self::Bybit(sync) => sync.last_id(),
         }
     }
 }

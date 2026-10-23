@@ -24,14 +24,16 @@ use engine::store::samples::{BookRow, Sample};
 use engine::store::writer::LogConfig;
 use engine::venue::Venue;
 use engine_harness::api::{
-    Frame, ISING_RUN, LivePath, Outcome, Script, Server, copy_ising_fixture, decode_stream,
-    fixture, get_arrow, golden, next_frame, next_json, one_batch, script, send_json, ws_connect,
+    Frame, ISING_RUN, LivePath, Outcome, Server, copy_ising_fixture, decode_stream, fixture,
+    get_arrow, golden, merged, next_frame, next_json, one_batch, script, send_json, ws_connect,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const RUN: &str = "20231114T221320Z-session";
+/// The Bybit run recorded beside it.
+const BYBIT_RUN: &str = "20231114T221320Z-bybit";
 const WAIT: Duration = Duration::from_secs(20);
 
 fn scratch(name: &str) -> PathBuf {
@@ -67,24 +69,40 @@ fn results() -> [(&'static str, Value); 4] {
     ]
 }
 
-/// The committed session through the live path, with the API attached and a lossless client
-/// and an Arrow subscriber connected from the start; then results published for the app. The
-/// WebSocket frames, as text, in the order they arrived, and the live Arrow stream's bytes.
+/// The committed sessions, Binance's and Bybit's at once, each through its own live path into one
+/// hub, with the API attached and a lossless client and an Arrow subscriber connected from the
+/// start; then results published for the app. The WebSocket frames, as text, in the order they
+/// arrived, the live Arrow stream's bytes, and the Binance run's folder.
 async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> {
-    let Script {
-        venue,
-        scales,
-        messages,
-    } = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let binance = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let bybit = script(&fixture("synthetic/bybit-session.jsonl"))?;
     let hub = Hub::new(HubConfig {
         lossless: true,
+        venues: vec![binance.venue, bybit.venue],
         ..HubConfig::default()
     });
     let config = LogConfig {
         max_segment_bytes: 2048,
         ..LogConfig::default()
     };
-    let mut live = LivePath::new(venue, scales, Arc::clone(&hub), dir, Some(RUN), config)?;
+    let mut loops = [
+        LivePath::new(
+            binance.venue,
+            binance.scales,
+            Arc::clone(&hub),
+            dir,
+            Some(RUN),
+            config.clone(),
+        )?,
+        LivePath::new(
+            bybit.venue,
+            bybit.scales,
+            Arc::clone(&hub),
+            dir,
+            Some(BYBIT_RUN),
+            config,
+        )?,
+    ];
     let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.to_owned())).await?;
 
     let mut ws = ws_connect(server.addr).await?;
@@ -106,8 +124,8 @@ async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> 
     while hub.arrow_subscribers() == 0 {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    for message in messages {
-        live.push(message).await?;
+    for (which, message) in merged(binance.messages, bybit.messages) {
+        loops[which].push(message).await?;
     }
     let client = reqwest::Client::new();
     for (topic, body) in results() {
@@ -132,7 +150,9 @@ async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> 
         }
     }
     let arrow = arrow.await??.to_vec();
-    let (_summary, _, _) = live.finish().await?;
+    for live in loops {
+        live.finish().await?;
+    }
     server.stop().await;
     Ok((frames, arrow, dir.join("market").join(RUN)))
 }
@@ -165,6 +185,14 @@ async fn the_session_is_sent_as_its_golden_files_say() -> Outcome {
         .filter(|v| v["t"] == "status")
         .collect();
     let status = statuses.last().ok_or("no status")?;
+    assert_eq!(status["venues"]["bybit-linear"]["resyncs"], 5, "{status}");
+    let venues: std::collections::BTreeSet<String> = frames
+        .iter()
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(|v| v["t"] == "book")
+        .filter_map(|v| v["venue"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(venues.len(), 2, "both venues' books were sent: {venues:?}");
     let last = &status["venues"]["binance-usdm"];
     assert!(
         last["streams"]["depth"]["reconnects"].as_u64() >= Some(1),
@@ -251,9 +279,21 @@ fn catalog_status() -> Status {
         snapshot_failures: 1,
         parse_errors: 2,
     };
+    let bybit = VenueStatus {
+        ts_ms: 1_700_000_000_250,
+        streams: Streams {
+            depth: stream(true, 0, 0),
+            trades: stream(false, 0, 0),
+        },
+        symbols: BTreeMap::from([("BTCUSDT".to_owned(), SymbolStatus { synced: true })]),
+        resyncs: 1,
+        sequence_gaps: 1,
+        snapshot_failures: 0,
+        parse_errors: 0,
+    };
     Status {
         ts_ms: 1_700_000_000_300,
-        venues: BTreeMap::from([(Venue::BinanceUsdm, binance)]),
+        venues: BTreeMap::from([(Venue::BinanceUsdm, binance), (Venue::BybitLinear, bybit)]),
     }
 }
 
@@ -270,13 +310,22 @@ fn every_server_message_matches_the_catalog() -> Outcome {
         ("ETHUSDT".to_owned(), scale(2, 3)),
     ]);
     let source = Source {
-        venues: BTreeMap::from([(
-            Venue::BinanceUsdm,
-            VenueSource {
-                scales,
-                run: Some(RUN.to_owned()),
-            },
-        )]),
+        venues: BTreeMap::from([
+            (
+                Venue::BinanceUsdm,
+                VenueSource {
+                    scales,
+                    run: Some(RUN.to_owned()),
+                },
+            ),
+            (
+                Venue::BybitLinear,
+                VenueSource {
+                    scales: BTreeMap::from([("BTCUSDT".to_owned(), scale(1, 3))]),
+                    run: Some(BYBIT_RUN.to_owned()),
+                },
+            ),
+        ]),
     };
     let welcome = Welcome::new(&source, 20, 100_000_000);
     let sample = catalog_sample();

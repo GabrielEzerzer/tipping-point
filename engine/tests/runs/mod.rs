@@ -120,7 +120,7 @@ pub fn write_run(script: &Path, dir: &Path, log: LogConfig) -> (PathBuf, Summary
         venue,
         symbols: scales.keys().cloned().collect(),
         scales,
-        streams: vec!["depth@100ms".to_owned(), "aggTrade".to_owned()],
+        streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
         book_sample: BookSample::default(),
     };
     let manifest = run::create(&run_dir, params).expect("a run folder");

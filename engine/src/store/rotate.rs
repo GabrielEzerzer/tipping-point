@@ -363,6 +363,11 @@ impl Tables {
                     };
                     match depth {
                         Depth::Update(update) => self.depth.rows.push(frame, venue, &raw, &update),
+                        Depth::Book(snapshot) => {
+                            self.snapshots
+                                .rows
+                                .push(frame, venue, raw.symbol(), &snapshot)
+                        }
                     }
                 }
                 Ok(Parsed::Trade(raw)) => self.trades.rows.push(frame, venue, &raw, scales),

@@ -5,7 +5,8 @@
 //! and replayed `book` messages are each an in-order subsequence of those rows (coalescing skips,
 //! never alters), ending on the same last row per symbol; a replay through the API equals the
 //! replay through the log that rotate made the rows from. A stream that fails partway fails at
-//! the client; it never passes for a short table.
+//! the client; it never passes for a short table. Two venues fed at once, each by its own loop,
+//! serve each venue's rows exactly as that venue's own run stores them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -21,8 +22,8 @@ use engine::store::rotate::rotate;
 use engine::store::writer::LogConfig;
 use engine::venue::Venue;
 use engine_harness::api::{
-    Frame, LivePath, Outcome, Script, Server, Socket, fixture, get_arrow, hello, next_frame,
-    next_json, one_batch, read_parquet, script, send_json, ws_connect,
+    Frame, LivePath, Outcome, Script, Server, Socket, fixture, get_arrow, hello, merged,
+    next_frame, next_json, one_batch, read_parquet, script, send_json, ws_connect,
 };
 use serde_json::{Value, json};
 
@@ -693,6 +694,181 @@ async fn a_replay_that_fails_says_so_and_never_ended() -> Outcome {
         "{outcome}"
     );
     played.server.stop().await;
+    fs::remove_dir_all(&played.dir)?;
+    Ok(())
+}
+
+/// What a two-venue live phase left: the rotated runs' folders, the live Arrow rows, and what the
+/// app received.
+struct TwoVenues {
+    dir: PathBuf,
+    live: Vec<BookRow>,
+    books: Vec<BookRow>,
+    trades: Vec<Value>,
+    others: Vec<Value>,
+}
+
+/// The Bybit run recorded beside the Binance one.
+const BYBIT_RUN: &str = "20231114T221320Z-bybit";
+
+/// Binance's and Bybit's sessions at once, each through its own live path into one hub, with an
+/// Arrow subscriber and a coalescing app client connected from the start; then both runs rotated.
+async fn play_two_venues(dir: PathBuf) -> Outcome<TwoVenues> {
+    let binance = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let bybit = script(&fixture("synthetic/bybit-session.jsonl"))?;
+    let hub = Hub::new(HubConfig {
+        venues: vec![binance.venue, bybit.venue],
+        ..HubConfig::default()
+    });
+    let small = LogConfig {
+        max_segment_bytes: 2048,
+        ..LogConfig::default()
+    };
+    let mut loops = [
+        LivePath::new(
+            binance.venue,
+            binance.scales,
+            Arc::clone(&hub),
+            &dir,
+            Some(RUN),
+            small.clone(),
+        )?,
+        LivePath::new(
+            bybit.venue,
+            bybit.scales,
+            Arc::clone(&hub),
+            &dir,
+            Some(BYBIT_RUN),
+            small,
+        )?,
+    ];
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+    let url = server.url("/v1/live/book_samples");
+    let arrow = tokio::spawn(async move { get_arrow(&url).await });
+    let mut app = ws_connect(server.addr).await?;
+    let welcome = hello(&mut app).await?;
+    assert_eq!(
+        welcome["runs"],
+        json!({"binance-usdm": RUN, "bybit-linear": BYBIT_RUN})
+    );
+    let venues: BTreeSet<&str> = welcome["symbols"]
+        .as_array()
+        .ok_or("welcome symbols")?
+        .iter()
+        .filter_map(|s| s["venue"].as_str())
+        .collect();
+    assert_eq!(venues, BTreeSet::from(["binance-usdm", "bybit-linear"]));
+    send_json(
+        &mut app,
+        &json!({"t": "sub", "topics": ["book", "trades", "status"]}),
+    )
+    .await?;
+    while hub.arrow_subscribers() == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for (which, message) in merged(binance.messages, bybit.messages) {
+        loops[which].push(message).await?;
+        // Real time between inputs, so the app client coalesces some samples and sends others.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    hub.end();
+    let (live_schema, live_batches) = arrow.await??;
+    let (books, trades, others) = read_until_ended(&mut app).await?;
+    for live in loops {
+        live.finish().await?;
+    }
+    for run in [RUN, BYBIT_RUN] {
+        rotate(&dir.join("market").join(run))?;
+    }
+    server.stop().await;
+    Ok(TwoVenues {
+        dir,
+        live: book_rows(&one_batch(&live_schema, &live_batches)?),
+        books,
+        trades,
+        others,
+    })
+}
+
+/// Two venues at once, as `serve` will run Binance and Bybit: each venue's live loop, through
+/// its own tap, feeds one hub. The welcome lists both venues' symbols and runs; every live Arrow
+/// row, book message and trade names its venue; each venue's live rows equal its own run's
+/// rotated Parquet field for field, on one absolute grid, so the venues join exactly on
+/// `sample_ts_ns`; the app's book messages for each venue are an in-order subsequence of that
+/// venue's rows; the status holds each venue's own sockets and counters.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_venues_serve_exactly_what_each_stores() -> Outcome {
+    let played = play_two_venues(scratch("api-two-venues")).await?;
+    let mut grids = Vec::new();
+    for (venue, run) in [("binance-usdm", RUN), ("bybit-linear", BYBIT_RUN)] {
+        let (schema, batches) = read_parquet(&played.dir.join("market").join(run), "book_samples")?;
+        let stored = book_rows(&one_batch(&schema, &batches)?);
+        assert!(
+            stored.iter().all(|row| row.0 == venue),
+            "{run} holds only {venue}"
+        );
+        let live: Vec<BookRow> = played
+            .live
+            .iter()
+            .filter(|row| row.0 == venue)
+            .cloned()
+            .collect();
+        assert_eq!(live, stored, "{venue}: the live rows are its rotated table");
+        assert!(stored.len() >= 30, "{venue}: {} rows", stored.len());
+        let books: Vec<BookRow> = played
+            .books
+            .iter()
+            .filter(|b| b.0 == venue)
+            .cloned()
+            .collect();
+        assert_subsequence(&books, &stored, venue);
+        let instants: BTreeSet<i64> = stored.iter().map(|row| row.2).collect();
+        assert!(
+            instants.iter().all(|ms| ms % 100 == 0),
+            "{venue}: an absolute grid"
+        );
+        grids.push(instants);
+    }
+    let lo = grids
+        .iter()
+        .filter_map(|g| g.first())
+        .copied()
+        .max()
+        .ok_or("instants")?;
+    let hi = grids
+        .iter()
+        .filter_map(|g| g.last())
+        .copied()
+        .min()
+        .ok_or("instants")?;
+    let overlap = |grid: &BTreeSet<i64>| grid.range(lo..=hi).copied().collect::<Vec<i64>>();
+    assert_eq!(
+        overlap(&grids[0]),
+        overlap(&grids[1]),
+        "both venues are sampled at the same instants where they overlap"
+    );
+
+    // Only Binance's script trades; every trade says its venue and carries a string id.
+    let (_, stored) = read_parquet(&played.dir.join("market").join(RUN), "trades")?;
+    let stored: usize = stored.iter().map(RecordBatch::num_rows).sum();
+    assert_eq!(played.trades.len(), stored, "every trade reached the app");
+    for trade in &played.trades {
+        assert_eq!(trade["venue"], "binance-usdm", "{trade}");
+        assert!(trade["id"].is_string(), "{trade}");
+    }
+    let status = played
+        .others
+        .iter()
+        .rev()
+        .find(|m| m["t"] == "status")
+        .ok_or("a status")?;
+    let bybit = &status["venues"]["bybit-linear"];
+    assert_eq!(bybit["streams"]["depth"]["reconnects"], 1, "{status}");
+    assert_eq!(bybit["resyncs"], 5, "{status}");
+    assert!(
+        status["venues"]["binance-usdm"]["resyncs"].as_u64() >= Some(1),
+        "{status}"
+    );
     fs::remove_dir_all(&played.dir)?;
     Ok(())
 }
