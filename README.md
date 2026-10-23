@@ -15,6 +15,22 @@ Open-source framework for detecting critical transitions in live data streams: a
   replay-equals-live checks and the API's contract, parity, Python and load checks (production code
   never depends on it).
 
+## Release builds, one heavy job at a time
+
+Run the engine's binaries (`ingest`, `store` and `serve`, and the harness's `record` and `soak`)
+from a release build: `cargo build --release -p engine -p engine-harness` once, then the
+`cargo run --release ...` lines below, or `target/release/<bin>` directly. Plain `cargo run`
+builds the dev profile, where rotate (binary log to Parquet) is roughly ten times slower: 5.4-6.0
+minutes per recorded hour against 35-37 s (#63). `serve --record` rotates in the background as
+each segment closes, re-reading from the start, so in debug live-run replay finds gaps from about
+the fifth hour, and Ctrl-C after a day of recording waits about an hour for the final rotate
+(about 10 minutes in release). The app's Tauri sidecar, when it lands, ships the release binary.
+Tests stay in the dev profile, which compiles much faster: `cargo test` and the gate build it.
+
+On a laptop, run one heavy job at a time: a cargo build, `cargo test` or the gate, a recording
+session or a by-hand `store rotate`, a simulator run, a training. They share the same cores, so
+two at once each run slower, and a recording's live loop can fall behind the feed.
+
 ## Binance ingest
 
 `engine/src/binance/` keeps a correct local order book for BTCUSDT and ETHUSDT from the USD-M
@@ -24,10 +40,10 @@ The sync logic is a pure state machine (`sync.rs`) behind a multi-symbol `feed.r
 (`ws.rs`, `rest.rs`, `live.rs`) is thin around it.
 
 ```sh
-cargo run -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
-cargo run -p engine --bin ingest -- --record                # ...and records a run to the data dir (Ctrl-C ends it cleanly)
-cargo run -p engine-harness --bin record -- --seconds 60    # a run + the live transcript → harness/fixtures/recorded/ (gitignored)
-cargo run -p engine-harness --bin soak -- --hours 24        # gaps/resyncs/reconnects/drops per hour → harness/out/
+cargo run --release -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
+cargo run --release -p engine --bin ingest -- --record                # ...and records a run to the data dir (Ctrl-C ends it cleanly)
+cargo run --release -p engine-harness --bin record -- --seconds 60    # a run + the live transcript → harness/fixtures/recorded/ (gitignored)
+cargo run --release -p engine-harness --bin soak -- --hours 24        # gaps/resyncs/reconnects/drops per hour → harness/out/
 ```
 
 ## Market data on disk
@@ -49,9 +65,9 @@ segment, `complete.json` after a clean end), the layout the Ising simulator shar
 so the engine and the simulator share one root with no configuration.
 
 ```sh
-cargo run -p engine --bin store -- recover <run dir>              # after a crash: close the newest segment
-cargo run -p engine --bin store -- rotate <run dir>               # closed segments → Parquet (safe to re-run)
-cargo run -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the books from the log or the Parquet
+cargo run --release -p engine --bin store -- recover <run dir>              # after a crash: close the newest segment
+cargo run --release -p engine --bin store -- rotate <run dir>               # closed segments → Parquet (safe to re-run)
+cargo run --release -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the books from the log or the Parquet
 ```
 
 DuckDB is linked from its prebuilt library, which the build downloads once per target dir
@@ -75,9 +91,9 @@ prints `serve listening on http://127.0.0.1:<port>` once it accepts connections,
 that passed `--port 0` reads the port from it.
 
 ```sh
-cargo run -p engine --bin serve                                   # live Binance feed on 127.0.0.1:7731
-cargo run -p engine --bin serve -- --record                       # ...recorded, closed segments rotated in the background
-cargo run -p engine --bin serve -- --script <file.jsonl> --speed 10 --port 0   # a recorded script played back instead
+cargo run --release -p engine --bin serve                                   # live Binance feed on 127.0.0.1:7731
+cargo run --release -p engine --bin serve -- --record                       # ...recorded, closed segments rotated in the background
+cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --port 0   # a recorded script played back instead
 ```
 
 | route | what |
