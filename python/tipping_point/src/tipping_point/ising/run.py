@@ -8,7 +8,6 @@ run would be (Gate D). The unit of reproducibility is the run on one device type
 from __future__ import annotations
 
 import platform
-import subprocess
 import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -269,7 +268,7 @@ def _manifest(
         "format": 1,
         "domain": "ising",
         "run_id": run_id,
-        "producer": {"name": "tipping_point.ising", "version": __version__, **_git()},
+        "producer": {"name": "tipping_point.ising", "version": __version__, **io.code_version()},
         "started_ns": time.time_ns(),
         "key": "step",
         "tables": [name for name in io.TABLES if used[name]],
@@ -313,18 +312,3 @@ def _manifest(
             "pyarrow": pa.__version__,
         },
     }
-
-
-def _git() -> dict[str, Any]:
-    """The commit that produced the run, and whether the tree had uncommitted edits."""
-    here = Path(__file__).parent
-
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=here, capture_output=True, text=True, check=True
-        ).stdout.strip()
-
-    try:
-        return {"git_sha": git("rev-parse", "HEAD"), "dirty": git("status", "--porcelain") != ""}
-    except (OSError, subprocess.CalledProcessError):
-        return {"git_sha": None, "dirty": None}

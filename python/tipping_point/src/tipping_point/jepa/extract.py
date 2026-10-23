@@ -39,7 +39,6 @@ from .lattice import canonical, unpack
 from .readout import batches, readouts
 from .train import (
     Checkpoint,
-    code_version,
     default_device,
     deterministic,
     evaluation_masks,
@@ -92,7 +91,7 @@ def _manifest(out: Path, run: Run, ckpt: Checkpoint, device: torch.device) -> di
         "format": 1,
         "domain": "ising",
         "run_id": out.name,
-        "producer": {"name": "tipping_point.jepa", "version": __version__, **code_version()},
+        "producer": {"name": "tipping_point.jepa", "version": __version__, **io.code_version()},
         "started_ns": time.time_ns(),
         "key": "step",
         "tables": [LATENTS],

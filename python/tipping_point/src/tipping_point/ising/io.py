@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -153,6 +154,23 @@ def discard_after(run_dir: Path, step: int, tables: Sequence[str] = TABLES) -> N
         for path in chunks(run_dir, name):
             if int(path.stem) > step:
                 path.unlink()
+
+
+def code_version() -> dict[str, Any]:
+    """The commit of the running code and whether its checkout had uncommitted edits (both None
+    without git): every manifest's producer.git_sha and producer.dirty. The one copy, since an
+    Ising run, a JEPA training and the EWS result scored from them must agree on "dirty"."""
+    here = Path(__file__).parent
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=here, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    try:
+        return {"git_sha": git("rev-parse", "HEAD"), "dirty": git("status", "--porcelain") != ""}
+    except (OSError, subprocess.CalledProcessError):
+        return {"git_sha": None, "dirty": None}
 
 
 def write_complete(run_dir: Path, last_step: int, checks: dict[str, Any]) -> None:

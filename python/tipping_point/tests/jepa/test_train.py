@@ -19,7 +19,7 @@ import pytest
 import torch
 from tipping_point.ews.ising import open_run
 from tipping_point.ising import io
-from tipping_point.jepa import data, lattice, train
+from tipping_point.jepa import data, extract, lattice, train
 from tipping_point.jepa.lattice import Jepa, unpack
 
 SHORT = jepa_toy.config(steps=12, checkpoint_every=4, monitor_every=4, pca_frames=128)
@@ -150,6 +150,22 @@ def test_the_manifest_names_its_data_code_seeds_and_pilot(ising: jepa_ising.Isin
     assert "git_sha" in manifest["producer"] and "dirty" in manifest["producer"]
     assert manifest["env"]["use_deterministic_algorithms"] and manifest["env"]["amp"] is None
     assert manifest["params"]["receptive_field"] == 14
+
+
+def test_trainings_and_latents_take_their_commit_from_the_one_helper(
+    ising: jepa_ising.Ising, small: data.Dataset, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#88 for the JEPA's two manifests: a training's and a latents table's producer come from
+    io.code_version, the copy Ising runs and EWS results read, not a third of their own."""
+    planted = {"git_sha": "f" * 40, "dirty": True}
+    monkeypatch.setattr(io, "code_version", lambda: dict(planted))
+    training = io.read_json(train.start(SHORT, small, tmp_path, "d", "cpu") / "manifest.json")
+    ckpt = train.load_model(ising.training / train.FINAL)
+    latents = extract._manifest(
+        tmp_path / "l", open_run(ising.runs["ramp"]), ckpt, torch.device("cpu")
+    )
+    for producer in (training["producer"], latents["producer"]):
+        assert {key: producer[key] for key in planted} == planted, producer
 
 
 @pytest.mark.parametrize(

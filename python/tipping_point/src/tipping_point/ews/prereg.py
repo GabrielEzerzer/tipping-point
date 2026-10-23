@@ -373,18 +373,6 @@ def cells(doc: dict[str, Any]) -> int:
     return per_size * len(doc["data"]["L"]) * len(doc["event"]["horizons"]) * grid
 
 
-def _code() -> dict[str, Any]:
-    """The commit of the code that scored, and whether its tree had uncommitted edits."""
-    here = Path(__file__).parent
-    try:
-        return {
-            "git_sha": _git(here, "rev-parse", "HEAD"),
-            "dirty": bool(_git(here, "status", "--porcelain")),
-        }
-    except (OSError, PreregError):
-        return {"git_sha": None, "dirty": None}
-
-
 def write_result(
     data_dir: Path,
     prereg: Prereg,
@@ -403,7 +391,7 @@ def write_result(
         "format": 1,
         "domain": "ews",
         "run_id": run_id,
-        "producer": {"name": "tipping_point.ews", "version": __version__, **_code()},
+        "producer": {"name": "tipping_point.ews", "version": __version__, **io.code_version()},
         "started_ns": time.time_ns(),
         "key": "cell",
         "tables": list(filled),
