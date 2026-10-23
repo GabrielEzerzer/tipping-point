@@ -43,8 +43,10 @@ through the same pipeline the live loop runs.
 
 Runs live in `<data dir>/market/<run_id>/` (`manifest.json`, `log/`, one Parquet file per table per
 segment, `complete.json` after a clean end), the layout the Ising simulator shares. The data dir is
-`$TP_DATA_DIR`, or else `%LOCALAPPDATA%\tipping-point` (`~/.local/share/tipping-point` elsewhere),
-never the repository.
+`$TP_DATA_DIR`, or else `%LOCALAPPDATA%\tipping-point` (`$XDG_DATA_HOME/tipping-point` or
+`~/.local/share/tipping-point` elsewhere), never the repository. The Python CLIs (`ising`, `ews`,
+`jepa`) resolve the same folder when `--data-dir` is not given (`tipping_point.engine.data_dir`),
+so the engine and the simulator share one root with no configuration.
 
 ```sh
 cargo run -p engine --bin store -- recover <run dir>              # after a crash: close the newest segment
@@ -119,8 +121,8 @@ Runs follow the shared layout `<data dir>/ising/<run_id>/` (`manifest.json`, Par
 `stats/`, `configs/`, `balance/`, and `complete.json` after a clean end). A run id is the UTC start
 time plus a tag in the engine's charset (`tipping_point.engine.run_id`: ASCII letters, digits, `-`
 and `_`), so a number's `.` is written `p`, as in `20261023T010000Z-L16-ramp-x0p02-s1`; the
-engine's API opens no other name. The data dir is
-`--data-dir` or `$TP_DATA_DIR`, outside the repository; `--device` defaults to CUDA when available.
+engine's API opens no other name. The data dir is `--data-dir`, else the engine's (see Market data
+on disk); `--device` defaults to CUDA when available.
 
 ```sh
 uv run python -m tipping_point.ising validate                        # Gates A-C on a small L = 4 run

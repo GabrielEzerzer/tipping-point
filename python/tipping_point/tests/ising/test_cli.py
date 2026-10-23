@@ -256,8 +256,15 @@ def test_pilot_tau_must_be_a_positive_number(tmp_path: Path) -> None:
         _taus(str(pilot), (3.5,))
 
 
-def test_data_dir_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Runs never default into the repository (it lives in the vault; data is GBs)."""
+def test_runs_land_where_the_engine_looks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches #81 end to end: with TP_DATA_DIR unset a run lands in the engine's default data
+    dir (LOCALAPPDATA comes first in its chain) instead of being refused; set, it lands there.
+    Either way never in the repository, which lives in the vault (data is GBs)."""
+    argv = ["pilot", "--L", "4", "--T", "3.0", "--replicas", "2", "--therm", "0", "--sweeps", "2"]
     monkeypatch.delenv("TP_DATA_DIR", raising=False)
-    with pytest.raises(SystemExit):
-        main(["pilot", "--L", "4"])
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    assert main([*argv, "--device", "cpu"]) == 0
+    assert len(list((tmp_path / "local" / "tipping-point" / "ising").iterdir())) == 1
+    monkeypatch.setenv("TP_DATA_DIR", str(tmp_path / "set"))
+    assert main([*argv, "--device", "cpu"]) == 0
+    assert len(list((tmp_path / "set" / "ising").iterdir())) == 1

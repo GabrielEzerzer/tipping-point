@@ -11,16 +11,16 @@
   validate   Gates A-C and the independence check on a small L = 4 run; exit 1 on a failure
   resume     continue a crashed or stopped run from its checkpoint
 
-Runs land in <data dir>/ising/<run_id>/; the data dir is --data-dir or $TP_DATA_DIR. A run id
-is the UTC start plus a tag in the engine's charset, a number's '.' written 'p' (x = 0.02 is
-x0p02), so the engine can open every run.
+Runs land in <data dir>/ising/<run_id>/. The data dir is --data-dir, else the engine's own
+($TP_DATA_DIR, or a per-user folder outside the repository: tipping_point.engine.data_dir). A
+run id is the UTC start plus a tag in the engine's charset, a number's '.' written 'p' (x = 0.02
+is x0p02), so the engine can open every run.
 """
 
 from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 import time
 from collections.abc import Sequence
@@ -29,14 +29,14 @@ from typing import Any
 
 import numpy as np
 
+from .. import engine
 from . import autocorr, io, pilot, protocol, run
+
+DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _parser()
-    args = parser.parse_args(argv)
-    if args.command != _resume and args.data_dir is None:
-        parser.error("set TP_DATA_DIR or pass --data-dir")
+    args = _parser().parse_args(argv)
     return args.command(args)
 
 
@@ -46,7 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--device", default=run.default_device(), help="cuda if available, else cpu"
     )
-    common.add_argument("--data-dir", type=Path, default=os.environ.get("TP_DATA_DIR"))
+    common.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     common.add_argument("--checkpoint-every", type=int, default=100_000, help="sweeps")
     sized = argparse.ArgumentParser(add_help=False, parents=[common])
     sized.add_argument("--L", type=int, required=True)
@@ -100,7 +100,7 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("tauc", help="tau_c(L) at Tc and its fit A L^z -> pilot.json")
     p.add_argument("runs", type=Path, nargs="+", help="complete pilot runs at Tc, one per L")
-    p.add_argument("--data-dir", type=Path, default=os.environ.get("TP_DATA_DIR"))
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--draws", type=int, default=pilot.DRAWS, help="bootstrap resamples")
     p.set_defaults(command=_tauc)
 

@@ -12,28 +12,29 @@
            complete.json; exit 1 on any problem
   budget   GPU hours per ISO week from <data dir>/jepa/gpu_hours.jsonl against a weekly quota
 
-Trainings land in <data dir>/jepa/<run_id>/; the data dir is --data-dir or $TP_DATA_DIR.
+Trainings land in <data dir>/jepa/<run_id>/; the data dir is --data-dir, else the engine's own
+($TP_DATA_DIR, or a per-user folder outside the repository: tipping_point.engine.data_dir).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .. import engine
 from ..ews.ising import IsingDataError
 from . import extract, probes, train
 from .data import HELD_OUT, PREREG_SEEDS, find_staircases, load
+
+DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    if getattr(args, "needs_data", False) and args.data_dir is None:
-        parser.error("set TP_DATA_DIR or pass --data-dir")
     try:
         return args.command(args)
     except (IsingDataError, ValueError, RuntimeError, FileNotFoundError) as exc:
@@ -46,7 +47,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
     sub = parser.add_subparsers(required=True)
     data_dir = argparse.ArgumentParser(add_help=False)
-    data_dir.add_argument("--data-dir", type=Path, default=os.environ.get("TP_DATA_DIR"))
+    data_dir.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     device = argparse.ArgumentParser(add_help=False)
     device.add_argument("--device", default=None, help="default: cuda if available, else cpu")
 
@@ -67,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--cov-weight", type=float, default=defaults.cov_weight, help="0: EMA only")
     p.add_argument("--checkpoint-every", type=int, default=defaults.checkpoint_every)
     p.add_argument("--monitor-every", type=int, default=defaults.monitor_every)
-    p.set_defaults(command=_train, needs_data=True)
+    p.set_defaults(command=_train)
 
     p = sub.add_parser("resume", parents=[device], help="continue a training")
     p.add_argument("run_dir", type=Path)
@@ -94,7 +95,7 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("budget", parents=[data_dir], help="GPU hours per week against a quota")
     p.add_argument("--quota", type=float, default=30.0, help="hours per week")
-    p.set_defaults(command=_budget, needs_data=True)
+    p.set_defaults(command=_budget)
     return parser
 
 
