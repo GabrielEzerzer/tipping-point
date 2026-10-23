@@ -8,6 +8,7 @@ Open-source framework for detecting critical transitions in live data streams: a
 - `engine/` — Rust core, a member of the root Cargo workspace (`Cargo.toml`).
 - `python/tipping_point/` — the Python package (src layout), a member of the root uv workspace (`pyproject.toml`).
 - `app/` — the Tauri desktop app (not yet started).
+- `notebooks/` — Kaggle kernels (JEPA training on the GPUs).
 - `paper/` — the paper.
 - `harness/` — supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
   a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries, the
@@ -221,6 +222,57 @@ uv run python -m tipping_point.ews calibrate                         # 2,000 nul
 
 Results land in `<data dir>/ews/<run_id>/`, and every evaluated cell is appended to
 `<data dir>/ews/trials.jsonl`.
+
+## JEPA world model (Ising)
+
+`python/tipping_point/src/tipping_point/jepa/` is the JEPA of #27: one per-frame encoder shared by
+every L (2x2 patchify, three ConvNeXt blocks with circular depthwise 3x3 convolutions; 0.40M
+parameters, a receptive field of 14 sites, below the smallest L), a convolutional predictor
+(0.16M parameters, ~50 sites of range) and an EMA target encoder. It hides blocks of frame c (4-8
+sites a side, 20-25% of the cells, a one-cell buffer cut from the context) and predicts their
+LayerNorm'd target features in frame c + delta, delta 0-7 inside a burst; VICReg variance and
+covariance terms on the visible tokens guard against collapse, and a detector with absolute floors
+on feature spread watches for it. Bursts are flipped to positive magnetisation, D4 and rolls are
+augmentations, and training reads staircase plateaus only, of dedicated simulator seeds: the
+pre-registered seeds 1-5, ramps and null runs are refused.
+
+```sh
+uv run python -m tipping_point.jepa train --L 16 32 64 --train-seeds 101 102 --val-seed 103 \
+    --seed 1 --pilot <pilot run>/pilot.json [--held-out] [--prereg paper/prereg/<id>.toml]
+uv run python -m tipping_point.jepa resume <training>                # after a killed session
+uv run python -m tipping_point.jepa extract <training>/final.pt <simulator run>
+uv run python -m tipping_point.jepa probe <training> --fit <val run> --test <scored run>
+uv run python -m tipping_point.jepa verify <training> <run>/latents/<set> ...
+uv run python -m tipping_point.jepa budget --quota 30                # GPU hours per ISO week
+```
+
+- **A training** lives in `<data dir>/jepa/<run_id>/`: the manifest (every input run with its
+  `complete.json` sha256, the pilot record's sha256, the pre-registration's id, the seeds, the git
+  commit), `train/` and `monitor/` Parquet, `ckpt/step_0000000.pt` (the untrained twin, saved
+  before any update), `final.pt`, and `complete.json` with every file's sha256 and the collapse
+  verdict. Both models carry a PCA basis fitted on training frames. Every session appends its
+  hours to `<data dir>/jepa/gpu_hours.jsonl`.
+- **Reproducibility:** one master seed gives each random stream its own generator;
+  `use_deterministic_algorithms(True)` is a tripwire and `CUBLAS_WORKSPACE_CONFIG` is set before
+  CUDA starts. Two CPU runs of a seed give bitwise-identical losses, and a resumed run continues
+  bit for bit. A T4 trains in fp16 autocast, anything else in float32; never bf16, never
+  `torch.compile`.
+- **The latents table** (#28's input) is written beside the frames, in
+  `<simulator run>/latents/<training>-step<step>/`: one row per `configs` row, keyed and ordered
+  like `configs` (step, replica, temperature, segment, burst, frame), with `surprise` (the delta = 0
+  prediction error over two fixed evaluation masks) and `pc_1`..`pc_8`, float32. Its manifest names
+  the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it.
+- **The untrained twin is the null:** a local encoder's pooled readouts inherit Ising scaling with
+  random weights, so learning is claimed only as a margin over each run's step-0 twin, which goes
+  through every test.
+- **Kaggle:** `notebooks/kaggle_train.py` clones a pinned commit with a read-only token from
+  Kaggle Secrets, installs with `--extra cu126`, checks the dataset's hashes, trains one model seed
+  per T4 and resumes from the previous version's output.
+
+The harness trains a planted-stripe toy on the CPU (`harness/jepa_toy.py`: validation error 1.37
+to 0.34 in 150 steps; probes cannot tell it from its twin, prediction error can), breaks the loss
+to check that the detector fires, and runs the extract round trip on runs the simulator itself
+writes (`harness/jepa_ising.py`).
 
 ## Running the gate
 
