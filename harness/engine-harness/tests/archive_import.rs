@@ -8,7 +8,7 @@
 //! run changes nothing; another archive or other tables for the same run are refused. The same
 //! records fed as a live stream through the venue's adapter raise the same events with the same
 //! books, input for input. Real archive days, kept locally in the gitignored
-//! `harness/fixtures/archives/`, are imported too when present.
+//! `harness/fixtures/archives/`, are imported too when present and `TP_ARCHIVE_DAYS` is set.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -524,11 +524,21 @@ async fn an_archive_imports_exactly_as_its_records_fed_live() -> Outcome {
     Ok(())
 }
 
-/// Real archive days kept locally (gitignored): each imports with its rows matching its records,
-/// and passes its integrity checks. Skips, and says so, when there are none.
+/// Real archive days kept locally (gitignored, `harness/fixtures/archives/`): each imports with
+/// its rows matching its records, and passes its integrity checks. A day is hundreds of megabytes
+/// and minutes to import, so this runs only with `TP_ARCHIVE_DAYS` set, as `TP_CRASH_ROUNDS`
+/// lengthens the crash test: `TP_ARCHIVE_DAYS=1 cargo test --release -p engine-harness --test
+/// archive_import local_archive_days`. Skips, and says so, otherwise or when there are none.
 #[test]
 fn local_archive_days_import_cleanly() -> Outcome {
     let dir = repo().join("harness/fixtures/archives");
+    if std::env::var_os("TP_ARCHIVE_DAYS").is_none() {
+        println!(
+            "skipped: set TP_ARCHIVE_DAYS to import the archive days in {}",
+            dir.display()
+        );
+        return Ok(());
+    }
     let mut found: Vec<PathBuf> = match fs::read_dir(&dir) {
         Ok(entries) => entries
             .filter_map(Result::ok)
@@ -551,10 +561,18 @@ fn local_archive_days_import_cleanly() -> Outcome {
         let imported = import(&path, &config(&data, None), &mut |_| {})?;
         let check = &imported.integrity;
         println!("{}: {:?} {check:?}", path.display(), imported.rows);
-        assert_eq!(
-            (check.errors, check.outside_day, check.crossed),
-            (0, 0, 0),
-            "{}",
+        assert_eq!((check.errors, check.crossed), (0, 0), "{}", path.display());
+        // A Bybit day runs on to its next snapshot, half a second past midnight: those few
+        // records are the next file's first and are counted, not refused. The day itself is
+        // whole: its last record is at most a second past midnight.
+        let day_end = ArchiveName::parse(&path.file_name().unwrap_or_default().to_string_lossy())
+            .map(|name| name.day.start_ns() + 86_400_000_000_000)
+            .ok_or("an archive name")?;
+        assert!(
+            check
+                .last_ts_ns
+                .is_some_and(|last| last < day_end + 1_000_000_000),
+            "{}: ends past the next day's first second",
             path.display()
         );
         if let Some(rows) = imported.rows.get("trades") {

@@ -81,8 +81,9 @@ and published carries that licence and the "Binance Vision" attribution.
 cargo run -p engine --bin store -- import <archive> [--data-dir DIR] [--tables T,...]
 ```
 
-Downloaded days stay local (`harness/fixtures/archives/`, gitignored; the import tests read any
-found there). The committed tests use tiny synthetic archives in each venue's format
+Downloaded days stay local (`harness/fixtures/archives/`, gitignored); with `TP_ARCHIVE_DAYS`
+set, the import tests import every day found there (`TP_ARCHIVE_DAYS=1 cargo test --release -p
+engine-harness --test archive_import local_archive_days`). The committed tests use tiny synthetic archives in each venue's format
 (`engine/tests/fixtures/archives/`, made by `harness/engine-harness/tests/make_archive_fixtures.py`).
 
 DuckDB is linked from its prebuilt library, which the build downloads once per target dir
