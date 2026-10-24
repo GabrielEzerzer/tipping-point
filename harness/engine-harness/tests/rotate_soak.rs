@@ -249,8 +249,8 @@ fn write_segment(run_dir: &Path, bytes: u64) -> Result<u64, Box<dyn Error>> {
         while written < bytes {
             let next = entries.next().unwrap_or_else(|| {
                 turn += 1;
-                let stream = &mut streams[usize::from(turn % 2 == 0)];
-                if turn % 7 == 0 {
+                let stream = &mut streams[usize::from(turn.is_multiple_of(2))];
+                if turn.is_multiple_of(7) {
                     entry(Kind::Trade, t_ms, stream.trade(&mut random, t_ms))
                 } else {
                     t_ms += STEP_MS;
