@@ -238,9 +238,12 @@ fn fetch_snapshots(
     config: &LiveConfig,
 ) {
     for symbol in pipeline.feed_mut().snapshots_due() {
-        let now = Instant::now();
-        let at = next_allowed.get(&symbol).copied().unwrap_or(now).max(now);
-        next_allowed.insert(symbol.clone(), at + config.min_snapshot_interval);
+        let at = fetch_at(
+            next_allowed,
+            &symbol,
+            Instant::now(),
+            config.min_snapshot_interval,
+        );
         pipeline.stats_mut().snapshot_fetches += 1;
         let rest = rest.clone();
         let tx = tx.clone();
@@ -250,6 +253,23 @@ fn fetch_snapshots(
             let _ = tx.send((symbol, now_ns(), result)).await;
         });
     }
+}
+
+/// When the snapshot fetch for `symbol` asked for at `now` starts: at once, or `floor` after the
+/// start of the symbol's last fetch, whichever is later. The floor alone spaces a symbol's
+/// refetches out: a failed fetch leaves the symbol due again in the same loop pass, and a
+/// 1000-level snapshot costs 20 of Binance's 2,400 REST weight a minute, past which come a 429
+/// and then an IP ban (#73). After a quiet spell the next fetch is immediate, never a burst owed
+/// for the gap.
+fn fetch_at(
+    next: &mut BTreeMap<Symbol, Instant>,
+    symbol: &str,
+    now: Instant,
+    floor: Duration,
+) -> Instant {
+    let at = next.get(symbol).copied().unwrap_or(now).max(now);
+    next.insert(symbol.to_owned(), at + floor);
+    at
 }
 
 /// Raises [`LiveEvent::ScalesChanged`] when a fetch of `symbol`'s scales found others than its
@@ -406,6 +426,53 @@ mod tests {
             scales_due(&feed, &mut checked, start + RECHECK_SCALES_EVERY),
             btc
         );
+    }
+
+    /// A symbol whose snapshots keep failing is refetched a floor apart, never at round-trip
+    /// speed, and another symbol is not held up by it (#73).
+    #[test]
+    fn a_symbols_snapshot_fetches_are_a_floor_apart() {
+        let floor = LiveConfig::default().min_snapshot_interval;
+        assert_eq!(floor, Duration::from_secs(2), "the default floor");
+        let (mut next, now) = (BTreeMap::new(), Instant::now());
+        let mut fetch = |symbol: &str, now: Instant| fetch_at(&mut next, symbol, now, floor);
+        assert_eq!(fetch("BTCUSDT", now), now, "the first fetch is immediate");
+        assert_eq!(fetch("BTCUSDT", now), now + floor);
+        assert_eq!(fetch("BTCUSDT", now), now + 2 * floor);
+        assert_eq!(fetch("ETHUSDT", now), now, "another symbol is not held up");
+        // A quiet spell owes nothing: the next fetch is immediate and the floor counts from it.
+        let later = now + 10 * floor;
+        assert_eq!(fetch("BTCUSDT", later), later);
+        assert_eq!(fetch("BTCUSDT", later), later + floor);
+    }
+
+    /// A feed that ended cleanly marks its run complete; one cut short by an error leaves it
+    /// incomplete, though its log closes properly either way (#73).
+    #[tokio::test]
+    async fn only_a_feed_that_ended_cleanly_completes_its_run() -> Result<(), LiveError> {
+        let dir = std::env::temp_dir().join(format!("tp-finish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let symbols = vec!["BTCUSDT".to_owned()];
+        let scales = BTreeMap::from([(
+            symbols[0].clone(),
+            Scales {
+                price_decimals: 1,
+                qty_decimals: 3,
+            },
+        )]);
+        for (clean, name) in [(true, "clean"), (false, "cut")] {
+            let recording = Recording {
+                run_dir: dir.join(name),
+                log: LogConfig::default(),
+            };
+            let log = start_recording(&recording, Venue::BinanceUsdm, &symbols, &scales)?;
+            finish_recording(log, &recording.run_dir, clean).await?;
+            let complete = recording.run_dir.join(run::COMPLETE).is_file();
+            assert_eq!(complete, clean, "the {name} run");
+            assert!(recording.run_dir.join(run::MANIFEST).is_file());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 
     #[test]
