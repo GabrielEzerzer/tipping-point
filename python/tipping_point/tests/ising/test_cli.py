@@ -1,13 +1,19 @@
 """The command line end to end: pilot smoke, validate, ramp and staircase on tiny settings."""
 
+import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
 from tipping_point.ising import exact, gates, io, pilot, protocol
-from tipping_point.ising.__main__ import _taus, main
+from tipping_point.ising.__main__ import _number, _taus, main
 
 PILOT = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #50's pilot record
+# The engine's run-name rule as a literal: store::run::run_id's tag charset (ASCII letters,
+# digits, '-' and '_'; engine/src/store/run.rs), which api::table::safe applies to the whole run
+# id, at most 128 characters, before any read (engine/src/api/table.rs).
+ENGINE_RUN_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 def _only_run(root: Path) -> Path:
@@ -50,16 +56,63 @@ def test_validate_cli_passes_and_writes_its_verdicts(tmp_path: Path) -> None:
 
 def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
     """--x picks r from L and the pilot record's A L^z; the tag and the manifest record x, the
-    fit it was read against, and r."""
+    fit it was read against, and r, and the manifest names the record (#55)."""
     argv = ["ramp", "--L", "4", "--x", "2", "--pilot", str(PILOT), "--replicas", "2"]
     argv += ["--pre", "10", "--hold", "10", "--data-dir", str(tmp_path), "--device", "cpu"]
     assert main(argv) == 0
     run_dir = _only_run(tmp_path)
     assert run_dir.name.endswith("-L4-ramp-x2-s1")
-    params = io.read_json(run_dir / "manifest.json")["params"]["schedule"]["params"]
-    fit = pilot.read(PILOT)["fit"]
+    manifest = io.read_json(run_dir / "manifest.json")["params"]
+    params = manifest["schedule"]["params"]
+    record = pilot.read(PILOT)
+    fit = record["fit"]
     assert (params["x"], params["A"], params["z"]) == (2.0, fit["A"], fit["z"])
     assert params["rate"] == protocol.rate_for(4, 2.0, fit["A"], fit["z"])
+    assert manifest["pilot"] == {
+        "run_id": PILOT.parent.name,  # a run id, never a local path
+        "sha256": hashlib.sha256(PILOT.read_bytes()).hexdigest(),
+        "kernel_commit": record["kernel_commit"],
+        "kernel_sha256": record["kernel_sha256"],
+        "stale": False,
+    }
+    assert manifest["algorithm"]["kernel_sha256"] == pilot.kernel_sha256()
+
+
+def test_every_run_id_the_cli_makes_opens_through_the_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches #67: the pre-registered slow ramp, x = 0.02, was named x0.02, a run the engine
+    lists and then refuses to open. Every command that starts a run, with its numbers at their
+    presets, and tauc's record folder, gets an id the engine's name filter accepts."""
+    monkeypatch.setattr(protocol, "dwell", lambda tau, *_: (2, 6))  # plateaus of 8 sweeps
+    monkeypatch.setattr(protocol, "NULL_TAU_C", 2)  # null runs of ~100 sweeps
+    small = ["--replicas", "2", "--data-dir", str(tmp_path), "--device", "cpu"]
+    ramp = ["ramp", "--L", "4", "--pre", "10", "--hold", "10"]
+    commands = [
+        ["pilot", "--L", "4", "--T", "3.0", "--therm", "0", "--sweeps", "2"],
+        ["staircase", "--L", "4", "--tau", "1", "--warmup", "0", "--saves", "0"],
+        *([*ramp, "--x", x, "--pilot", str(PILOT)] for x in ("0.02", "2")),
+        [*ramp, "--rate", "50"],
+        *(["null", "--L", "16", "--epsilon-L", e, "--pilot", str(PILOT)] for e in ("2", "4", "6")),
+    ]
+    for argv in commands:
+        assert main([*argv, *small]) == 0, argv
+    argv = ["validate", "--replicas", "256", "--therm", "100", "--sweeps", "100"]
+    main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"])  # its verdicts do not matter
+    pilot.write(pilot.read(PILOT), tmp_path)  # the folder tauc writes its record to
+    names = [p.name for p in (tmp_path / "ising").iterdir()]
+    assert len(names) == len(commands) + 2
+    assert [name for name in names if not ENGINE_RUN_NAME.fullmatch(name)] == []
+    assert any(name.endswith("-L4-ramp-x0p02-s1") for name in names)
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(0.02, "0p02"), (2.0, "2"), (1 / 3, "0p333333"), (1e-5, "1e-05"), (1e20, "1e20")],
+)
+def test_numbers_in_tags_keep_to_the_engines_charset(value: float, text: str) -> None:
+    """Any --x the parser takes, not just the presets: no '.' and no '+'."""
+    assert _number(value) == text and ENGINE_RUN_NAME.fullmatch(f"x{text}")
 
 
 def test_ramp_manifest_records_the_save_schedule_it_ran(tmp_path: Path) -> None:
@@ -94,12 +147,41 @@ def test_null_run_is_a_complete_thermalised_fixed_run_naming_epsilon_l_and_tau_c
     schedule = io.read_json(run_dir / "manifest.json")["params"]["schedule"]
     params, tau_c = schedule["params"], pilot.tau_c(pilot.read(PILOT), 16)
     assert schedule["kind"] == "fixed" and (params["epsilon_L"], params["tau_c"]) == (6.0, tau_c)
+    stamp = io.read_json(run_dir / "manifest.json")["params"]["pilot"]
+    assert stamp == pilot.stamp(PILOT, pilot.read(PILOT)) and stamp["stale"] is False
     assert params["temperatures"] == [exact.TC * (1 + 6 / 16)]
     (check,) = io.read_json(run_dir / "complete.json")["checks"]["thermalised"]
     assert check["passed"], check
     assert all(c.passed for c in gates.gate_b(run_dir))  # its bursts sample Boltzmann, as any run's
     with pytest.raises(SystemExit):
         main([*argv[:4], "3", *argv[5:], "--data-dir", str(tmp_path / "x"), "--device", "cpu"])
+
+
+def test_ramp_and_null_refuse_a_stale_record_unless_allowed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Catches #55 at the command line: a record without kernel_sha256 (the shape of every record
+    written before it) is refused by ramp and null with no run started; --allow-stale-pilot runs
+    with a warning, and the manifest's stamp says stale."""
+    record = json.loads(PILOT.read_text(encoding="utf-8"))
+    del record["kernel_sha256"]
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps(record), encoding="utf-8")
+    ramp = ["ramp", "--L", "4", "--x", "2", "--pilot", str(old), "--replicas", "2"]
+    ramp += ["--pre", "10", "--hold", "10", "--data-dir", str(tmp_path / "d"), "--device", "cpu"]
+    null = ["null", "--L", "16", "--epsilon-L", "4", "--pilot", str(old)]
+    null += ["--data-dir", str(tmp_path / "d"), "--device", "cpu"]
+    for argv in (ramp, null):
+        with pytest.raises(SystemExit) as refused:
+            main(argv)
+        message = str(refused.value.code)
+        assert "records no kernel_sha256" in message and "--allow-stale-pilot" in message
+    assert not (tmp_path / "d").exists()
+    assert main([*ramp, "--allow-stale-pilot"]) == 0
+    assert "records no kernel_sha256" in capsys.readouterr().err
+    stamp = io.read_json(_only_run(tmp_path / "d") / "manifest.json")["params"]["pilot"]
+    assert stamp["stale"] is True and stamp["kernel_sha256"] is None
+    assert stamp["kernel_commit"] == record["kernel_commit"]
 
 
 def test_null_run_refuses_a_size_the_record_did_not_measure(tmp_path: Path) -> None:
@@ -174,8 +256,15 @@ def test_pilot_tau_must_be_a_positive_number(tmp_path: Path) -> None:
         _taus(str(pilot), (3.5,))
 
 
-def test_data_dir_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Runs never default into the repository (it lives in the vault; data is GBs)."""
+def test_runs_land_where_the_engine_looks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches #81 end to end: with TP_DATA_DIR unset a run lands in the engine's default data
+    dir (LOCALAPPDATA comes first in its chain) instead of being refused; set, it lands there.
+    Either way never in the repository, which lives in the vault (data is GBs)."""
+    argv = ["pilot", "--L", "4", "--T", "3.0", "--replicas", "2", "--therm", "0", "--sweeps", "2"]
     monkeypatch.delenv("TP_DATA_DIR", raising=False)
-    with pytest.raises(SystemExit):
-        main(["pilot", "--L", "4"])
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    assert main([*argv, "--device", "cpu"]) == 0
+    assert len(list((tmp_path / "local" / "tipping-point" / "ising").iterdir())) == 1
+    monkeypatch.setenv("TP_DATA_DIR", str(tmp_path / "set"))
+    assert main([*argv, "--device", "cpu"]) == 0
+    assert len(list((tmp_path / "set" / "ising").iterdir())) == 1

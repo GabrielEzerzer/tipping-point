@@ -15,6 +15,22 @@ Open-source framework for detecting critical transitions in live data streams: a
   replay-equals-live checks and the API's contract, parity, Python and load checks (production code
   never depends on it).
 
+## Release builds, one heavy job at a time
+
+Run the engine's binaries (`ingest`, `store` and `serve`, and the harness's `record` and `soak`)
+from a release build: `cargo build --release -p engine -p engine-harness` once, then the
+`cargo run --release ...` lines below, or `target/release/<bin>` directly. Plain `cargo run`
+builds the dev profile, where rotate (binary log to Parquet) is roughly ten times slower: 5.4-6.0
+minutes per recorded hour against 35-37 s (#63). `serve --record` rotates in the background as
+each segment closes, re-reading from the start, so in debug live-run replay finds gaps from about
+the fifth hour, and Ctrl-C after a day of recording waits about an hour for the final rotate
+(about 10 minutes in release). The app's Tauri sidecar, when it lands, ships the release binary.
+Tests stay in the dev profile, which compiles much faster: `cargo test` and the gate build it.
+
+On a laptop, run one heavy job at a time: a cargo build, `cargo test` or the gate, a recording
+session or a by-hand `store rotate`, a simulator run, a training. They share the same cores, so
+two at once each run slower, and a recording's live loop can fall behind the feed.
+
 ## Venues and the live feed
 
 `engine/src/market/` is the market-data core every venue shares: integer-unit order books, a
@@ -30,10 +46,10 @@ snapshot); it has no live loop yet and is read from Bybit's archive. One run hol
 one `serve` hub takes several venues' loops at once.
 
 ```sh
-cargo run -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
-cargo run -p engine --bin ingest -- --record                # ...and records a run to the data dir (Ctrl-C ends it cleanly)
-cargo run -p engine-harness --bin record -- --seconds 60    # a run + the live transcript → harness/fixtures/recorded/ (gitignored)
-cargo run -p engine-harness --bin soak -- --hours 24        # gaps/resyncs/reconnects/drops per hour → harness/out/
+cargo run --release -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
+cargo run --release -p engine --bin ingest -- --record                # ...and records a run to the data dir (Ctrl-C ends it cleanly)
+cargo run --release -p engine-harness --bin record -- --seconds 60    # a run + the live transcript → harness/fixtures/recorded/ (gitignored)
+cargo run --release -p engine-harness --bin soak -- --hours 24        # gaps/resyncs/reconnects/drops per hour → harness/out/
 ```
 
 ## Market data on disk
@@ -49,13 +65,15 @@ through the same pipeline the live loop runs.
 
 Runs live in `<data dir>/market/<run_id>/` (`manifest.json`, `log/`, one Parquet file per table per
 segment, `complete.json` after a clean end), the layout the Ising simulator shares. The data dir is
-`$TP_DATA_DIR`, or else `%LOCALAPPDATA%\tipping-point` (`~/.local/share/tipping-point` elsewhere),
-never the repository.
+`$TP_DATA_DIR`, or else `%LOCALAPPDATA%\tipping-point` (`$XDG_DATA_HOME/tipping-point` or
+`~/.local/share/tipping-point` elsewhere), never the repository. The Python CLIs (`ising`, `ews`,
+`jepa`) resolve the same folder when `--data-dir` is not given (`tipping_point.engine.data_dir`),
+so the engine and the simulator share one root with no configuration.
 
 ```sh
-cargo run -p engine --bin store -- recover <run dir>              # after a crash: close the newest segment
-cargo run -p engine --bin store -- rotate <run dir>               # closed segments → Parquet (safe to re-run)
-cargo run -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the books from the log or the Parquet
+cargo run --release -p engine --bin store -- recover <run dir>              # after a crash: close the newest segment
+cargo run --release -p engine --bin store -- rotate <run dir>               # closed segments → Parquet (safe to re-run)
+cargo run --release -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the books from the log or the Parquet
 ```
 
 ### Historical archives
@@ -79,7 +97,7 @@ for the same run is refused. Binance's archives are CC BY-NC-SA 4.0: anything de
 and published carries that licence and the "Binance Vision" attribution.
 
 ```sh
-cargo run -p engine --bin store -- import <archive> [--data-dir DIR] [--tables T,...]
+cargo run --release -p engine --bin store -- import <archive> [--data-dir DIR] [--tables T,...]
 ```
 
 Downloaded days stay local (`harness/fixtures/archives/`, gitignored); with `TP_ARCHIVE_DAYS`
@@ -108,9 +126,9 @@ prints `serve listening on http://127.0.0.1:<port>` once it accepts connections,
 that passed `--port 0` reads the port from it.
 
 ```sh
-cargo run -p engine --bin serve                                   # live Binance feed on 127.0.0.1:7731
-cargo run -p engine --bin serve -- --record                       # ...recorded, closed segments rotated in the background
-cargo run -p engine --bin serve -- --script <file.jsonl> --speed 10 --port 0   # a recorded script played back instead
+cargo run --release -p engine --bin serve                                   # live Binance feed on 127.0.0.1:7731
+cargo run --release -p engine --bin serve -- --record                       # ...recorded, closed segments rotated in the background
+cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --port 0   # a recorded script played back instead
 ```
 
 | route | what |
@@ -155,8 +173,11 @@ default 5 s. The Python round trip (`api_python`) runs the repository's `.venv` 
 `python/tipping_point/src/tipping_point/ising/` simulates the 2D Ising model with checkerboard
 Metropolis in PyTorch: int8 spins, a batch of independent replicas, one seeded generator per run.
 Runs follow the shared layout `<data dir>/ising/<run_id>/` (`manifest.json`, Parquet chunks under
-`stats/`, `configs/`, `balance/`, and `complete.json` after a clean end). The data dir is
-`--data-dir` or `$TP_DATA_DIR`, outside the repository; `--device` defaults to CUDA when available.
+`stats/`, `configs/`, `balance/`, and `complete.json` after a clean end). A run id is the UTC start
+time plus a tag in the engine's charset (`tipping_point.engine.run_id`: ASCII letters, digits, `-`
+and `_`), so a number's `.` is written `p`, as in `20261023T010000Z-L16-ramp-x0p02-s1`; the
+engine's API opens no other name. The data dir is `--data-dir`, else the engine's (see Market data
+on disk); `--device` defaults to CUDA when available.
 
 ```sh
 uv run python -m tipping_point.ising validate                        # Gates A-C on a small L = 4 run
@@ -181,15 +202,30 @@ uv run python -m tipping_point.ising pilot --L 64 --T 2.269185314213022 --replic
 uv run python -m tipping_point.ising tauc <L16 run> <L32 run> <L64 run>    # -> <data dir>/ising/<id>-tauc-L16-32-64/pilot.json
 ```
 
-`pilot.json` is `{"kernel_commit", "per_L": {"16": {...}, ...}, "fit": {"A", "z", "A_ci", "z_ci"}}`,
-each `per_L` entry `{"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps", "seed"}`
-plus `"tau_c_ci"` (95%, optional for readers; field notes in `ising/pilot.py`). A size missing from
-`per_L` reads tau_c = A L^z. `tauc` refuses a run that is incomplete, never held exactly Tc, or
-holds fewer than 300 tau_c: subtracting each series' mean pulls the windowed estimate about
-10 / (N / tau) low, so a recorded tau_c is at most ~3% short (`test_autocorr` pins the bias).
+`pilot.json` is `{"kernel_commit", "kernel_sha256", "per_L": {"16": {...}, ...}, "fit": {"A", "z",
+"A_ci", "z_ci"}}`, each `per_L` entry `{"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas",
+"sweeps", "seed"}` plus `"tau_c_ci"` (95%, optional for readers; field notes in `ising/pilot.py`).
+A size missing from `per_L` reads tau_c = A L^z. `tauc` refuses a run that is incomplete, never
+held exactly Tc, or holds fewer than 300 tau_c: subtracting each series' mean pulls the windowed
+estimate about 10 / (N / tau) low, so a recorded tau_c is at most ~3% short (`test_autocorr` pins
+the bias).
+
+**A stale record is refused.** `kernel_sha256` is the sha256 of `ising/kernel.py` (the sweep and
+its acceptance table) that the pilot runs ran; every run's manifest records its own as
+`params.algorithm.kernel_sha256`. `ramp --x`, `null` and `ews score` refuse a record whose
+`kernel_sha256` is not the running kernel's, since its tau_c would clock another kernel. The
+commit cannot decide this: it moves with every merge, kernel or not. A record written before #55
+has no `kernel_sha256` and counts as stale. `--allow-stale-pilot` uses a stale record anyway, with
+a warning. Either way the run's manifest names the record it read as `params.pilot`:
+`{"run_id", "sha256", "kernel_commit", "kernel_sha256", "stale"}`, and EWS results repeat that stamp
+for each input run beside their own record's `kernel_sha256` and `stale` in `params.pilot`. #50's
+record below predates the field, so ramps, nulls and scoring read against the copy in the data
+dir need `--allow-stale-pilot` until the pilot is re-run. Its numbers still stand: `kernel.py` is
+byte for byte the one at 5aac98e.
 
 The record on the fixed kernel (#47; commit 5aac98e, CPU, seed 1), copied to
-`python/tipping_point/tests/fixtures/ising_pilot.json`:
+`python/tipping_point/tests/fixtures/ising_pilot.json` with `kernel_sha256` added (the sha256 of
+`kernel.py` at 5aac98e):
 
 | L | replicas x sweeps | tau_c = tau(\|m\|) [95% CI] | binning | tau(e) | N / tau_c |
 |---|---|---|---|---|---|

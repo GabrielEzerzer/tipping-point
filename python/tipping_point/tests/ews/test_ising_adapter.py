@@ -107,8 +107,11 @@ def test_pilot_record_is_read_and_checked(tmp_path: Path) -> None:
         ising.read_pilot(tmp_path, PILOT_RUN)
     path = pilot(tmp_path)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    record = ising.read_pilot(tmp_path, PILOT_RUN, digest)
+    with pytest.raises(ising.IsingDataError, match=r"no kernel_sha256.*--allow-stale-pilot"):
+        ising.read_pilot(tmp_path, PILOT_RUN, digest)  # the planted record predates #55
+    record = ising.read_pilot(tmp_path, PILOT_RUN, digest, allow_stale=True)
     assert record.tau(16) == 4.0 and record.tau(32) == 8.0 and record.kernel_commit == "0" * 40
+    assert record.kernel_sha256 is None and record.stale
     with pytest.raises(ising.IsingDataError, match="no tau_c for L = 64"):
         record.tau(64)
     with pytest.raises(ising.IsingDataError, match="pins"):
@@ -116,7 +119,7 @@ def test_pilot_record_is_read_and_checked(tmp_path: Path) -> None:
     extended = json.loads(path.read_text("utf-8"))
     extended["per_L"]["16"] |= {"tau_c_ci": [3.5, 4.6], "a_key_from_later": 1}
     path.write_text(json.dumps(extended))
-    record = ising.read_pilot(tmp_path, PILOT_RUN)  # optional and unknown keys are fine
+    record = ising.read_pilot(tmp_path, PILOT_RUN, allow_stale=True)  # extra keys are fine
     assert record.tau(16) == 4.0 and record.tau_c_ci == {16: [3.5, 4.6]}
     path.write_text(json.dumps({"per_L": {"16": {"tau_c": -1.0}}, "kernel_commit": "x"}))
     with pytest.raises(ising.IsingDataError, match="positive"):

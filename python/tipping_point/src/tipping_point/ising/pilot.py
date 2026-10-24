@@ -9,6 +9,8 @@ L, each holding a block at exactly Tc with a stats row every sweep, and writes
   {
     "kernel_commit": "<sha>",   commit the pilot runs came from; "<sha>-dirty" if any of their
                                 trees had uncommitted edits
+    "kernel_sha256": "<hex>",   sha256 of the kernel source they ran (kernel.py: the sweep and its
+                                acceptance table), as their manifests record it
     "per_L": {                  one entry per size, keyed by str(L):
       "16": {
         "tau_c": ...,           Sokal tau_int of |m|, 1 + 2 sum rho(t) with window c = 5, sweeps
@@ -26,6 +28,12 @@ L, each holding a block at exactly Tc with a stats row every sweep, and writes
 
 `tau_c(record, L)` reads a measured size from per_L and any other size from the fit.
 
+`read` refuses a stale record, one whose kernel_sha256 is not the running kernel's: its tau_c
+clocks another kernel. A record without the field (written before #55) counts as stale. The
+commit cannot decide it, since it moves with every merge whether the kernel changed or not.
+`ramp` and `null` take --allow-stale-pilot to use one anyway, and their manifests carry `stamp`,
+which records whether it was.
+
 Subtracting each series' mean pulls the windowed estimate about 10 / (N / tau) low (2c over
 N / tau, c = 5), so a size is recorded only from N >= 300 tau_c: at most ~3% short. The record's
 L = 64 entry (343 tau_c) reads ~3% low and L = 16 (960 tau_c) ~1%; test_autocorr pins both.
@@ -33,14 +41,16 @@ L = 64 entry (343 tau_c) reads ~3% low and L = 16 (960 tau_c) ~1%; test_autocorr
 
 from __future__ import annotations
 
+import hashlib
 import math
+import re
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from .. import engine
 from . import autocorr, io
 from .exact import TC
 
@@ -48,6 +58,13 @@ DRAWS = 2000  # bootstrap resamples per size
 MIN_N_OVER_TAU = 300  # measured sweeps per tau_c below which the estimate reads > 3% short
 _QUANTILES = (0.025, 0.975)  # 95% intervals
 _ENTRY_KEYS = ("tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps", "seed")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+KERNEL = Path(__file__).with_name("kernel.py")  # the dynamics tau_c measures
+
+
+def kernel_sha256() -> str:
+    """sha256 of the running kernel's source: the kernel a record must have measured."""
+    return hashlib.sha256(KERNEL.read_bytes()).hexdigest()
 
 
 def series(columns: dict[str, np.ndarray], T: float, L: int) -> tuple[np.ndarray, np.ndarray]:
@@ -62,15 +79,18 @@ def series(columns: dict[str, np.ndarray], T: float, L: int) -> tuple[np.ndarray
 
 def measure(
     run_dir: Path, draws: int = DRAWS, seed: int = 0
-) -> tuple[int, dict[str, Any], np.ndarray, str]:
+) -> tuple[int, dict[str, Any], np.ndarray, str, str]:
     """One size from a complete run with a block at exactly Tc: L, its per_L entry, the
-    bootstrap taus of |m| and the run's commit."""
+    bootstrap taus of |m|, the run's commit and its kernel's sha256."""
     if not (run_dir / "complete.json").exists():
         raise ValueError(f"{run_dir.name} is not complete")
     manifest = io.read_json(run_dir / "manifest.json")
     L, producer = manifest["params"]["L"], manifest["producer"]
+    kernel = manifest["params"]["algorithm"].get("kernel_sha256")
     if producer["git_sha"] is None:
         raise ValueError(f"{run_dir.name} records no git commit, so no kernel to name")
+    if kernel is None:
+        raise ValueError(f"{run_dir.name} records no kernel_sha256 (run before #55); re-run it")
     stats = io.read_table(run_dir, "stats")
     columns = {name: stats[name].to_numpy() for name in stats.column_names}
     at_tc = (columns["phase"] == 1) & (columns["temperature"] == TC)
@@ -98,7 +118,8 @@ def measure(
         "sweeps": m.shape[1],
         "seed": manifest["params"]["seed"],
     }
-    return L, entry, boot, producer["git_sha"] + ("-dirty" if producer["dirty"] else "")
+    commit = producer["git_sha"] + ("-dirty" if producer["dirty"] else "")
+    return L, entry, boot, commit, kernel
 
 
 def fit(L: Sequence[int], tau: np.ndarray) -> tuple[Any, Any]:
@@ -116,14 +137,17 @@ def record(run_dirs: Sequence[Path], draws: int = DRAWS, seed: int = 0) -> dict[
     sizes = [L for L, *_ in results]
     if len(sizes) < 2 or len(set(sizes)) < len(sizes):
         raise ValueError(f"need one pilot run per L and at least two sizes, got L = {sizes}")
-    commits = {commit for *_, commit in results}
+    commits, kernels = {r[3] for r in results}, {r[4] for r in results}
     if len(commits) > 1:
         raise ValueError(f"pilot runs come from different commits: {sorted(commits)}")
-    A, z = fit(sizes, np.array([entry["tau_c"] for _, entry, _, _ in results]))
-    A_draws, z_draws = fit(sizes, np.stack([boot for _, _, boot, _ in results], axis=1))
+    if len(kernels) > 1:
+        raise ValueError(f"pilot runs ran different kernels: {sorted(kernels)}")
+    A, z = fit(sizes, np.array([r[1]["tau_c"] for r in results]))
+    A_draws, z_draws = fit(sizes, np.stack([r[2] for r in results], axis=1))
     return {
         "kernel_commit": commits.pop(),
-        "per_L": {str(L): entry for L, entry, _, _ in results},
+        "kernel_sha256": kernels.pop(),
+        "per_L": {str(r[0]): r[1] for r in results},
         "fit": {
             "A": float(A),
             "z": float(z),
@@ -136,15 +160,16 @@ def record(run_dirs: Sequence[Path], draws: int = DRAWS, seed: int = 0) -> dict[
 def write(record: dict[str, Any], root: Path) -> Path:
     """Write <root>/ising/<run_id>/pilot.json, the run_id naming its sizes; return the path."""
     sizes = "-".join(record["per_L"])
-    run_dir = Path(root) / "ising" / f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-tauc-L{sizes}"
+    run_dir = Path(root) / "ising" / engine.run_id(f"tauc-L{sizes}")
     run_dir.mkdir(parents=True)
     io.write_json(run_dir / "pilot.json", record)
     return run_dir / "pilot.json"
 
 
-def read(path: Path) -> dict[str, Any]:
-    """A pilot record, refused unless it has every field above (tau_c_ci may be absent), every
-    tau_c, A and z is a finite positive number, and every size held at least 300 tau_c."""
+def read(path: Path, allow_stale: bool = False) -> dict[str, Any]:
+    """A pilot record, refused unless it has every field above (tau_c_ci may be absent; a missing
+    kernel_sha256 makes it stale), every tau_c, A and z is a finite positive number, and every
+    size held at least 300 tau_c; refused when stale too, unless `allow_stale`."""
     record = io.read_json(Path(path))
     per_L, fit = record.get("per_L"), record.get("fit")
     if not (
@@ -169,7 +194,39 @@ def read(path: Path) -> dict[str, Any]:
         and all(len(fit.get(key) or ()) == 2 for key in ("A_ci", "z_ci"))
     ):
         raise ValueError(f"{path}: bad fit {fit}")
+    kernel = record.get("kernel_sha256")
+    if kernel is not None and not (isinstance(kernel, str) and _SHA256.fullmatch(kernel)):
+        raise ValueError(f"{path}: bad kernel_sha256 {kernel!r}")
+    why = stale(record)
+    if why and not allow_stale:
+        raise ValueError(
+            f"{path} is stale: {why}. Its tau_c may belong to another kernel: re-run the pilot "
+            "and tauc, or pass --allow-stale-pilot to use it anyway"
+        )
     return record
+
+
+def stale(record: dict[str, Any]) -> str | None:
+    """Why a record did not measure the running kernel, or None when it did."""
+    kernel = record.get("kernel_sha256")
+    if kernel is None:
+        return "it records no kernel_sha256 (it was written before #55)"
+    if kernel != kernel_sha256():
+        return f"it measured kernel {kernel[:12]}, not the running kernel.py {kernel_sha256()[:12]}"
+    return None
+
+
+def stamp(path: Path, record: dict[str, Any]) -> dict[str, Any]:
+    """What a run's manifest records of the pilot record it read: its run id (the folder it sits
+    in, never a local path) and sha256, the kernel it measured, and whether that was stale
+    (possible only with --allow-stale-pilot)."""
+    return {
+        "run_id": Path(path).parent.name,
+        "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+        "kernel_commit": record["kernel_commit"],
+        "kernel_sha256": record.get("kernel_sha256"),
+        "stale": stale(record) is not None,
+    }
 
 
 def tau_c(record: dict[str, Any], L: int) -> float:

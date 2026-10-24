@@ -24,14 +24,13 @@ import subprocess
 import time
 import tomllib
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .. import __version__
+from .. import __version__, engine
 from ..ising import io
 
 PREREG_DIR = Path("paper") / "prereg"
@@ -374,18 +373,6 @@ def cells(doc: dict[str, Any]) -> int:
     return per_size * len(doc["data"]["L"]) * len(doc["event"]["horizons"]) * grid
 
 
-def _code() -> dict[str, Any]:
-    """The commit of the code that scored, and whether its tree had uncommitted edits."""
-    here = Path(__file__).parent
-    try:
-        return {
-            "git_sha": _git(here, "rev-parse", "HEAD"),
-            "dirty": bool(_git(here, "status", "--porcelain")),
-        }
-    except (OSError, PreregError):
-        return {"git_sha": None, "dirty": None}
-
-
 def write_result(
     data_dir: Path,
     prereg: Prereg,
@@ -396,7 +383,7 @@ def write_result(
 ) -> Path:
     """A scoring run's output in the shared layout: manifest.json first, each non-empty table as
     <table>/00000000000000000000.parquet keyed by `cell`, and complete.json once all are synced."""
-    run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{prereg.name}"
+    run_id = engine.run_id(prereg.name)
     run_dir = Path(data_dir) / "ews" / run_id
     run_dir.mkdir(parents=True)
     filled = {name: rows for name, rows in tables.items() if rows}
@@ -404,7 +391,7 @@ def write_result(
         "format": 1,
         "domain": "ews",
         "run_id": run_id,
-        "producer": {"name": "tipping_point.ews", "version": __version__, **_code()},
+        "producer": {"name": "tipping_point.ews", "version": __version__, **io.code_version()},
         "started_ns": time.time_ns(),
         "key": "cell",
         "tables": list(filled),

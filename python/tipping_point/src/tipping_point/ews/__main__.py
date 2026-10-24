@@ -3,17 +3,18 @@
   calibrate            the surrogate test's false-positive rate on synthetic nulls; the long
                        version of the gate's check, run before each freeze (exit 1 off the band)
   score --prereg FILE  score a frozen pre-registration: results to <data dir>/ews/<run_id>/, one
-                       line per evaluated cell to <data dir>/ews/trials.jsonl
+                       line per evaluated cell to <data dir>/ews/trials.jsonl; a stale pilot
+                       record is refused unless --allow-stale-pilot
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
-The data dir is --data-dir or $TP_DATA_DIR.
+The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside
+the repository: tipping_point.engine.data_dir).
 """
 
 from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,10 +22,12 @@ from typing import Any
 
 import numpy as np
 
+from .. import engine
 from . import ising, prereg, scoring, surrogates
 from .trend import Pipeline
 
 NULLS = ("ar1", "fast_slow")
+DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
 CELL = ("indicator", "observable", "cadence", "L", "h", "window_taus", "bandwidth_taus", "headline")
 
 
@@ -79,8 +82,6 @@ def calibration(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    if getattr(args, "needs_data", False) and args.data_dir is None:
-        parser.error("set TP_DATA_DIR or pass --data-dir")
     try:
         return args.command(args)
     except (prereg.PreregError, ising.IsingDataError) as exc:
@@ -101,9 +102,14 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("score", help="score a frozen pre-registration")
     p.add_argument("--prereg", type=Path, required=True)
-    p.add_argument("--data-dir", type=Path, default=os.environ.get("TP_DATA_DIR"))
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--seed", type=int, default=26, help="bootstrap and surrogate draws")
-    p.set_defaults(command=_score, needs_data=True)
+    p.add_argument(
+        "--allow-stale-pilot",
+        action="store_true",
+        help="score with a pilot record that did not measure the running kernel (stamped stale)",
+    )
+    p.set_defaults(command=_score)
 
     p = sub.add_parser("prereg", help="pre-registration files")
     actions = p.add_subparsers(required=True)
@@ -139,7 +145,8 @@ def _score(args: argparse.Namespace) -> int:
         )
     if pre.doc["data"]["domain"] != "ising":
         raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
-    evaluation = ising.evaluate(pre.doc, args.data_dir, np.random.default_rng(args.seed))
+    rng = np.random.default_rng(args.seed)
+    evaluation = ising.evaluate(pre.doc, args.data_dir, rng, allow_stale=args.allow_stale_pilot)
     stamp = prereg.stamp(pre, ref)
     pilot = evaluation.pilot
     params = {
@@ -148,13 +155,20 @@ def _score(args: argparse.Namespace) -> int:
             "run_id": pilot.path.parent.name,
             "sha256": pilot.sha256,
             "kernel_commit": pilot.kernel_commit,
+            "kernel_sha256": pilot.kernel_sha256,
+            "stale": pilot.stale is not None,
             "tau_c": {str(L): tau for L, tau in sorted(pilot.tau_c.items())},
             "tau_c_ci": {str(L): ci for L, ci in sorted(pilot.tau_c_ci.items())},
         },
         "dropped": evaluation.dropped,
     }
-    inputs = [
-        {"domain": "ising", "run_id": r.run_id, "complete_sha256": r.complete_sha256}
+    inputs = [  # pilot: the stamp of the record a ramp or null run was made with (#55)
+        {
+            "domain": "ising",
+            "run_id": r.run_id,
+            "complete_sha256": r.complete_sha256,
+            "pilot": r.params.get("pilot"),
+        }
         for r in evaluation.inputs
     ]
     run_dir = prereg.write_result(args.data_dir, pre, ref, evaluation.tables, inputs, params)

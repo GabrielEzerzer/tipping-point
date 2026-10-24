@@ -36,7 +36,6 @@ import hashlib
 import json
 import os
 import platform
-import subprocess
 import time
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -50,7 +49,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from .. import __version__
+from .. import __version__, engine
 from ..ising import io
 from . import monitor, objective
 from .data import Dataset, reload
@@ -308,21 +307,6 @@ def budget(root: Path, quota: float) -> list[dict[str, Any]]:
     ]
 
 
-def code_version() -> dict[str, Any]:
-    """The commit of the code that ran, and whether its tree had uncommitted edits."""
-    here = Path(__file__).parent
-
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=here, capture_output=True, text=True, check=True
-        ).stdout.strip()
-
-    try:
-        return {"git_sha": git("rev-parse", "HEAD"), "dirty": git("status", "--porcelain") != ""}
-    except (OSError, subprocess.CalledProcessError):
-        return {"git_sha": None, "dirty": None}
-
-
 # ---------------------------------------------------------------- the loop
 
 
@@ -565,7 +549,7 @@ def _manifest(
         "format": 1,
         "domain": "jepa",
         "run_id": trainer.run_id,
-        "producer": {"name": "tipping_point.jepa", "version": __version__, **code_version()},
+        "producer": {"name": "tipping_point.jepa", "version": __version__, **io.code_version()},
         "started_ns": time.time_ns(),
         "key": "step",
         "tables": list(TABLES),
@@ -615,7 +599,7 @@ def start(
     end (or to a collapse, when the config stops on one)."""
     dev = torch.device(device or default_device())
     flags = deterministic(dev)
-    run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{tag}"
+    run_id = engine.run_id(tag)
     run_dir = Path(root) / "jepa" / run_id
     trainer = _Trainer(run_dir, run_id, config, data, dev)
     run_dir.mkdir(parents=True)

@@ -22,12 +22,13 @@ from ews_planted import (
 class Planted:
     root: Path
     runs: dict[str, Path]  # tag -> run folder
+    stamps: dict[str, dict[str, object]]  # tag -> the pilot stamp in its manifest (ramps, nulls)
 
 
 @pytest.fixture(scope="session")
 def planted(tmp_path_factory: pytest.TempPathFactory) -> Planted:
     root = tmp_path_factory.mktemp("ews-data")
-    runs = {}
+    runs, stamps = {}, {}
     for L in SIZES:
         sweeps = 500 if L == 16 else 900
         for seed in SEEDS:
@@ -37,6 +38,8 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> Planted:
                 f"L{L}-qs-s{seed}": (staircase(), plateau_values(L)),
             }
             for tag, (schedule, values) in plan.items():
-                runs[tag] = write_run(root, tag, schedule, L, seed, values)
+                if "-qs-" not in tag:  # a staircase dwells on tau.json, not on a pilot record
+                    stamps[tag] = {"run_id": f"pilot-{tag}", "sha256": "0" * 64, "stale": False}
+                runs[tag] = write_run(root, tag, schedule, L, seed, values, pilot=stamps.get(tag))
     pilot(root)
-    return Planted(root, runs)
+    return Planted(root, runs, stamps)

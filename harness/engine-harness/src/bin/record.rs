@@ -3,7 +3,7 @@
 //! loop's own transcript (`live-transcript.json`) for the replay-equals-live check. It then
 //! replays the log and says whether the replay matched. Recordings are never committed.
 //!
-//! `cargo run -p engine-harness --bin record -- [--seconds N] [--out DIR]`
+//! `cargo run --release -p engine-harness --bin record -- [--seconds N] [--out DIR]`
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

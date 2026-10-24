@@ -10,7 +10,7 @@
 //! a replay reaches the rotated hours through `DuckDB` and the open hour from memory. Ctrl-C or
 //! `--seconds` ends it.
 //!
-//! `cargo run -p engine --bin serve -- [--port N] [--record] [--data-dir DIR]
+//! `cargo run --release -p engine --bin serve -- [--port N] [--record] [--data-dir DIR]
 //!   [--allow-origin URL]... [--script FILE [--speed X]] [--seconds N]`
 
 use std::error::Error;

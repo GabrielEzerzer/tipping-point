@@ -14,7 +14,7 @@
 //! samples for an order book and trades for trades; `--tables` names others (`frames`,
 //! `depth_updates`, `snapshots`).
 //!
-//! `cargo run -p engine --bin store -- rotate <run dir>`
+//! `cargo run --release -p engine --bin store -- rotate <run dir>`
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

@@ -2,7 +2,7 @@
 //! dropped under backpressure, once per period, to stdout and to a line-per-period file
 //! under `harness/out/`.
 //!
-//! `cargo run -p engine-harness --bin soak -- [--hours H | --seconds N] [--report-secs S] [--out PATH]`
+//! `cargo run --release -p engine-harness --bin soak -- [--hours H | --seconds N] [--report-secs S] [--out PATH]`
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

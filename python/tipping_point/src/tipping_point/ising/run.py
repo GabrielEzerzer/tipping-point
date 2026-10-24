@@ -8,10 +8,8 @@ run would be (Gate D). The unit of reproducibility is the run on one device type
 from __future__ import annotations
 
 import platform
-import subprocess
 import time
 from dataclasses import asdict, dataclass, fields
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +18,10 @@ import pyarrow as pa
 import torch
 from torch import Tensor
 
-from .. import __version__
+from .. import __version__, engine
 from . import gates, io, kernel, protocol
 from .exact import TC
+from .pilot import kernel_sha256
 
 CONFIG_BUFFER_BYTES = 2**28  # flush before ~256 MB of configurations pile up on the device
 MAX_LATTICES = 2**16  # replica ids are stored as uint16
@@ -46,19 +45,25 @@ class Spec:
 
 
 def start(
-    spec: Spec, schedule: protocol.Schedule, root: Path, tag: str, device: str | None = None
+    spec: Spec,
+    schedule: protocol.Schedule,
+    root: Path,
+    tag: str,
+    device: str | None = None,
+    pilot: dict[str, Any] | None = None,
 ) -> Path:
-    """Create <root>/ising/<run_id>/ and its manifest, then run the schedule to the end."""
+    """Create <root>/ising/<run_id>/ and its manifest, then run the schedule to the end. `pilot`
+    is the stamp of the pilot record the schedule was read against (pilot.stamp), if any."""
     if spec.replicas * schedule.blocks > MAX_LATTICES:
         raise ValueError(
             f"{spec.replicas * schedule.blocks:,} lattices in one run, but replica ids are "
             f"uint16: at most {MAX_LATTICES:,} (replicas per temperature x temperatures)"
         )
     dev = torch.device(device or default_device())
-    run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{tag}"
+    run_id = engine.run_id(tag)
     run_dir = Path(root) / "ising" / run_id
     run_dir.mkdir(parents=True)
-    io.write_json(run_dir / "manifest.json", _manifest(spec, schedule, run_id, dev))
+    io.write_json(run_dir / "manifest.json", _manifest(spec, schedule, run_id, dev, pilot))
     gen = torch.Generator(device=dev).manual_seed(spec.seed)
     shape = (spec.replicas * schedule.blocks, spec.L, spec.L)
     if spec.init == "hot":
@@ -252,14 +257,18 @@ def _checkpoint(run_dir: Path, step: int, s: Tensor, gen: torch.Generator) -> No
 
 
 def _manifest(
-    spec: Spec, schedule: protocol.Schedule, run_id: str, dev: torch.device
+    spec: Spec,
+    schedule: protocol.Schedule,
+    run_id: str,
+    dev: torch.device,
+    pilot: dict[str, Any] | None,
 ) -> dict[str, Any]:
     used = {"stats": True, "configs": bool(schedule.frames), "balance": spec.tally}
     return {
         "format": 1,
         "domain": "ising",
         "run_id": run_id,
-        "producer": {"name": "tipping_point.ising", "version": __version__, **_git()},
+        "producer": {"name": "tipping_point.ising", "version": __version__, **io.code_version()},
         "started_ns": time.time_ns(),
         "key": "step",
         "tables": [name for name in io.TABLES if used[name]],
@@ -271,6 +280,7 @@ def _manifest(
             "boundary": "periodic",
             "Tc": TC,
             "schedule": schedule.to_json(),
+            "pilot": pilot,
             "algorithm": {
                 "name": "checkerboard-metropolis",
                 "order": "black (i + j even) half-sweep, then white",
@@ -278,6 +288,7 @@ def _manifest(
                     "u < min(1, exp(-dE/T)), except u < 1/2 at dE = 0; "
                     "table built in float64, used as float32"
                 ),
+                "kernel_sha256": kernel_sha256(),  # kernel.py, which implements the above
             },
             "rng": {
                 "generator": f"torch.Generator({dev.type})",
@@ -301,18 +312,3 @@ def _manifest(
             "pyarrow": pa.__version__,
         },
     }
-
-
-def _git() -> dict[str, Any]:
-    """The commit that produced the run, and whether the tree had uncommitted edits."""
-    here = Path(__file__).parent
-
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=here, capture_output=True, text=True, check=True
-        ).stdout.strip()
-
-    try:
-        return {"git_sha": git("rev-parse", "HEAD"), "dirty": git("status", "--porcelain") != ""}
-    except (OSError, subprocess.CalledProcessError):
-        return {"git_sha": None, "dirty": None}

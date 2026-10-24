@@ -1,7 +1,9 @@
 """The engine seam: Parquet reads that need no engine, and the engine's local HTTP API.
 
 Offline work (training on Kaggle, experiments, baselines) reads a run's Parquet directly with
-`read`, following the shared layout `<root>/<domain>/<run_id>/<table>/<first_key:020>.parquet`.
+`read`, following the shared layout `<root>/<domain>/<run_id>/<table>/<first_key:020>.parquet`;
+`run_id` names a new run by the engine's rule, so the engine can open it, and `data_dir` is the
+root the engine uses, so both halves share it without configuration.
 The engine is only on the live path: `live` streams book samples as Arrow record batches, each
 one or more whole 100 ms grid instants of one venue with one row per symbol (one instant per
 batch live; a backfill or an unpaced replay sends several), `table` reads a range of any table
@@ -27,8 +29,12 @@ Stdlib and pyarrow only.
 from __future__ import annotations
 
 import json
+import os
+import re
+import tempfile
 import urllib.request
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -43,6 +49,42 @@ STREAM_TYPE = "application/vnd.apache.arrow.stream"
 SCHEMA_KEY = b"tp.schema"
 RUNS_KEY = b"tp.runs"
 SCALES_KEY = b"tp.scales"
+DATA_DIR_ENV = "TP_DATA_DIR"
+_TAG = re.compile(r"[A-Za-z0-9_-]+")  # store::run::run_id's charset (engine/src/store/run.rs)
+_MAX_TAG = 128 - len("YYYYMMDDTHHMMSSZ-")  # the API opens names of <= 128 (api/table.rs, safe)
+
+
+def data_dir(environ: Mapping[str, str] = os.environ) -> Path:
+    """The data dir, resolved as the engine resolves it (store::run::data_dir,
+    engine/src/store/run.rs): $TP_DATA_DIR, or else a per-user folder outside the repository,
+    tipping-point under %LOCALAPPDATA% on Windows, under $XDG_DATA_HOME or ~/.local/share
+    elsewhere, and under the temp dir as a last resort. An empty variable counts as unset."""
+
+    def var(name: str) -> str | None:
+        return environ.get(name) or None
+
+    chosen = var(DATA_DIR_ENV)
+    if chosen is not None:
+        return Path(chosen)
+    base = var("LOCALAPPDATA") or var("XDG_DATA_HOME")
+    home = var("HOME")
+    if base is not None:
+        root = Path(base)
+    elif home is not None:
+        root = Path(home) / ".local" / "share"
+    else:
+        root = Path(tempfile.gettempdir())
+    return root / "tipping-point"
+
+
+def run_id(tag: str) -> str:
+    """A new run's id, the UTC start time plus a tag (20261021T140512Z-L16-ramp-x0p02-s1), by
+    the engine's rule (store::run::run_id): the tag holds only ASCII letters, digits, '-' and
+    '_', and the whole id at most 128 characters. The API lists a run of any other name but
+    refuses to open it (a '.' among them). Readers take any name already on disk."""
+    if not (_TAG.fullmatch(tag) and len(tag) <= _MAX_TAG):
+        raise ValueError(f"run tag {tag!r} must be 1-{_MAX_TAG} ASCII letters, digits, '-' or '_'")
+    return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{tag}"
 
 
 def read(

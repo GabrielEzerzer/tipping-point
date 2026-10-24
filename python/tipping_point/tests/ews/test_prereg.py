@@ -10,7 +10,9 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import pytest
+import torch
 from tipping_point.ews import prereg
+from tipping_point.ising import io, protocol, run
 
 REPO = Path(__file__).resolve().parents[4]
 V1 = REPO / "paper" / "prereg" / "ising-ews-v1.toml"
@@ -138,6 +140,24 @@ def test_freeze_binds_the_file_and_results_carry_the_stamp(tmp_path: Path, repo:
     path.write_bytes(path.read_bytes().replace(b"x = 0.02", b"x = 0.03"))
     with pytest.raises(prereg.PreregError, match="differs from the version frozen"):
         prereg.frozen(prereg.load(path))
+
+
+def test_runs_and_results_take_their_commit_from_one_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches #88: an Ising run's producer and the EWS result scored from it each ran their own
+    copy of git rev-parse and status, so a fix to one copy (say, untracked files no longer counted
+    as dirty) would leave one result with two definitions of a dirty checkout. Both read
+    io.code_version: a value no checkout gives reaches both manifests."""
+    planted = {"git_sha": "f" * 40, "dirty": True}
+    monkeypatch.setattr(io, "code_version", lambda: dict(planted))
+    spec, schedule = run.Spec(L=4, replicas=1, seed=1), protocol.Fixed((2.0,), 1, 1)
+    ising = run._manifest(spec, schedule, "r", torch.device("cpu"), None)["producer"]
+    tables = {"auc": [{"L": 16, "auc": 0.5}]}
+    result = prereg.write_result(tmp_path, prereg.load(V1), prereg.Frozen("t", "c"), tables, [], {})
+    ews = json.loads((result / "manifest.json").read_text("utf-8"))["producer"]
+    for producer in (ising, ews):
+        assert {key: producer[key] for key in planted} == planted, producer
 
 
 def test_freeze_refuses_what_it_should(repo: Path) -> None:

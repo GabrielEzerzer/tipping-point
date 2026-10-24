@@ -2,7 +2,7 @@
 //! With `--record` it also records every input to a new run under the data dir: `TP_DATA_DIR`,
 //! or else a per-user folder outside the repository. Ctrl-C ends a run cleanly.
 //!
-//! `cargo run -p engine --bin ingest -- [--seconds N] [--record]`
+//! `cargo run --release -p engine --bin ingest -- [--seconds N] [--record]`
 
 use std::process::ExitCode;
 use std::time::Duration;

@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import re
+import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,8 +22,15 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 from tipping_point import engine
+from tipping_point.ews.__main__ import _parser as ews_cli
+from tipping_point.ising.__main__ import _parser as ising_cli
+from tipping_point.jepa.__main__ import _parser as jepa_cli
 
 GOLDEN = Path(__file__).resolve().parents[3] / "engine" / "tests" / "fixtures" / "api"
+# The engine's run-name rule as a literal: store::run::run_id's tag charset (ASCII letters,
+# digits, '-' and '_'; engine/src/store/run.rs), which api::table::safe applies to the whole run
+# id, at most 128 characters, before any read (engine/src/api/table.rs).
+ENGINE_RUN_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 def golden_stream() -> bytes:
@@ -85,6 +95,60 @@ def test_read_takes_a_key_range_and_columns_straight_from_parquet(tmp_path: Path
     assert part.column("m").to_pylist() == [4, 6, 8]
     with pytest.raises(FileNotFoundError):
         engine.read(tmp_path, "ising", run.name, "configs")
+
+
+def test_run_ids_follow_the_engines_rule() -> None:
+    """Catches #67's root: Python named runs its own way, so a '.' reached a run id that the
+    engine lists and then refuses to open. run_id refuses every tag the engine would, and the ids
+    it makes pass the engine's filter."""
+    made = engine.run_id("L16-ramp-x0p02-s1")
+    assert ENGINE_RUN_NAME.fullmatch(made) and re.fullmatch(r"\d{8}T\d{6}Z-L16-ramp-x0p02-s1", made)
+    assert ENGINE_RUN_NAME.fullmatch(engine.run_id("t" * 111))  # 17 + 111 = 128
+    for bad in ["", "a=b", "a/b", "a b", "a.b", "x0.02", "a\\b", "1e+20", "é", "t" * 112]:
+        with pytest.raises(ValueError, match="run tag"):
+            engine.run_id(bad)
+
+
+def test_the_data_dir_is_the_engines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches #81: with TP_DATA_DIR unset the engine fell back to a per-user folder while the
+    Python CLIs refused, so following both halves of the README gave two roots. data_dir walks
+    the engine's chain (the cases its own test pins in engine/src/store/run.rs), never into the
+    repository, and the ising, ews and jepa CLIs default to it, the variable set or unset."""
+    cases = [
+        ({"TP_DATA_DIR": "D:/data", "LOCALAPPDATA": "C:/l"}, Path("D:/data")),
+        ({"TP_DATA_DIR": "", "LOCALAPPDATA": "C:/l"}, Path("C:/l") / "tipping-point"),
+        ({"XDG_DATA_HOME": "/x", "HOME": "/home/g"}, Path("/x") / "tipping-point"),
+        ({"HOME": "/home/g"}, Path("/home/g/.local/share") / "tipping-point"),
+        ({}, Path(tempfile.gettempdir()) / "tipping-point"),
+    ]
+    for environ, expected in cases:
+        assert engine.data_dir(environ) == expected, environ
+    unset = {k: v for k, v in os.environ.items() if k != engine.DATA_DIR_ENV}
+    assert not engine.data_dir(unset).resolve().is_relative_to(Path(__file__).resolve().parents[3])
+    commands = [
+        (ising_cli, ["pilot", "--L", "4"]),
+        (ews_cli, ["score", "--prereg", "p"]),
+        (jepa_cli, ["budget"]),
+    ]
+    monkeypatch.delenv(engine.DATA_DIR_ENV, raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    for parser, argv in commands:
+        assert parser().parse_args(argv).data_dir == tmp_path / "local" / "tipping-point", argv
+    monkeypatch.setenv(engine.DATA_DIR_ENV, str(tmp_path / "set"))
+    for parser, argv in commands:
+        assert parser().parse_args(argv).data_dir == tmp_path / "set", argv
+
+
+def test_read_takes_runs_named_before_and_after_the_rule(tmp_path: Path) -> None:
+    """A run already on disk under a dotted id (made before run_id) still reads, as does one
+    named by the rule: the rule binds new names, never readers."""
+    for name in ("20261022T000000Z-L16-ramp-x0.02-s1", "20261023T000000Z-L16-ramp-x0p02-s1"):
+        run = tmp_path / "ising" / name
+        (run / "stats").mkdir(parents=True)
+        (run / "manifest.json").write_text(json.dumps({"key": "step", "tables": ["stats"]}))
+        table = pa.table({"step": pa.array([1, 2], pa.int64())})
+        pq.write_table(table, run / "stats" / f"{1:020d}.parquet")
+        assert engine.read(tmp_path, "ising", name, "stats").column("step").to_pylist() == [1, 2]
 
 
 class Stand(ThreadingHTTPServer):
