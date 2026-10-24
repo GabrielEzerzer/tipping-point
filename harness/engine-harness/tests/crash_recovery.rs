@@ -38,6 +38,7 @@ fn a_killed_writer_loses_no_good_frame_once_recovered() -> Result<(), Box<dyn Er
         // ends the writer even if the whole test runner is killed.
         let mut child = KillOnDrop(
             Command::new(env!("CARGO_BIN_EXE_crash-writer"))
+                .arg("--end-with-stdin")
                 .arg(&run_dir)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
@@ -101,5 +102,42 @@ fn a_killed_writer_loses_no_good_frame_once_recovered() -> Result<(), Box<dyn Er
             "no kill landed mid-frame, so the torn-tail path went untested"
         );
     }
+    Ok(())
+}
+
+/// Started with stdin null and no `--end-with-stdin`, the writer still writes until it is killed,
+/// instead of ending at once with nothing written and exit 0, as if it had run (#93). It is
+/// killed as soon as it has filled one 16 KiB segment, a fraction of a second.
+#[test]
+fn a_writer_without_stdin_held_open_still_writes() -> Result<(), Box<dyn Error>> {
+    let run_dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("crash-no-stdin-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&run_dir);
+    let mut child = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_crash-writer"))
+            .arg(&run_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?,
+    );
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            panic!("the writer ended on its own ({status}) with stdin null");
+        }
+        let segments = segment::list(&run_dir.join(LOG_DIR)).map_or(0, |list| list.len());
+        if segments >= 2 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{segments} segments after 20 s"
+        );
+        sleep(Duration::from_millis(5));
+    }
+    child.kill()?;
+    child.wait()?;
+    fs::remove_dir_all(&run_dir)?;
     Ok(())
 }

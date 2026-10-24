@@ -11,8 +11,8 @@ use std::process::Child;
 
 /// A child process that is killed and reaped when this drops, so a test that fails or returns
 /// early never leaves it running. A test runner killed outright runs no `Drop`: a child that
-/// would run forever (the crash writer) also ends when its piped stdin closes, which happens
-/// however its parent ends.
+/// would run forever (the crash writer, told `--end-with-stdin`) also ends when its piped stdin
+/// closes, which happens however its parent ends.
 #[derive(Debug)]
 pub struct KillOnDrop(pub Child);
 
