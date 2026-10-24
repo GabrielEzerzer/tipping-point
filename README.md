@@ -178,7 +178,11 @@ cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --
 - **Checks on every request:** `Host` must name the server (stops DNS rebinding) and a browser's
   `Origin` must be on the allowlist (the Tauri webview, the Vite dev server, `--allow-origin`).
 - **Replay and scrub:** rotated hours come from Parquet through DuckDB, the hour not yet rotated
-  from memory, as the same `book` and `trades` messages.
+  from memory, as the same `book` and `trades` messages. The Parquet is read ten minutes of the
+  run at a time: each read pays a fixed cost (a DuckDB connection, every file's footer, an hour's
+  row group decoded), so reading 10 s at a time took 46 s per recorded hour at speed 0 in a debug
+  build, against 3.3 s now (#69). `replay_speed` in `engine/src/api/replay.rs` measures it:
+  `TP_REPLAY_HOURS=2 cargo test -p engine --lib replay_speed -- --ignored --nocapture`.
 
 Training reads Parquet directly (`tipping_point.engine.read`, no engine); the engine's Arrow
 streams serve live inference and replay tests of it (`live`, `table`, `publish`; stdlib and
