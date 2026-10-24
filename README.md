@@ -121,7 +121,10 @@ Recorded fixtures are never committed; the replay tests replay any present local
 otherwise. The committed tests use synthetic streams and a golden log
 (`engine/tests/fixtures/synthetic/`) and generated ones (property tests and fault injection in
 `engine/tests/`, crash injection and replay-equals-live in `harness/engine-harness/tests/`).
-`TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default).
+`TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default). With `TP_ROTATE_SOAK`
+set, `cargo test --release -p engine-harness --test rotate_soak -- --nocapture` writes one full
+1 GiB segment of synthetic frames, rotates it, and records the time and peak memory in
+`harness/out/rotate-soak-<ms>.json` (#52; `TP_ROTATE_SOAK_MB` for another size).
 
 ## Engine API
 
