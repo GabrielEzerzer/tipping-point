@@ -34,6 +34,7 @@ use engine_harness::api::{
     Frame, LivePath, Outcome, Server, hello, next_frame, next_json, send_json, ws_connect,
 };
 use engine_harness::load::{Generator, peak_memory_bytes, percentile};
+use engine_harness::skipped;
 use futures_util::SinkExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -81,15 +82,6 @@ fn wake_probe(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<Duration>> {
         }
         late
     })
-}
-
-/// Prints a line the gate counts as a skip. libtest keeps a passing test's `println!` output to
-/// itself, so this writes to stdout's handle, which it does not capture.
-fn skipped(why: &str) {
-    use std::io::Write;
-    let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "\nSKIPPED: {why}");
-    let _ = out.flush();
 }
 
 /// What one app client got: book messages and trades with when they arrived, and gaps.

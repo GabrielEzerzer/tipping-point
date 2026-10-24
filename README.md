@@ -124,8 +124,9 @@ Windows the build also copies `duckdb.dll` next to the binaries (`target/<profil
 a binary copied elsewhere needs that DLL beside it. Linux and macOS binaries find the library
 through their rpath.
 
-Recorded fixtures are never committed; the replay tests replay any present locally and skip
-otherwise. The committed tests use synthetic streams and a golden log
+Recorded fixtures are never committed; `replay_equals_live` replays any present locally and,
+with none, says so on a `SKIPPED:` line the gate counts rather than passing silently. The
+committed tests use synthetic streams and a golden log
 (`engine/tests/fixtures/synthetic/`) and generated ones (property tests and fault injection in
 `engine/tests/`, crash injection and replay-equals-live in `harness/engine-harness/tests/`).
 `TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default). With `TP_ROTATE_SOAK`
