@@ -80,6 +80,12 @@ fn main() {
 /// nothing to check. Runs before the library is copied anywhere; failing here also stops every
 /// binary and test that would load it from being built.
 fn check_download(dir: &Path) {
+    // libduckdb-sys takes DUCKDB_LIB_DIR over a download, whatever DUCKDB_DOWNLOAD_LIB says, and
+    // tests it the same way.
+    println!("cargo::rerun-if-env-changed=DUCKDB_LIB_DIR");
+    if env::var("DUCKDB_LIB_DIR").is_ok() {
+        return;
+    }
     println!("cargo::rerun-if-env-changed=DUCKDB_DOWNLOAD_LIB");
     let downloaded = env::var("DUCKDB_DOWNLOAD_LIB")
         .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true"));

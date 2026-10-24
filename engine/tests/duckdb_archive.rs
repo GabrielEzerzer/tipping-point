@@ -11,6 +11,20 @@ use std::path::Path;
 
 #[test]
 fn only_the_pinned_archive_passes() -> Result<(), Box<dyn Error>> {
+    // On Windows x64 every build downloads the library unless DUCKDB_LIB_DIR names one, so an
+    // archive the build script did not check means the check is no longer wired in.
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let archive = {
+        if option_env!("DUCKDB_LIB_DIR").is_some() {
+            println!("skipped: DuckDB comes from DUCKDB_LIB_DIR, so nothing was downloaded");
+            return Ok(());
+        }
+        let Some(archive) = option_env!("TP_DUCKDB_ARCHIVE") else {
+            panic!("the build script checked no DuckDB archive");
+        };
+        archive
+    };
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
     let Some(archive) = option_env!("TP_DUCKDB_ARCHIVE") else {
         println!("skipped: this build downloaded no DuckDB archive to check");
         return Ok(());
