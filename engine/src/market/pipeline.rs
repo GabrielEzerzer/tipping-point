@@ -267,12 +267,17 @@ impl Pipeline {
                 }
                 self.note_sync_change(symbol, on_event);
             }
-            // The feed already dropped this symbol's book.
-            Err(FeedError::BadDepth { symbol, .. }) => {
-                on_event(LiveEvent::Resync {
-                    symbol,
-                    reason: ResyncReason::BadFrame,
-                });
+            // The feed already dropped this symbol's buffer, and its book if it had one: only a
+            // lost book is a resync, as for every symbol below (#41).
+            Err(FeedError::BadDepth {
+                symbol, book_lost, ..
+            }) => {
+                if *book_lost {
+                    on_event(LiveEvent::Resync {
+                        symbol,
+                        reason: ResyncReason::BadFrame,
+                    });
+                }
                 self.note_sync_change(symbol, on_event);
             }
             // Unreadable, so it may have been any symbol's update: trust no book.
@@ -575,6 +580,42 @@ mod tests {
         assert_eq!(
             live.resyncs,
             vec![(SYMBOL.to_owned(), ResyncReason::BadFrame)]
+        );
+    }
+
+    /// Buffering after a reconnect, there is no book to lose: frames that do not convert (a
+    /// finer tick size sends one every 100 ms) are errors, not a resync each (#41).
+    #[test]
+    fn a_depth_frame_that_does_not_convert_while_buffering_raises_no_resync() {
+        let mut live = Live::synced();
+        live.send(Message::Socket {
+            stream: Stream::Depth,
+            inbound: Inbound::Disconnected {
+                reason: "stream ended".to_owned(),
+                dropped_before: 0,
+                capture_ns: 7,
+            },
+        });
+        let finer_than_the_tick = r#"{"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":1,"T":1,"s":"BTCUSDT","U":13,"u":13,"pu":12,"b":[["100.05","1.000"]],"a":[]}}"#;
+        for _ in 0..10 {
+            live.send(Message::Socket {
+                stream: Stream::Depth,
+                inbound: Inbound::Text {
+                    text: finer_than_the_tick.to_owned(),
+                    dropped_before: 0,
+                    capture_ns: 8,
+                },
+            });
+        }
+        assert_eq!(
+            live.resyncs,
+            vec![(SYMBOL.to_owned(), ResyncReason::Reconnect)]
+        );
+        let stats = live.pipeline.feed().stats();
+        assert_eq!(
+            (stats.resyncs, stats.parse_errors),
+            (1, 10),
+            "one resync event per resync counted"
         );
     }
 
