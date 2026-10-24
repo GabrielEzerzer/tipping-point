@@ -25,6 +25,15 @@ use crate::venue::Venue;
 /// samples of an unchanged book (a day at the default 100 ms).
 pub const MAX_GAP_SAMPLES: i64 = 864_000;
 
+/// The first instant of the grid `every_ns` apart (multiples of it since the epoch) at or after
+/// `t`. The one place the grid is rounded to, for the sampler and for the replay that counts the
+/// instants it lost (#87).
+pub(crate) fn grid_ceil(t: i64, every_ns: i64) -> i64 {
+    t.div_euclid(every_ns)
+        .saturating_add(i64::from(t.rem_euclid(every_ns) != 0))
+        .saturating_mul(every_ns)
+}
+
 /// One symbol's book as a sample holds it: the top levels of each side, empty while unsynced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookRow {
@@ -135,13 +144,6 @@ impl Sampler {
         self.skipped
     }
 
-    /// The first grid instant at or after `t`.
-    fn ceil(&self, t: i64) -> i64 {
-        t.div_euclid(self.every_ns)
-            .saturating_add(i64::from(t.rem_euclid(self.every_ns) != 0))
-            .saturating_mul(self.every_ns)
-    }
-
     /// Called for every input, before it is applied, with its capture time: the grid instants
     /// the clock now passes, each to be sampled from the book as it stands, after every earlier
     /// input and before this one. None when the clock does not move past an instant, and none
@@ -154,7 +156,7 @@ impl Sampler {
         };
         let Some(clock) = self.clock else {
             self.clock = Some(captured);
-            self.next = self.ceil(captured);
+            self.next = grid_ceil(captured, self.every_ns);
             return none;
         };
         if captured <= clock {
@@ -164,7 +166,7 @@ impl Sampler {
         let count = (captured - self.next).max(0).div_euclid(self.every_ns);
         if count > MAX_GAP_SAMPLES {
             self.skipped += u64::try_from(count).unwrap_or(0);
-            self.next = self.ceil(captured);
+            self.next = grid_ceil(captured, self.every_ns);
             return none;
         }
         let instants = Instants {
@@ -172,7 +174,7 @@ impl Sampler {
             end: captured,
             every_ns: self.every_ns,
         };
-        self.next = self.ceil(captured);
+        self.next = grid_ceil(captured, self.every_ns);
         instants
     }
 }
@@ -312,11 +314,15 @@ mod tests {
 
     #[test]
     fn grid_instants_round_up() {
-        let sampler = sampler();
-        assert_eq!(sampler.ceil(0), 0);
-        assert_eq!(sampler.ceil(1), 100);
-        assert_eq!(sampler.ceil(100), 100);
-        assert_eq!(sampler.ceil(-1), 0);
+        assert_eq!(grid_ceil(0, 100), 0);
+        assert_eq!(grid_ceil(1, 100), 100);
+        assert_eq!(grid_ceil(100, 100), 100);
+        assert_eq!(grid_ceil(-1, 100), 0);
+        assert_eq!(
+            grid_ceil(i64::MAX, 100),
+            i64::MAX,
+            "saturates, never overflows"
+        );
     }
 
     #[test]

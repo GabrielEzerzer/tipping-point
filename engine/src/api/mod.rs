@@ -333,13 +333,16 @@ fn body_for(api: &Api, kill: Option<Extension<Kill>>) -> (Chunks, Body) {
     )
 }
 
-/// A non-negative, finite number of seconds.
-fn seconds(value: Option<f64>, name: &str) -> Result<Option<f64>, ApiError> {
-    match value {
-        Some(s) if !s.is_finite() || s < 0.0 => Err(bad_request(format!(
-            "{name} must be a number of seconds, 0 or more"
-        ))),
-        other => Ok(other),
+/// The span a `backfill_s` asks for, one rule for the Arrow route and the WebSocket's `sub`
+/// (#87): none is none, else a finite number of seconds, 0 or more, capped at 1e9 s so that no
+/// number can overflow a `Duration`.
+fn backfill(seconds: Option<f64>) -> Result<Duration, ApiError> {
+    match seconds {
+        None => Ok(Duration::ZERO),
+        Some(s) if s.is_finite() && s >= 0.0 => Ok(Duration::from_secs_f64(s.min(1e9))),
+        Some(_) => Err(bad_request(
+            "backfill_s must be a number of seconds, 0 or more",
+        )),
     }
 }
 
@@ -355,7 +358,7 @@ async fn live_samples(
     Query(query): Query<LiveQuery>,
     kill: Option<Extension<Kill>>,
 ) -> Result<Response, ApiError> {
-    let backfill = seconds(query.backfill_s, "backfill_s")?;
+    let span = backfill(query.backfill_s)?;
     let speed = query.speed.unwrap_or(1.0);
     if !replay::valid_speed(speed) {
         return Err(bad_request(format!(
@@ -377,8 +380,7 @@ async fn live_samples(
     let source = hub.source().await;
     let levels = hub.config().book_sample.levels;
     let schema = live_schema(&source, levels);
-    let backfill = Duration::from_secs_f64(backfill.unwrap_or(0.0).min(1e9));
-    let (past, rx, ended) = hub.subscribe_samples(backfill);
+    let (past, rx, ended) = hub.subscribe_samples(span);
     let (chunks, body) = body_for(&api, kill);
     tokio::spawn(live_stream(schema, levels, past, rx, ended, chunks));
     Ok(arrow_response(body))

@@ -23,7 +23,7 @@ use super::messages::TradeMessage;
 use super::table::{Table, TableError, locate};
 use crate::market::sync::Level;
 use crate::store::run::MARKET;
-use crate::store::samples::{BookRow, Sample};
+use crate::store::samples::{BookRow, Sample, grid_ceil};
 use crate::store::{StoreError, query};
 use crate::venue::Venue;
 
@@ -325,15 +325,12 @@ fn missing_instants(
     } else if start_ns != i64::MIN {
         // The first grid instant at or after the start; a run's first sample comes a second or
         // two after the run starts, and there is nothing before it to lose.
-        let start = start_ns
-            .div_euclid(every_ns)
-            .checked_add(i64::from(start_ns.rem_euclid(every_ns) != 0))?
-            .checked_mul(every_ns)?;
+        let start = grid_ceil(start_ns, every_ns);
         first_ever.map_or(start, |first_ever| start.max(first_ever))
     } else {
         first_ever?
     };
-    let lost = u64::try_from((first - expected).div_euclid(every_ns)).ok()?;
+    let lost = u64::try_from(first.checked_sub(expected)?.div_euclid(every_ns)).ok()?;
     (lost > 0).then_some(lost)
 }
 

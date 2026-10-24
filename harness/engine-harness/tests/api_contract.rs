@@ -782,21 +782,29 @@ async fn a_replay_opening_on_a_slow_disk_holds_up_no_other_connection() -> Outco
     Ok(())
 }
 
-/// The relayed messages a client reads until nothing more comes for `quiet`: each as its topic and
-/// data.
-async fn relayed_until_quiet(ws: &mut Socket, quiet: Duration) -> Outcome<Vec<(String, Value)>> {
+/// The messages a client reads until nothing more comes for `quiet`.
+async fn until_quiet(ws: &mut Socket, quiet: Duration) -> Outcome<Vec<Value>> {
     let mut got = Vec::new();
     loop {
         match next_frame(ws, quiet).await {
-            Frame::Text(text) => {
-                let message: Value = serde_json::from_str(&text)?;
-                let topic = message["t"].as_str().unwrap_or_default().to_owned();
-                got.push((topic, message["data"].clone()));
-            }
+            Frame::Text(text) => got.push(serde_json::from_str(&text)?),
             Frame::Silent => return Ok(got),
             other => return Err(format!("the socket stopped: {other:?}").into()),
         }
     }
+}
+
+/// The relayed messages a client reads until nothing more comes for `quiet`: each as its topic and
+/// data.
+async fn relayed_until_quiet(ws: &mut Socket, quiet: Duration) -> Outcome<Vec<(String, Value)>> {
+    let got = until_quiet(ws, quiet).await?;
+    Ok(got
+        .into_iter()
+        .map(|message| {
+            let topic = message["t"].as_str().unwrap_or_default().to_owned();
+            (topic, message["data"].clone())
+        })
+        .collect())
 }
 
 /// Publishing takes JSON objects on the relayed topics only, and an app client of a production
@@ -870,6 +878,173 @@ async fn only_objects_on_relayed_topics_are_published() -> Outcome {
     assert_eq!(post("meters", "[1,2]").await?.status(), 400);
     assert_eq!(post("meters", "not json").await?.status(), 400);
     assert_eq!(post("jev", &"x".repeat(100 * 1024)).await?.status(), 413);
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A hub whose one venue has started, serving `dir`.
+async fn started_server(dir: &Path, config: HubConfig) -> std::io::Result<Server> {
+    let hub = Hub::new(config);
+    let feed = VenueSource {
+        scales: BTreeMap::new(),
+        run: None,
+    };
+    assert!(hub.start(Venue::BinanceUsdm, feed));
+    Server::start(hub, ApiConfig::new(dir.to_owned())).await
+}
+
+/// Reads past text frames to the close, and returns its code.
+async fn close_code(ws: &mut Socket) -> Option<u16> {
+    loop {
+        match next_frame(ws, WAIT).await {
+            Frame::Text(_) | Frame::Binary(_) => {}
+            Frame::Closed(code) => return code,
+            Frame::Silent => return None,
+        }
+    }
+}
+
+/// `backfill_s` is one rule on both routes (#87): a negative, NaN or infinite one is refused, a
+/// 400 on the Arrow route and a 4000 close on the WebSocket, and one too big for a `Duration` is
+/// capped, never a panic. Each route had its own copy of the rule, which nothing tested.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_backfill_is_refused_or_capped_alike_on_both_routes() -> Outcome {
+    let dir = scratch("api-backfill-rule");
+    let server = started_server(&dir, HubConfig::default()).await?;
+    let mut ws = ws_connect(server.addr).await?;
+    hello(&mut ws).await?;
+    let huge = json!({"t": "sub", "topics": ["book"], "backfill_s": 1e300});
+    send_json(&mut ws, &huge).await?;
+    assert_eq!(
+        next_json(&mut ws, WAIT).await?,
+        json!({"t": "source", "mode": "live"})
+    );
+    let negative = json!({"t": "sub", "topics": ["book"], "backfill_s": -1});
+    send_json(&mut ws, &negative).await?;
+    assert_eq!(close_code(&mut ws).await, Some(4000));
+
+    // Ended, so an Arrow stream ends as soon as its backfill is sent.
+    server.hub.end();
+    for refused in ["-1", "NaN", "inf"] {
+        let url = server.url(&format!("/v1/live/book_samples?backfill_s={refused}"));
+        let response = reqwest::get(url).await?;
+        assert_eq!(response.status(), 400, "backfill_s={refused}");
+        let body = response.text().await?;
+        assert!(body.contains("backfill_s must be"), "{body}");
+    }
+    let (_, batches) = get_arrow(&server.url("/v1/live/book_samples?backfill_s=1e300")).await?;
+    assert!(batches.is_empty(), "nothing was published");
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A client of `addr` subscribed to `topic`, past the subscription's answer.
+async fn subscribed(addr: std::net::SocketAddr, topic: &str) -> Outcome<Socket> {
+    let mut ws = ws_connect(addr).await?;
+    hello(&mut ws).await?;
+    send_json(&mut ws, &json!({"t": "sub", "topics": [topic]})).await?;
+    let ack = next_json(&mut ws, WAIT).await?;
+    if ack != json!({"t": "source", "mode": "live"}) {
+        return Err(format!("wanted the subscription answered, got {ack}").into());
+    }
+    Ok(ws)
+}
+
+/// What a client of an append topic got: the `id_field` of each item it received, in order, and
+/// the losses its gaps on `topic` counted. Items come one per message, or, for trades, several.
+fn received(messages: &[Value], topic: &str, id_field: &str) -> Outcome<(Vec<u64>, u64)> {
+    let (mut ids, mut lost) = (Vec::new(), 0);
+    for message in messages {
+        let items = match message["t"].as_str() {
+            Some("gap") if message["topic"] == topic => {
+                lost += message["lost"].as_u64().ok_or("a count")?;
+                continue;
+            }
+            Some("trades") => message["trades"].as_array().cloned().unwrap_or_default(),
+            Some(t) if t == topic => vec![message["data"].clone()],
+            _ => return Err(format!("not {topic}: {message}").into()),
+        };
+        for item in items {
+            ids.push(item[id_field].as_u64().ok_or("an id")?);
+        }
+    }
+    Ok((ids, lost))
+}
+
+/// A client that falls behind on an append topic is told so (#87, where the three topics' drain
+/// loops became one): on ising and trades, a gap with the count lost and the newest after it,
+/// every message either delivered or counted; on jev, which is never dropped, a 4002 close. The
+/// hub holds two of each for a client, and a hundred are published at once, well inside the
+/// 16 ms a connection waits between sends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn falling_behind_on_an_append_topic_is_a_gap_or_a_close() -> Outcome {
+    const BURST: u64 = 100;
+    let dir = scratch("api-behind");
+    let config = HubConfig {
+        trades_capacity: 2,
+        relay_capacity: 2,
+        ..HubConfig::default()
+    };
+    let server = started_server(&dir, config).await?;
+    let hub = Arc::clone(&server.hub);
+    let quiet = Duration::from_millis(500);
+    let check = |what: &str, (ids, lost): (Vec<u64>, u64)| {
+        assert!(lost > 0, "{what}: nothing lost: {ids:?}");
+        assert_eq!(
+            lost + ids.len() as u64,
+            BURST,
+            "{what}: delivered or counted, each once"
+        );
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "{what}: {ids:?}");
+        assert_eq!(
+            ids.last(),
+            Some(&(BURST - 1)),
+            "{what}: the newest is never lost"
+        );
+    };
+
+    let mut ising = subscribed(server.addr, "ising").await?;
+    for step in 0..BURST {
+        hub.relay(Topic::Ising, json!({"run": ISING_RUN, "step": step}));
+    }
+    check(
+        "ising",
+        received(&until_quiet(&mut ising, quiet).await?, "ising", "step")?,
+    );
+
+    let mut trades = subscribed(server.addr, "trades").await?;
+    for seq in 0..BURST {
+        let trade = TradeMessage {
+            venue: Venue::BinanceUsdm,
+            symbol: "BTCUSDT".to_owned(),
+            seq,
+            ts_ms: 1_700_000_000_000 + seq,
+            id: seq.to_string(),
+            px: 500_000,
+            qty: 1,
+            buyer_is_maker: false,
+        };
+        hub.publish_trade(1_700_000_000_000_000_000, trade);
+    }
+    check(
+        "trades",
+        received(&until_quiet(&mut trades, quiet).await?, "trades", "seq")?,
+    );
+
+    let mut jev = subscribed(server.addr, "jev").await?;
+    for n in 0..BURST {
+        hub.relay(
+            Topic::Jev,
+            json!({"symbol": "BTCUSDT", "label": "regime_shift", "n": n}),
+        );
+    }
+    assert_eq!(
+        close_code(&mut jev).await,
+        Some(4002),
+        "jev is never dropped"
+    );
     server.stop().await;
     fs::remove_dir_all(&dir)?;
     Ok(())

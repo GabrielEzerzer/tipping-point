@@ -388,6 +388,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         }
     }
 
+    /// A `gap` on an append topic, when the client lost any of it.
+    fn queue_gap(&mut self, topic: Topic, lost: u64) {
+        if lost > 0 {
+            self.queue(&ServerMessage::Gap { topic, lost });
+        }
+    }
+
     fn queue_source(&mut self, mode: &'static str) {
         let message = match &self.mode {
             Mode::Replay {
@@ -558,13 +565,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         levels: Option<usize>,
         backfill_s: Option<f64>,
     ) -> Result<(), Closing> {
-        let backfill = match backfill_s {
-            None => Duration::ZERO,
-            Some(seconds) if seconds.is_finite() && seconds >= 0.0 => {
-                Duration::from_secs_f64(seconds.min(1e9))
-            }
-            Some(_) => return Err(bad("backfill_s must be a number of seconds, 0 or more")),
-        };
+        let backfill = super::backfill(backfill_s).map_err(|super::ApiError(_, why)| bad(why))?;
         let hub = Arc::clone(&self.api.hub);
         let most = hub.config().book_sample.levels;
         self.sub = Sub {
@@ -744,39 +745,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         self.collect_latest(Topic::Meters);
         self.collect_latest(Topic::Pnl);
         if let Some(jev) = self.jev.as_mut() {
-            let mut fresh = Vec::new();
-            loop {
-                match jev.try_recv() {
-                    Ok(data) => fresh.push(data),
-                    Err(TryRecvError::Lagged(_)) => {
-                        return Err(Closing::Code(
-                            close::TOO_SLOW,
-                            "fell behind on jev, which is never dropped".to_owned(),
-                        ));
-                    }
-                    Err(TryRecvError::Empty | TryRecvError::Closed) => break,
-                }
+            let (fresh, lost) = drain(jev);
+            if lost > 0 {
+                return Err(Closing::Code(
+                    close::TOO_SLOW,
+                    "fell behind on jev, which is never dropped".to_owned(),
+                ));
             }
             for data in fresh {
                 self.queue(&ServerMessage::relay(Topic::Jev, &data));
             }
         }
         if let Some(ising) = self.ising.as_mut() {
-            let mut fresh = Vec::new();
-            let mut lost = 0;
-            loop {
-                match ising.try_recv() {
-                    Ok(data) => fresh.push(data),
-                    Err(TryRecvError::Lagged(n)) => lost += n,
-                    Err(TryRecvError::Empty | TryRecvError::Closed) => break,
-                }
-            }
-            if lost > 0 {
-                self.queue(&ServerMessage::Gap {
-                    topic: Topic::Ising,
-                    lost,
-                });
-            }
+            let (fresh, lost) = drain(ising);
+            self.queue_gap(Topic::Ising, lost);
             for data in fresh {
                 self.queue(&ServerMessage::relay(Topic::Ising, &data));
             }
@@ -820,21 +802,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             }
         }
         if let Some(trades) = self.trades.as_mut() {
-            let mut fresh = Vec::new();
-            let mut lost = 0;
-            loop {
-                match trades.try_recv() {
-                    Ok(trade) => fresh.push(trade),
-                    Err(TryRecvError::Lagged(n)) => lost += n,
-                    Err(TryRecvError::Empty | TryRecvError::Closed) => break,
-                }
-            }
-            if lost > 0 {
-                self.queue(&ServerMessage::Gap {
-                    topic: Topic::Trades,
-                    lost,
-                });
-            }
+            let (fresh, lost) = drain(trades);
+            self.queue_gap(Topic::Trades, lost);
             self.queue_trades(&fresh);
         }
         if ended && !self.told_ended {
@@ -862,6 +831,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             for data in fresh {
                 self.queue(&ServerMessage::relay(topic, &data));
             }
+        }
+    }
+}
+
+/// Everything waiting on an append topic's channel, and how many items the client lost by falling
+/// behind: one drain for jev, ising and trades, which differ only in what a loss means (#87).
+fn drain<T: Clone>(rx: &mut broadcast::Receiver<T>) -> (Vec<T>, u64) {
+    let (mut fresh, mut lost) = (Vec::new(), 0);
+    loop {
+        match rx.try_recv() {
+            Ok(item) => fresh.push(item),
+            Err(TryRecvError::Lagged(n)) => lost += n,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return (fresh, lost),
         }
     }
 }
