@@ -560,13 +560,74 @@ def test_all_legs_run_after_a_failure_and_gate_exits_nonzero(tmp_path, monkeypat
         ("ghost", "RED"),
         ("last", "GREEN"),
     ]
-    assert set(rows[0]) == {"leg", "returncode", "duration", "verdict", "verdict_source"}
+    assert set(rows[0]) == {
+        "leg",
+        "returncode",
+        "duration",
+        "verdict",
+        "verdict_source",
+        "output_tail",
+        "evidence",
+    }
 
 
 def test_gate_exits_zero_only_when_all_green(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(gate, "OUT", tmp_path)
     monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", "print('All checks passed!')")])
     assert gate.main([]) == 0
+
+
+# ---------- the record diagnoses a red leg without a re-run (#59)
+
+
+def test_cargo_test_runs_every_binary_past_a_failing_one() -> None:
+    # without it cargo stops at the first failing binary: the RED run of 2026-10-22 never ran
+    # api_parity, api_python, crash_recovery, replay_equals_live or the doc tests
+    (leg,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    assert "--no-fail-fast" in leg.argv
+
+
+def test_a_red_cargo_test_record_names_the_failing_test_and_keeps_its_panic(
+    tmp_path, monkeypatch
+) -> None:
+    # 2026-10-22: the RED record held only "151 passed; 1 failed", so the test that failed
+    # (api_load, #60) could not be named without re-running the suite
+    (real,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    path = FIXTURES / "cargo-test-no-fail-fast-red.txt"
+    code = f"import sys; sys.stdout.buffer.write(open({str(path)!r}, 'rb').read())"
+    fake = gate.Leg("cargo-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [fake])
+    assert gate.main([]) == 1
+    (record,) = tmp_path.glob("gate-*.json")
+    (row,) = json.loads(record.read_text(encoding="utf-8"))
+    assert row["verdict"] == "RED"
+    lib = "unittests src\\lib.rs"
+    assert row["evidence"] == {
+        "results": [
+            f"{lib}: test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 0.01s",
+            "tests\\smoke.rs: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 0.00s",
+            "Doc-tests engine: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 0.00s",
+        ],
+        "failures": [f"{lib}: ---- deliberate::deliberately_fails stdout ----"],
+    }
+    assert row["output_tail"] == fixture("cargo-test-no-fail-fast-red.txt").splitlines()
+    assert "assertion `left == right` failed: deliberate" in row["output_tail"]
+
+
+def test_the_record_keeps_the_last_lines_of_a_long_output(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    code = "for i in range(500): print(i)\nprint('All checks passed!')"
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("long", code)])
+    assert gate.main([]) == 0
+    (record,) = tmp_path.glob("gate-*.json")
+    (row,) = json.loads(record.read_text(encoding="utf-8"))
+    assert len(row["output_tail"]) == gate.TAIL_LINES == 200
+    assert row["output_tail"][-2:] == ["499", "All checks passed!"]
+    assert row["evidence"] == {}  # only cargo-test reads extra evidence from its output
 
 
 # ---------- lie: a tool that cannot start, a judge that crashes

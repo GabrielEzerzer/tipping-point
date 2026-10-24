@@ -116,6 +116,24 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     return Verdict(True, summary)
 
 
+_FAILURE_HEADER = re.compile(r"^---- .+ ----$")  # libtest's "---- <test> stdout ----"
+
+
+def cargo_test_evidence(output: str) -> dict[str, list[str]]:
+    """What the record keeps of a cargo-test run besides its tail: every 'test result:' line and
+    every failing test's output header, each under the binary that printed it, so a red run
+    names what failed however far above the tail it sits."""
+    binary, evidence = "(no header)", {"results": [], "failures": []}
+    for line in output.splitlines():
+        if header := _TEST_HEADER.match(line):
+            binary = (header["binary"] or header["doctests"]).split(" (")[0]
+        elif _TEST_RESULT.search(line):
+            evidence["results"].append(f"{binary}: {line.strip()}")
+        elif _FAILURE_HEADER.match(line.strip()):
+            evidence["failures"].append(f"{binary}: {line.strip()}")
+    return evidence
+
+
 def judge_ruff_check(returncode: int, output: str) -> Verdict:
     found = re.search(r"^Found \d+ errors?.*$", output, re.MULTILINE)
     if found:
@@ -217,6 +235,7 @@ class Leg:
     name: str
     argv: list[str]
     judge: Callable[[int, str], Verdict]
+    evidence: Callable[[str], dict[str, list[str]]] | None = None  # kept beside the tail
 
 
 def _judge_pytest_from_disk(returncode: int, _output: str) -> Verdict:
@@ -231,7 +250,13 @@ LEGS: list[Leg] = [
         ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
         judge_clippy,
     ),
-    Leg("cargo-test", ["cargo", "test", "--workspace"], judge_cargo_test),
+    # --no-fail-fast: one failing binary must not hide whether the ones after it pass
+    Leg(
+        "cargo-test",
+        ["cargo", "test", "--workspace", "--no-fail-fast"],
+        judge_cargo_test,
+        cargo_test_evidence,
+    ),
     Leg("ruff-check", ["ruff", "check"], judge_ruff_check),
     Leg("ruff-format", ["ruff", "format", "--check"], judge_ruff_format),
     Leg("pyright", ["pyright"], judge_pyright),
@@ -245,6 +270,9 @@ LEGS: list[Leg] = [
 ]
 
 
+TAIL_LINES = 200  # of each leg's output, kept in the record so a red leg reads without a re-run
+
+
 @dataclass(frozen=True)
 class LegResult:
     leg: str
@@ -252,10 +280,13 @@ class LegResult:
     duration: float
     verdict: str
     verdict_source: str
+    output_tail: list[str]
+    evidence: dict[str, list[str]]
 
 
 def run_leg(leg: Leg) -> LegResult:
     start = time.perf_counter()
+    output = ""
     try:
         if leg.name == "pytest":
             JUNIT.unlink(missing_ok=True)  # a stale report must never vouch for this run
@@ -274,7 +305,7 @@ def run_leg(leg: Leg) -> LegResult:
     except OSError as exc:  # also a stale JUnit report that cannot be deleted (held open)
         verdict, returncode = Verdict(False, f"tool could not start: {exc}"), None
     else:
-        returncode = proc.returncode
+        returncode, output = proc.returncode, proc.stdout
         try:
             verdict = leg.judge(proc.returncode, proc.stdout)
         except Exception as exc:  # a crashing judge is a RED leg, never a dead gate
@@ -285,6 +316,8 @@ def run_leg(leg: Leg) -> LegResult:
         duration=round(time.perf_counter() - start, 2),
         verdict="GREEN" if verdict.green else "RED",
         verdict_source=verdict.source,
+        output_tail=output.splitlines()[-TAIL_LINES:],
+        evidence=leg.evidence(output) if leg.evidence else {},
     )
 
 
