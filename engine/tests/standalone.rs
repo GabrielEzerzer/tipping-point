@@ -32,6 +32,84 @@ fn run_bare(exe: &str, args: &[&str]) -> Output {
     command.output().expect("the binary can be spawned")
 }
 
+/// Arrow's end-of-stream marker: a continuation token and a zero length.
+const EOS: [u8; 8] = [0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0];
+
+/// The body of a whole chunked HTTP/1.1 response. hyper writes the terminating zero-length chunk
+/// only for a body that ran to its end, never for one the engine aborted, so its absence, or a
+/// chunk cut short, is an error.
+fn whole_body(response: &[u8]) -> Result<Vec<u8>, String> {
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or("no end of the headers")?;
+    let head = String::from_utf8_lossy(&response[..split]).to_ascii_lowercase();
+    if !head.contains("transfer-encoding: chunked") {
+        return Err(format!("not a chunked body: {head}"));
+    }
+    let mut rest = &response[split + 4..];
+    let mut body = Vec::new();
+    loop {
+        let line = rest
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or("the body stops before its terminating chunk")?;
+        let size = std::str::from_utf8(&rest[..line])
+            .ok()
+            .and_then(|text| usize::from_str_radix(text.trim(), 16).ok())
+            .ok_or("an unreadable chunk size")?;
+        rest = &rest[line + 2..];
+        if size == 0 {
+            return if rest == b"\r\n" {
+                Ok(body)
+            } else {
+                Err("bytes after the terminating chunk".to_owned())
+            };
+        }
+        if rest.len() < size + 2 || &rest[size..size + 2] != b"\r\n" {
+            return Err("a chunk cut short".to_owned());
+        }
+        body.extend_from_slice(&rest[..size]);
+        rest = &rest[size + 2..];
+    }
+}
+
+/// The rows of a whole Arrow IPC stream in an HTTP response: the body is whole, every message
+/// decodes, and the end marker is the last of them and the body's last 8 bytes.
+fn whole_table(response: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
+    use arrow::buffer::Buffer;
+    use arrow::ipc::reader::StreamDecoder;
+
+    let body = whole_body(response)?;
+    if !body.ends_with(&EOS) {
+        return Err("the stream does not end with Arrow's end marker".into());
+    }
+    let mut decoder = StreamDecoder::new();
+    let mut buffer = Buffer::from(body);
+    let mut rows = 0;
+    // Past the end marker the decoder refuses any byte, so nothing follows it.
+    while let Some(batch) = decoder.decode(&mut buffer)? {
+        rows += batch.num_rows();
+    }
+    decoder.finish()?;
+    Ok(rows)
+}
+
+/// The rows of a table's Parquet files.
+fn stored_rows(table_dir: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    let mut rows = 0;
+    for entry in std::fs::read_dir(table_dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "parquet") {
+            let reader = SerializedFileReader::new(std::fs::File::open(&path)?)?;
+            rows += usize::try_from(reader.metadata().file_metadata().num_rows())?;
+        }
+    }
+    Ok(rows)
+}
+
 /// A binary that cannot find its DLL never reaches `main`: Windows ends it with
 /// `STATUS_DLL_NOT_FOUND`. Reaching the usage error proves it loaded.
 #[test]
@@ -117,11 +195,14 @@ fn serve_plays_a_script_records_it_and_serves_its_tables() -> Result<(), Box<dyn
         head.contains("application/vnd.apache.arrow.stream"),
         "{head}"
     );
-    assert!(
-        table
-            .windows(8)
-            .any(|w| w == [0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]),
-        "the stream ends with Arrow's end marker"
+    // The whole table, read as a client must: the end marker's 8 bytes also occur inside data
+    // batches, so finding them anywhere passed a stream the engine cut short (#86).
+    let rows = whole_table(&table)?;
+    let stored = stored_rows(&data.join("market").join(&run_id).join("book_samples"))?;
+    assert!(stored > 0, "rotate stored no book samples");
+    assert_eq!(
+        rows, stored,
+        "the table served holds every row rotate stored"
     );
     let manifest = data.join("market").join(&run_id).join("manifest.json");
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest)?)?;
