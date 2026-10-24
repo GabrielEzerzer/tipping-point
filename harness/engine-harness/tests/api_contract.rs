@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use engine::api::ApiConfig;
 use engine::api::hub::{Hub, HubConfig, Source, VenueSource};
-use engine::api::ipc::{Encoder, SCHEMA_KEY, major};
+use engine::api::ipc::{Encoder, SCHEMA_KEY};
 use engine::api::messages::{
     BookMessage, ClientMessage, LatticeHeader, PROTOCOL, ServerMessage, SourceMessage, Status,
     StreamStatus, Streams, SymbolStatus, Topic, TradeMessage, VenueStatus, Welcome, lattice_frame,
@@ -498,7 +498,13 @@ async fn every_arrow_schema_matches_its_golden_file() -> Outcome {
         let (schema, batches) =
             get_arrow(&server.url(&format!("/v1/table/{domain}/{run}/{table}"))).await?;
         assert!(!batches.is_empty(), "{domain}/{table} has rows");
-        let id = format!("{table}/{}", major(domain, table));
+        // The market tables keyed by venue are at 2; frames and the Ising tables at 1.
+        let major = if domain == "market" && table != "frames" {
+            2
+        } else {
+            1
+        };
+        let id = format!("{table}/{major}");
         assert_eq!(schema.metadata()[SCHEMA_KEY], id);
         schemas.insert(format!("{domain}/{table}"), describe(&schema));
     }

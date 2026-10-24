@@ -91,7 +91,11 @@ impl Replay {
         };
         let tables = Tables {
             samples: open("book_samples")?,
-            trades: open("trades")?,
+            // A run rotated before there were venues keeps its trades in `agg_trades`.
+            trades: match open("trades")? {
+                Some(trades) => Some(trades),
+                None => open("agg_trades")?,
+            },
         };
         if tables.samples.is_none() && live.is_none() {
             return Err(TableError::NotFound(format!(
@@ -259,13 +263,13 @@ fn slice_or_next(tables: &Tables, cursor: i64) -> Result<Found, StoreError> {
     let mut samples = Vec::new();
     if let Some((table, schema)) = &tables.samples {
         for batch in table.window(&conn, schema, "sample_ts_ns", (start, end))? {
-            samples.extend(samples_of(&batch)?);
+            samples.extend(samples_of(&batch, run_venue(table))?);
         }
     }
     let mut trades = Vec::new();
     if let Some((table, schema)) = &tables.trades {
         for batch in table.window(&conn, schema, "capture_ts_ns", (start, end))? {
-            trades.extend(trades_of(&batch)?);
+            trades.extend(trades_of(&batch, run_venue(table))?);
         }
     }
     if samples.is_empty() && trades.is_empty() {
@@ -329,20 +333,66 @@ fn strings<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray, St
         .ok_or_else(|| missing(name))
 }
 
-/// The venue a row names.
-fn venue_at(venues: &StringArray, row: usize) -> Result<Venue, StoreError> {
-    venues
-        .value(row)
-        .parse()
-        .map_err(|error: String| StoreError::Arrow(arrow::error::ArrowError::SchemaError(error)))
+/// The venue a market run holds (Binance's, for runs recorded before runs said).
+fn run_venue(table: &Table) -> Venue {
+    table.venue.unwrap_or(Venue::BinanceUsdm)
 }
 
-/// `book_samples` rows back into samples, one per instant.
-fn samples_of(batch: &RecordBatch) -> Result<Vec<Arc<Sample>>, StoreError> {
+/// The venues of a batch's rows: its `venue` column, or, in a table rotated before there were
+/// venues, which has none, the run's venue for every row.
+enum Venues<'a> {
+    Column(&'a StringArray),
+    Run(Venue),
+}
+
+impl Venues<'_> {
+    fn of(batch: &RecordBatch, run: Venue) -> Result<Venues<'_>, StoreError> {
+        Ok(match batch.column_by_name("venue") {
+            Some(_) => Venues::Column(strings(batch, "venue")?),
+            None => Venues::Run(run),
+        })
+    }
+
+    fn at(&self, row: usize) -> Result<Venue, StoreError> {
+        match self {
+            Self::Column(venues) => venues.value(row).parse().map_err(|error: String| {
+                StoreError::Arrow(arrow::error::ArrowError::SchemaError(error))
+            }),
+            Self::Run(venue) => Ok(*venue),
+        }
+    }
+}
+
+/// The trade ids of a batch's rows: `trade_id` as stored, or a pre-venue `agg_trades` table's
+/// numeric `agg_trade_id`.
+enum TradeIds<'a> {
+    Text(&'a StringArray),
+    Number(&'a Int64Array),
+}
+
+impl TradeIds<'_> {
+    fn of(batch: &RecordBatch) -> Result<TradeIds<'_>, StoreError> {
+        Ok(match batch.column_by_name("trade_id") {
+            Some(_) => TradeIds::Text(strings(batch, "trade_id")?),
+            None => TradeIds::Number(int64(batch, "agg_trade_id")?),
+        })
+    }
+
+    fn at(&self, row: usize) -> String {
+        match self {
+            Self::Text(ids) => ids.value(row).to_owned(),
+            Self::Number(ids) => ids.value(row).to_string(),
+        }
+    }
+}
+
+/// `book_samples` rows back into samples, one per venue and instant; `venue` is the run's, for a
+/// table rotated before rows named theirs.
+fn samples_of(batch: &RecordBatch, venue: Venue) -> Result<Vec<Arc<Sample>>, StoreError> {
     let times = int64(batch, "sample_ts_ns")?;
     let seqs = int64(batch, "seq")?;
     let ids = int64(batch, "last_update_id")?;
-    let venues = strings(batch, "venue")?;
+    let venues = Venues::of(batch, venue)?;
     let symbols = strings(batch, "symbol")?;
     let synced = batch
         .column_by_name("synced")
@@ -384,7 +434,7 @@ fn samples_of(batch: &RecordBatch) -> Result<Vec<Arc<Sample>>, StoreError> {
             bids: levels_at(&bids, row),
             asks: levels_at(&asks, row),
         };
-        let (t, venue) = (times.value(row), venue_at(venues, row)?);
+        let (t, venue) = (times.value(row), venues.at(row)?);
         match out.last_mut() {
             Some(sample) if sample.sample_ts_ns == t && sample.venue == venue => {
                 sample.rows.push(book);
@@ -400,16 +450,20 @@ fn samples_of(batch: &RecordBatch) -> Result<Vec<Arc<Sample>>, StoreError> {
     Ok(out.into_iter().map(Arc::new).collect())
 }
 
-/// `trades` rows back into trade messages, each with its capture time.
-fn trades_of(batch: &RecordBatch) -> Result<Vec<(i64, Arc<TradeMessage>)>, StoreError> {
+/// `trades` rows (or a pre-venue run's `agg_trades` rows) back into trade messages, each with its
+/// capture time; `venue` is the run's, for a table rotated before rows named theirs.
+fn trades_of(
+    batch: &RecordBatch,
+    venue: Venue,
+) -> Result<Vec<(i64, Arc<TradeMessage>)>, StoreError> {
     let seqs = int64(batch, "seq")?;
     let traded = int64(batch, "trade_ts_ns")?;
     let captured = int64(batch, "capture_ts_ns")?;
     let prices = int64(batch, "price")?;
     let qtys = int64(batch, "qty")?;
-    let venues = strings(batch, "venue")?;
+    let venues = Venues::of(batch, venue)?;
     let symbols = strings(batch, "symbol")?;
-    let ids = strings(batch, "trade_id")?;
+    let ids = TradeIds::of(batch)?;
     let makers = batch
         .column_by_name("buyer_is_maker")
         .and_then(|column| column.as_any().downcast_ref::<BooleanArray>())
@@ -417,11 +471,11 @@ fn trades_of(batch: &RecordBatch) -> Result<Vec<(i64, Arc<TradeMessage>)>, Store
     (0..batch.num_rows())
         .map(|row| {
             let trade = TradeMessage {
-                venue: venue_at(venues, row)?,
+                venue: venues.at(row)?,
                 symbol: symbols.value(row).to_owned(),
                 seq: u64::try_from(seqs.value(row)).unwrap_or_default(),
                 ts_ms: u64::try_from(traded.value(row).div_euclid(1_000_000)).unwrap_or_default(),
-                id: ids.value(row).to_owned(),
+                id: ids.at(row),
                 px: prices.value(row),
                 qty: qtys.value(row),
                 buyer_is_maker: makers.value(row),

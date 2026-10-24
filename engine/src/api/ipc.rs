@@ -28,16 +28,17 @@ pub const STREAM_TYPE: &str = "application/vnd.apache.arrow.stream";
 /// The schema-metadata key naming a stream's table and major version.
 pub const SCHEMA_KEY: &str = "tp.schema";
 
-/// A table's major version. The market tables whose rows name a book or a trade are at 2: their
-/// rows became keyed by venue as well as symbol, `trades` (once `agg_trades`) took string ids,
-/// and `depth_updates` made the ids only some venues send nullable. The rest are at 1.
+/// The column the market tables gained with venues.
+pub const VENUE_COLUMN: &str = "venue";
+
+/// A table's major version, read from the schema it was stored with, never from its name: a
+/// market table whose rows name their `venue` is at 2 (its rows are keyed by venue as well as
+/// symbol; `trades`, once `agg_trades`, took string ids; `depth_updates` made the ids only some
+/// venues send nullable). Everything else is at 1: frames, the Ising tables, and market tables
+/// rotated before there were venues, which are served as they were stored.
 #[must_use]
-pub fn major(domain: &str, table: &str) -> u32 {
-    let keyed_by_venue = matches!(
-        table,
-        "depth_updates" | "trades" | "snapshots" | "book_samples"
-    );
-    if domain == MARKET && keyed_by_venue {
+pub fn major(domain: &str, schema: &Schema) -> u32 {
+    if domain == MARKET && schema.field_with_name(VENUE_COLUMN).is_ok() {
         2
     } else {
         1
@@ -71,7 +72,7 @@ pub enum Origin<'a> {
 /// Never: runs and scales are plain strings and numbers and always serialize.
 #[must_use]
 pub fn tagged(schema: &Schema, provenance: &Provenance<'_>) -> SchemaRef {
-    let major = major(provenance.domain, provenance.table);
+    let major = major(provenance.domain, schema);
     let mut metadata = HashMap::from([
         (
             SCHEMA_KEY.to_owned(),
@@ -221,6 +222,23 @@ mod tests {
             .expect("fixed-size binary");
         assert_eq!(spins.value(1), &[0x80, 0x01]);
         Ok(())
+    }
+
+    #[test]
+    fn the_major_comes_from_what_was_stored() {
+        let with = |names: &[&str]| {
+            Schema::new(
+                names
+                    .iter()
+                    .map(|name| Field::new(*name, DataType::Int64, false))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let keyed = with(&["sample_ts_ns", VENUE_COLUMN, "seq"]);
+        let before_venues = with(&["sample_ts_ns", "seq"]);
+        assert_eq!(major(MARKET, &keyed), 2);
+        assert_eq!(major(MARKET, &before_venues), 1, "served as it was stored");
+        assert_eq!(major("ising", &keyed), 1);
     }
 
     #[test]

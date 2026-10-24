@@ -19,7 +19,7 @@ use engine::api::ApiConfig;
 use engine::api::hub::{Hub, HubConfig};
 use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
-use engine::store::writer::LogConfig;
+use engine::store::writer::{LogConfig, LogWriter};
 use engine::venue::Venue;
 use engine_harness::api::{
     Frame, LivePath, Outcome, Script, Server, Socket, fixture, get_arrow, hello, merged,
@@ -230,8 +230,14 @@ async fn play(dir: PathBuf) -> Outcome<Played> {
     // Rotate while the log is still open: the closed segments become Parquet, the newest stays
     // in the log, so a replay now reads the rotated hours through DuckDB and the rest from memory.
     // The writer thread can lag the loop on a loaded machine; let it catch up first, so the
-    // segments the loop has closed are on disk when rotate looks.
-    while live.log.writer().is_some_and(|writer| writer.queued() > 0) {
+    // segments the loop has closed are on disk when rotate looks; a writer that stalls fails here.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while let Some(queued) = live.log.writer().map(LogWriter::queued).filter(|&q| q > 0) {
+        if tokio::time::Instant::now() > deadline {
+            return Err(
+                format!("the log writer still had {queued} frames queued after {WAIT:?}").into(),
+            );
+        }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let run_dir = dir.join("market").join(RUN);
@@ -925,6 +931,171 @@ async fn replays_send_whole_instants_across_duckdb_chunks() -> Outcome {
     }
     server.stop().await;
     fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A run rotated before there were venues (a format-1 manifest without a venue, `book_samples`
+/// without its `venue` column, trades in `agg_trades` with numeric ids) is served as it was stored:
+/// its tables at major 1, never labelled with a contract they do not keep, and the app's replay of
+/// it puts the run's venue (Binance's, for such runs) on every book and trade and runs to its end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_rotated_before_venues_is_served_as_it_was_stored() -> Outcome {
+    const OLD: &str = "20261021T000000Z-before-venues";
+    let dir = scratch("api-before-venues");
+    write_pre_venue_run(&dir.join("market").join(OLD))?;
+    let hub = Hub::new(HubConfig::default());
+    let feed = engine::market::feed::Feed::new(Venue::BinanceUsdm, BTreeMap::new());
+    let mut tap = engine::api::hub::LiveTap::new(Arc::clone(&hub));
+    engine::market::live::Observer::started(&mut tap, &feed, None);
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+
+    let url = server.url(&format!("/v1/table/market/{OLD}/book_samples"));
+    let (schema, batches) = get_arrow(&url).await?;
+    assert_eq!(schema.metadata()["tp.schema"], "book_samples/1");
+    assert!(schema.field_with_name("venue").is_err(), "{schema:?}");
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 30);
+    let url = server.url(&format!("/v1/table/market/{OLD}/agg_trades"));
+    let (schema, _) = get_arrow(&url).await?;
+    assert_eq!(schema.metadata()["tp.schema"], "agg_trades/1");
+
+    let mut viewer = ws_connect(server.addr).await?;
+    hello(&mut viewer).await?;
+    let sub = json!({"t": "sub", "topics": ["book", "trades"]});
+    send_json(&mut viewer, &sub).await?;
+    let _ack = next_json(&mut viewer, WAIT).await?;
+    send_json(&mut viewer, &json!({"t": "replay", "run": OLD, "speed": 0})).await?;
+    until_replay(&mut viewer).await?;
+    let (mut books, mut trades) = (0, Vec::new());
+    let outcome = loop {
+        let message = next_json(&mut viewer, WAIT).await?;
+        match message["t"].as_str() {
+            Some("book") => {
+                assert_eq!(message["venue"], "binance-usdm", "{message}");
+                books += 1;
+            }
+            Some("trades") => {
+                trades.extend(message["trades"].as_array().cloned().unwrap_or_default());
+            }
+            Some("source") => break message,
+            _ => {}
+        }
+    };
+    assert_eq!(outcome["mode"], "ended", "{outcome}");
+    assert!(books > 0, "the replay sent books");
+    let ids: Vec<&str> = trades.iter().filter_map(|t| t["id"].as_str()).collect();
+    assert_eq!(ids, ["1", "2", "3"], "numeric ids as strings");
+    assert!(
+        trades.iter().all(|t| t["venue"] == "binance-usdm"),
+        "{trades:?}"
+    );
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A market run as rotate wrote it before there were venues: a format-1 manifest without a venue,
+/// 30 instants of `book_samples` without the `venue` column, three trades in `agg_trades`.
+fn write_pre_venue_run(run_dir: &Path) -> Outcome {
+    use arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use engine::market::sync::Level;
+    use engine::store::samples::{BookRow as Row, Sample, SampleRows};
+
+    const T0: i64 = 1_792_540_800_000_000_000;
+    fs::create_dir_all(run_dir.join("book_samples"))?;
+    fs::create_dir_all(run_dir.join("agg_trades"))?;
+    let manifest = json!({
+        "format": 1, "domain": "market", "run_id": run_dir.file_name().and_then(|n| n.to_str()),
+        "producer": {"name": "engine", "version": "0.1.0", "git_sha": null, "dirty": null},
+        "started_ns": T0, "key": "seq",
+        "tables": ["frames", "depth_updates", "agg_trades", "snapshots", "book_samples"],
+        "params": {
+            "symbols": ["BTCUSDT"],
+            "scales": {"BTCUSDT": {"price_decimals": 1, "qty_decimals": 3}},
+            "streams": ["depth@100ms", "aggTrade"],
+            "book_sample": {"levels": 2, "every_ns": 100_000_000},
+        },
+    });
+    fs::write(run_dir.join("manifest.json"), manifest.to_string())?;
+
+    let mut rows = SampleRows::new(2);
+    for i in 0..30_i64 {
+        rows.push(&Sample {
+            sample_ts_ns: T0 + i * 100_000_000,
+            seq: i,
+            venue: Venue::BinanceUsdm,
+            rows: vec![Row {
+                symbol: "BTCUSDT".to_owned(),
+                synced: true,
+                last_update_id: Some(i),
+                bids: vec![Level {
+                    price: 1000,
+                    qty: 1 + i,
+                }],
+                asks: vec![Level {
+                    price: 1001,
+                    qty: 2,
+                }],
+            }],
+        });
+    }
+    let samples = rows.take()?;
+    // Every column but the venue, as rotate wrote them then.
+    let kept: Vec<usize> = (0..samples.num_columns())
+        .filter(|&i| samples.schema().field(i).name() != "venue")
+        .collect();
+    write_parquet(
+        &run_dir
+            .join("book_samples")
+            .join(format!("{:020}.parquet", 0)),
+        &samples.project(&kept)?,
+    )?;
+
+    let int64 = |name: &str, nullable: bool| Field::new(name, DataType::Int64, nullable);
+    let schema = Arc::new(Schema::new(vec![
+        int64("seq", false),
+        int64("source_ts_ns", false),
+        int64("trade_ts_ns", false),
+        int64("capture_ts_ns", false),
+        Field::new("symbol", DataType::Utf8, false),
+        int64("agg_trade_id", false),
+        int64("first_trade_id", true),
+        int64("last_trade_id", true),
+        int64("price", false),
+        int64("qty", false),
+        Field::new("buyer_is_maker", DataType::Boolean, false),
+    ]));
+    let times: Vec<i64> = (1..=3).map(|k| T0 + k * 700_000_000).collect();
+    let column = |values: Vec<i64>| -> ArrayRef { Arc::new(Int64Array::from(values)) };
+    let trades = RecordBatch::try_new(
+        schema,
+        vec![
+            column(vec![40, 41, 42]),
+            column(times.clone()),
+            column(times.clone()),
+            column(times),
+            Arc::new(StringArray::from(vec!["BTCUSDT"; 3])),
+            column(vec![1, 2, 3]),
+            column(vec![10, 11, 13]),
+            column(vec![10, 12, 13]),
+            column(vec![1000, 1001, 1000]),
+            column(vec![5, 6, 7]),
+            Arc::new(BooleanArray::from(vec![false, true, false])),
+        ],
+    )?;
+    write_parquet(
+        &run_dir
+            .join("agg_trades")
+            .join(format!("{:020}.parquet", 0)),
+        &trades,
+    )
+}
+
+fn write_parquet(path: &Path, batch: &RecordBatch) -> Outcome {
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(fs::File::create(path)?, batch.schema(), None)?;
+    writer.write(batch)?;
+    writer.close()?;
     Ok(())
 }
 
