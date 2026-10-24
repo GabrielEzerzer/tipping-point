@@ -125,8 +125,12 @@ a binary copied elsewhere needs that DLL beside it. Linux and macOS binaries fin
 through their rpath.
 
 Recorded fixtures are never committed; `replay_equals_live` replays any present locally and,
-with none, says so on a `SKIPPED:` line the gate counts rather than passing silently. The
-committed tests use synthetic streams and a golden log
+with none, says so on a `SKIPPED:` line the gate counts rather than passing silently. A
+recording whose `live-transcript.json` an older harness wrote is skipped the same way: its
+`format` is below `FORMAT` (`harness/engine-harness/src/transcript.rs`, bumped whenever what a
+transcript step records changes), so there is nothing to compare it with. Record it again
+(`cargo run --release -p engine-harness --bin record -- --seconds 60`) and delete the old run
+from `harness/fixtures/recorded/market/` (#101). The committed tests use synthetic streams and a golden log
 (`engine/tests/fixtures/synthetic/`) and generated ones (property tests and fault injection in
 `engine/tests/`, crash injection and replay-equals-live in `harness/engine-harness/tests/`).
 `TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default). With `TP_ROTATE_SOAK`
