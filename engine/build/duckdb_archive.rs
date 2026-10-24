@@ -1,5 +1,5 @@
 //! The one `DuckDB` library archive the build accepts (#66). libduckdb-sys downloads the
-//! prebuilt library from DuckDB's GitHub release and checks no hash, and a release's assets can
+//! prebuilt library from the `DuckDB` GitHub release and checks no hash, and a release's assets can
 //! be replaced under the same tag (v1.5.6 is not immutable), so the build script refuses any
 //! archive but this one before it copies the library anywhere. A test checks the check.
 //!
@@ -10,6 +10,7 @@
 //! uploaded 2026-09-28). Bump it in the same commit as the duckdb and libduckdb-sys pins, from
 //! the new release asset's GitHub digest.
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -40,8 +41,10 @@ pub fn sha256(path: &Path) -> io::Result<String> {
     Ok(hasher
         .finalize()
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        }))
 }
 
 /// Whether the archive at `path` is the pinned one.

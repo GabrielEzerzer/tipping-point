@@ -86,12 +86,11 @@ fn check_download(dir: &Path) {
     if !downloaded {
         return;
     }
-    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64") {
-        panic!(
-            "no SHA-256 is pinned for this target's libduckdb archive: add it to \
-             engine/build/duckdb_archive.rs before building with DUCKDB_DOWNLOAD_LIB"
-        );
-    }
+    assert!(
+        env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64"),
+        "no SHA-256 is pinned for this target's libduckdb archive: add it to \
+         engine/build/duckdb_archive.rs before building with DUCKDB_DOWNLOAD_LIB"
+    );
     let archive = dir.join(duckdb_archive::NAME);
     println!("cargo::rerun-if-changed={}", archive.display());
     if let Err(error) = duckdb_archive::check(&archive) {
