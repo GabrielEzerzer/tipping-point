@@ -158,8 +158,17 @@ enum Mode {
         speed: f64,
         paused: bool,
     },
-    /// A replay ran out; nothing comes until `replay` or `live`.
-    Ended,
+    /// A replay ran out or failed, or the live feed stopped: nothing comes until `replay` or
+    /// `live`. After a replay it is kept here, so a seek starts it again.
+    Ended(Option<LastReplay>),
+}
+
+/// A connection's replay once it is over: its run and speed, and why it failed, if it did.
+#[derive(Debug)]
+struct LastReplay {
+    run: String,
+    speed: f64,
+    error: Option<String>,
 }
 
 struct Connection<S> {
@@ -276,7 +285,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         );
         self.queue(&ServerMessage::Welcome(&welcome));
         for text in early {
-            self.on_text(&text)?;
+            self.on_text(&text).await?;
         }
         self.flush().await?;
         if self.ordered.is_some() {
@@ -313,7 +322,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         loop {
             tokio::select! {
                 biased;
-                incoming = self.ws.next() => self.on_incoming(incoming)?,
+                incoming = self.ws.next() => self.on_incoming(incoming).await?,
                 changed = self.changed.changed() => {
                     if changed.is_err() {
                         return Ok(());
@@ -339,7 +348,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             };
             tokio::select! {
                 biased;
-                incoming = self.ws.next() => self.on_incoming(incoming)?,
+                incoming = self.ws.next() => self.on_incoming(incoming).await?,
                 item = ordered.recv() => match item {
                     Ok(item) => self.on_ordered(item),
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -393,8 +402,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 speed: Some(*speed),
                 error: None,
             },
-            Mode::Live | Mode::Ended => SourceMessage {
+            Mode::Live | Mode::Ended(_) => SourceMessage {
                 mode,
+                run: None,
+                from_ms: None,
+                speed: None,
+                error: None,
+            },
+        };
+        self.queue(&ServerMessage::Source(&message));
+    }
+
+    /// The source of a connection whose replay or live feed is over: `ended`, or `failed` and
+    /// why, naming the replay's run.
+    fn queue_ended(&mut self) {
+        let message = match &self.mode {
+            Mode::Ended(Some(last)) => SourceMessage {
+                mode: if last.error.is_some() {
+                    "failed"
+                } else {
+                    "ended"
+                },
+                run: Some(last.run.clone()),
+                from_ms: None,
+                speed: None,
+                error: last.error.clone(),
+            },
+            Mode::Live | Mode::Replay { .. } | Mode::Ended(None) => SourceMessage {
+                mode: "ended",
                 run: None,
                 from_ms: None,
                 speed: None,
@@ -425,9 +460,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         }
     }
 
-    fn on_incoming(&mut self, incoming: Option<Result<Message, WsError>>) -> Result<(), Closing> {
+    async fn on_incoming(
+        &mut self,
+        incoming: Option<Result<Message, WsError>>,
+    ) -> Result<(), Closing> {
         match incoming {
-            Some(Ok(Message::Text(text))) => self.on_text(&text),
+            Some(Ok(Message::Text(text))) => self.on_text(&text).await,
             Some(Ok(Message::Binary(_))) => Err(bad("the engine takes text messages only")),
             Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => Ok(()),
             Some(Err(WsError::Capacity(_))) => Err(bad("message too large")),
@@ -435,13 +473,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         }
     }
 
-    fn on_text(&mut self, text: &str) -> Result<(), Closing> {
+    async fn on_text(&mut self, text: &str) -> Result<(), Closing> {
         let message = serde_json::from_str::<ClientMessage>(text)
             .map_err(|error| bad(format!("unreadable message: {error}")))?;
-        self.on_client(message)
+        self.on_client(message).await
     }
 
-    fn on_client(&mut self, message: ClientMessage) -> Result<(), Closing> {
+    async fn on_client(&mut self, message: ClientMessage) -> Result<(), Closing> {
         match message {
             ClientMessage::Hello { .. } => Err(bad("hello was already said")),
             ClientMessage::Sub {
@@ -461,18 +499,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 run,
                 from_ms,
                 speed,
-            } => self.replay(run, from_ms, speed),
+            } => self.replay(run, from_ms, speed).await,
             ClientMessage::Seek { to_ms } => {
-                let Mode::Replay { run, speed, .. } = &self.mode else {
+                // A replay that is over can still be sought in: it starts again from there.
+                let (Mode::Replay { run, speed, .. }
+                | Mode::Ended(Some(LastReplay { run, speed, .. }))) = &self.mode
+                else {
                     return Err(bad("seek needs a replay"));
                 };
                 let (run, speed) = (run.clone(), *speed);
-                self.replay(run, Some(to_ms), speed)
+                self.replay(run, Some(to_ms), speed).await
             }
             ClientMessage::Pause | ClientMessage::Play => {
                 let play = matches!(message, ClientMessage::Play);
-                let Mode::Replay { replay, paused, .. } = &mut self.mode else {
-                    return Err(bad("pause and play need a replay"));
+                let (replay, paused) = match &mut self.mode {
+                    Mode::Replay { replay, paused, .. } => (replay, paused),
+                    // Sent as the replay ran out, before the client heard: it is over, and the
+                    // client is told so again.
+                    Mode::Ended(_) => {
+                        self.queue_ended();
+                        return Ok(());
+                    }
+                    Mode::Live => return Err(bad("pause and play need a replay")),
                 };
                 if play {
                     replay.play();
@@ -556,16 +604,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             }
             self.book.mark_changed();
         }
-        self.queue_source(match self.mode {
-            Mode::Live => "live",
-            Mode::Replay { paused: true, .. } => "paused",
-            Mode::Replay { .. } => "replay",
-            Mode::Ended => "ended",
-        });
+        match self.mode {
+            Mode::Live => self.queue_source("live"),
+            Mode::Replay { paused: true, .. } => self.queue_source("paused"),
+            Mode::Replay { .. } => self.queue_source("replay"),
+            Mode::Ended(_) => self.queue_ended(),
+        }
         Ok(())
     }
 
-    fn replay(&mut self, run: String, from_ms: Option<i64>, speed: f64) -> Result<(), Closing> {
+    async fn replay(
+        &mut self,
+        run: String,
+        from_ms: Option<i64>,
+        speed: f64,
+    ) -> Result<(), Closing> {
         if !super::replay::valid_speed(speed) {
             return Err(bad(format!(
                 "speed is 0 (as fast as possible) or at least {}",
@@ -578,7 +631,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             &run,
             from_ms,
             speed,
+            self.api.config.open_delay,
         )
+        .await
         .map_err(|error| match error {
             TableError::BadName(why) | TableError::NotFound(why) => bad(why),
             TableError::Store(error) => bad(format!("cannot replay {run}: {error}")),
@@ -622,19 +677,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                         _ => None,
                     };
                     self.queue_replayed();
-                    let run = match &self.mode {
-                        Mode::Replay { run, .. } => Some(run.clone()),
-                        Mode::Live | Mode::Ended => None,
+                    let last = match std::mem::replace(&mut self.mode, Mode::Ended(None)) {
+                        Mode::Replay { run, speed, .. } => Some(LastReplay { run, speed, error }),
+                        Mode::Live | Mode::Ended(_) => None,
                     };
-                    self.mode = Mode::Ended;
-                    let message = SourceMessage {
-                        mode: if error.is_some() { "failed" } else { "ended" },
-                        run,
-                        from_ms: None,
-                        speed: None,
-                        error,
-                    };
-                    self.queue(&ServerMessage::Source(&message));
+                    self.mode = Mode::Ended(last);
+                    self.queue_ended();
                     return;
                 }
             }
@@ -671,8 +719,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 }
             }
             Ordered::End => {
-                self.mode = Mode::Ended;
-                self.queue_source("ended");
+                self.mode = Mode::Ended(None);
+                self.queue_ended();
             }
         }
     }
@@ -682,7 +730,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         match &self.mode {
             Mode::Live => self.collect_live(),
             Mode::Replay { paused: false, .. } => self.queue_replayed(),
-            Mode::Replay { paused: true, .. } | Mode::Ended => {}
+            Mode::Replay { paused: true, .. } | Mode::Ended(_) => {}
         }
         if self.status.has_changed().unwrap_or(false) || self.status_due {
             self.status_due = false;
@@ -822,7 +870,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 async fn next_item(mode: &mut Mode) -> Option<Item> {
     match mode {
         Mode::Replay { replay, .. } => replay.items.recv().await,
-        Mode::Live | Mode::Ended => std::future::pending().await,
+        Mode::Live | Mode::Ended(_) => std::future::pending().await,
     }
 }
 

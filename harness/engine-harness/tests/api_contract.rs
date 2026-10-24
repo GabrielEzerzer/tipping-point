@@ -27,6 +27,7 @@ use engine_harness::api::{
     Frame, ISING_RUN, LivePath, Outcome, Server, copy_ising_fixture, decode_stream, fixture,
     get_arrow, golden, merged, next_frame, next_json, one_batch, script, send_json, ws_connect,
 };
+use engine_harness::load::Generator;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -530,6 +531,45 @@ async fn every_arrow_schema_matches_its_golden_file() -> Outcome {
     Ok(())
 }
 
+/// A steady feed leaves the status unchanged for as long as it stays steady, yet the status's
+/// `ts_ms` keeps up with it: unchanged, it goes out again once a second of the feed has passed,
+/// so a client comparing `ts_ms` with its own clock never takes a healthy feed for a stale one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_status_time_keeps_up_with_a_steady_feed() -> Outcome {
+    const T0: i64 = 1_700_000_000_000_000_000;
+    let dir = scratch("api-status-time");
+    let mut generator = Generator::default();
+    let hub = Hub::new(HubConfig::default());
+    let mut live = LivePath::new(
+        Venue::BinanceUsdm,
+        generator.scales(),
+        Arc::clone(&hub),
+        &dir,
+        None,
+        LogConfig::default(),
+    )?;
+    for message in generator.opening(T0) {
+        live.push(message).await?;
+    }
+    let status = hub.watch_status();
+    // Ten seconds of depth updates 50 ms apart: each book syncs on its first and stays synced.
+    for i in 1..=200 {
+        let captured_ms = (T0 + i * 50_000_000) / 1_000_000;
+        live.push(generator.depth(captured_ms * 1_000_000)).await?;
+        let times = status.borrow().as_ref().and_then(|status| {
+            let venue = status.venues.get(&Venue::BinanceUsdm)?;
+            Some((status.ts_ms, venue.ts_ms))
+        });
+        let (ts_ms, venue_ts_ms) = times.ok_or("a status")?;
+        for behind in [captured_ms - ts_ms, captured_ms - venue_ts_ms] {
+            assert!(behind < 1000, "input {i}: the status is {behind} ms behind");
+        }
+    }
+    live.finish().await?;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
 /// Wrong version, a first message that is not hello, and an unreadable message each close the
 /// connection with their code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -613,7 +653,8 @@ async fn a_subscription_sent_before_the_welcome_is_answered_after_it() -> Outcom
 }
 
 /// A foreign `Origin` is refused, the WebSocket upgrade included, and so is a `Host` that names
-/// another server (DNS rebinding); the allowed origins and a client without `Origin` get in.
+/// another server (DNS rebinding) and a page's plain GET from another site, which carries no
+/// `Origin`; the allowed origins and a client without `Origin` get in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreign_origins_and_hosts_are_refused() -> Outcome {
     let dir = scratch("api-origin");
@@ -643,6 +684,20 @@ async fn foreign_origins_and_hosts_are_refused() -> Outcome {
         .send()
         .await?;
     assert_eq!(foreign.status(), 403);
+    // What a browser sends for `fetch(url, {mode: 'no-cors'})` or an image on another site's page.
+    let no_cors = client
+        .get(server.url("/v1/health"))
+        .header("Sec-Fetch-Site", "cross-site")
+        .header("Sec-Fetch-Mode", "no-cors")
+        .send()
+        .await?;
+    assert_eq!(no_cors.status(), 403, "a page's no-cors GET");
+    let typed = client
+        .get(server.url("/v1/health"))
+        .header("Sec-Fetch-Site", "none")
+        .send()
+        .await?;
+    assert_eq!(typed.status(), 200, "a URL typed into the address bar");
     let publish = client
         .post(server.url("/v1/publish/meters"))
         .header("Origin", "https://evil.example")
@@ -660,6 +715,68 @@ async fn foreign_origins_and_hosts_are_refused() -> Outcome {
     socket.read_to_string(&mut answer).await?;
     assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
     server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A replay opening its run on a slow disk holds up no other connection, even with the whole
+/// server on one thread: the opening runs on a blocking thread, so another client asking meanwhile
+/// is answered at once. Then the replay of a run that is not there is refused with 4000, as ever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_opening_on_a_slow_disk_holds_up_no_other_connection() -> Outcome {
+    const SLOW: Duration = Duration::from_secs(3);
+    let dir = scratch("api-slow-open");
+    let hub = Hub::new(HubConfig::default());
+    let feed = engine::market::feed::Feed::new(Venue::BinanceUsdm, BTreeMap::new());
+    let mut tap = engine::api::hub::LiveTap::new(Arc::clone(&hub));
+    engine::market::live::Observer::started(&mut tap, &feed, None);
+    let config = ApiConfig {
+        open_delay: Some(SLOW),
+        ..ApiConfig::new(dir.clone())
+    };
+    let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = std::thread::spawn(move || -> std::io::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async move {
+            let server = Server::start(hub, config).await?;
+            let _ = addr_tx.send(server.addr);
+            let _ = stop_rx.await;
+            server.stop().await;
+            Ok(())
+        })
+    });
+    let addr = addr_rx.await?;
+    let mut clients = Vec::new();
+    for _ in 0..2 {
+        let mut ws = ws_connect(addr).await?;
+        send_json(&mut ws, &json!({"t": "hello", "v": PROTOCOL})).await?;
+        assert_eq!(next_json(&mut ws, WAIT).await?["t"], "welcome");
+        clients.push(ws);
+    }
+    let missing = json!({"t": "replay", "run": "20990101T000000Z-none", "speed": 0});
+    send_json(&mut clients[0], &missing).await?;
+    // The server has the replay well before the other client asks.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let asked = std::time::Instant::now();
+    send_json(&mut clients[1], &json!({"t": "sub", "topics": ["status"]})).await?;
+    let answer = next_json(&mut clients[1], WAIT).await?;
+    let waited = asked.elapsed();
+    assert_eq!(answer, json!({"t": "source", "mode": "live"}));
+    assert!(
+        waited < SLOW / 3,
+        "answered after {waited:?}, behind the slow disk"
+    );
+    let refused = next_frame(&mut clients[0], WAIT).await;
+    assert_eq!(
+        refused,
+        Frame::Closed(Some(4000)),
+        "a run that is not there"
+    );
+    let _ = stop_tx.send(());
+    server.join().map_err(|_| "the server thread panicked")??;
     fs::remove_dir_all(&dir)?;
     Ok(())
 }

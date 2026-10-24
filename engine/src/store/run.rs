@@ -20,7 +20,6 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -131,32 +130,22 @@ pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
 pub struct Producer {
     pub name: String,
     pub version: String,
-    /// `None` when git is unavailable, e.g. a binary run away from its checkout.
+    /// `None` when it was built without git, e.g. outside a checkout.
     pub git_sha: Option<String>,
-    /// Whether the checkout had uncommitted edits.
+    /// Whether the source it was built from had edits the commit does not hold.
     pub dirty: Option<bool>,
 }
 
 impl Producer {
-    /// This engine build, with the commit read from git in the crate's own checkout.
+    /// This engine build, with the commit the build script found it built from: the binary's
+    /// own, whatever the checkout holds when it runs.
     #[must_use]
     pub fn engine() -> Self {
-        let git = |args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .output()
-                .ok()?;
-            output
-                .status
-                .success()
-                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        };
         Self {
             name: "engine".to_owned(),
             version: crate::version().to_owned(),
-            git_sha: git(&["rev-parse", "HEAD"]),
-            dirty: git(&["status", "--porcelain"]).map(|status| !status.is_empty()),
+            git_sha: option_env!("TP_GIT_SHA").map(str::to_owned),
+            dirty: option_env!("TP_GIT_DIRTY").map(|dirty| dirty == "true"),
         }
     }
 }

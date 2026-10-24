@@ -38,7 +38,9 @@ sha2 = "0.11"
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
-tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+# 1.54.1 at least: 1.54.0 is yanked for a use-after-free in `Interval` (RUSTSEC-2026-0384), which
+# the live loop and every WebSocket poll (#62).
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 

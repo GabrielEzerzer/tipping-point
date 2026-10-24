@@ -422,8 +422,8 @@ async fn check_replays(played: &Played, stored: &RecordBatch, rows: &[BookRow]) 
 }
 
 /// The app's replay controls on one connection: a replay at real speed, paused (nothing comes),
-/// played on, sought forward (only later samples come), then back to the live feed, each change
-/// answered by a `source` message.
+/// played on, sought forward (only later samples come), controls racing its end, then back to the
+/// live feed, each change answered by a `source` message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
     let played = play(scratch("api-controls")).await?;
@@ -457,6 +457,21 @@ async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
         !books.is_empty() && books.iter().all(|book| book.2 >= to_ms),
         "{books:?}"
     );
+
+    // Controls sent as the replay ran out, which the engine has before the client hears `ended`:
+    // pause and play are told it ended, and a seek starts it again.
+    for control in ["pause", "play"] {
+        send_json(&mut viewer, &json!({"t": control})).await?;
+        let told = next_json(&mut viewer, WAIT).await?;
+        let ended = json!({"t": "source", "mode": "ended", "run": RUN});
+        assert_eq!(told, ended, "{control} after the end");
+    }
+    let near_end = last_ms - 500;
+    send_json(&mut viewer, &json!({"t": "seek", "to_ms": near_end})).await?;
+    let again = until_source(&mut viewer, "replay").await?;
+    assert_eq!(again["from_ms"], near_end);
+    let (books, _, _) = read_until_ended(&mut viewer).await?;
+    assert!(books.iter().all(|book| book.2 >= near_end), "{books:?}");
 
     send_json(&mut viewer, &json!({"t": "live"})).await?;
     until_source(&mut viewer, "live").await?;
@@ -589,9 +604,10 @@ async fn a_producer_that_panics_fails_at_the_client() -> Outcome {
     Ok(())
 }
 
-/// Replaying the live run when memory no longer reaches back to the requested start (nothing
-/// rotated, a ring of 400 ms): the client is told how many instants are missing with a book gap,
-/// before the samples memory still holds.
+/// Replaying the live run when memory no longer reaches back to the requested start, or to the
+/// run's first sample when the replay names no start (nothing rotated, a ring of 400 ms): the
+/// client is told how many instants are missing with a book gap, before the samples memory still
+/// holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     let dir = scratch("api-gap");
@@ -657,6 +673,13 @@ async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     // From before the run's first sample, as from the run's start: the same instants are lost.
     let early = json!({"t": "replay", "run": RUN, "from_ms": first_ms - 2_000, "speed": 0});
     send_json(&mut viewer, &early).await?;
+    until_replay(&mut viewer).await?;
+    let gap = next_json(&mut viewer, WAIT).await?;
+    assert_eq!(gap, json!({"t": "gap", "topic": "book", "lost": lost}));
+    read_until_ended(&mut viewer).await?;
+    // With no start at all, the replay begins at the run's first sample: the same are lost.
+    let whole = json!({"t": "replay", "run": RUN, "speed": 0});
+    send_json(&mut viewer, &whole).await?;
     until_replay(&mut viewer).await?;
     let gap = next_json(&mut viewer, WAIT).await?;
     assert_eq!(gap, json!({"t": "gap", "topic": "book", "lost": lost}));

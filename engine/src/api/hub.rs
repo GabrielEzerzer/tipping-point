@@ -33,6 +33,10 @@ use crate::store::samples::{Sample, SampleRows, Sampler};
 use crate::store::writer::Entry;
 use crate::venue::Venue;
 
+/// How much of the capture clock an unchanged status lets pass before it goes out again with its
+/// newer `ts_ms`.
+const STATUS_EVERY_MS: i64 = 1000;
+
 /// How much the hub keeps and how far a reader may fall behind.
 #[derive(Debug, Clone)]
 pub struct HubConfig {
@@ -233,9 +237,15 @@ impl Hub {
         i64::try_from(self.config.ring.as_nanos()).unwrap_or(i64::MAX)
     }
 
-    /// A venue's live feed has started. The hub has, once every venue it serves has.
-    pub fn start(&self, venue: Venue, feed: VenueSource) {
+    /// A venue's live feed has started. The hub has, once every venue it serves has. A second
+    /// feed for a venue that has one is refused (false): one venue's runs and status are one
+    /// feed's.
+    #[must_use]
+    pub fn start(&self, venue: Venue, feed: VenueSource) -> bool {
         let mut feeds = self.feeds.lock().unwrap_or_else(PoisonError::into_inner);
+        if feeds.contains_key(&venue) {
+            return false;
+        }
         feeds.insert(venue, feed);
         if self
             .config
@@ -249,6 +259,7 @@ impl Hub {
             self.source.send_replace(Some(Arc::new(source)));
             self.changed();
         }
+        true
     }
 
     /// The live feed, once it has started.
@@ -495,14 +506,15 @@ fn backfill_of<T>(
 
 /// A venue's live loop's observer for the API: it samples the book before each input with
 /// rotate's sampler, so the live stream holds exactly the `book_samples` rows rotate writes later,
-/// and publishes trades and every change of the venue's status. One per venue.
+/// and publishes trades and every change of the venue's status. One per venue: the tap of a second
+/// loop for a venue the hub already has is refused at the start and publishes nothing.
 #[derive(Debug)]
 pub struct LiveTap {
     hub: Arc<Hub>,
     sampler: Sampler,
     rows: SampleRows,
     encoder: Option<Encoder>,
-    /// The venue, known once the loop starts.
+    /// The venue, known once the loop starts and the hub takes its feed.
     venue: Option<Venue>,
     /// The seq and capture time of the input being applied.
     input: Option<(u64, i64)>,
@@ -615,6 +627,9 @@ impl Observer for LiveTap {
             scales,
             run: run_id.map(str::to_owned),
         };
+        if !self.hub.start(venue, started.clone()) {
+            return;
+        }
         // Every venue's samples go out in one stream schema; this tap's batches only need its
         // fields, which are the same for every venue, so its own provenance will do.
         let source = Source {
@@ -623,10 +638,12 @@ impl Observer for LiveTap {
         let schema = live_schema(&source, self.sampler.levels());
         self.encoder = Encoder::new(schema).ok().map(|(encoder, _header)| encoder);
         self.venue = Some(venue);
-        self.hub.start(venue, started);
     }
 
     fn input(&mut self, seq: u64, entry: &Entry, feed: &Feed) {
+        if self.venue.is_none() {
+            return;
+        }
         self.input = Some((seq, entry.capture_ts_ns));
         let instants = self.sampler.instants(entry.capture_ts_ns);
         let before = i64::try_from(seq).unwrap_or(i64::MAX) - 1;
@@ -669,11 +686,12 @@ impl Observer for LiveTap {
                     );
                 }
                 let status = self.status(feed, stats, captured_ns.div_euclid(1_000_000));
-                if !self
-                    .last_status
-                    .as_ref()
-                    .is_some_and(|last| last.same_as(&status))
-                {
+                // Unchanged, it still goes out once a second of the feed has passed, so its time
+                // keeps up with a steady feed.
+                let due = self.last_status.as_ref().is_none_or(|last| {
+                    !last.same_as(&status) || status.ts_ms - last.ts_ms >= STATUS_EVERY_MS
+                });
+                if due {
                     self.last_status = Some(status.clone());
                     self.hub.publish_status(venue, status);
                 }
@@ -712,6 +730,39 @@ mod tests {
             backfill_of(&empty, Duration::from_secs(1), |t| *t).count(),
             0
         );
+    }
+
+    /// Two live loops for one venue (one recording BTC, one ETH, say): the hub keeps the first
+    /// loop's feed, and the second loop's tap publishes nothing, where before the venue's run
+    /// named whichever started last and its status flipped between the two on every input.
+    #[test]
+    fn a_second_feed_for_a_venue_is_refused() {
+        let hub = Hub::new(HubConfig::default());
+        let run = |hub: &Arc<Hub>| -> Option<String> {
+            hub.started()?.venues.get(&Venue::BinanceUsdm)?.run.clone()
+        };
+        let feed = Feed::new(Venue::BinanceUsdm, BTreeMap::new());
+        let mut first = LiveTap::new(Arc::clone(&hub));
+        first.started(&feed, Some("first"));
+        let mut second = LiveTap::new(Arc::clone(&hub));
+        second.started(&feed, Some("second"));
+        assert_eq!(run(&hub).as_deref(), Some("first"));
+        let entry = |capture_ts_ns| Entry {
+            kind: crate::store::frame::Kind::Control,
+            source_ts_ns: capture_ts_ns,
+            capture_ts_ns,
+            payload: String::new(),
+        };
+        // Inputs a second apart: a live tap samples ten grid instants between them.
+        for (seq, capture_ts_ns) in [(1, 1_000_000_000), (2, 2_000_000_000)] {
+            second.input(seq, &entry(capture_ts_ns), &feed);
+        }
+        assert_eq!(hub.ring_len(), (0, 0), "the refused tap published samples");
+        for (seq, capture_ts_ns) in [(1, 1_000_000_000), (2, 2_000_000_000)] {
+            first.input(seq, &entry(capture_ts_ns), &feed);
+        }
+        assert_eq!(hub.ring_len(), (10, 0), "the first tap publishes");
+        assert_eq!(run(&hub).as_deref(), Some("first"));
     }
 
     #[test]
