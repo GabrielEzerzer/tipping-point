@@ -1,10 +1,14 @@
 //! One WebSocket connection's replay of a recorded market run. The rotated hours come from the
 //! run's Parquet through `DuckDB`, a slice of the capture clock at a time (a seek is a query on
-//! `book_samples`); when the run is the one being recorded live, the hour the rotate step has
-//! not reached comes from the hub's memory. Book samples and trades go out in capture order at
-//! `speed` times real time, as the same `book` and `trades` messages the live feed sends.
+//! `book_samples`); when the run is the one being recorded live, the replay lists its files
+//! again each time it reaches their end, so it takes in the hours rotated while it played, and
+//! the hour the rotate step has not reached comes from the hub's memory. Book samples and trades
+//! go out in capture order at `speed` times real time, as the same `book` and `trades` messages
+//! the live feed sends.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,6 +68,70 @@ struct Tables {
     trades: Option<(Table, SchemaRef)>,
 }
 
+impl Tables {
+    /// The tables of `run` as its files are now. While the run is being recorded, rotate may be
+    /// writing a segment: it writes the segment's `book_samples` file last, under the name its
+    /// other files have, so only the trades files whose `book_samples` file is listed (listed
+    /// first) are kept, and a segment comes in whole or not at all.
+    fn open(data_dir: &Path, run: &str, recording: bool) -> Result<Self, TableError> {
+        let open = |name: &str| -> Result<Option<(Table, SchemaRef)>, TableError> {
+            match locate(data_dir, MARKET, run, name) {
+                Ok(table) => {
+                    let schema = table.schema()?;
+                    Ok(Some((table, schema)))
+                }
+                Err(TableError::NotFound(_)) => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+        let samples = open("book_samples")?;
+        // A run rotated before there were venues keeps its trades in `agg_trades`.
+        let mut trades = match open("trades")? {
+            Some(trades) => Some(trades),
+            None => open("agg_trades")?,
+        };
+        if recording {
+            let rotated: BTreeSet<OsString> = samples
+                .iter()
+                .flat_map(|(table, _)| &table.files)
+                .filter_map(|file| file.file_name().map(ToOwned::to_owned))
+                .collect();
+            if let Some((table, _)) = &mut trades {
+                table
+                    .files
+                    .retain(|file| file.file_name().is_some_and(|name| rotated.contains(name)));
+            }
+            trades = trades.filter(|(table, _)| !table.files.is_empty());
+        }
+        Ok(Self { samples, trades })
+    }
+
+    /// Only the files `before` did not list; `None` when it listed them all.
+    fn added_since(&self, before: &Self) -> Option<Self> {
+        let added = |now: &Option<(Table, SchemaRef)>, then: &Option<(Table, SchemaRef)>| {
+            let (mut table, schema) = now.clone()?;
+            let listed: &[PathBuf] = then.as_ref().map_or(&[], |(table, _)| &table.files);
+            table.files.retain(|file| !listed.contains(file));
+            (!table.files.is_empty()).then_some((table, schema))
+        };
+        let added = Self {
+            samples: added(&self.samples, &before.samples),
+            trades: added(&self.trades, &before.trades),
+        };
+        (added.samples.is_some() || added.trades.is_some()).then_some(added)
+    }
+}
+
+/// The run a replay plays while it is being recorded live: the hub whose memory carries it on
+/// after its rotated hours, the venue recording it, and where its files are, to list them again.
+#[derive(Debug)]
+struct Recording {
+    hub: Arc<Hub>,
+    venue: Venue,
+    data_dir: PathBuf,
+    run: String,
+}
+
 impl Replay {
     /// Starts replaying `run` from `from_ms` (its start when `None`).
     ///
@@ -79,24 +147,7 @@ impl Replay {
     ) -> Result<Self, TableError> {
         // The venue whose live feed records this run, if one does: memory carries the run on.
         let live = hub.started().and_then(|source| source.venue_recording(run));
-        let open = |name: &str| -> Result<Option<(Table, SchemaRef)>, TableError> {
-            match locate(data_dir, MARKET, run, name) {
-                Ok(table) => {
-                    let schema = table.schema()?;
-                    Ok(Some((table, schema)))
-                }
-                Err(TableError::NotFound(_)) => Ok(None),
-                Err(error) => Err(error),
-            }
-        };
-        let tables = Tables {
-            samples: open("book_samples")?,
-            // A run rotated before there were venues keeps its trades in `agg_trades`.
-            trades: match open("trades")? {
-                Some(trades) => Some(trades),
-                None => open("agg_trades")?,
-            },
-        };
+        let tables = Tables::open(data_dir, run, live.is_some())?;
         if tables.samples.is_none() && live.is_none() {
             return Err(TableError::NotFound(format!(
                 "market run {run:?} has no book samples to replay"
@@ -105,14 +156,13 @@ impl Replay {
         let (tx, items) = mpsc::channel(QUEUE);
         let (paused, paused_rx) = watch::channel(false);
         let start_ns = from_ms.map_or(i64::MIN, |ms| ms.saturating_mul(1_000_000));
-        let task = tokio::spawn(feed(
-            tables,
-            live.map(|venue| (hub, venue)),
-            start_ns,
-            speed,
-            tx,
-            paused_rx,
-        ));
+        let recording = live.map(|venue| Recording {
+            hub,
+            venue,
+            data_dir: data_dir.to_owned(),
+            run: run.to_owned(),
+        });
+        let task = tokio::spawn(feed(tables, recording, start_ns, speed, tx, paused_rx));
         Ok(Self {
             items,
             paused,
@@ -129,11 +179,22 @@ impl Replay {
     }
 }
 
-/// Sends the run's items from `from_ns` on, paced, then [`Item::End`]. `live` is the hub and the
-/// venue whose live feed records the run, when one does.
+/// Runs `work` on a blocking thread, as `DuckDB` and the file system need; its error as text.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, TableError> + Send + 'static,
+) -> Result<T, String> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(stopped) => Err(format!("the replay stopped: {stopped}")),
+    }
+}
+
+/// Sends the run's items from `from_ns` on, paced, then [`Item::End`]. `live` is set when the
+/// run is being recorded live.
 async fn feed(
-    tables: Tables,
-    live: Option<(Arc<Hub>, Venue)>,
+    mut tables: Tables,
+    live: Option<Recording>,
     start_ns: i64,
     speed: f64,
     tx: mpsc::Sender<Item>,
@@ -144,18 +205,15 @@ async fn feed(
     // Where the Parquet left off: the last sample instant and the last trade sent from it.
     let mut last_sample = i64::MIN;
     let mut last_trade: Option<u64> = None;
+    // Where the Parquet had left off when its files were last listed again: the replay goes back
+    // for the new files' first rows, and skips what it sent before.
+    let mut sent: (i64, Option<u64>) = (i64::MIN, None);
     loop {
         let slice = tables.clone();
-        let found = match tokio::task::spawn_blocking(move || slice_or_next(&slice, cursor)).await {
-            Ok(Ok(found)) => found,
-            Ok(Err(error)) => {
-                let _ = tx.send(Item::Failed(error.to_string())).await;
-                return;
-            }
-            Err(stopped) => {
-                let _ = tx
-                    .send(Item::Failed(format!("the replay stopped: {stopped}")))
-                    .await;
+        let found = match blocking(move || Ok(slice_or_next(&slice, cursor)?)).await {
+            Ok(found) => found,
+            Err(error) => {
+                let _ = tx.send(Item::Failed(error)).await;
                 return;
             }
         };
@@ -163,6 +221,10 @@ async fn feed(
             Found::Items(items, next) => {
                 for (t, item) in items {
                     match &item {
+                        Item::Sample(sample) if sample.sample_ts_ns <= sent.0 => continue,
+                        Item::Trade(trade) if sent.1.is_some_and(|seq| trade.seq <= seq) => {
+                            continue;
+                        }
                         Item::Sample(sample) => last_sample = last_sample.max(sample.sample_ts_ns),
                         Item::Trade(trade) => last_trade = last_trade.max(Some(trade.seq)),
                         Item::BookGap(_) | Item::End | Item::Failed(_) => {}
@@ -174,10 +236,28 @@ async fn feed(
                 cursor = next;
             }
             Found::Skip(next) => cursor = next,
-            Found::Done => break,
+            Found::Done => {
+                let Some(live) = &live else { break };
+                // Rotate turns each closed hour of the run into Parquet: list the files again
+                // and play on through any it added, before memory takes over.
+                let (before, data_dir, run) =
+                    (tables.clone(), live.data_dir.clone(), live.run.clone());
+                match blocking(move || more_files(&before, &data_dir, &run, start_ns)).await {
+                    Ok(Some((more, first))) => {
+                        tables = more;
+                        cursor = cursor.min(first);
+                        sent = (last_sample, last_trade);
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        let _ = tx.send(Item::Failed(error)).await;
+                        return;
+                    }
+                }
+            }
         }
     }
-    if let Some((hub, venue)) = live {
+    if let Some(Recording { hub, venue, .. }) = live {
         // The rotated tables are a prefix of the run: memory carries on after them, from the
         // requested start, and says so when it no longer reaches back that far.
         let recent = hub.recent(venue, start_ns.saturating_sub(1));
@@ -236,6 +316,24 @@ fn missing_instants(
     };
     let lost = u64::try_from((first - expected).div_euclid(every_ns)).ok()?;
     (lost > 0).then_some(lost)
+}
+
+/// The run's tables listed again, and the first time at or after `from` in the files they
+/// gained; `None` when they gained none with rows from then on. A segment's rows come after the
+/// last segment's, but the slice the replay last read can reach past where those ended, so the
+/// replay goes back to the new files' first row.
+fn more_files(
+    before: &Tables,
+    data_dir: &Path,
+    run: &str,
+    from: i64,
+) -> Result<Option<(Tables, i64)>, TableError> {
+    let now = Tables::open(data_dir, run, true)?;
+    let Some(added) = now.added_since(before) else {
+        return Ok(None);
+    };
+    let conn = query::connect()?;
+    Ok(first(&added, &conn, from)?.map(|t| (now, t)))
 }
 
 /// What one look at the Parquet found.
@@ -547,7 +645,191 @@ impl Pacer {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    use arrow::array::ArrayRef;
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    use super::super::hub::{HubConfig, Published, VenueSource};
     use super::*;
+    use crate::store::run::MANIFEST;
+    use crate::store::samples::SampleRows;
+
+    const RUN: &str = "20261024T100000Z-live";
+    const T0: i64 = 1_700_000_000_000_000_000;
+    const STEP: i64 = 100_000_000;
+
+    /// The book sample of grid instant `i`.
+    fn sample_at(i: i64) -> Sample {
+        Sample {
+            sample_ts_ns: T0 + i * STEP,
+            seq: 2 * i,
+            venue: Venue::BinanceUsdm,
+            rows: vec![BookRow {
+                symbol: "BTCUSDT".to_owned(),
+                synced: true,
+                last_update_id: Some(i),
+                bids: vec![Level {
+                    price: 1000,
+                    qty: 1 + i,
+                }],
+                asks: vec![Level {
+                    price: 1001,
+                    qty: 1,
+                }],
+            }],
+        }
+    }
+
+    /// The trade captured 10 ms after grid instant `i`, with its capture time.
+    fn trade_at(i: i64) -> (i64, TradeMessage) {
+        let captured = T0 + i * STEP + 10_000_000;
+        let trade = TradeMessage {
+            venue: Venue::BinanceUsdm,
+            symbol: "BTCUSDT".to_owned(),
+            seq: u64::try_from(2 * i + 1).expect("a positive seq"),
+            ts_ms: u64::try_from(captured / 1_000_000).expect("a positive time"),
+            id: i.to_string(),
+            px: 1000,
+            qty: 1,
+            buyer_is_maker: false,
+        };
+        (captured, trade)
+    }
+
+    fn write_parquet(path: &Path, batch: &RecordBatch) {
+        fs::create_dir_all(path.parent().expect("a table dir")).expect("the table dir");
+        let file = fs::File::create(path).expect("a Parquet file");
+        let mut writer = parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None)
+            .expect("a Parquet writer");
+        writer.write(batch).expect("rows written");
+        writer.close().expect("a footer");
+    }
+
+    /// The segment of grid instants `instants` as rotate leaves it: its `trades` file (the trades
+    /// after `trades`' instants), then its `book_samples` file, both named after the segment.
+    fn write_segment(run_dir: &Path, instants: std::ops::Range<i64>, trades: &[i64]) {
+        let name = format!("{:020}.parquet", instants.start);
+        let trades: Vec<(i64, TradeMessage)> = trades.iter().map(|&i| trade_at(i)).collect();
+        let int64 = |value: &dyn Fn(&(i64, TradeMessage)) -> i64| -> ArrayRef {
+            Arc::new(Int64Array::from(
+                trades.iter().map(value).collect::<Vec<_>>(),
+            ))
+        };
+        let text = |value: &dyn Fn(&(i64, TradeMessage)) -> String| -> ArrayRef {
+            Arc::new(StringArray::from(
+                trades.iter().map(value).collect::<Vec<_>>(),
+            ))
+        };
+        let field = |name: &str, kind: DataType| Field::new(name, kind, false);
+        let schema = Arc::new(Schema::new(vec![
+            field("seq", DataType::Int64),
+            field("trade_ts_ns", DataType::Int64),
+            field("capture_ts_ns", DataType::Int64),
+            field("venue", DataType::Utf8),
+            field("symbol", DataType::Utf8),
+            field("trade_id", DataType::Utf8),
+            field("price", DataType::Int64),
+            field("qty", DataType::Int64),
+            field("buyer_is_maker", DataType::Boolean),
+        ]));
+        let columns = vec![
+            int64(&|(_, trade)| i64::try_from(trade.seq).expect("a seq")),
+            int64(&|(t, _)| *t),
+            int64(&|(t, _)| *t),
+            text(&|(_, trade)| trade.venue.id().to_owned()),
+            text(&|(_, trade)| trade.symbol.clone()),
+            text(&|(_, trade)| trade.id.clone()),
+            int64(&|(_, trade)| trade.px),
+            int64(&|(_, trade)| trade.qty),
+            Arc::new(BooleanArray::from(vec![false; trades.len()])) as ArrayRef,
+        ];
+        let batch = RecordBatch::try_new(schema, columns).expect("a trades batch");
+        write_parquet(&run_dir.join("trades").join(&name), &batch);
+        let mut rows = SampleRows::new(1);
+        for i in instants {
+            rows.push(&sample_at(i));
+        }
+        let samples = rows.take().expect("a book_samples batch");
+        write_parquet(&run_dir.join("book_samples").join(&name), &samples);
+    }
+
+    /// The live run replayed from its start while rotate turns another hour into Parquet: the
+    /// replay plays the new hour from its files, then memory, every instant and trade once and no
+    /// gap. Memory reaches back only into that hour, so before, the replay went from the first
+    /// hour's files to memory and said instants were lost that were on disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replay_of_the_live_run_takes_in_the_hours_rotated_while_it_plays() {
+        let dir = std::env::temp_dir().join(format!("tp-replay-rotated-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let run_dir = dir.join(MARKET).join(RUN);
+        fs::create_dir_all(&run_dir).expect("the run dir");
+        let manifest =
+            r#"{"key":"seq","tables":["trades","book_samples"],"params":{"venue":"binance-usdm"}}"#;
+        fs::write(run_dir.join(MANIFEST), manifest).expect("the manifest");
+        // 650 instants: more than the replay queues, and the hour ends inside a slice.
+        write_segment(&run_dir, 0..650, &[25, 125, 225, 325, 425, 525, 625]);
+        let hub = Hub::new(HubConfig::default());
+        let feed = VenueSource {
+            scales: BTreeMap::new(),
+            run: Some(RUN.to_owned()),
+        };
+        hub.start(Venue::BinanceUsdm, feed);
+        // Memory holds the hour rotate has not reached and the end of the one before it.
+        for i in 1000..1500 {
+            hub.publish_sample(Published {
+                sample: Arc::new(sample_at(i)),
+                ipc: Vec::new(),
+                captured_ns: T0 + i * STEP,
+            });
+        }
+        for i in [1025, 1125, 1225, 1325, 1425] {
+            let (captured, trade) = trade_at(i);
+            hub.publish_trade(captured, trade);
+        }
+
+        let mut replay =
+            Replay::start(&dir, Arc::clone(&hub), RUN, None, 0.0).expect("the live run replays");
+        // The replay waits on its full queue inside the first file while rotate adds the next.
+        write_segment(&run_dir, 650..1300, &[725, 825, 925, 1025, 1125, 1225]);
+        let (mut instants, mut trades) = (Vec::new(), Vec::new());
+        loop {
+            match replay.items.recv().await.expect("the replay ends with End") {
+                Item::Sample(sample) => instants.push((sample.sample_ts_ns - T0) / STEP),
+                Item::Trade(trade) => trades.push(trade.seq),
+                Item::BookGap(lost) => panic!("a gap of {lost} instants, all on disk or in memory"),
+                Item::End => break,
+                Item::Failed(why) => panic!("the replay failed: {why}"),
+            }
+        }
+        let first_wrong = instants.iter().zip(0..).find(|&(got, want)| *got != want);
+        assert!(
+            instants.len() == 1500 && first_wrong.is_none(),
+            "every instant once, in order: {} sent, first wrong (sent, due) {first_wrong:?}",
+            instants.len()
+        );
+        let every_trade: Vec<u64> = (0..15).map(|k| 2 * (100 * k + 25) + 1).collect();
+        assert_eq!(trades, every_trade, "every trade once");
+
+        // A segment rotate is still writing, its trades file there and its book_samples file not
+        // yet, stays out of a recording run's tables until it is whole.
+        let partial = run_dir.join("trades").join(format!("{:020}.parquet", 1300));
+        fs::copy(
+            run_dir.join("trades").join(format!("{:020}.parquet", 650)),
+            partial,
+        )
+        .expect("a trades file");
+        let trades_files = |recording| {
+            Tables::open(&dir, RUN, recording)
+                .expect("the tables")
+                .trades
+                .map(|(table, _)| table.files.len())
+        };
+        assert_eq!(trades_files(true), Some(2));
+        assert_eq!(trades_files(false), Some(3));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_step_longer_than_the_grid_is_instants_lost() {
