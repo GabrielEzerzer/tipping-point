@@ -3,11 +3,13 @@
 //! land mid-rotation too. Entry `i` carries [`crash_payload`]`(i)`. The crash-recovery test
 //! kills it at a random moment and checks what recovery keeps.
 //!
-//! It also ends when its stdin closes. The test gives it a pipe whose other end closes when the
-//! test's process ends, however that ends, so a killed test runner never leaves it writing
-//! forever. Run by hand, end it with Ctrl-C (or end of input).
+//! With `--end-with-stdin` it also ends when its stdin closes. The test passes it with a pipe
+//! whose other end closes when the test's process ends, however that ends, so a killed test
+//! runner never leaves it writing forever. Without it stdin is never read, so a writer started
+//! with stdin closed or null writes until it is killed, rather than ending at once with nothing
+//! written and exit 0, as if it had run (#93). Run by hand, end it with Ctrl-C.
 //!
-//! `crash-writer <run dir>`
+//! `crash-writer [--end-with-stdin] <run dir>`
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -21,11 +23,23 @@ use engine::store::writer::{Entry, LogConfig, LogWriter};
 use engine::venue::Venue;
 use engine_harness::crash_payload;
 
-fn parse_args(args: &[String]) -> Result<&Path, String> {
-    match args {
-        [run_dir] => Ok(Path::new(run_dir)),
-        _ => Err("usage: crash-writer <run dir>".to_owned()),
-    }
+/// Where to write, and whether to end when stdin closes.
+#[derive(Debug, PartialEq, Eq)]
+struct Args<'a> {
+    run_dir: &'a Path,
+    end_with_stdin: bool,
+}
+
+fn parse_args(args: &[String]) -> Result<Args<'_>, String> {
+    let (run_dir, end_with_stdin) = match args {
+        [run_dir] => (run_dir, false),
+        [flag, run_dir] if flag == "--end-with-stdin" => (run_dir, true),
+        _ => return Err("usage: crash-writer [--end-with-stdin] <run dir>".to_owned()),
+    };
+    Ok(Args {
+        run_dir: Path::new(run_dir),
+        end_with_stdin,
+    })
 }
 
 fn config() -> LogConfig {
@@ -36,10 +50,15 @@ fn config() -> LogConfig {
     }
 }
 
-fn main() -> ExitCode {
+/// On a runtime of its own so that it appends through the live loop's own `append`.
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let run_dir = match parse_args(&args) {
-        Ok(run_dir) => run_dir,
+    let Args {
+        run_dir,
+        end_with_stdin,
+    } = match parse_args(&args) {
+        Ok(args) => args,
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::FAILURE;
@@ -57,10 +76,12 @@ fn main() -> ExitCode {
         venue: Venue::BinanceUsdm,
         scales: BTreeMap::new(),
     };
-    std::thread::spawn(|| {
-        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
-        std::process::exit(0);
-    });
+    if end_with_stdin {
+        std::thread::spawn(|| {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            std::process::exit(0);
+        });
+    }
     let mut log = match LogWriter::start(run_dir, meta, config()) {
         Ok(log) => log,
         Err(error) => {
@@ -75,7 +96,7 @@ fn main() -> ExitCode {
             capture_ts_ns: now_ns(),
             payload: crash_payload(i),
         };
-        if let Err(error) = log.append_blocking(entry) {
+        if let Err(error) = log.append(entry).await {
             eprintln!("crash-writer: {error}");
             return ExitCode::FAILURE;
         }
@@ -88,10 +109,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn takes_exactly_a_run_dir() {
-        assert_eq!(parse_args(&["r".to_owned()]), Ok(Path::new("r")));
-        assert!(parse_args(&[]).is_err());
-        assert!(parse_args(&["a".to_owned(), "b".to_owned()]).is_err());
+    fn takes_a_run_dir_and_the_stdin_flag_before_it() {
+        let parse = |raw: &[&str]| {
+            let raw: Vec<String> = raw.iter().map(|s| (*s).to_owned()).collect();
+            parse_args(&raw).map(|args| (args.run_dir.to_owned(), args.end_with_stdin))
+        };
+        assert_eq!(parse(&["r"]), Ok((Path::new("r").to_owned(), false)));
+        assert_eq!(
+            parse(&["--end-with-stdin", "r"]),
+            Ok((Path::new("r").to_owned(), true))
+        );
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["a", "b"]).is_err());
+        assert!(parse(&["r", "--end-with-stdin"]).is_err());
     }
 
     #[test]

@@ -71,9 +71,15 @@ pub enum FeedError {
     Message(#[from] MessageError),
     #[error(transparent)]
     Decimal(#[from] DecimalError),
-    /// A depth update did not convert at its symbol's scales; the symbol's book was dropped.
-    #[error("{symbol} depth update lost, book invalidated: {error}")]
-    BadDepth { symbol: Symbol, error: DecimalError },
+    /// A depth update did not convert at its symbol's scales. It is lost, which breaks the
+    /// symbol's update chain, so the symbol's buffer was dropped, and its book with it when it had
+    /// one (`book_lost`: the only case counted as a resync).
+    #[error("{symbol} depth update lost{}: {error}", if *.book_lost { ", book invalidated" } else { "" })]
+    BadDepth {
+        symbol: Symbol,
+        error: DecimalError,
+        book_lost: bool,
+    },
     #[error("no scales for symbol {0:?}")]
     UnknownSymbol(String),
 }
@@ -86,6 +92,8 @@ pub struct Feed {
     syncs: BTreeMap<Symbol, BookSync>,
     pending_snapshot: BTreeSet<Symbol>,
     stats: Stats,
+    /// How many depth updates in a row each symbol failed to convert; none once one converts.
+    unconverted: BTreeMap<Symbol, u32>,
 }
 
 impl Feed {
@@ -103,6 +111,7 @@ impl Feed {
             syncs,
             pending_snapshot: BTreeSet::new(),
             stats: Stats::default(),
+            unconverted: BTreeMap::new(),
         }
     }
 
@@ -141,36 +150,67 @@ impl Feed {
         &self.stats
     }
 
+    /// How many depth updates in a row `symbol` failed to convert at its scales: a stray bad
+    /// frame makes one, a tick or lot size that got finer makes every one (#45).
+    #[must_use]
+    pub fn unconverted_in_a_row(&self, symbol: &str) -> u32 {
+        self.unconverted.get(symbol).copied().unwrap_or(0)
+    }
+
     /// Feeds the text of one stream frame.
     ///
     /// A depth update that does not convert at its symbol's scales is lost, which breaks that
-    /// symbol's update chain, so its book is invalidated ([`ResyncReason::BadFrame`]) before the
-    /// error comes back.
+    /// symbol's update chain, so its buffer and any book are dropped ([`ResyncReason::BadFrame`])
+    /// before the error comes back, saying whether there was a book to lose.
     ///
     /// # Errors
     /// Returns an error when the frame cannot be parsed or converted, or names a symbol without
     /// scales. Every error bumps the parse-error counter.
     pub fn on_text(&mut self, text: &str) -> Result<Event, FeedError> {
+        let parsed = self.venue.parse(text);
+        self.on_parsed(parsed)
+    }
+
+    /// [`Self::on_text`] for a frame its caller has already read by the venue's rules
+    /// ([`Venue::parse`]) for a use of its own, so that it is read only once: rotate reads every
+    /// frame for its table rows too (#68).
+    ///
+    /// # Errors
+    /// As [`Self::on_text`]; a frame that did not read is an error here too.
+    pub fn on_parsed(&mut self, parsed: Result<Parsed, MessageError>) -> Result<Event, FeedError> {
         self.stats.frames += 1;
-        let event = self.route(text);
+        let event = parsed
+            .map_err(FeedError::from)
+            .and_then(|parsed| self.route(parsed));
         if event.is_err() {
             self.stats.parse_errors += 1;
         }
         event
     }
 
-    fn route(&mut self, text: &str) -> Result<Event, FeedError> {
-        match self.venue.parse(text)? {
+    fn route(&mut self, parsed: Parsed) -> Result<Event, FeedError> {
+        match parsed {
             Parsed::Depth(raw) => {
                 self.stats.depth_events += 1;
                 let scales = self.scales_for(raw.symbol())?;
                 let converted = raw.convert(scales);
                 let symbol = raw.into_symbol();
                 let depth = match converted {
-                    Ok(depth) => depth,
+                    Ok(depth) => {
+                        if !self.unconverted.is_empty() {
+                            self.unconverted.remove(&symbol);
+                        }
+                        depth
+                    }
                     Err(error) => {
-                        self.invalidate(&symbol, ResyncReason::BadFrame);
-                        return Err(FeedError::BadDepth { symbol, error });
+                        let in_a_row = self.unconverted.entry(symbol.clone()).or_default();
+                        *in_a_row = in_a_row.saturating_add(1);
+                        let book_lost = self.invalidate(&symbol, ResyncReason::BadFrame);
+                        return Err(FeedError::BadDepth {
+                            symbol,
+                            error,
+                            book_lost,
+                        });
                     }
                 };
                 let Some(sync) = self.syncs.get_mut(&symbol) else {
@@ -426,10 +466,14 @@ mod tests {
             r#"[["100.0","0.000"],["100.05","1.000"]]"#,
             "[]",
         );
-        assert!(matches!(
-            feed.on_text(&bad),
-            Err(FeedError::BadDepth { symbol, .. }) if symbol == "BTCUSDT"
-        ));
+        let error = feed.on_text(&bad).err();
+        assert!(
+            matches!(
+                &error,
+                Some(FeedError::BadDepth { symbol, book_lost: true, .. }) if symbol == "BTCUSDT"
+            ),
+            "{error:?}"
+        );
         assert!(
             feed.book("BTCUSDT").is_none(),
             "the stale bid must not survive"
@@ -439,6 +483,42 @@ mod tests {
         assert_eq!(stats.parse_errors, 1);
         assert_eq!((stats.resyncs, stats.bad_frame_resyncs), (1, 1));
         Ok(())
+    }
+
+    #[test]
+    fn depth_updates_that_do_not_convert_are_counted_in_a_row() -> Result<(), FeedError> {
+        let mut feed = synced_feed()?;
+        for u in 13..23 {
+            let finer_than_the_tick = depth(u, u, u - 1, r#"[["100.05","1.000"]]"#, "[]");
+            assert!(feed.on_text(&finer_than_the_tick).is_err());
+        }
+        assert_eq!(feed.unconverted_in_a_row("BTCUSDT"), 10);
+        feed.on_text(&depth(23, 23, 22, "[]", "[]"))?;
+        assert_eq!(
+            feed.unconverted_in_a_row("BTCUSDT"),
+            0,
+            "one that converts ends the run"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_depth_frame_that_does_not_convert_with_no_book_says_none_was_lost() {
+        let mut feed = feed();
+        let finer_than_the_tick = depth(10, 12, 9, r#"[["100.05","1.000"]]"#, "[]");
+        let error = feed.on_text(&finer_than_the_tick).err();
+        assert!(
+            matches!(
+                &error,
+                Some(FeedError::BadDepth {
+                    book_lost: false,
+                    ..
+                })
+            ),
+            "{error:?}"
+        );
+        let stats = feed.stats();
+        assert_eq!((stats.parse_errors, stats.resyncs), (1, 0));
     }
 
     #[test]

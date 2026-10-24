@@ -159,28 +159,6 @@ impl LogWriter {
         Ok(self.queued_frame(len))
     }
 
-    /// [`Self::append`] for callers outside an async runtime.
-    ///
-    /// # Errors
-    /// As [`Self::append`].
-    pub fn append_blocking(&mut self, entry: Entry) -> Result<u64, LogError> {
-        check(&entry)?;
-        let now = now_ns();
-        if self.segment_bytes >= self.max_segment_bytes || now >= self.rotate_at_ns {
-            let job = self.rotation(now);
-            self.tx
-                .blocking_send(job)
-                .map_err(|_| LogError::WriterGone)?;
-            self.rotated(now);
-        }
-        let frame = self.number(entry);
-        let len = frame.encoded_len();
-        self.tx
-            .blocking_send(Job::Write(frame))
-            .map_err(|_| LogError::WriterGone)?;
-        Ok(self.queued_frame(len))
-    }
-
     /// Ends the segment if its hour is over, even with nothing to append, so an idle hour is
     /// still a segment of its own. The live loop calls this on its timer. True when it rotated.
     ///
@@ -193,23 +171,6 @@ impl LogWriter {
         }
         let job = self.rotation(now);
         self.tx.send(job).await.map_err(|_| LogError::WriterGone)?;
-        self.rotated(now);
-        Ok(true)
-    }
-
-    /// [`Self::tick`] for callers outside an async runtime.
-    ///
-    /// # Errors
-    /// As [`Self::tick`].
-    pub fn tick_blocking(&mut self) -> Result<bool, LogError> {
-        let now = now_ns();
-        if now < self.rotate_at_ns {
-            return Ok(false);
-        }
-        let job = self.rotation(now);
-        self.tx
-            .blocking_send(job)
-            .map_err(|_| LogError::WriterGone)?;
         self.rotated(now);
         Ok(true)
     }

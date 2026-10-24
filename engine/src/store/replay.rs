@@ -13,6 +13,7 @@ use super::{StoreError, query};
 use crate::market::feed::Feed;
 use crate::market::live::LiveEvent;
 use crate::market::pipeline::{Applied, Pipeline, Replayed, Report};
+use crate::venue::{MessageError, Parsed};
 
 /// A replay in progress: push frames in seq order, starting with the run's Meta at seq 0.
 #[derive(Debug)]
@@ -52,6 +53,20 @@ impl Replay {
         frame: &Frame,
         on_event: &mut impl FnMut(LiveEvent<'_>),
     ) -> Result<(), StoreError> {
+        self.push_parsed(frame, None, on_event)
+    }
+
+    /// [`Self::push`] for a caller that has already read a depth or trade frame's payload by its
+    /// venue's rules (see [`Pipeline::apply_parsed`]), so it is not read again.
+    ///
+    /// # Errors
+    /// As [`Self::push`].
+    pub(crate) fn push_parsed(
+        &mut self,
+        frame: &Frame,
+        parsed: Option<Result<Parsed, MessageError>>,
+        on_event: &mut impl FnMut(LiveEvent<'_>),
+    ) -> Result<(), StoreError> {
         match self.previous {
             None if frame.seq != 0 || frame.kind != Kind::Meta => {
                 return Err(StoreError::MissingMeta {
@@ -83,9 +98,9 @@ impl Replay {
             .as_ref()
             .is_none_or(|window| window.contains(&frame.capture_ts_ns));
         let applied = if inside {
-            pipeline.apply(frame.kind, &frame.payload, on_event)
+            pipeline.apply_parsed(frame.kind, &frame.payload, parsed, on_event)
         } else {
-            pipeline.apply(frame.kind, &frame.payload, &mut |_| {})
+            pipeline.apply_parsed(frame.kind, &frame.payload, parsed, &mut |_| {})
         };
         self.report.note(frame.seq, &applied);
         Ok(())

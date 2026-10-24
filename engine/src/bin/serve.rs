@@ -24,17 +24,19 @@ use std::time::Duration;
 
 use engine::api::hub::{Hub, HubConfig, LiveTap};
 use engine::api::{ApiConfig, DEFAULT_PORT, serve};
+use engine::market::Symbol;
 use engine::market::feed::Feed;
 use engine::market::live::{Log, Observer, handle, utc_clock};
 use engine::market::pipeline::Pipeline;
 use engine::market::recording::{Record, read_records};
-use engine::store::frame::Meta;
 use engine::store::rotate::rotate;
-use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams};
+use engine::store::run;
 use engine::store::segment::{self, LOG_DIR};
-use engine::store::writer::{LogConfig, LogWriter};
+use engine::store::writer::LogConfig;
 use engine::venue::Venue;
-use engine::venue::binance::live::{LiveConfig, Recording, run_live};
+use engine::venue::binance::live::{
+    LiveConfig, Recording, finish_recording, run_live, start_recording,
+};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, sleep_until};
@@ -239,20 +241,15 @@ async fn play_script(
     let Some(Record::Scales { venue, scales }) = records.next() else {
         return Err("a script starts with its scales".into());
     };
+    // Recorded as the live loop records, through its own start and finish (#75).
     let mut log = match recording {
         Some(run_dir) => {
-            let params = MarketParams {
-                venue,
-                symbols: scales.keys().cloned().collect(),
-                scales: scales.clone(),
-                streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
-                book_sample: BookSample::default(),
-                clock: Clock::Capture,
-                source: DataSource::Live,
+            let recording = Recording {
+                run_dir: run_dir.to_owned(),
+                log: LogConfig::default(),
             };
-            let manifest = run::create(run_dir, params)?;
-            let writer = LogWriter::start(run_dir, Meta::for_run(&manifest), LogConfig::default())?;
-            Log::recorded(writer)
+            let symbols: Vec<Symbol> = scales.keys().cloned().collect();
+            Log::recorded(start_recording(&recording, venue, &symbols, &scales)?)
         }
         None => Log::unrecorded(),
     };
@@ -278,9 +275,8 @@ async fn play_script(
             .ok_or("only the first line of a script holds scales")?;
         handle(message, &mut pipeline, &mut log, &mut tap).await?;
     }
-    let summary = tokio::task::spawn_blocking(move || log.finish()).await??;
-    if let (Some(summary), Some(run_dir)) = (summary, recording) {
-        run::complete(run_dir, &summary)?;
+    if let (Log::Recorded(writer), Some(run_dir)) = (log, recording) {
+        finish_recording(*writer, run_dir, true).await?;
     }
     Ok(())
 }
@@ -368,6 +364,48 @@ mod tests {
         ] {
             assert!(parse(raw).is_err(), "{raw:?}");
         }
+    }
+
+    /// A scripted run is recorded as the live loop records one (#75): its manifest says the
+    /// same of the feed (venue, symbols, scales, streams, book sampling, clock, source) as the
+    /// live loop's recording does for the same venue and scales, and it ends complete.
+    #[tokio::test]
+    async fn a_scripted_run_is_recorded_as_a_live_one() -> Result<(), Box<dyn Error>> {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/synthetic/session-faults.jsonl");
+        let records = read_records(BufReader::new(File::open(script)?))?;
+        let Some(Record::Scales { venue, scales }) = records.first().cloned() else {
+            panic!("the script starts with its scales");
+        };
+        let dir = std::env::temp_dir().join(format!("tp-serve-script-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let scripted = dir.join("scripted");
+        let hub = Hub::new(HubConfig {
+            venues: vec![venue],
+            ..HubConfig::default()
+        });
+        play_script(records, 0.0, Some(&scripted), &hub).await?;
+
+        let live = Recording {
+            run_dir: dir.join("live"),
+            log: LogConfig::default(),
+        };
+        let symbols: Vec<Symbol> = scales.keys().cloned().collect();
+        start_recording(&live, venue, &symbols, &scales)?.finish()?;
+
+        let read = |run_dir: &Path, file: &str| -> Result<serde_json::Value, Box<dyn Error>> {
+            Ok(serde_json::from_slice(&std::fs::read(run_dir.join(file))?)?)
+        };
+        assert_eq!(
+            read(&scripted, run::MANIFEST)?["params"],
+            read(&live.run_dir, run::MANIFEST)?["params"]
+        );
+        assert!(
+            read(&scripted, run::COMPLETE).is_ok(),
+            "the run is complete"
+        );
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     #[test]

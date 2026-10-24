@@ -18,7 +18,7 @@ use super::sync::{BookSync, Outcome, ResyncReason};
 use super::ws::Inbound;
 use crate::store::frame::Kind;
 use crate::store::writer::Entry;
-use crate::venue::Venue;
+use crate::venue::{MessageError, Parsed, Venue};
 
 /// Something a socket or the REST client did that the feed reacts to although it is no frame.
 /// Logged as a Control frame: JSON tagged by `type`.
@@ -221,10 +221,30 @@ impl Pipeline {
         payload: &str,
         on_event: &mut impl FnMut(LiveEvent<'_>),
     ) -> Applied {
+        self.apply_parsed(kind, payload, None, on_event)
+    }
+
+    /// [`Self::apply`] for a caller that has already read a depth or trade frame's payload by its
+    /// venue's rules ([`Venue::parse`]) for a use of its own: `parsed` is that reading, and the
+    /// payload is not read again (#68). `None`, or any other kind, reads as [`Self::apply`] does.
+    pub fn apply_parsed(
+        &mut self,
+        kind: Kind,
+        payload: &str,
+        parsed: Option<Result<Parsed, MessageError>>,
+        on_event: &mut impl FnMut(LiveEvent<'_>),
+    ) -> Applied {
         let applied = match kind {
-            Kind::Depth => Applied::Frame(self.depth(payload, on_event)),
-            // Whatever the trade socket's text turns out to be, live only lets the feed count it.
-            Kind::Trade => Applied::Frame(self.feed.on_text(payload)),
+            Kind::Depth | Kind::Trade => {
+                let parsed = parsed.unwrap_or_else(|| self.feed.venue().parse(payload));
+                if kind == Kind::Depth {
+                    Applied::Frame(self.depth(parsed, on_event))
+                } else {
+                    // Whatever the trade socket's text turns out to be, live only lets the feed
+                    // count it.
+                    Applied::Frame(self.feed.on_parsed(parsed))
+                }
+            }
             Kind::Snapshot => match serde_json::from_str::<SnapshotPayload>(payload) {
                 Ok(snapshot) => {
                     Applied::Snapshot(self.snapshot(&snapshot.symbol, &snapshot.body, on_event))
@@ -251,10 +271,10 @@ impl Pipeline {
 
     fn depth(
         &mut self,
-        text: &str,
+        parsed: Result<Parsed, MessageError>,
         on_event: &mut impl FnMut(LiveEvent<'_>),
     ) -> Result<Event, FeedError> {
-        let result = self.feed.on_text(text);
+        let result = self.feed.on_parsed(parsed);
         match &result {
             Ok(Event::Depth {
                 symbol, outcome, ..
@@ -267,12 +287,17 @@ impl Pipeline {
                 }
                 self.note_sync_change(symbol, on_event);
             }
-            // The feed already dropped this symbol's book.
-            Err(FeedError::BadDepth { symbol, .. }) => {
-                on_event(LiveEvent::Resync {
-                    symbol,
-                    reason: ResyncReason::BadFrame,
-                });
+            // The feed already dropped this symbol's buffer, and its book if it had one: only a
+            // lost book is a resync, as for every symbol below (#41).
+            Err(FeedError::BadDepth {
+                symbol, book_lost, ..
+            }) => {
+                if *book_lost {
+                    on_event(LiveEvent::Resync {
+                        symbol,
+                        reason: ResyncReason::BadFrame,
+                    });
+                }
                 self.note_sync_change(symbol, on_event);
             }
             // Unreadable, so it may have been any symbol's update: trust no book.
@@ -575,6 +600,42 @@ mod tests {
         assert_eq!(
             live.resyncs,
             vec![(SYMBOL.to_owned(), ResyncReason::BadFrame)]
+        );
+    }
+
+    /// Buffering after a reconnect, there is no book to lose: frames that do not convert (a
+    /// finer tick size sends one every 100 ms) are errors, not a resync each (#41).
+    #[test]
+    fn a_depth_frame_that_does_not_convert_while_buffering_raises_no_resync() {
+        let mut live = Live::synced();
+        live.send(Message::Socket {
+            stream: Stream::Depth,
+            inbound: Inbound::Disconnected {
+                reason: "stream ended".to_owned(),
+                dropped_before: 0,
+                capture_ns: 7,
+            },
+        });
+        let finer_than_the_tick = r#"{"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":1,"T":1,"s":"BTCUSDT","U":13,"u":13,"pu":12,"b":[["100.05","1.000"]],"a":[]}}"#;
+        for _ in 0..10 {
+            live.send(Message::Socket {
+                stream: Stream::Depth,
+                inbound: Inbound::Text {
+                    text: finer_than_the_tick.to_owned(),
+                    dropped_before: 0,
+                    capture_ns: 8,
+                },
+            });
+        }
+        assert_eq!(
+            live.resyncs,
+            vec![(SYMBOL.to_owned(), ResyncReason::Reconnect)]
+        );
+        let stats = live.pipeline.feed().stats();
+        assert_eq!(
+            (stats.resyncs, stats.parse_errors),
+            (1, 10),
+            "one resync event per resync counted"
         );
     }
 

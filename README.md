@@ -45,6 +45,13 @@ snapshot, then deltas whose update id runs on by one; a skipped id drops the boo
 snapshot); it has no live loop yet and is read from Bybit's archive. One run holds one venue, and
 one `serve` hub takes several venues' loops at once.
 
+A run keeps the scales it started with, from its manifest to its Parquet and the API's `welcome`,
+so a tick or lot size made finer mid-run leaves that symbol's depth updates unconvertible and its
+book down (`parse_errors` climbs). After ten such updates in a row the Binance loop asks for the
+symbol's exchange info again, at most every ten minutes, and if the scales did change it says so
+(`ScalesChanged`, printed by `ingest` and `soak`); a restart records a new run at the new scales
+(#45).
+
 ```sh
 cargo run --release -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
 cargo run --release -p engine --bin ingest -- --record                # ...and records a run to the data dir (Ctrl-C ends it cleanly)
@@ -107,6 +114,11 @@ engine-harness --test archive_import local_archive_days`). The committed tests u
 
 DuckDB is linked from its prebuilt library, which the build downloads once per target dir
 (`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network. On
+Windows the build accepts only the archive whose SHA-256 is pinned in
+`engine/build/duckdb_archive.rs` (x64's; Windows on Arm fails until its archive is pinned too)
+and fails on any other: libduckdb-sys checks no hash, and a GitHub release's assets can be
+replaced under the same tag (#66). A DuckDB bump changes that pin in the same commit as the
+`duckdb` and `libduckdb-sys` pins, taking the new release asset's digest from GitHub. On
 Windows the build also copies `duckdb.dll` next to the binaries (`target/<profile>/`,
 `engine/build.rs`), so `store.exe` and `serve.exe` start from any shell, not only under cargo;
 a binary copied elsewhere needs that DLL beside it. Linux and macOS binaries find the library
@@ -116,7 +128,10 @@ Recorded fixtures are never committed; the replay tests replay any present local
 otherwise. The committed tests use synthetic streams and a golden log
 (`engine/tests/fixtures/synthetic/`) and generated ones (property tests and fault injection in
 `engine/tests/`, crash injection and replay-equals-live in `harness/engine-harness/tests/`).
-`TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default).
+`TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default). With `TP_ROTATE_SOAK`
+set, `cargo test --release -p engine-harness --test rotate_soak -- --nocapture` writes one full
+1 GiB segment of synthetic frames, rotates it, and records the time and peak memory in
+`harness/out/rotate-soak-<ms>.json` (#52; `TP_ROTATE_SOAK_MB` for another size).
 
 ## Engine API
 

@@ -7,6 +7,13 @@
 //! puts on `PATH` for `cargo run` and `cargo test`. Windows has no rpath: a binary run any other
 //! way looks for `duckdb.dll` beside itself, then on `PATH`, and fails to start without it.
 //! Linux and macOS binaries carry an rpath to the download folder, so only Windows needs this.
+//!
+//! Before any of that it checks the downloaded archive against the one pinned in
+//! `build/duckdb_archive.rs` and fails the build on any other (#66): the library runs inside the
+//! recorder, the store CLI and every test.
+
+#[path = "build/duckdb_archive.rs"]
+mod duckdb_archive;
 
 use std::env;
 use std::fs;
@@ -17,9 +24,10 @@ const LIBRARY: &str = "duckdb.dll";
 
 /// What the engine is built from, besides its dependencies' own sources: whether any of it
 /// differs from the commit is the manifests' `dirty`, and a change to it reruns this script.
-const SOURCES: [&str; 5] = [
+const SOURCES: [&str; 6] = [
     "src",
     "build.rs",
+    "build",
     "Cargo.toml",
     "../Cargo.toml",
     "../Cargo.lock",
@@ -34,8 +42,12 @@ fn main() {
     // libduckdb-sys (`links = "duckdb"`) tells its direct dependents where the library it
     // downloaded lives; depending on it directly is also what makes its build script run first.
     println!("cargo::rerun-if-env-changed=DEP_DUCKDB_INCLUDE");
-    let Some(source) = env::var_os("DEP_DUCKDB_INCLUDE")
-        .map(|dir| PathBuf::from(dir).join(LIBRARY))
+    let download_dir = env::var_os("DEP_DUCKDB_INCLUDE").map(PathBuf::from);
+    if let Some(dir) = &download_dir {
+        check_download(dir);
+    }
+    let Some(source) = download_dir
+        .map(|dir| dir.join(LIBRARY))
         .filter(|path| path.is_file())
     else {
         println!(
@@ -60,6 +72,43 @@ fn main() {
             target.display()
         );
     }
+}
+
+/// Fails the build unless the library libduckdb-sys downloaded (`DUCKDB_DOWNLOAD_LIB`, see
+/// `.cargo/config.toml`) came in the pinned archive, which it leaves in `dir` beside what it
+/// extracted. A library found any other way (`DUCKDB_LIB_DIR`) was not downloaded, so there is
+/// nothing to check. Runs before the library is copied anywhere; failing here also stops every
+/// binary and test that would load it from being built.
+fn check_download(dir: &Path) {
+    // libduckdb-sys takes DUCKDB_LIB_DIR over a download, whatever DUCKDB_DOWNLOAD_LIB says, and
+    // tests it the same way.
+    println!("cargo::rerun-if-env-changed=DUCKDB_LIB_DIR");
+    if env::var("DUCKDB_LIB_DIR").is_ok() {
+        return;
+    }
+    println!("cargo::rerun-if-env-changed=DUCKDB_DOWNLOAD_LIB");
+    let downloaded = env::var("DUCKDB_DOWNLOAD_LIB")
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true"));
+    if !downloaded {
+        return;
+    }
+    assert!(
+        env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64"),
+        "no SHA-256 is pinned for this target's libduckdb archive: add it to \
+         engine/build/duckdb_archive.rs before building with DUCKDB_DOWNLOAD_LIB"
+    );
+    let archive = dir.join(duckdb_archive::NAME);
+    println!("cargo::rerun-if-changed={}", archive.display());
+    if let Err(error) = duckdb_archive::check(&archive) {
+        panic!(
+            "refusing the downloaded DuckDB library: {error}. If DuckDB was not bumped, the \
+             release asset may have been replaced: do not build with it. Delete {} to download \
+             it again (#66).",
+            dir.display()
+        );
+    }
+    // For the test that checks this check against the same archive.
+    println!("cargo::rustc-env=TP_DUCKDB_ARCHIVE={}", archive.display());
 }
 
 /// The commit the build is made from, as `TP_GIT_SHA`, and whether the engine's sources differ

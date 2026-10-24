@@ -191,7 +191,7 @@ impl Table {
     }
 
     fn source(&self) -> String {
-        let files: Vec<String> = self.files.iter().map(|path| literal(path)).collect();
+        let files: Vec<String> = self.files.iter().map(|path| query::literal(path)).collect();
         format!("read_parquet([{}], union_by_name = true)", files.join(", "))
     }
 
@@ -453,15 +453,6 @@ fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// A path as a `DuckDB` string literal.
-fn literal(path: &Path) -> String {
-    let text = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .replace('\'', "''");
-    format!("'{text}'")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,8 +470,33 @@ mod tests {
     }
 
     #[test]
-    fn identifiers_and_literals_are_quoted() {
+    fn identifiers_are_quoted() {
         assert_eq!(identifier("a\"b"), "\"a\"\"b\"");
-        assert_eq!(literal(Path::new(r"C:\x\it's")), "'C:/x/it''s'");
+    }
+
+    /// A table's files reach SQL through the store's one path quoting (#76), so a data dir with
+    /// a quote in its path still reads.
+    #[test]
+    fn a_table_under_a_path_with_a_quote_reads() -> Result<(), Box<dyn std::error::Error>> {
+        let run = "20261022T000000Z-fixture";
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/ising")
+            .join(run);
+        let data_dir = std::env::temp_dir().join(format!("tp-table-it's-{}", std::process::id()));
+        let run_dir = data_dir.join("ising").join(run);
+        std::fs::create_dir_all(run_dir.join("stats"))?;
+        std::fs::copy(fixture.join(MANIFEST), run_dir.join(MANIFEST))?;
+        for path in query::table_files(&fixture, "stats")? {
+            let name = path.file_name().ok_or("a file name")?;
+            std::fs::copy(&path, run_dir.join("stats").join(name))?;
+        }
+
+        let table = locate(&data_dir, "ising", run, "stats")?;
+        let schema = table.schema()?;
+        let batches = table.window(&query::connect()?, &schema, "step", (0, i64::MAX))?;
+        let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        std::fs::remove_dir_all(&data_dir)?;
+        assert!(rows > 0, "no rows read from {}", run_dir.display());
+        Ok(())
     }
 }

@@ -149,14 +149,15 @@ proptest! {
         let dir = fresh_dir("round-trip");
         let config = LogConfig { max_segment_bytes, ..LogConfig::default() };
         let mut writer = LogWriter::start(&dir, meta(), config)?;
+        let runtime = runs::runtime();
         let mut given = Vec::new();
         for (kind, source_ts_ns, capture_ts_ns, payload) in &entries {
-            given.push(writer.append_blocking(Entry {
+            given.push(runtime.block_on(writer.append(Entry {
                 kind: *kind,
                 source_ts_ns: *source_ts_ns,
                 capture_ts_ns: *capture_ts_ns,
                 payload: payload.clone(),
-            })?);
+            }))?);
         }
         let summary = writer.finish()?;
 
@@ -196,7 +197,8 @@ proptest! {
 
 /// Segments end on the clock too, even with nothing to write: the live loop ticks the writer on
 /// its timer, and each piece of an idle hour becomes a segment of its own, Meta and marker. The
-/// seqs the handle hands out run on across those markers.
+/// seqs the handle hands out run on across those markers. Driven through the live loop's own
+/// `append` and `tick` (#74).
 #[test]
 fn segments_also_end_on_the_clock() -> Result<(), Box<dyn std::error::Error>> {
     let dir = fresh_dir("clock");
@@ -211,13 +213,14 @@ fn segments_also_end_on_the_clock() -> Result<(), Box<dyn std::error::Error>> {
         payload: payload.to_owned(),
     };
     let mut writer = LogWriter::start(&dir, meta(), config)?;
-    let before = writer.append_blocking(entry("before"))?;
+    let runtime = runs::runtime();
+    let before = runtime.block_on(writer.append(entry("before")))?;
     let mut ticks = 0;
     for _ in 0..15 {
         std::thread::sleep(std::time::Duration::from_millis(10));
-        ticks += u64::from(writer.tick_blocking()?);
+        ticks += u64::from(runtime.block_on(writer.tick())?);
     }
-    let after = writer.append_blocking(entry("after"))?;
+    let after = runtime.block_on(writer.append(entry("after")))?;
     let summary = writer.finish()?;
     assert!(summary.segments >= 3, "{summary:?}");
     assert!(ticks >= 2, "{ticks} idle rotations");

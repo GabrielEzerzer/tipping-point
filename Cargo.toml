@@ -55,3 +55,8 @@ pedantic = { level = "warn", priority = -1 }
 dbg_macro = "warn"
 todo = "warn"
 unwrap_used = "warn"
+
+# The engine's build script hashes the 13 MB DuckDB archive every time it runs, which is on every
+# engine source change (#66); unoptimized, that took over a second of each dev build.
+[profile.dev.package.sha2]
+opt-level = 3

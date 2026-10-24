@@ -17,6 +17,14 @@ use engine::store::segment::{self, LOG_DIR, SegmentReader};
 use engine::store::writer::{LogConfig, LogWriter, Summary};
 use engine::venue::Venue;
 
+/// A runtime to drive the writer's async handle from a synchronous test: the live loop's own
+/// `append` and `tick`, so the tests check the code that records.
+pub fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime")
+}
+
 /// An empty folder of its own under cargo's scratch dir for integration tests.
 pub fn fresh_dir(name: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -127,12 +135,13 @@ pub fn write_run(script: &Path, dir: &Path, log: LogConfig) -> (PathBuf, Summary
     };
     let manifest = run::create(&run_dir, params).expect("a run folder");
     let mut writer = LogWriter::start(&run_dir, Meta::for_run(&manifest), log).expect("a writer");
+    let runtime = runtime();
     for record in records {
         let message = record
             .into_message()
             .expect("only the first line holds scales");
         for entry in entries(venue, message) {
-            writer.append_blocking(entry).expect("an append");
+            runtime.block_on(writer.append(entry)).expect("an append");
         }
     }
     let summary = writer.finish().expect("a clean finish");

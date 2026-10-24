@@ -255,10 +255,13 @@ fn book_samples_are_the_book_at_each_instant_of_the_capture_clock() -> Outcome {
 #[test]
 fn rotate_can_be_rerun_and_cleans_up_after_its_own_crash() -> Outcome {
     let (dir, run_dir, segments) = session("rerun");
-    rotate(&run_dir)?;
+    let first = rotate(&run_dir)?;
+    assert!(first.unparsed > 0, "the fixture's bad frames: {first:?}");
     let again = rotate(&run_dir)?;
     assert_eq!(again.written, Vec::<PathBuf>::new());
     assert_eq!(again.skipped, 5 * segments);
+    // A rotated segment is read again only for the replay, not for its rows (#68).
+    assert_eq!(again.unparsed, 0, "{again:?}");
 
     // What a rotate killed halfway leaves: a temp file, and an output it never got to.
     let conn = connect()?;
