@@ -431,9 +431,13 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps({"machine": load, "strays": swept, "legs": legs}, indent=2), encoding="utf-8"
     )
     red = [r.leg for r in results if r.verdict != "GREEN"]
-    skipped = sum(len(r.evidence.get("skipped", [])) for r in results)
-    counted = f" ({skipped} skipped)" if skipped else ""  # a green gate that skipped says so
-    print(f"gate {'RED: ' + ', '.join(red) if red else 'GREEN'}{counted}  (record: {record})")
+    skips = [(r.leg, len(r.evidence["skipped"])) for r in results if r.evidence.get("skipped")]
+    if red:  # each skip named by its leg, so it never reads as a red leg's
+        named = "; skipped: " + ", ".join(f"{leg} {n}" for leg, n in skips) if skips else ""
+        verdict = f"RED: {', '.join(red)}{named}"
+    else:  # a green gate that skipped says so
+        verdict = f"GREEN ({sum(n for _, n in skips)} skipped)" if skips else "GREEN"
+    print(f"gate {verdict}  (record: {record})")
     return 1 if red else 0
 
 

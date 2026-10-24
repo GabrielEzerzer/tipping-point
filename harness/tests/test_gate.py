@@ -742,6 +742,19 @@ def test_the_gate_line_counts_the_checks_its_legs_skipped(
     assert capsys.readouterr().out.splitlines()[-1].startswith(f"{last}  (record: ")
 
 
+def test_a_red_gate_names_the_leg_that_skipped(tmp_path, monkeypatch, capsys) -> None:
+    # "gate RED: ruff-check (1 skipped)" would read as the red leg's skip
+    (real,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    path = FIXTURES / "cargo-test-skipped-green.txt"
+    code = f"import sys; sys.stdout.buffer.write(open({str(path)!r}, 'rb').read())"
+    fake = gate.Leg("cargo-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("ruff-check", "raise SystemExit(1)"), fake])
+    assert gate.main([]) == 1
+    last = capsys.readouterr().out.splitlines()[-1]
+    assert last.startswith("gate RED: ruff-check; skipped: cargo-test 1  (record: ")
+
+
 # ---------- a shared laptop: strays, build jobs, priority and load (#61)
 
 
