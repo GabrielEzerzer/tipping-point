@@ -200,7 +200,12 @@ mod tests {
             exchange.send(frame).await.expect("in-memory send");
             sleep(Duration::from_secs(20)).await;
         }
-        let ended = reader.await.expect("reader task");
+        // Its own bound, not tied to IDLE_TIMEOUT or the connection's age, makes a missing idle
+        // timeout fail here instead of leaving the paused clock idling forever (#42).
+        let ended = timeout(Duration::from_secs(120), reader)
+            .await
+            .expect("still reading 2 minutes into the silence")
+            .expect("reader task");
 
         assert!(
             matches!(
