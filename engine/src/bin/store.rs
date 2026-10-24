@@ -6,7 +6,7 @@
 //! store replay <run dir> [--parquet]   replay the log (or its Parquet) and show what it rebuilt
 //! ```
 //!
-//! `cargo run -p engine --bin store -- rotate <run dir>`
+//! `cargo run --release -p engine --bin store -- rotate <run dir>`
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
