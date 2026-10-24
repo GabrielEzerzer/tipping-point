@@ -776,7 +776,7 @@ mod tests {
             scales: BTreeMap::new(),
             run: Some(RUN.to_owned()),
         };
-        hub.start(Venue::BinanceUsdm, feed);
+        assert!(hub.start(Venue::BinanceUsdm, feed));
         // Memory holds the hour rotate has not reached and the end of the one before it.
         for i in 1000..1500 {
             hub.publish_sample(Published {
