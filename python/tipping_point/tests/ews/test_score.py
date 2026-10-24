@@ -169,24 +169,35 @@ def _repo(root: Path, data_dir: Path, **files: str) -> dict[str, Path]:
     return paths
 
 
-def _score(path: Path, data_dir: Path) -> int:
-    return main(["score", "--prereg", str(path), "--data-dir", str(data_dir), "--seed", "3"])
+def _score(path: Path, data_dir: Path, *extra: str) -> int:
+    argv = ["score", "--prereg", str(path), "--data-dir", str(data_dir), "--seed", "3", *extra]
+    return main(argv)
 
 
-def test_score_writes_stamped_results_and_logs_every_cell(planted: Any, tmp_path: Path) -> None:
+def test_score_writes_stamped_results_and_logs_every_cell(
+    planted: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """The whole chain on data whose answers are planted: AUC cells for both cadences, surrogate
     and alarm rows at the headline cell, static and dynamic FSS, all stamped with the frozen
-    prereg and the inputs' completion hashes, one trial logged per cell."""
+    prereg and the inputs' completion hashes, one trial logged per cell. The planted pilot record
+    predates kernel_sha256, so like any record that cannot be matched to the running kernel it is
+    refused (#55: an old tau_c clock scored without a trace), and with --allow-stale-pilot it
+    scores and the result says stale."""
     data_dir = planted.root
     paths = _repo(tmp_path / "repo", data_dir, demo=PILOT_RUN)
     assert main(["prereg", "freeze", "demo", "--root", str(tmp_path / "repo")]) == 0
-    assert _score(paths["demo"], data_dir) == 0
+    assert _score(paths["demo"], data_dir) == 1
+    assert "records no kernel_sha256" in capsys.readouterr().err
+    assert prereg.trials(data_dir, prereg.load(paths["demo"])) == 0  # nothing scored or logged
+    assert _score(paths["demo"], data_dir, "--allow-stale-pilot") == 0
     (run_dir,) = (data_dir / "ews").glob("*-demo-v1")
     manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
     demo = prereg.load(paths["demo"])
     assert manifest["params"]["prereg"]["sha256"] == demo.sha256
     assert manifest["params"]["prereg"]["tag"] == "prereg/demo-v1"
     assert manifest["params"]["pilot"]["tau_c"] == {"16": 4.0, "32": 8.0}
+    assert manifest["params"]["pilot"]["stale"] is True
+    assert manifest["params"]["pilot"]["kernel_sha256"] is None
     inputs = {i["run_id"]: i for i in manifest["params"]["inputs"]}
     assert len(inputs) == 12  # 2 sizes x 2 seeds x (ramp, null, staircase)
     for tag, run_folder in planted.runs.items():

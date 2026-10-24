@@ -9,13 +9,15 @@ check is dropped and counted. Schedules of kind ramp, fixed and staircase are re
 a fixed run holds one temperature, and a null block is matched on its eps_L.
 
 tau_c(L), the time unit, comes from the #50 pilot record <data dir>/ising/<pilot run>/pilot.json:
-  {"kernel_commit": str,
+  {"kernel_commit": str, "kernel_sha256": str (absent before #55),
    "per_L": {"16": {"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps",
                     "seed", optional "tau_c_ci": [lo, hi]}, ...},
    "fit": {"A", "z", "A_ci", "z_ci"}}
 Only the measured per_L values are read (other keys are ignored); the fit, and any tau_c it would
 extrapolate to an unmeasured L, never enter scoring. Nothing here holds a tau_c of its own:
-without the record, or for an L it did not measure, scoring stops.
+without the record, or for an L it did not measure, scoring stops. A stale record, one that did
+not measure the running kernel (tipping_point.ising.pilot.stale, the rule ramp and null runs are
+held to), is refused unless the caller allows it.
 
 Cadences: `dense` is every stats row, thinned to one sample per `thin` tau_c; `matched` is every
 saved frame (bursts of consecutive sweeps), exactly what the JEPA sees. Windows, bandwidths and
@@ -37,6 +39,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ..ising import autocorr, io
+from ..ising.pilot import stale as _stale
 from . import fss, indicators, scoring, surrogates
 from .trend import Pipeline, trailing_score
 
@@ -69,8 +72,14 @@ class Pilot:
     path: Path
     sha256: str
     kernel_commit: str
+    kernel_sha256: str | None  # None in a record written before #55
     tau_c: dict[int, float]
     tau_c_ci: dict[int, list[float]]  # the record's 95% interval, where it gives one
+
+    @property
+    def stale(self) -> str | None:
+        """Why the record did not measure the running kernel, or None when it did."""
+        return _stale({"kernel_sha256": self.kernel_sha256})
 
     def tau(self, L: int) -> float:
         if L not in self.tau_c:
@@ -78,8 +87,11 @@ class Pilot:
         return self.tau_c[L]
 
 
-def read_pilot(data_dir: Path, run_id: str, sha256: str | None = None) -> Pilot:
-    """The tau_c record of a pilot run; with `sha256`, the file must be exactly that one."""
+def read_pilot(
+    data_dir: Path, run_id: str, sha256: str | None = None, allow_stale: bool = False
+) -> Pilot:
+    """The tau_c record of a pilot run; with `sha256`, the file must be exactly that one. A stale
+    record is refused unless `allow_stale`."""
     path = Path(data_dir) / "ising" / run_id / PILOT
     if not path.is_file():
         raise IsingDataError(
@@ -98,15 +110,23 @@ def read_pilot(data_dir: Path, run_id: str, sha256: str | None = None) -> Pilot:
             for L, point in record["per_L"].items()
             if point.get("tau_c_ci") is not None
         }
-        commit = record["kernel_commit"]
+        commit, kernel = record["kernel_commit"], record.get("kernel_sha256")
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise IsingDataError(f"{path}: not a pilot record ({exc!r})") from exc
     if not isinstance(commit, str) or not commit:
         raise IsingDataError(f"{path}: kernel_commit must name the kernel's commit")
+    if kernel is not None and not isinstance(kernel, str):
+        raise IsingDataError(f"{path}: kernel_sha256 must be the kernel's sha256")
     bad = sorted(L for L, tau in tau_c.items() if not 0 < tau < math.inf)
     if bad or not tau_c:
         raise IsingDataError(f"{path}: tau_c must be positive and finite for every L (bad: {bad})")
-    return Pilot(path, digest, commit, tau_c, ci)
+    pilot = Pilot(path, digest, commit, kernel, tau_c, ci)
+    if pilot.stale and not allow_stale:
+        raise IsingDataError(
+            f"{path} is stale: {pilot.stale}. Its tau_c may belong to another kernel: re-run the "
+            "pilot and tauc, or pass --allow-stale-pilot to score with it anyway"
+        )
+    return pilot
 
 
 @dataclass(frozen=True)
@@ -498,13 +518,19 @@ def evaluate(
     data_dir: Path,
     rng: np.random.Generator,
     say: Callable[[str], None] = print,
+    allow_stale: bool = False,
 ) -> Evaluation:
     """Score a pre-registration's Ising experiment: the AUC of every cell, the surrogate tests and
     alarms at the headline cell, and static and dynamic finite-size scaling. It computes only:
-    writing results and logging trials are the caller's."""
+    writing results and logging trials are the caller's. A stale pilot record is refused unless
+    allow_stale."""
     data = doc["data"]
     pinned = data["tau_c"]["pilot_sha256"]
-    pilot = read_pilot(data_dir, data["tau_c"]["pilot_run"], pinned if len(pinned) == 64 else None)
+    pilot = read_pilot(
+        data_dir, data["tau_c"]["pilot_run"], pinned if len(pinned) == 64 else None, allow_stale
+    )
+    if pilot.stale:
+        say(f"warning: {pilot.path}: {pilot.stale}; scored anyway (--allow-stale-pilot)")
     chosen = select(*find_runs(data_dir), data)
     tables: dict[str, list[Row]] = {"auc": [], "surrogates": [], "alarms": []}
     alarm_eps: Alarms = {}
