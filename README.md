@@ -188,9 +188,11 @@ Training reads Parquet directly (`tipping_point.engine.read`, no engine); the en
 streams serve live inference and replay tests of it (`live`, `table`, `publish`; stdlib and
 pyarrow only). The protocol is pinned by golden files in `engine/tests/fixtures/api/`, which the
 app's mock replays; a change fails `api_contract` until they are regenerated in the same commit
-(`TP_UPDATE_GOLDEN=1 cargo test -p engine-harness`). `api_load` drives ten times the live rate
-into nine app clients, two Arrow clients and one stalled client of each kind, and writes its
-measurements to `harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
+(`TP_UPDATE_GOLDEN=1 cargo test -p engine-harness`). `api_load` drives ten times the live rate,
+its depth frames as deep as Binance's (20 to 60 levels a side, one in a hundred 150 to 500, from
+the captured frames, #83), into nine app clients, two Arrow clients and one stalled client of
+each kind, and writes its measurements, the live path's time per depth frame among them, to
+`harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
 default 5 s. It fails if any input takes the live path half the stall timeout or longer; the rates
 achieved are recorded, not asserted, since on a shared machine they measure the CPU the test got.
 The report also holds the cores and how late a 1 ms sleep woke through the load: past a quarter of
