@@ -615,21 +615,76 @@ def test_a_red_cargo_test_record_names_the_failing_test_and_keeps_its_panic(
     assert gate.main([]) == 1
     (row,) = _record(tmp_path)["legs"]
     assert row["verdict"] == "RED"
-    lib = "unittests src\\lib.rs"
+    lib = "unittests src\\lib.rs (target\\debug\\deps\\engine-ceeaaad3673c0ec7.exe)"
+    smoke = "tests\\smoke.rs (target\\debug\\deps\\smoke-5a66701626c5dd9a.exe)"
     assert row["evidence"] == {
         "results": [
             f"{lib}: test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; "
             "0 filtered out; finished in 0.01s",
-            "tests\\smoke.rs: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+            f"{smoke}: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
             "0 filtered out; finished in 0.00s",
             "Doc-tests engine: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; "
             "0 filtered out; finished in 0.00s",
         ],
-        "failures": [f"{lib}: ---- deliberate::deliberately_fails stdout ----"],
+        "failures": [[f"{lib}: ---- deliberate::deliberately_fails stdout ----", *PANIC]],
         "skipped": [],
     }
     assert row["output_tail"] == fixture("cargo-test-no-fail-fast-red.txt").splitlines()
     assert "assertion `left == right` failed: deliberate" in row["output_tail"]
+
+
+# the panic of the real red engine run (cargo-test-red.txt), as its failure section holds it
+PANIC = [
+    "thread 'deliberate::deliberately_fails' (22964) panicked at engine\\src\\lib.rs:23:9:",
+    "assertion `left == right` failed: deliberate",
+    "  left: 2",
+    " right: 3",
+    "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+]
+
+
+def _planted_early_failure() -> str:
+    """The real workspace run with the real red engine run's failure planted in its first
+    binary, as --no-fail-fast prints it: every binary after the failing one still reports."""
+    red = fixture("cargo-test-red.txt")
+    failure = red[red.index("failures:") : red.index("test result: FAILED")]
+    first = WORKSPACE.index("test result: ok. 38 passed; 0 failed")
+    rest = WORKSPACE[first:].replace("ok. 38 passed; 0 failed", "FAILED. 37 passed; 1 failed", 1)
+    return WORKSPACE[:first] + failure + rest
+
+
+def test_an_early_failure_keeps_its_whole_section_after_it_leaves_the_tail(
+    tmp_path, monkeypatch
+) -> None:
+    # --no-fail-fast runs every binary after a failing one, so on the whole workspace an early
+    # failure's panic scrolls past the 200-line tail; this real workspace run is shorter, so the
+    # tail is cut to match
+    log = tmp_path / "cargo-test.txt"
+    log.write_bytes(_planted_early_failure().encode("utf-8"))
+    code = f"import sys; sys.stdout.buffer.write(open({str(log)!r}, 'rb').read())"
+    (real,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    monkeypatch.setattr(gate, "TAIL_LINES", 40)
+    leg = gate.Leg("cargo-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    result = gate.run_leg(leg)
+    assert result.verdict == "RED"
+    assert not set(PANIC) & set(result.output_tail)
+    lib = "unittests src\\lib.rs (target\\debug\\deps\\engine-9f819c0ddae3f0f5.exe)"
+    assert result.evidence["failures"] == [
+        [f"{lib}: ---- deliberate::deliberately_fails stdout ----", *PANIC]
+    ]
+    assert len(result.evidence["results"]) == 9  # and every binary after it reported
+
+
+def test_two_binaries_of_one_name_are_told_apart_by_their_exe() -> None:
+    # engine's and engine-harness's lib tests both run as "unittests src\lib.rs"
+    engine = fixture("cargo-test-green.txt")
+    harness = engine.replace("engine-ceeaaad3673c0ec7.exe", "engine_harness-0123456789abcdef.exe")
+    results = gate.cargo_test_evidence(engine + harness)["results"]
+    labels = [r.split(": test result")[0] for r in results if r.startswith("unittests")]
+    assert labels == [
+        "unittests src\\lib.rs (target\\debug\\deps\\engine-ceeaaad3673c0ec7.exe)",
+        "unittests src\\lib.rs (target\\debug\\deps\\engine_harness-0123456789abcdef.exe)",
+    ]
 
 
 def test_the_record_keeps_the_last_lines_of_a_long_output(tmp_path, monkeypatch) -> None:
@@ -655,7 +710,8 @@ def test_a_check_a_test_skipped_is_counted_in_the_summary_and_the_record() -> No
     assert verdict.green, verdict.source
     assert verdict.source == "1 test result lines: 1 passed; 0 failed; 1 skipped"
     (skip,) = gate.cargo_test_evidence(output)["skipped"]
-    assert skip.startswith("tests\\api_load.rs: SKIPPED: api_load's arrow p99 131.0442ms over its")
+    api_load = "tests\\api_load.rs (target\\debug\\deps\\api_load-8652aba3279d7f40.exe)"
+    assert skip.startswith(f"{api_load}: SKIPPED: api_load's arrow p99 131.0442ms over its")
 
 
 def test_only_a_line_that_starts_with_skipped_counts() -> None:

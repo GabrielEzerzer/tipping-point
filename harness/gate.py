@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import strays
 
@@ -135,20 +136,35 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
 _FAILURE_HEADER = re.compile(r"^---- .+ ----$")  # libtest's "---- <test> stdout ----"
 
 
-def cargo_test_evidence(output: str) -> dict[str, list[str]]:
-    """What the record keeps of a cargo-test run besides its tail: every 'test result:' line,
-    every failing test's output header and every SKIPPED line, each under the binary that
-    printed it, so a red run names what failed however far above the tail it sits."""
-    binary, evidence = "(no header)", {"results": [], "failures": [], "skipped": []}
+def cargo_test_evidence(output: str) -> dict[str, list[Any]]:
+    """What the record keeps of a cargo-test run besides its tail, each under the binary that
+    printed it, exe and all (engine's and engine-harness's lib tests both run as "unittests
+    src\\lib.rs"): every 'test result:' line, every SKIPPED line, and every failing test's whole
+    section of output, from its '---- <test> stdout ----' header to the next 'failures:' line, so
+    a failure early in a --no-fail-fast run reads in full after it has left the tail."""
+    binary, section = "(no header)", None
+    evidence: dict[str, list[Any]] = {"results": [], "failures": [], "skipped": []}
     for line in output.splitlines():
-        if header := _TEST_HEADER.match(line):
-            binary = (header["binary"] or header["doctests"]).split(" (")[0]
-        elif _TEST_RESULT.search(line):
-            evidence["results"].append(f"{binary}: {line.strip()}")
-        elif _FAILURE_HEADER.match(line.strip()):
-            evidence["failures"].append(f"{binary}: {line.strip()}")
-        elif _SKIPPED.match(line):
-            evidence["skipped"].append(f"{binary}: {line.strip()}")
+        header, failure = _TEST_HEADER.match(line), _FAILURE_HEADER.match(line.strip())
+        ends = header or failure or line.strip() == "failures:" or _TEST_RESULT.search(line)
+        if section is not None and not ends:
+            section.append(line)
+        elif header:
+            section, binary = None, header["binary"] or header["doctests"]
+        elif failure:
+            section = [f"{binary}: {line.strip()}"]
+            evidence["failures"].append(section)
+        else:
+            section = None
+            if _TEST_RESULT.search(line):
+                evidence["results"].append(f"{binary}: {line.strip()}")
+            elif _SKIPPED.match(line):
+                evidence["skipped"].append(f"{binary}: {line.strip()}")
+    for lines in evidence["failures"]:  # without the blank lines around each section's output
+        while len(lines) > 1 and not lines[-1].strip():
+            lines.pop()
+        while len(lines) > 1 and not lines[1].strip():
+            del lines[1]
     return evidence
 
 
@@ -253,7 +269,7 @@ class Leg:
     name: str
     argv: list[str]
     judge: Callable[[int, str], Verdict]
-    evidence: Callable[[str], dict[str, list[str]]] | None = None  # kept beside the tail
+    evidence: Callable[[str], dict[str, list[Any]]] | None = None  # kept beside the tail
 
 
 def _judge_pytest_from_disk(returncode: int, _output: str) -> Verdict:
@@ -345,7 +361,7 @@ class LegResult:
     verdict: str
     verdict_source: str
     output_tail: list[str]
-    evidence: dict[str, list[str]]
+    evidence: dict[str, list[Any]]
 
 
 def run_leg(leg: Leg) -> LegResult:
