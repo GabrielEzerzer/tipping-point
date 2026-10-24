@@ -1,11 +1,14 @@
 """Finite-size scaling fits and verdicts on data whose exponents are known exactly."""
 
+from collections.abc import Callable
+
 import numpy as np
 import pytest
-from tipping_point.ews import fss
+from tipping_point.ews import fss, ising
 from tipping_point.ising.exact import TC
 
 SIZES = [16, 32, 64, 128]
+PerSize = dict[int, tuple[list[np.ndarray], float]]  # alarm eps_L per seed, censored share
 
 
 def test_scaled_temperature_round_trips_and_is_zero_at_tc() -> None:
@@ -62,6 +65,39 @@ def test_alarm_convergence_on_scaling_alarms() -> None:
     inv_nu, ci = fss.alarm_convergence(samples, 300, np.random.default_rng(4))
     assert inv_nu == pytest.approx(1.0, abs=0.05) and ci[0] < 1.0 < ci[1]
     assert fss.combine(fss.match(inv_nu, ci, 1.0, 0.1), fss.excludes(ci, 0.0, 0.1)) == fss.PASS
+
+
+def test_dynamic_verdicts_on_planted_alarm_positions() -> None:
+    """#64: the wiring of ising._dynamic, which the planted scoring run cannot pin (its intervals
+    are too wide to pass). Alarms planted at one eps_L at every L give 1/nu = 1 and pass; at one
+    T (eps_L ~ L, an indicator merely monotone in T) 1/nu = 0 and fail; and with more than half
+    of one L's replicas censored the alarm position was not measured there, so the verdict is
+    inconclusive whatever the alarms say (exactly half is still measured)."""
+    rng = np.random.default_rng(5)
+
+    def planted(eps: Callable[[int], float], censored: float = 0.0) -> PerSize:
+        return {
+            L: ([eps(L) + 0.01 * rng.standard_normal(16) for _ in range(5)], censored)
+            for L in SIZES
+        }
+
+    at_eps = planted(lambda L: 1.3)
+    at_T = planted(lambda L: float(fss.scaled_temperature(TC + 0.05, L)))
+    half: PerSize = {L: (groups, 0.5) for L, (groups, _) in at_eps.items()}
+    over: PerSize = half | {16: (at_eps[16][0], 0.5625)}
+    doc = {
+        "fss": {"dynamic": {"expected_inverse_nu": 1.0, "tolerance": 0.1}},
+        "scoring": {"bootstrap": 200, "ci_level": 0.95},
+    }
+    cases = {("variance", "dense"): at_eps, ("variance", "matched"): at_T}
+    cases |= {("ac", "dense"): half, ("ac", "matched"): over}
+    rows = {(r["quantity"], r["cadence"]): r for r in ising._dynamic(doc, cases, rng)}
+    scaling, monotone = rows["inverse_nu_variance", "dense"], rows["inverse_nu_variance", "matched"]
+    assert scaling["estimate"] == pytest.approx(1.0, abs=0.02) and scaling["verdict"] == fss.PASS
+    assert monotone["estimate"] == pytest.approx(0.0, abs=0.02) and monotone["verdict"] == fss.FAIL
+    assert rows["inverse_nu_ac", "dense"]["verdict"] == fss.PASS
+    assert rows["inverse_nu_ac", "matched"]["verdict"] == fss.INCONCLUSIVE
+    assert all(r["expected"] == 1.0 and r["tolerance"] == 0.1 for r in rows.values())
 
 
 @pytest.mark.parametrize(
