@@ -10,9 +10,9 @@ use std::path::Path;
 use super::frame::{Frame, Kind, Meta};
 use super::segment::{self, Ending, LOG_DIR, SegmentReader};
 use super::{StoreError, query};
-use crate::binance::feed::Feed;
-use crate::binance::live::LiveEvent;
-use crate::binance::pipeline::{Applied, Pipeline, Replayed, Report};
+use crate::market::feed::Feed;
+use crate::market::live::LiveEvent;
+use crate::market::pipeline::{Applied, Pipeline, Replayed, Report};
 
 /// A replay in progress: push frames in seq order, starting with the run's Meta at seq 0.
 #[derive(Debug)]
@@ -74,7 +74,7 @@ impl Replay {
                     seq: frame.seq,
                     error,
                 })?;
-            self.pipeline = Some(Pipeline::new(Feed::new(meta.scales)));
+            self.pipeline = Some(Pipeline::new(Feed::new(meta.venue, meta.scales)));
             self.report.note(frame.seq, &Applied::NotAnInput);
             return Ok(());
         };

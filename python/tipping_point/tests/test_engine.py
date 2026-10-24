@@ -29,15 +29,19 @@ def golden_stream() -> bytes:
 
 def test_the_golden_live_stream_keeps_the_stored_contract() -> None:
     """The engine's live book samples as pinned by its contract test: schema id and provenance
-    in the metadata, no null where the schema forbids one, numeric columns into torch shared."""
+    in the metadata, every row keyed by venue and symbol, no null where the schema forbids one,
+    numeric columns into torch shared."""
     reader = pa.ipc.open_stream(golden_stream())
-    assert engine.schema_id(reader.schema) == "book_samples/1"
+    assert engine.schema_id(reader.schema) == "book_samples/2"
     metadata = reader.schema.metadata or {}
     assert metadata[b"tp.domain"] == b"market"
-    assert json.loads(metadata[b"tp.scales"])["BTCUSDT"] == {"price_decimals": 1, "qty_decimals": 3}
+    venues = engine.scales(reader.schema)
+    assert venues["binance-usdm"]["BTCUSDT"] == {"price_decimals": 1, "qty_decimals": 3}
+    assert set(engine.runs(reader.schema)) <= set(venues)
     batches = list(reader)
     assert batches
     for batch in batches:
+        assert set(batch.column("venue").to_pylist()) <= set(venues)
         free = set(engine.null_free(batch))
         for field in batch.schema:
             if not field.nullable:
@@ -51,6 +55,18 @@ def test_the_golden_live_stream_keeps_the_stored_contract() -> None:
 def test_a_schema_without_the_engine_metadata_is_not_an_engine_stream() -> None:
     with pytest.raises(ValueError, match="not an engine stream"):
         engine.schema_id(pa.schema([("seq", pa.int64())]))
+    with pytest.raises(ValueError, match="not a market stream"):
+        engine.runs(pa.schema([("seq", pa.int64())], metadata={b"tp.run": b"r"}))
+
+
+def test_runs_and_scales_are_keyed_by_venue() -> None:
+    metadata = {
+        b"tp.runs": json.dumps({"bybit-linear": "20261020T000000Z-bybit-linear-btcusdt"}),
+        b"tp.scales": json.dumps({"bybit-linear": {"BTCUSDT": {"price_decimals": 1}}}),
+    }
+    schema = pa.schema([("venue", pa.string())], metadata=metadata)
+    assert engine.runs(schema) == {"bybit-linear": "20261020T000000Z-bybit-linear-btcusdt"}
+    assert engine.scales(schema)["bybit-linear"]["BTCUSDT"]["price_decimals"] == 1
 
 
 def test_read_takes_a_key_range_and_columns_straight_from_parquet(tmp_path: Path) -> None:
@@ -136,7 +152,7 @@ def chunked(handler: BaseHTTPRequestHandler, body: bytes, kind: str, finish: boo
 def test_a_whole_stream_reads_back_whole(stand: Start) -> None:
     server = stand(lambda h: chunked(h, golden_stream(), engine.STREAM_TYPE, finish=True))
     with engine.live(server.url) as stream:
-        assert engine.schema_id(stream.schema) == "book_samples/1"
+        assert engine.schema_id(stream.schema) == "book_samples/2"
         table = stream.read_all()
     assert table.equals(pa.ipc.open_stream(golden_stream()).read_all())
 

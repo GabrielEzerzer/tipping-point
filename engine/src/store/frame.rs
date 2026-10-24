@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::run::{Manifest, Producer};
-use crate::binance::{Scales, Symbol};
+use crate::market::{Scales, Symbol};
+use crate::venue::Venue;
 
 /// The four bytes every frame starts with.
 pub const MAGIC: [u8; 4] = [0xFF, b'T', b'P', b'L'];
@@ -295,8 +296,17 @@ pub struct Meta {
     /// The seq of this Meta frame, which the segment file is named after.
     pub first_seq: u64,
     pub producer: Producer,
+    /// The venue whose streams the run holds. Logs written before there were venues are
+    /// Binance's.
+    #[serde(default = "binance")]
+    pub venue: Venue,
     /// The scales every price and quantity in the run was parsed with.
     pub scales: BTreeMap<Symbol, Scales>,
+}
+
+/// The venue of every run recorded before runs said which venue they were.
+fn binance() -> Venue {
+    Venue::BinanceUsdm
 }
 
 impl Meta {
@@ -307,6 +317,7 @@ impl Meta {
             run_id: manifest.run_id.clone(),
             first_seq: 0,
             producer: manifest.producer.clone(),
+            venue: manifest.params.venue,
             scales: manifest.params.scales.clone(),
         }
     }

@@ -4,6 +4,7 @@
 //! replayed as if live. Every batch is cast back to the schema stored in the Parquet footer, so
 //! a read through the engine equals a direct `pyarrow.dataset` read of the same files.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,12 +17,13 @@ use duckdb::params_from_iter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 
-use super::ipc::{Encoder, Provenance, conform, tagged};
+use super::ipc::{Encoder, Origin, Provenance, conform, tagged};
 use super::replay::delay;
 use super::stream::Chunks;
-use crate::binance::{Scales, Symbol};
+use crate::market::{Scales, Symbol};
 use crate::store::run::{self, MANIFEST};
 use crate::store::{StoreError, query};
+use crate::venue::Venue;
 
 /// The domains a data dir holds.
 pub const DOMAINS: [&str; 2] = [run::MARKET, "ising"];
@@ -49,6 +51,8 @@ struct Manifest {
 #[derive(Debug, Default, Deserialize)]
 struct Params {
     #[serde(default)]
+    venue: Option<Venue>,
+    #[serde(default)]
     scales: Option<std::collections::BTreeMap<Symbol, Scales>>,
 }
 
@@ -63,6 +67,8 @@ pub struct Table {
     pub key: String,
     /// Its Parquet files in key order.
     pub files: Vec<PathBuf>,
+    /// A market run's venue (Binance's, for runs recorded before runs said), `None` elsewhere.
+    pub venue: Option<Venue>,
     pub scales: Option<std::collections::BTreeMap<Symbol, Scales>>,
 }
 
@@ -107,6 +113,8 @@ pub fn locate(data_dir: &Path, domain: &str, run: &str, name: &str) -> Result<Ta
             "table {name:?} of run {run:?} has no Parquet yet"
         )));
     }
+    let venue =
+        (domain == run::MARKET).then(|| manifest.params.venue.unwrap_or(Venue::BinanceUsdm));
     Ok(Table {
         domain: domain.to_owned(),
         run: run.to_owned(),
@@ -114,6 +122,7 @@ pub fn locate(data_dir: &Path, domain: &str, run: &str, name: &str) -> Result<Ta
         run_dir,
         key: manifest.key,
         files,
+        venue,
         scales: manifest.params.scales,
     })
 }
@@ -130,13 +139,19 @@ impl Table {
         let stored = ParquetRecordBatchReaderBuilder::try_new(file)?
             .schema()
             .clone();
+        let origin = match self.venue {
+            Some(venue) => Origin::Market {
+                runs: BTreeMap::from([(venue, self.run.as_str())]),
+                scales: self.scales.iter().map(|scales| (venue, scales)).collect(),
+            },
+            None => Origin::Run(&self.run),
+        };
         Ok(tagged(
             &stored,
             &Provenance {
                 table: &self.name,
                 domain: &self.domain,
-                run: &self.run,
-                scales: self.scales.as_ref(),
+                origin,
             },
         ))
     }

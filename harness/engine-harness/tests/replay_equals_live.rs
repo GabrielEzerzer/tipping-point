@@ -10,15 +10,15 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use engine::binance::feed::Feed;
-use engine::binance::live::{LiveEvent, LiveStats, Log, Observer, handle};
-use engine::binance::pipeline::Pipeline;
-use engine::binance::recording::{Record, read_records};
-use engine::binance::sync::BookSync;
+use engine::market::feed::Feed;
+use engine::market::live::{LiveEvent, LiveStats, Log, Observer, handle};
+use engine::market::pipeline::Pipeline;
+use engine::market::recording::{Record, read_records};
+use engine::market::sync::BookSync;
 use engine::store::frame::{Kind, Meta};
 use engine::store::replay::{replay_log, replay_parquet};
 use engine::store::rotate::rotate;
-use engine::store::run::{self, BookSample, MarketParams};
+use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams};
 use engine::store::segment::{self, LOG_DIR, SegmentReader};
 use engine::store::writer::{Entry, LogConfig, LogWriter};
 use engine_harness::transcript::{FORMAT, Transcript};
@@ -82,16 +82,19 @@ async fn a_session_with_every_fault_replays_exactly_as_it_ran() -> Outcome {
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../engine/tests/fixtures/synthetic/session-faults.jsonl");
     let mut records = read_records(BufReader::new(File::open(script)?))?.into_iter();
-    let Some(Record::Scales { scales }) = records.next() else {
+    let Some(Record::Scales { venue, scales }) = records.next() else {
         panic!("the script starts with its scales");
     };
     let dir = fresh_dir("replay-equals-live");
     let run_dir = dir.join(run::MARKET).join("20231114T221320Z-session");
     let params = MarketParams {
+        venue,
         symbols: scales.keys().cloned().collect(),
         scales: scales.clone(),
-        streams: vec!["depth@100ms".to_owned(), "aggTrade".to_owned()],
+        streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
         book_sample: BookSample::default(),
+        clock: Clock::Capture,
+        source: DataSource::Live,
     };
     let manifest = run::create(&run_dir, params)?;
     // Small segments, so the replays also cross segment boundaries.
@@ -106,7 +109,7 @@ async fn a_session_with_every_fault_replays_exactly_as_it_ran() -> Outcome {
     )?);
 
     // Live: exactly what run_live does with each message, network aside.
-    let mut pipeline = Pipeline::new(Feed::new(scales));
+    let mut pipeline = Pipeline::new(Feed::new(venue, scales));
     let mut live = Watch::default();
     for record in records {
         let message = record

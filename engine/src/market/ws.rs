@@ -1,4 +1,4 @@
-//! The WebSocket reader: one combined-stream connection, kept alive and reconnected, handing
+//! The WebSocket reader: one connection to a venue's stream, kept alive and reconnected, handing
 //! raw text frames to a bounded channel without ever blocking on it.
 
 use std::time::Duration;
@@ -10,16 +10,7 @@ use tokio::time::{Instant, sleep, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, connect_async};
 
-use super::Symbol;
 use crate::store::now_ns;
-
-/// Routed path that serves `@depth@100ms`.
-pub const DEPTH_HOST: &str = "wss://fstream.binance.com/public/stream";
-/// Routed path that serves `@aggTrade` (it is not delivered on `/public`).
-pub const TRADE_HOST: &str = "wss://fstream.binance.com/market/stream";
-
-/// Binance closes a connection after 24 h; leaving before that keeps the reconnect on our terms.
-pub const DEFAULT_MAX_CONNECTION_AGE: Duration = Duration::from_hours(23);
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -55,16 +46,6 @@ pub enum Inbound {
         dropped_before: u64,
         capture_ns: i64,
     },
-}
-
-/// Combined-stream URL for the given symbols and stream suffix, e.g. `depth@100ms`.
-#[must_use]
-pub fn stream_url(host: &str, symbols: &[Symbol], suffix: &str) -> String {
-    let streams: Vec<String> = symbols
-        .iter()
-        .map(|s| format!("{}@{suffix}", s.to_lowercase()))
-        .collect();
-    format!("{host}?streams={}", streams.join("/"))
 }
 
 /// Reads `url` forever, reconnecting with backoff, until the receiver is dropped.
@@ -304,18 +285,5 @@ mod tests {
             "gave up after {elapsed:?}"
         );
         reader.abort();
-    }
-
-    #[test]
-    fn builds_combined_stream_urls() {
-        let symbols = vec!["BTCUSDT".to_owned(), "ETHUSDT".to_owned()];
-        assert_eq!(
-            stream_url(DEPTH_HOST, &symbols, "depth@100ms"),
-            "wss://fstream.binance.com/public/stream?streams=btcusdt@depth@100ms/ethusdt@depth@100ms"
-        );
-        assert_eq!(
-            stream_url(TRADE_HOST, &symbols[..1], "aggTrade"),
-            "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade"
-        );
     }
 }

@@ -4,9 +4,13 @@
 //! <data dir>/market/<run_id>/
 //!   manifest.json               written once, at the start
 //!   complete.json               written once, at a clean end; absent = running or crashed
-//!   log/<first_seq:020>.tplog   the binary log
+//!   log/<first_seq:020>.tplog   the binary log (a live run; an archive run has none)
 //!   <table>/<first_seq:020>.parquet
 //! ```
+//!
+//! A market run holds one venue. A live run's `capture_ts_ns` is the local clock when an input
+//! arrived; an archive run's is the exchange's own time (its manifest says `clock`), and its
+//! manifest names the archive files it came from, each the lossless copy of what the run holds.
 //!
 //! Files only ever appear: each is written to a temp name, synced, then renamed to a name that
 //! did not exist. Nothing is rewritten.
@@ -26,10 +30,15 @@ use serde::{Deserialize, Serialize};
 use super::now_ns;
 use super::rotate::TABLES;
 use super::writer::Summary;
-use crate::binance::{Scales, Symbol};
+use crate::market::{Scales, Symbol};
+use crate::venue::Venue;
 
 /// The environment variable naming the data dir.
 pub const DATA_DIR_ENV: &str = "TP_DATA_DIR";
+/// The manifest format this code writes: 2 added the venue, the clock and the data's source.
+pub const FORMAT: u32 = 2;
+/// Nanoseconds in a UTC day.
+pub const DAY_NS: i64 = 86_400_000_000_000;
 /// The market domain's folder under the data dir.
 pub const MARKET: &str = "market";
 /// The run's key column: every table carries it, rows in key order.
@@ -88,9 +97,23 @@ pub fn run_id(started_ns: i64, tag: &str) -> Result<String, String> {
     ))
 }
 
+/// A proleptic Gregorian (year, month, day) to days since 1970-01-01: Howard Hinnant's
+/// `days_from_civil`, the inverse of [`civil_from_days`].
+#[must_use]
+pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let (month, day) = (i64::from(month), i64::from(day));
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// Days since 1970-01-01 to a proleptic Gregorian (year, month, day): Howard Hinnant's
 /// `civil_from_days`, valid for any day count an `i64` of nanoseconds can reach.
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+#[must_use]
+pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -159,10 +182,95 @@ impl Default for BookSample {
 /// What a market run recorded and how.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketParams {
+    /// The venue whose streams the run holds; one run per venue. Runs recorded before there
+    /// were venues are Binance's.
+    #[serde(default = "binance")]
+    pub venue: Venue,
     pub symbols: Vec<Symbol>,
     pub scales: BTreeMap<Symbol, Scales>,
     pub streams: Vec<String>,
     pub book_sample: BookSample,
+    /// What the run's `capture_ts_ns` is; runs from before manifests said were live.
+    #[serde(default)]
+    pub clock: Clock,
+    /// Where the run's data came from; runs from before manifests said were live.
+    #[serde(default)]
+    pub source: DataSource,
+}
+
+/// What a run's `capture_ts_ns` is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Clock {
+    /// The local wall clock when each input arrived: a live run.
+    #[default]
+    Capture,
+    /// The exchange's own time for each record: an archive run, which joins live runs on
+    /// exchange time, never capture time.
+    Exchange,
+}
+
+/// Where a run's data came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DataSource {
+    /// Recorded from the venue's live streams (or a script played through the live path).
+    #[default]
+    Live,
+    /// Imported from archive files of `format`.
+    Archive {
+        format: String,
+        files: Vec<ArchiveFile>,
+    },
+}
+
+/// One archive file a run was imported from, the lossless copy of what the run holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveFile {
+    pub name: String,
+    pub url: String,
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+/// What an archive import checked about the archive and made of it, kept in `complete.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Integrity {
+    /// Records the archive holds (a CSV header is no record).
+    pub records: u64,
+    /// The first and last exchange time among them.
+    pub first_ts_ns: Option<i64>,
+    pub last_ts_ns: Option<i64>,
+    /// Records whose exchange time is outside the archive's day.
+    pub outside_day: u64,
+    /// The venue's continuity id over the file (Bybit's `u`, Binance's aggregate trade id), and
+    /// the places it did not run on by one (for Bybit, only between snapshots).
+    pub first_id: Option<u64>,
+    pub last_id: Option<u64>,
+    pub id_gaps: u64,
+    /// Binance: aggregated trades whose first trade id did not follow the last one's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trade_id_gaps: Option<u64>,
+    /// Bybit: whole books in the file, the first and every one Bybit sent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<u64>,
+    /// What the pipeline made of the records: inputs it could not use, books it threw away, and
+    /// updates that left a book crossed.
+    pub errors: u64,
+    pub resyncs: u64,
+    pub crossed: u64,
+    /// Book-sample instants left unsampled across exchange-clock jumps of over a day.
+    pub skipped_samples: u64,
+    /// Book-sample rows written while their book was not synced: instants with no trustworthy
+    /// book, before the first snapshot or after a gap until the next one. A day that lost one
+    /// message and never got a snapshot again shows here, not as an error.
+    #[serde(default)]
+    pub unsynced_samples: u64,
+}
+
+/// The venue of every run recorded before manifests said which venue they were.
+fn binance() -> Venue {
+    Venue::BinanceUsdm
 }
 
 /// `manifest.json`: written once, when the run starts.
@@ -184,9 +292,13 @@ pub struct Complete {
     pub ended_ns: i64,
     pub last_key: u64,
     /// Rows per table at the end of the run. The log is the only table a live run writes, so
-    /// a market run counts its frames; rotate later writes exactly that many `frames` rows.
+    /// a live market run counts its frames; rotate later writes exactly that many `frames` rows.
+    /// An archive run counts the rows of each table it wrote.
     pub rows: BTreeMap<String, u64>,
     pub clean: bool,
+    /// An archive run's checks of its archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<Integrity>,
 }
 
 /// A new market run's folder, `<data dir>/market/<run_id>`, with the run id stamped now.
@@ -219,7 +331,7 @@ pub fn create(run_dir: &Path, params: MarketParams) -> io::Result<Manifest> {
     }
     fs::create_dir(run_dir)?;
     let manifest = Manifest {
-        format: 1,
+        format: FORMAT,
         domain: MARKET.to_owned(),
         run_id,
         producer: Producer::engine(),
@@ -242,6 +354,7 @@ pub fn complete(run_dir: &Path, log: &Summary) -> io::Result<()> {
         last_key: log.last_seq,
         rows: BTreeMap::from([("frames".to_owned(), log.frames)]),
         clean: true,
+        integrity: None,
     };
     write_json_once(&run_dir.join(COMPLETE), &complete)
 }
@@ -361,6 +474,38 @@ mod tests {
     }
 
     #[test]
+    fn days_from_civil_inverts_civil_from_days() {
+        for days in [-719_468, -1, 0, 1, 11_016, 20_746, 2_932_896] {
+            let (year, month, day) = civil_from_days(days);
+            let (month, day) = (u32::try_from(month).ok(), u32::try_from(day).ok());
+            let (Some(month), Some(day)) = (month, day) else {
+                panic!("a month and a day");
+            };
+            assert_eq!(
+                days_from_civil(year, month, day),
+                days,
+                "{year}-{month}-{day}"
+            );
+        }
+        assert_eq!(
+            days_from_civil(2026, 10, 20) * DAY_NS,
+            1_792_454_400_000_000_000
+        );
+    }
+
+    #[test]
+    fn a_manifest_from_before_venues_reads_as_a_live_binance_run() -> io::Result<()> {
+        let old = r#"{"symbols":["BTCUSDT"],"scales":{"BTCUSDT":{"price_decimals":1,"qty_decimals":3}},"streams":["depth@100ms"],"book_sample":{"levels":20,"every_ns":100000000}}"#;
+        let params: MarketParams = serde_json::from_str(old).map_err(io::Error::other)?;
+        assert_eq!(params.venue, Venue::BinanceUsdm);
+        assert_eq!(
+            (params.clock, params.source),
+            (Clock::Capture, DataSource::Live)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn run_tags_that_would_confuse_a_reader_are_refused() {
         for tag in ["", "a=b", "a/b", "a b", "a.b"] {
             assert!(run_id(0, tag).is_err(), "{tag:?}");
@@ -415,6 +560,7 @@ mod tests {
             last_key: 9,
             rows: BTreeMap::from([("frames".to_owned(), 10)]),
             clean: true,
+            integrity: None,
         };
         write_json_once(&path, &complete)?;
         assert_eq!(read_json::<Complete>(&path)?, complete);

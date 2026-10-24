@@ -93,9 +93,9 @@ pub fn for_each_frame(
 /// The time column a table is windowed on, and the order its rows come back in.
 fn shape(table: &str) -> Result<(&'static str, &'static str), StoreError> {
     Ok(match table {
-        "frames" | "agg_trades" => ("capture_ts_ns", "seq"),
+        "frames" | "trades" => ("capture_ts_ns", "seq"),
         "depth_updates" | "snapshots" => ("capture_ts_ns", "seq, side DESC, level_idx"),
-        "book_samples" => ("sample_ts_ns", "sample_ts_ns, symbol"),
+        "book_samples" => ("sample_ts_ns", "sample_ts_ns, venue, symbol"),
         _ => return Err(StoreError::UnknownTable(table.to_owned())),
     })
 }

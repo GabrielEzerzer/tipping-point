@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::decimal::step_decimals;
-use super::{Scales, Symbol};
+use crate::market::decimal::step_decimals;
+use crate::market::{Scales, Symbol};
 
 /// Base URL of the USD-M futures REST API.
 pub const BASE_URL: &str = "https://fapi.binance.com";

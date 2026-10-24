@@ -1,5 +1,6 @@
-//! The multi-symbol feed: raw frame text in, book outcomes out. Pure, so the live loop, a
-//! recording and a synthetic test stream all drive exactly the same code.
+//! The multi-symbol feed of one venue: raw frame text in, book outcomes out. Pure, so the live
+//! loop, a recording and a synthetic test stream all drive exactly the same code. The venue reads
+//! the text and its rule keeps each book; the counting and the reactions are shared.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7,9 +8,23 @@ use thiserror::Error;
 
 use super::book::Book;
 use super::decimal::DecimalError;
-use super::messages::{AggTrade, MessageError, Payload, parse_frame, parse_snapshot};
 use super::sync::{BookSync, Outcome, ResyncReason};
 use super::{Scales, Symbol};
+use crate::venue::{Depth, MessageError, Parsed, Venue};
+
+/// One trade in integer units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trade {
+    pub symbol: String,
+    /// The venue's id for it, as text: Binance numbers its aggregated trades, Bybit uses UUIDs.
+    pub trade_id: String,
+    pub price: i64,
+    pub qty: i64,
+    pub trade_time_ms: u64,
+    /// True when the buyer was the maker (the seller crossed the spread), whatever the venue
+    /// calls it.
+    pub buyer_is_maker: bool,
+}
 
 /// Counters over everything the feed has seen.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -22,6 +37,10 @@ pub struct Stats {
     pub applied: u64,
     pub buffered: u64,
     pub dropped_stale: u64,
+    /// Updates dropped because no book was there and none was coming but the venue's next
+    /// snapshot (Bybit's rule).
+    pub skipped: u64,
+    /// Snapshots fed: REST bodies, and whole books sent on the stream.
     pub snapshots: u64,
     /// Times a trustworthy book was thrown away, by reason.
     pub resyncs: u64,
@@ -42,7 +61,7 @@ pub enum Event {
         outcome: Outcome,
         crossed: bool,
     },
-    Trade(AggTrade),
+    Trade(Trade),
 }
 
 /// Why a frame or snapshot could not be fed.
@@ -59,9 +78,10 @@ pub enum FeedError {
     UnknownSymbol(String),
 }
 
-/// One [`BookSync`] per symbol, plus the scales to parse with and the running counters.
+/// One venue's [`BookSync`] per symbol, plus the scales to parse with and the running counters.
 #[derive(Debug)]
 pub struct Feed {
+    venue: Venue,
     scales: BTreeMap<Symbol, Scales>,
     syncs: BTreeMap<Symbol, BookSync>,
     pending_snapshot: BTreeSet<Symbol>,
@@ -69,20 +89,27 @@ pub struct Feed {
 }
 
 impl Feed {
-    /// A feed for exactly the symbols given scales.
+    /// A feed of `venue`'s books for exactly the symbols given scales.
     #[must_use]
-    pub fn new(scales: BTreeMap<Symbol, Scales>) -> Self {
+    pub fn new(venue: Venue, scales: BTreeMap<Symbol, Scales>) -> Self {
         let syncs = scales
             .keys()
             .cloned()
-            .map(|s| (s, BookSync::new()))
+            .map(|s| (s, BookSync::new(venue)))
             .collect();
         Self {
+            venue,
             scales,
             syncs,
             pending_snapshot: BTreeSet::new(),
             stats: Stats::default(),
         }
+    }
+
+    /// The venue whose streams this feed reads.
+    #[must_use]
+    pub fn venue(&self) -> Venue {
+        self.venue
     }
 
     /// The symbols this feed tracks.
@@ -133,34 +160,50 @@ impl Feed {
     }
 
     fn route(&mut self, text: &str) -> Result<Event, FeedError> {
-        match parse_frame(text)?.data {
-            Payload::Depth(raw) => {
+        match self.venue.parse(text)? {
+            Parsed::Depth(raw) => {
                 self.stats.depth_events += 1;
-                let scales = self.scales_for(&raw.symbol)?;
-                let update = match scales.depth_update(&raw) {
-                    Ok(update) => update,
+                let scales = self.scales_for(raw.symbol())?;
+                let converted = raw.convert(scales);
+                let symbol = raw.into_symbol();
+                let depth = match converted {
+                    Ok(depth) => depth,
                     Err(error) => {
-                        self.invalidate(&raw.symbol, ResyncReason::BadFrame);
-                        return Err(FeedError::BadDepth {
-                            symbol: raw.symbol,
-                            error,
-                        });
+                        self.invalidate(&symbol, ResyncReason::BadFrame);
+                        return Err(FeedError::BadDepth { symbol, error });
                     }
                 };
-                let sync = self.syncs.entry(raw.symbol.clone()).or_default();
-                let outcome = sync.on_event(update);
-                let crossed = sync.book().is_some_and(Book::is_crossed);
-                self.count(outcome, crossed);
+                let Some(sync) = self.syncs.get_mut(&symbol) else {
+                    return Err(FeedError::UnknownSymbol(symbol));
+                };
+                let (outcome, crossed) = match depth {
+                    Depth::Update(update) => {
+                        let outcome = sync.on_event(update);
+                        let crossed = sync.book().is_some_and(Book::is_crossed);
+                        self.count(outcome, crossed);
+                        (outcome, crossed)
+                    }
+                    // Counted as a snapshot, as a REST one is; its install is no applied update.
+                    Depth::Book(snapshot) => {
+                        let installed = sync.on_snapshot(&snapshot);
+                        let crossed = sync.book().is_some_and(Book::is_crossed);
+                        self.stats.snapshots += 1;
+                        for (outcome, crossed) in installed.drained {
+                            self.count(outcome, crossed);
+                        }
+                        (installed.outcome, crossed)
+                    }
+                };
                 Ok(Event::Depth {
-                    symbol: raw.symbol,
+                    symbol,
                     outcome,
                     crossed,
                 })
             }
-            Payload::AggTrade(raw) => {
+            Parsed::Trade(raw) => {
                 self.stats.trades += 1;
-                let scales = self.scales_for(&raw.symbol)?;
-                Ok(Event::Trade(scales.agg_trade(&raw)?))
+                let scales = self.scales_for(raw.symbol())?;
+                Ok(Event::Trade(raw.convert(scales)?))
             }
         }
     }
@@ -173,8 +216,10 @@ impl Feed {
         self.pending_snapshot.remove(symbol);
         self.stats.snapshots += 1;
         let scales = self.scales_for(symbol)?;
-        let snapshot = scales.snapshot(&parse_snapshot(body)?)?;
-        let sync = self.syncs.entry(symbol.to_owned()).or_default();
+        let snapshot = self.venue.parse_snapshot(body)?.convert(scales)?;
+        let Some(sync) = self.syncs.get_mut(symbol) else {
+            return Err(FeedError::UnknownSymbol(symbol.to_owned()));
+        };
         let installed = sync.on_snapshot(&snapshot);
         // The install is counted under `snapshots`; a failed install is the resync among the
         // replayed updates, so counting those counts it exactly once.
@@ -245,6 +290,7 @@ impl Feed {
             }
             Outcome::Buffered => self.stats.buffered += 1,
             Outcome::DroppedStale => self.stats.dropped_stale += 1,
+            Outcome::Skipped => self.stats.skipped += 1,
             Outcome::NeedsResync(reason) => {
                 self.stats.resyncs += 1;
                 match reason {
@@ -264,13 +310,16 @@ mod tests {
     use super::*;
 
     fn feed() -> Feed {
-        Feed::new(BTreeMap::from([(
-            "BTCUSDT".to_owned(),
-            Scales {
-                price_decimals: 1,
-                qty_decimals: 3,
-            },
-        )]))
+        Feed::new(
+            Venue::BinanceUsdm,
+            BTreeMap::from([(
+                "BTCUSDT".to_owned(),
+                Scales {
+                    price_decimals: 1,
+                    qty_decimals: 3,
+                },
+            )]),
+        )
     }
 
     fn depth(first: u64, last: u64, prev: u64, bids: &str, asks: &str) -> String {
@@ -453,6 +502,87 @@ mod tests {
         let event = feed.on_text(&depth(13, 13, 12, r#"[["102.0","1.000"]]"#, "[]"))?;
         assert!(matches!(event, Event::Depth { crossed: true, .. }));
         assert_eq!(feed.stats().crossed, 1);
+        Ok(())
+    }
+
+    fn bybit_feed() -> Feed {
+        Feed::new(
+            Venue::BybitLinear,
+            BTreeMap::from([(
+                "BTCUSDT".to_owned(),
+                Scales {
+                    price_decimals: 1,
+                    qty_decimals: 3,
+                },
+            )]),
+        )
+    }
+
+    /// A Bybit order-book message, as its stream and archive send one.
+    fn bybit(kind: &str, u: u64, bids: &str, asks: &str) -> String {
+        format!(
+            r#"{{"topic":"orderbook.200.BTCUSDT","type":"{kind}","ts":1,"data":{{"s":"BTCUSDT","b":{bids},"a":{asks},"u":{u},"seq":7}},"cts":1}}"#
+        )
+    }
+
+    #[test]
+    fn a_bybit_book_comes_on_the_stream_and_chains_on_u() -> Result<(), FeedError> {
+        let mut feed = bybit_feed();
+        let early = feed.on_text(&bybit("delta", 41, r#"[["100.0","1.000"]]"#, "[]"))?;
+        assert!(matches!(
+            early,
+            Event::Depth {
+                outcome: Outcome::Skipped,
+                ..
+            }
+        ));
+        assert_eq!(
+            feed.snapshots_due(),
+            Vec::<String>::new(),
+            "nothing to fetch"
+        );
+        let book = r#"[["100.0","1.000"],["99.0","2.000"]]"#;
+        feed.on_text(&bybit("snapshot", 42, book, r#"[["101.0","1.000"]]"#))?;
+        assert!(feed.sync("BTCUSDT").is_some_and(BookSync::is_synced));
+        feed.on_text(&bybit("delta", 43, r#"[["100.0","0"]]"#, "[]"))?;
+        assert_eq!(
+            feed.book("BTCUSDT")
+                .and_then(Book::best_bid)
+                .map(|l| l.price),
+            Some(990)
+        );
+        let gap = feed.on_text(&bybit("delta", 45, "[]", "[]"))?;
+        assert!(matches!(
+            gap,
+            Event::Depth {
+                outcome: Outcome::NeedsResync(ResyncReason::SequenceGap {
+                    expected: 43,
+                    got: 44
+                }),
+                ..
+            }
+        ));
+        feed.on_text(&bybit("delta", 46, "[]", "[]"))?;
+        // A restart: the stream starts over at u = 1 with a whole book.
+        feed.on_text(&bybit("snapshot", 1, book, "[]"))?;
+        feed.on_text(&bybit("delta", 2, r#"[["98.0","1.000"]]"#, "[]"))?;
+        assert_eq!(feed.sync("BTCUSDT").and_then(BookSync::last_id), Some(2));
+        let stats = feed.stats();
+        assert_eq!(
+            (
+                stats.snapshots,
+                stats.applied,
+                stats.skipped,
+                stats.sequence_gaps
+            ),
+            (2, 2, 2, 1)
+        );
+        assert!(matches!(
+            feed.on_snapshot("BTCUSDT", "{}"),
+            Err(FeedError::Message(MessageError::NoRestSnapshots(
+                Venue::BybitLinear
+            )))
+        ));
         Ok(())
     }
 }

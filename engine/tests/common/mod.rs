@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use engine::binance::book::Book;
-use engine::binance::sync::{DepthUpdate, Level, Snapshot};
+use engine::market::book::Book;
+use engine::market::sync::{DepthUpdate, Level, Snapshot};
 use proptest::prelude::*;
 
 /// One change to the reference book. A positive quantity sets the level, zero deletes it.

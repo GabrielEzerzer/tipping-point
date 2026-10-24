@@ -3,14 +3,20 @@
 Offline work (training on Kaggle, experiments, baselines) reads a run's Parquet directly with
 `read`, following the shared layout `<root>/<domain>/<run_id>/<table>/<first_key:020>.parquet`.
 The engine is only on the live path: `live` streams book samples as Arrow record batches, each
-one or more whole 100 ms grid instants with one row per symbol (one instant per batch live; a
-backfill or an unpaced replay sends several), `table` reads a range of any table through the
-engine, and `publish` hands results (meters, Jev labels, P&L) back for the app.
+one or more whole 100 ms grid instants of one venue with one row per symbol (one instant per
+batch live; a backfill or an unpaced replay sends several), `table` reads a range of any table
+through the engine, and `publish` hands results (meters, Jev labels, P&L) back for the app.
 
-Every stream keeps the stored schema, with `tp.schema = "<table>/<major>"` in its metadata. A
-column the schema declares non-nullable never holds a null, so `torch.from_dlpack(column)`
-shares its buffer; nullable book levels (past the book's depth, or while unsynced) must be
-filled first, which copies.
+Market data comes from several venues, and two can share a symbol (Binance and Bybit both say
+`BTCUSDT`), so every market row but a frame's has a `venue` column, and a book is keyed by
+(venue, symbol). A run holds one venue. `trades.trade_id` is a string (Bybit's are UUIDs).
+
+Every stream keeps the stored schema, with `tp.schema = "<table>/<major>"` in its metadata; the
+market tables keyed by venue are at major 2. A market stream says where its rows come from in
+`tp.runs` and `tp.scales`, both keyed by venue (`runs` and `scales` decode them); an Ising stream
+names its run in `tp.run`. A column the schema declares non-nullable never holds a null, so
+`torch.from_dlpack(column)` shares its buffer; nullable book levels (past the book's depth, or
+while unsynced) must be filled first, which copies.
 
 An engine stream either ends with Arrow's end-of-stream marker or fails: the engine aborts the
 HTTP response on any error, so a short read raises instead of passing for a short table.
@@ -35,6 +41,8 @@ import pyarrow.ipc
 DEFAULT_URL = "http://127.0.0.1:7731"
 STREAM_TYPE = "application/vnd.apache.arrow.stream"
 SCHEMA_KEY = b"tp.schema"
+RUNS_KEY = b"tp.runs"
+SCALES_KEY = b"tp.scales"
 
 
 def read(
@@ -142,7 +150,7 @@ def table(
 
 def publish(topic: str, payload: Mapping[str, Any], url: str = DEFAULT_URL) -> None:
     """Sends one result to the app through the engine: `meters` and `pnl` keep the latest per
-    `symbol`, `jev` and `ising` keep every message."""
+    `venue` and `symbol` the payload names, `jev` and `ising` keep every message."""
     body = json.dumps(payload).encode()
     request = urllib.request.Request(
         _url(url, f"/v1/publish/{quote(topic)}", {}),
@@ -160,6 +168,25 @@ def schema_id(schema: pa.Schema) -> str:
     if SCHEMA_KEY not in metadata:
         raise ValueError("not an engine stream: no tp.schema in the schema metadata")
     return metadata[SCHEMA_KEY].decode()
+
+
+def _market_metadata(schema: pa.Schema, key: bytes) -> Any:
+    metadata = schema.metadata or {}
+    if key not in metadata:
+        raise ValueError(f"not a market stream: no {key.decode()} in the schema metadata")
+    return json.loads(metadata[key])
+
+
+def runs(schema: pa.Schema) -> dict[str, str]:
+    """The run each venue's rows come from, by venue id: one entry for a table read, every
+    recording venue for the live stream (none when nothing is recorded)."""
+    return _market_metadata(schema, RUNS_KEY)
+
+
+def scales(schema: pa.Schema) -> dict[str, dict[str, dict[str, int]]]:
+    """Each venue's symbols' scales: `{venue: {symbol: {"price_decimals", "qty_decimals"}}}`. A
+    price of `p` ticks is `p / 10**price_decimals`."""
+    return _market_metadata(schema, SCALES_KEY)
 
 
 def null_free(batch: pa.RecordBatch) -> list[str]:

@@ -5,7 +5,8 @@
 mod common;
 
 use common::scenario;
-use engine::binance::sync::{BookSync, DepthUpdate, Outcome, ResyncReason};
+use engine::market::sync::{DepthUpdate, Outcome, ResyncReason};
+use engine::venue::binance::sync::BookSync;
 use proptest::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,21 +2,28 @@
 //! frame, the Ising lattice. Golden files under `engine/tests/fixtures/api/` pin every message;
 //! a change here fails the contract tests until they are regenerated in the same commit.
 //!
+//! Venues: a symbol names a book only together with its venue (Binance and Bybit both say
+//! `BTCUSDT`), so every message that carries a symbol carries its `venue` too, and `status`
+//! reports each venue's own sockets and counters.
+//!
 //! Units: prices are integer ticks and quantities integer lots at each symbol's scales, sent
 //! once in `welcome`; times are integer milliseconds since the epoch (`ts_ms`), because
-//! nanoseconds since the epoch are past 2^53 and JavaScript would round them.
+//! nanoseconds since the epoch are past 2^53 and JavaScript would round them. Trade ids are
+//! strings: Bybit's are UUIDs.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::binance::Scales;
-use crate::binance::sync::Level;
+use super::hub::Source;
+use crate::market::sync::Level;
 use crate::store::samples::{BookRow, Sample};
+use crate::venue::Venue;
 
-/// The protocol version a client must say hello with.
-pub const PROTOCOL: u32 = 1;
+/// The protocol version a client must say hello with. Version 2 added the venue to every
+/// message that names a symbol, made trade ids strings, and grouped `status` by venue.
+pub const PROTOCOL: u32 = 2;
 
 /// Close codes the engine ends a connection with.
 pub mod close {
@@ -98,11 +105,13 @@ impl Topic {
 pub enum ClientMessage {
     /// First, always: the protocol version the client speaks.
     Hello { v: u32 },
-    /// Replaces the subscription. `symbols` defaults to all, `levels` to the sampled depth, and
-    /// `backfill_s` first sends that many seconds of book samples and trades the engine still
-    /// holds.
+    /// Replaces the subscription. `venues` and `symbols` default to all (a book or trade is sent
+    /// when both match), `levels` to the sampled depth, and `backfill_s` first sends that many
+    /// seconds of book samples and trades the engine still holds.
     Sub {
         topics: Vec<Topic>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        venues: Option<Vec<Venue>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         symbols: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,9 +142,10 @@ fn one() -> f64 {
     1.0
 }
 
-/// A symbol and its scales, as `welcome` lists them.
+/// A venue's symbol and its scales, as `welcome` lists them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SymbolScales {
+    pub venue: Venue,
     pub symbol: String,
     pub price_decimals: u32,
     pub qty_decimals: u32,
@@ -147,35 +157,41 @@ pub struct Welcome {
     pub v: u32,
     /// `live`: the connection starts on the live feed.
     pub mode: &'static str,
-    /// The run the live feed is recording, if any.
-    pub run: Option<String>,
+    /// The run each venue's live feed is recording, by venue; a venue recording nothing is
+    /// absent.
+    pub runs: BTreeMap<Venue, String>,
     /// Levels each side of a `book` message holds at most.
     pub levels: usize,
     pub sample_every_ms: i64,
+    /// Every venue's symbols, venue by venue.
     pub symbols: Vec<SymbolScales>,
     pub topics: Vec<Topic>,
 }
 
 impl Welcome {
+    /// The welcome to the live feed `source`.
     #[must_use]
-    pub fn new(
-        scales: &BTreeMap<String, Scales>,
-        run: Option<String>,
-        levels: usize,
-        sample_every_ns: i64,
-    ) -> Self {
+    pub fn new(source: &Source, levels: usize, sample_every_ns: i64) -> Self {
         Self {
             v: PROTOCOL,
             mode: "live",
-            run,
+            runs: source
+                .venues
+                .iter()
+                .filter_map(|(venue, feed)| Some((*venue, feed.run.clone()?)))
+                .collect(),
             levels,
             sample_every_ms: sample_every_ns / 1_000_000,
-            symbols: scales
+            symbols: source
+                .venues
                 .iter()
-                .map(|(symbol, scales)| SymbolScales {
-                    symbol: symbol.clone(),
-                    price_decimals: scales.price_decimals,
-                    qty_decimals: scales.qty_decimals,
+                .flat_map(|(venue, feed)| {
+                    feed.scales.iter().map(|(symbol, scales)| SymbolScales {
+                        venue: *venue,
+                        symbol: symbol.clone(),
+                        price_decimals: scales.price_decimals,
+                        qty_decimals: scales.qty_decimals,
+                    })
                 })
                 .collect(),
             topics: Topic::ALL.to_vec(),
@@ -183,9 +199,10 @@ impl Welcome {
     }
 }
 
-/// One symbol's book at one grid instant: a `book_samples` row, as JSON.
+/// One venue's symbol's book at one grid instant: a `book_samples` row, as JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BookMessage<'a> {
+    pub venue: Venue,
     pub symbol: &'a str,
     pub ts_ms: i64,
     /// The last log frame applied before the instant.
@@ -207,6 +224,7 @@ impl<'a> BookMessage<'a> {
                 .collect()
         };
         Self {
+            venue: sample.venue,
             symbol: &row.symbol,
             ts_ms: sample.sample_ts_ns.div_euclid(1_000_000),
             seq: sample.seq,
@@ -218,17 +236,20 @@ impl<'a> BookMessage<'a> {
     }
 }
 
-/// One aggregated trade.
+/// One trade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TradeMessage {
+    pub venue: Venue,
     pub symbol: String,
-    /// The log frame that carried it.
+    /// The log frame that carried it, in its venue's run.
     pub seq: u64,
     /// The exchange's trade time.
     pub ts_ms: u64,
-    pub id: u64,
+    /// The venue's trade id: a string, whatever the venue numbers trades with.
+    pub id: String,
     pub px: i64,
     pub qty: i64,
+    /// True when the buyer was the maker, whatever the venue calls it.
     pub buyer_is_maker: bool,
 }
 
@@ -240,7 +261,7 @@ pub struct StreamStatus {
     pub frames_dropped: u64,
 }
 
-/// Both sockets.
+/// A venue's two sockets.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Streams {
     pub depth: StreamStatus,
@@ -253,10 +274,18 @@ pub struct SymbolStatus {
     pub synced: bool,
 }
 
-/// What the ingest is doing. `ts_ms` is the capture time of the last input it reflects, so a
-/// client tells stale data from its own clock.
+/// What every venue's ingest is doing, venue by venue. `ts_ms` is the capture time of the newest
+/// input any venue's state reflects, so a client tells stale data from its own clock.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Status {
+    pub ts_ms: i64,
+    pub venues: BTreeMap<Venue, VenueStatus>,
+}
+
+/// What one venue's ingest is doing: its own two sockets, its books and its counters. `ts_ms` is
+/// the capture time of the last of its inputs this reflects.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct VenueStatus {
     pub ts_ms: i64,
     pub streams: Streams,
     pub symbols: BTreeMap<String, SymbolStatus>,
@@ -266,7 +295,7 @@ pub struct Status {
     pub parse_errors: u64,
 }
 
-impl Status {
+impl VenueStatus {
     /// Equal but for the time: a change worth sending.
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
@@ -387,8 +416,22 @@ mod tests {
     fn client_messages_are_tagged_by_t() {
         let parse = |text: &str| serde_json::from_str::<ClientMessage>(text).ok();
         assert_eq!(
-            parse(r#"{"t":"hello","v":1}"#),
-            Some(ClientMessage::Hello { v: 1 })
+            parse(r#"{"t":"hello","v":2}"#),
+            Some(ClientMessage::Hello { v: 2 })
+        );
+        assert_eq!(
+            parse(r#"{"t":"sub","topics":["book"],"venues":["binance-usdm"]}"#),
+            Some(ClientMessage::Sub {
+                topics: vec![Topic::Book],
+                venues: Some(vec![Venue::BinanceUsdm]),
+                symbols: None,
+                levels: None,
+                backfill_s: None,
+            })
+        );
+        assert_eq!(
+            parse(r#"{"t":"sub","topics":[],"venues":["nowhere"]}"#),
+            None
         );
         assert_eq!(
             parse(r#"{"t":"replay","run":"r"}"#),
@@ -404,15 +447,15 @@ mod tests {
 
     #[test]
     fn a_status_change_ignores_the_time() {
-        let a = Status::default();
-        let b = Status {
+        let a = VenueStatus::default();
+        let b = VenueStatus {
             ts_ms: 5,
-            ..Status::default()
+            ..VenueStatus::default()
         };
         assert!(a.same_as(&b));
-        let c = Status {
+        let c = VenueStatus {
             resyncs: 1,
-            ..Status::default()
+            ..VenueStatus::default()
         };
         assert!(!a.same_as(&c));
     }

@@ -24,6 +24,7 @@ use engine::api::ApiConfig;
 use engine::api::hub::{Hub, HubConfig};
 use engine::store::now_ns;
 use engine::store::writer::LogConfig;
+use engine::venue::Venue;
 use engine_harness::api::{
     Frame, LivePath, Outcome, Server, hello, next_frame, next_json, send_json, ws_connect,
 };
@@ -160,7 +161,9 @@ async fn stalled_app(addr: std::net::SocketAddr) -> Outcome<WebSocketStream<TcpS
     let stream = stalled_socket(addr).await?;
     let (mut socket, _) = client_async(format!("ws://{addr}/v1/ws"), stream).await?;
     socket
-        .send(WsMessage::text(json!({"t": "hello", "v": 1}).to_string()))
+        .send(WsMessage::text(
+            json!({"t": "hello", "v": engine::api::messages::PROTOCOL}).to_string(),
+        ))
         .await?;
     socket
         .send(WsMessage::text(
@@ -213,6 +216,7 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
         ..ApiConfig::new(dir.clone())
     };
     let mut live = LivePath::new(
+        Venue::BinanceUsdm,
         generator.scales(),
         Arc::clone(&hub),
         &dir,
@@ -412,7 +416,7 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
         "live_path_ms_per_input": {"p50": millis(percentile(&mut per_input, 50.0)), "p99": millis(percentile(&mut per_input, 99.0)), "max": millis(per_input.iter().copied().max().unwrap_or_default())},
         "writer_queue": {"max": max_queued, "capacity": LogConfig::default().queue},
         "memory": {"peak_bytes": peak_memory_bytes(), "ring_samples": ring_samples, "ring_trades": ring_trades},
-        "books_synced": pipeline.feed().symbols().all(|s| pipeline.feed().sync(s).is_some_and(engine::binance::sync::BookSync::is_synced)),
+        "books_synced": pipeline.feed().symbols().all(|s| pipeline.feed().sync(s).is_some_and(engine::market::sync::BookSync::is_synced)),
     });
     let out = report_path();
     fs::create_dir_all(out.parent().ok_or("a report dir")?)?;
