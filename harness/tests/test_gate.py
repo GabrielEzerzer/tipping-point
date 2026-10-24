@@ -721,6 +721,27 @@ def test_only_a_line_that_starts_with_skipped_counts() -> None:
     assert gate.judge_cargo_test(0, output).source == "2 test result lines: 1 passed; 0 failed"
 
 
+@pytest.mark.parametrize(
+    ("stem", "last"),
+    [
+        ("cargo-test-skipped-green.txt", "gate GREEN (1 skipped)"),
+        ("cargo-test-green.txt", "gate GREEN"),
+    ],
+    ids=["skipped", "none-skipped"],
+)
+def test_the_gate_line_counts_the_checks_its_legs_skipped(
+    tmp_path, monkeypatch, capsys, stem: str, last: str
+) -> None:
+    # a green gate whose legs skipped a check says so on its last line, not only in a leg's
+    (real,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    code = f"import sys; sys.stdout.buffer.write(open({str(FIXTURES / stem)!r}, 'rb').read())"
+    fake = gate.Leg("cargo-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [fake])
+    assert gate.main([]) == 0
+    assert capsys.readouterr().out.splitlines()[-1].startswith(f"{last}  (record: ")
+
+
 # ---------- a shared laptop: strays, build jobs, priority and load (#61)
 
 
