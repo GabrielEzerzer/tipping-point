@@ -49,7 +49,7 @@ use crate::market::live::LiveEvent;
 use crate::market::pipeline::{Replayed, SnapshotPayload};
 use crate::market::sync::{DepthUpdate, Level, Snapshot};
 use crate::market::{Scales, Symbol};
-use crate::venue::{Depth, Parsed, RawDepth, RawTrade, Venue};
+use crate::venue::{Depth, MessageError, Parsed, RawDepth, RawTrade, Venue};
 
 /// Every table rotate writes, in the order the manifest lists them.
 pub const TABLES: [&str; 5] = [
@@ -83,7 +83,8 @@ pub struct Rotation {
     /// Temp files an interrupted rotate left, deleted.
     pub cleaned: u64,
     /// Depth, trade and snapshot frames that gave no rows because they did not parse or convert
-    /// (the `frames` table still holds their text).
+    /// (the `frames` table still holds their text), among those read for the files written this
+    /// time: a segment rotated before is not read for rows again.
     pub unparsed: u64,
     /// Grid instants left unsampled because the capture clock jumped further than a day.
     pub skipped_samples: u64,
@@ -92,8 +93,8 @@ pub struct Rotation {
 }
 
 /// Rotates every closed segment of a run into Parquet. Reads all closed segments in order
-/// through one pipeline, because a book sample depends on everything before it; writes only
-/// the files that are missing.
+/// through one pipeline, because a book sample depends on everything before it; makes rows
+/// for, and writes, only the files that are missing.
 ///
 /// # Errors
 /// Returns [`StoreError::InUse`] at once, touching nothing, while another rotate holds the run;
@@ -151,7 +152,8 @@ pub(super) struct Ingest {
     sampler: Sampler,
     venue: Venue,
     scales: BTreeMap<Symbol, Scales>,
-    /// Depth, trade and snapshot frames that gave no rows because they did not parse or convert.
+    /// Depth, trade and snapshot frames that gave no rows because they did not parse or convert,
+    /// of those read for a file being written.
     pub(super) unparsed: u64,
     /// Book-sample rows written while their book was not synced.
     pub(super) unsynced: u64,
@@ -192,27 +194,34 @@ impl Ingest {
             self.venue = meta.venue;
             self.scales = meta.scales;
         }
-        if tables.frames.enabled {
+        // A depth or trade frame is read once, for its rows and for the replay (#68).
+        let parsed = matches!(frame.kind, Kind::Depth | Kind::Trade)
+            .then(|| self.venue.parse(&frame.payload));
+        if tables.frames.writing() {
             tables.frames.rows.push(frame)?;
         }
-        if !tables.push_rows(frame, self.venue, &self.scales)? {
+        if !tables.push_rows(frame, parsed.as_ref(), self.venue, &self.scales)? {
             self.unparsed += 1;
         }
         if is_input(frame.kind) {
             let instants = self.sampler.instants(frame.capture_ts_ns);
-            if let Some(pipeline) = self.replay.pipeline() {
+            // Counted even when the file exists (an import finishing after a crash), but only
+            // pushed when it is written.
+            if tables.samples.enabled
+                && let Some(pipeline) = self.replay.pipeline()
+            {
                 let seq = to_i64(frame.seq)? - 1;
                 for t in instants {
                     let sample = Sample::of_feed(pipeline.feed(), t, seq, self.sampler.levels())?;
-                    if tables.samples.enabled {
+                    let unsynced = sample.rows.iter().filter(|row| !row.synced).count();
+                    self.unsynced += unsynced as u64;
+                    if tables.samples.writing() {
                         tables.samples.rows.push(&sample);
-                        let unsynced = sample.rows.iter().filter(|row| !row.synced).count();
-                        self.unsynced += unsynced as u64;
                     }
                 }
             }
         }
-        self.replay.push(frame, on_event)?;
+        self.replay.push_parsed(frame, parsed, on_event)?;
         tables.flush_full()
     }
 
@@ -301,6 +310,12 @@ impl<R: Rows> Table<R> {
             output,
             written: 0,
         }
+    }
+
+    /// True while its file is being written. A table whose file exists, or that the run does not
+    /// have, wants no rows: a segment rotated before is read again only for the replay (#68).
+    fn writing(&self) -> bool {
+        self.output.is_some()
     }
 
     fn flush(&mut self) -> Result<(), StoreError> {
@@ -429,21 +444,23 @@ impl Tables {
         })
     }
 
-    /// The table rows a frame's content gives, read by `venue`'s rules. False when a depth,
-    /// trade or snapshot frame did not parse or convert. Content decides the table, as it decides
-    /// how the feed routes text.
+    /// The table rows a frame's content gives, read by `venue`'s rules (`parsed` is a depth or
+    /// trade frame's payload, so read), into the tables whose files are being written. False
+    /// when a depth, trade or snapshot frame did not parse or convert. Content decides the
+    /// table, as it decides how the feed routes text.
     fn push_rows(
         &mut self,
         frame: &Frame,
+        parsed: Option<&Result<Parsed, MessageError>>,
         venue: Venue,
         scales: &BTreeMap<Symbol, Scales>,
     ) -> Result<bool, StoreError> {
-        match frame.kind {
-            Kind::Depth | Kind::Trade => {
-                if !(self.depth.enabled || self.trades.enabled || self.snapshots.enabled) {
+        match (frame.kind, parsed) {
+            (Kind::Depth | Kind::Trade, Some(parsed)) => {
+                if !(self.depth.writing() || self.trades.writing() || self.snapshots.writing()) {
                     return Ok(true);
                 }
-                match venue.parse(&frame.payload) {
+                match parsed {
                     Ok(Parsed::Depth(raw)) => {
                         let Some(depth) = scales
                             .get(raw.symbol())
@@ -452,24 +469,24 @@ impl Tables {
                             return Ok(false);
                         };
                         match depth {
-                            Depth::Update(update) if self.depth.enabled => {
-                                self.depth.rows.push(frame, venue, &raw, &update)
+                            Depth::Update(update) if self.depth.writing() => {
+                                self.depth.rows.push(frame, venue, raw, &update)
                             }
-                            Depth::Book(snapshot) if self.snapshots.enabled => self
+                            Depth::Book(snapshot) if self.snapshots.writing() => self
                                 .snapshots
                                 .rows
                                 .push(frame, venue, raw.symbol(), &snapshot),
                             Depth::Update(_) | Depth::Book(_) => Ok(true),
                         }
                     }
-                    Ok(Parsed::Trade(raw)) if self.trades.enabled => {
-                        self.trades.rows.push(frame, venue, &raw, scales)
+                    Ok(Parsed::Trade(raw)) if self.trades.writing() => {
+                        self.trades.rows.push(frame, venue, raw, scales)
                     }
                     Ok(Parsed::Trade(_)) => Ok(true),
                     Err(_) => Ok(false),
                 }
             }
-            Kind::Snapshot if self.snapshots.enabled => {
+            (Kind::Snapshot, _) if self.snapshots.writing() => {
                 match serde_json::from_str::<SnapshotPayload>(&frame.payload) {
                     Ok(snapshot) => self
                         .snapshots
@@ -478,7 +495,7 @@ impl Tables {
                     Err(_) => Ok(false),
                 }
             }
-            Kind::Snapshot | Kind::Meta | Kind::Control | Kind::SegmentEnd => Ok(true),
+            _ => Ok(true),
         }
     }
 

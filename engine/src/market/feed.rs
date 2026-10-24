@@ -157,16 +157,29 @@ impl Feed {
     /// Returns an error when the frame cannot be parsed or converted, or names a symbol without
     /// scales. Every error bumps the parse-error counter.
     pub fn on_text(&mut self, text: &str) -> Result<Event, FeedError> {
+        let parsed = self.venue.parse(text);
+        self.on_parsed(parsed)
+    }
+
+    /// [`Self::on_text`] for a frame its caller has already read by the venue's rules
+    /// ([`Venue::parse`]) for a use of its own, so that it is read only once: rotate reads every
+    /// frame for its table rows too (#68).
+    ///
+    /// # Errors
+    /// As [`Self::on_text`]; a frame that did not read is an error here too.
+    pub fn on_parsed(&mut self, parsed: Result<Parsed, MessageError>) -> Result<Event, FeedError> {
         self.stats.frames += 1;
-        let event = self.route(text);
+        let event = parsed
+            .map_err(FeedError::from)
+            .and_then(|parsed| self.route(parsed));
         if event.is_err() {
             self.stats.parse_errors += 1;
         }
         event
     }
 
-    fn route(&mut self, text: &str) -> Result<Event, FeedError> {
-        match self.venue.parse(text)? {
+    fn route(&mut self, parsed: Parsed) -> Result<Event, FeedError> {
+        match parsed {
             Parsed::Depth(raw) => {
                 self.stats.depth_events += 1;
                 let scales = self.scales_for(raw.symbol())?;

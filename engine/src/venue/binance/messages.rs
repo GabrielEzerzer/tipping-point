@@ -1,7 +1,11 @@
 //! Wire shapes of the Binance USD-M streams and REST replies, and their conversion to integer
 //! units. Prices and quantities arrive as decimal strings and are parsed exactly.
 
+use std::borrow::Cow;
+use std::fmt;
+
 use serde::Deserialize;
+use serde::de::{self, Deserializer, Visitor};
 
 use crate::market::Scales;
 use crate::market::decimal::{DecimalError, parse_units};
@@ -11,20 +15,77 @@ use crate::store::ms_to_ns;
 use crate::venue::{MessageError, Parsed, RawDepth, RawTrade};
 
 /// One message from a combined stream: `{"stream": "btcusdt@depth@100ms", "data": {...}}`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CombinedFrame {
     pub stream: String,
     pub data: Payload,
 }
 
 /// The `data` of a combined frame, picked by its `e` event type.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "e")]
+#[derive(Debug, Clone)]
 pub enum Payload {
-    #[serde(rename = "depthUpdate")]
     Depth(RawDepthUpdate),
-    #[serde(rename = "aggTrade")]
     AggTrade(RawAggTrade),
+}
+
+/// The event types [`parse_frame`] reads.
+const EVENTS: &[&str] = &["depthUpdate", "aggTrade"];
+
+/// A decimal string as sent, kept inline: a price or a quantity is a few characters and a depth
+/// frame holds hundreds of them, so a heap allocation for each was most of what reading a frame
+/// cost (#68).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Decimal {
+    len: u8,
+    bytes: [u8; Decimal::MAX],
+}
+
+impl Decimal {
+    /// The longest decimal string read; Binance's run to a dozen or so characters.
+    pub const MAX: usize = 31;
+
+    /// The text as sent.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl AsRef<str> for Decimal {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Debug for Decimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl<'de> Deserialize<'de> for Decimal {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Text;
+        impl Visitor<'_> for Text {
+            type Value = Decimal;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "a decimal string of at most {} bytes", Decimal::MAX)
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<Decimal, E> {
+                let mut bytes = [0; Decimal::MAX];
+                bytes
+                    .get_mut(..text.len())
+                    .ok_or_else(|| E::invalid_length(text.len(), &self))?
+                    .copy_from_slice(text.as_bytes());
+                let len =
+                    u8::try_from(text.len()).map_err(|_| E::invalid_length(text.len(), &self))?;
+                Ok(Decimal { len, bytes })
+            }
+        }
+        deserializer.deserialize_str(Text)
+    }
 }
 
 /// A `depthUpdate` event as sent: ids plus `[price, qty]` string pairs.
@@ -43,9 +104,9 @@ pub struct RawDepthUpdate {
     #[serde(rename = "pu")]
     pub prev_last_update_id: u64,
     #[serde(rename = "b")]
-    pub bids: Vec<[String; 2]>,
+    pub bids: Vec<[Decimal; 2]>,
     #[serde(rename = "a")]
-    pub asks: Vec<[String; 2]>,
+    pub asks: Vec<[Decimal; 2]>,
 }
 
 /// An `aggTrade` event as sent.
@@ -78,16 +139,51 @@ pub struct RawAggTrade {
 pub struct RawSnapshot {
     #[serde(rename = "lastUpdateId")]
     pub last_update_id: u64,
-    pub bids: Vec<[String; 2]>,
-    pub asks: Vec<[String; 2]>,
+    pub bids: Vec<[Decimal; 2]>,
+    pub asks: Vec<[Decimal; 2]>,
 }
 
-/// Parses the text of one combined-stream frame.
+/// A combined frame's stream and event type, borrowed, the rest of it skipped.
+#[derive(Deserialize)]
+struct Peek<'a> {
+    #[serde(borrow)]
+    stream: Cow<'a, str>,
+    #[serde(borrow)]
+    data: EventType<'a>,
+}
+
+#[derive(Deserialize)]
+struct EventType<'a> {
+    #[serde(borrow)]
+    e: Cow<'a, str>,
+}
+
+/// A combined frame whose data is known to be a `T`.
+#[derive(Deserialize)]
+struct CombinedOf<T> {
+    data: T,
+}
+
+/// Parses the text of one combined-stream frame. Its event type is read first and the data
+/// then decoded straight into that event's type: a tagged enum would copy the whole object
+/// into a buffer of its own before decoding it a second time (#68).
 ///
 /// # Errors
 /// Returns an error when the frame is not valid JSON of a known event type.
 pub fn parse_frame(text: &str) -> Result<CombinedFrame, MessageError> {
-    Ok(serde_json::from_str(text)?)
+    let peek: Peek = serde_json::from_str(text)?;
+    let data = match peek.data.e.as_ref() {
+        "depthUpdate" => Payload::Depth(serde_json::from_str::<CombinedOf<_>>(text)?.data),
+        "aggTrade" => Payload::AggTrade(serde_json::from_str::<CombinedOf<_>>(text)?.data),
+        other => {
+            let error = <serde_json::Error as de::Error>::unknown_variant(other, EVENTS);
+            return Err(MessageError::Json(error));
+        }
+    };
+    Ok(CombinedFrame {
+        stream: peek.stream.into_owned(),
+        data,
+    })
 }
 
 /// Reads one combined-stream frame as a venue frame.
@@ -227,6 +323,23 @@ mod tests {
                 qty: 250
             }]
         );
+        Ok(())
+    }
+
+    /// Decimals are kept inline (#68): an escaped one still reads, and one too long for the
+    /// buffer is a bad frame, never a panic or a truncated price.
+    #[test]
+    fn decimals_read_inline_escaped_or_not_and_overlong_ones_are_refused()
+    -> Result<(), MessageError> {
+        let escaped = DEPTH.replace("\"50000.10\"", r#""50000.10""#);
+        let Payload::Depth(raw) = parse_frame(&escaped)?.data else {
+            panic!("expected a depth payload");
+        };
+        assert_eq!(raw.bids[0][0].as_str(), "50000.10");
+        assert_eq!(format!("{:?}", raw.bids[0]), r#"["50000.10", "1.500"]"#);
+        let overlong = format!("\"{}\"", "1".repeat(Decimal::MAX + 1));
+        let overlong = DEPTH.replace("\"50000.10\"", &overlong);
+        assert!(matches!(parse_frame(&overlong), Err(MessageError::Json(_))));
         Ok(())
     }
 

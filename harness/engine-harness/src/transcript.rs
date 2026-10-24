@@ -36,7 +36,8 @@ pub struct Step {
 /// Bumped whenever what a step records changes, so that a transcript saved by an older harness
 /// is recognised as such rather than read as a replay that differs. 2: trades carry their id as
 /// a string (venues). 3: a depth update that does not convert raises a resync only when its
-/// symbol had a book, and its error says whether it did (#41).
+/// symbol had a book, and its error says whether it did (#41); a Binance frame's event type is
+/// read before the rest of it, so an unreadable frame's error can read differently (#68).
 pub const FORMAT: u32 = 3;
 
 /// Every applied input of a run, in order.

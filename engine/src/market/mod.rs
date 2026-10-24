@@ -34,13 +34,13 @@ impl Scales {
     ///
     /// # Errors
     /// Returns an error when a price or quantity is not representable at this scale.
-    pub fn levels(self, pairs: &[[String; 2]]) -> Result<Vec<Level>, DecimalError> {
+    pub fn levels<S: AsRef<str>>(self, pairs: &[[S; 2]]) -> Result<Vec<Level>, DecimalError> {
         pairs
             .iter()
             .map(|[price, qty]| {
                 Ok(Level {
-                    price: parse_units(price, self.price_decimals)?,
-                    qty: parse_units(qty, self.qty_decimals)?,
+                    price: parse_units(price.as_ref(), self.price_decimals)?,
+                    qty: parse_units(qty.as_ref(), self.qty_decimals)?,
                 })
             })
             .collect()
