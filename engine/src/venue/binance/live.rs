@@ -123,16 +123,14 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
     install_crypto_provider();
     let rest = Rest::new()?;
     let scales = rest.fetch_scales(&config.symbols).await?;
+    let venue = Venue::BinanceUsdm;
     let mut log = match &config.record {
-        Some(recording) => Log::recorded(start_recording(
-            recording,
-            Venue::BinanceUsdm,
-            &config.symbols,
-            &scales,
-        )?),
+        Some(recording) => {
+            Log::recorded(start_recording(recording, venue, &config.symbols, &scales)?)
+        }
         None => Log::unrecorded(),
     };
-    let mut pipeline = Pipeline::new(Feed::new(Venue::BinanceUsdm, scales));
+    let mut pipeline = Pipeline::new(Feed::new(venue, scales));
     let run_id = config
         .record
         .as_ref()
@@ -185,13 +183,8 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
                 capture_ns,
                 result: result.map_err(|error| error.to_string()),
             },
-            // Said, not applied: the run keeps one set of scales (see LiveEvent::ScalesChanged).
             Some((symbol, fetched)) = scales_rx.recv() => {
-                if let (Ok(now), Some(was)) = (fetched, pipeline.feed().scales(&symbol))
-                    && now != was
-                {
-                    observer.event(LiveEvent::ScalesChanged { symbol: &symbol, was, now });
-                }
+                say_if_scales_changed(pipeline.feed(), &symbol, fetched, &mut observer);
                 continue;
             }
             _ = report.tick() => {
@@ -213,40 +206,14 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
         if let Err(error) = handle(message, &mut pipeline, &mut log, &mut observer).await {
             break Err(error.into());
         }
-
-        for symbol in pipeline.feed_mut().snapshots_due() {
-            let now = Instant::now();
-            let at = next_fetch_allowed
-                .get(&symbol)
-                .copied()
-                .unwrap_or(now)
-                .max(now);
-            next_fetch_allowed.insert(symbol.clone(), at + config.min_snapshot_interval);
-            pipeline.stats_mut().snapshot_fetches += 1;
-            let rest = rest.clone();
-            let tx = snapshot_tx.clone();
-            tokio::spawn(async move {
-                sleep_until(at).await;
-                let result = rest.fetch_snapshot(&symbol).await;
-                let _ = tx.send((symbol, now_ns(), result)).await;
-            });
-        }
-
-        for symbol in scales_due(pipeline.feed(), &mut scales_checked, Instant::now()) {
-            let rest = rest.clone();
-            let tx = scales_tx.clone();
-            tokio::spawn(async move {
-                let fetched = rest
-                    .fetch_scales(std::slice::from_ref(&symbol))
-                    .await
-                    .and_then(|mut scales| {
-                        scales
-                            .remove(&symbol)
-                            .ok_or_else(|| RestError::MissingSymbol(symbol.clone()))
-                    });
-                let _ = tx.send((symbol, fetched)).await;
-            });
-        }
+        fetch_snapshots(
+            &mut pipeline,
+            &rest,
+            &snapshot_tx,
+            &mut next_fetch_allowed,
+            &config,
+        );
+        fetch_scales(pipeline.feed(), &rest, &scales_tx, &mut scales_checked);
     };
 
     depth_reader.abort();
@@ -259,6 +226,70 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
     };
     // The writer's own error explains a loop that stopped because the writer did.
     recorded.and(ended)
+}
+
+/// Starts a fetch of every snapshot the feed now needs, each symbol's at least the config's
+/// `min_snapshot_interval` after its last; the replies come back on `tx`.
+fn fetch_snapshots(
+    pipeline: &mut Pipeline,
+    rest: &Rest,
+    tx: &mpsc::Sender<Fetched>,
+    next_allowed: &mut BTreeMap<Symbol, Instant>,
+    config: &LiveConfig,
+) {
+    for symbol in pipeline.feed_mut().snapshots_due() {
+        let now = Instant::now();
+        let at = next_allowed.get(&symbol).copied().unwrap_or(now).max(now);
+        next_allowed.insert(symbol.clone(), at + config.min_snapshot_interval);
+        pipeline.stats_mut().snapshot_fetches += 1;
+        let rest = rest.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            sleep_until(at).await;
+            let result = rest.fetch_snapshot(&symbol).await;
+            let _ = tx.send((symbol, now_ns(), result)).await;
+        });
+    }
+}
+
+/// Raises [`LiveEvent::ScalesChanged`] when a fetch of `symbol`'s scales found others than its
+/// feed reads it at. Said, not applied: a run keeps one set of scales (#45).
+fn say_if_scales_changed(
+    feed: &Feed,
+    symbol: &str,
+    fetched: Result<Scales, RestError>,
+    observer: &mut impl Observer,
+) {
+    if let (Ok(now), Some(was)) = (fetched, feed.scales(symbol))
+        && now != was
+    {
+        observer.event(LiveEvent::ScalesChanged { symbol, was, now });
+    }
+}
+
+/// Starts a fetch of the scales of every symbol [`scales_due`] names; the replies come back on
+/// `tx`.
+fn fetch_scales(
+    feed: &Feed,
+    rest: &Rest,
+    tx: &mpsc::Sender<FetchedScales>,
+    checked: &mut BTreeMap<Symbol, Instant>,
+) {
+    for symbol in scales_due(feed, checked, Instant::now()) {
+        let rest = rest.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let fetched = rest
+                .fetch_scales(std::slice::from_ref(&symbol))
+                .await
+                .and_then(|mut scales| {
+                    scales
+                        .remove(&symbol)
+                        .ok_or_else(|| RestError::MissingSymbol(symbol.clone()))
+                });
+            let _ = tx.send((symbol, fetched)).await;
+        });
+    }
 }
 
 /// The symbols whose scales to ask the venue for again now (#45): those whose last
