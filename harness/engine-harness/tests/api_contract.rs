@@ -8,10 +8,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use engine::api::ApiConfig;
-use engine::api::hub::{Hub, HubConfig, Source, VenueSource};
+use engine::api::hub::{Hub, HubConfig, Published, Source, VenueSource};
 use engine::api::ipc::{Encoder, SCHEMA_KEY};
 use engine::api::messages::{
     BookMessage, ClientMessage, LatticeHeader, PROTOCOL, ServerMessage, SourceMessage, Status,
@@ -1045,6 +1046,95 @@ async fn falling_behind_on_an_append_topic_is_a_gap_or_a_close() -> Outcome {
         Some(4002),
         "jev is never dropped"
     );
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// When a client got its next `count` status messages, other messages skipped; an error unless
+/// they all come within `within`.
+async fn status_times(
+    ws: &mut Socket,
+    count: usize,
+    within: Duration,
+) -> Outcome<Vec<tokio::time::Instant>> {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut times = Vec::new();
+    while times.len() < count {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match next_frame(ws, left).await {
+            Frame::Text(text) => {
+                if serde_json::from_str::<Value>(&text)?["t"] == "status" {
+                    times.push(tokio::time::Instant::now());
+                }
+            }
+            other => {
+                let got = times.len();
+                return Err(format!("{got} status messages in {within:?}, then {other:?}").into());
+            }
+        }
+    }
+    Ok(times)
+}
+
+/// Status goes out every second even unchanged, as the protocol promises (#85), and only a
+/// production (coalescing) connection runs that heartbeat. With nothing published, a status-only
+/// client hears it again a second apart; and so does a client taking books while samples are
+/// published faster than it is sent to, where the heartbeat came last among what a connection
+/// waits on and lost every turn to the hub's wake-up, which a busy hub keeps ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_status_goes_out_every_second_unchanged() -> Outcome {
+    const WITHIN: Duration = Duration::from_secs(10);
+    let dir = scratch("api-heartbeat");
+    let server = started_server(&dir, HubConfig::default()).await?;
+    let hub = Arc::clone(&server.hub);
+    hub.publish_status(Venue::BinanceUsdm, VenueStatus::default());
+    // The status as subscribed, perhaps the heartbeat's first tick right behind it, then one a
+    // second: n of them span n - 3 seconds at least, so none came in a burst on a change.
+    let periodic = |times: &[tokio::time::Instant]| {
+        let seconds = u64::try_from(times.len().saturating_sub(3)).unwrap_or(0);
+        times[times.len() - 1] - times[0] >= Duration::from_secs(seconds)
+    };
+
+    let mut quiet = subscribed(server.addr, "status").await?;
+    let times = status_times(&mut quiet, 4, WITHIN).await?;
+    assert!(periodic(&times), "quiet: {times:?}");
+
+    let publishing = Arc::new(AtomicBool::new(true));
+    let publisher = std::thread::spawn({
+        let (hub, publishing) = (Arc::clone(&hub), Arc::clone(&publishing));
+        move || {
+            let mut i = 0;
+            while publishing.load(Ordering::Relaxed) {
+                let mut sample = catalog_sample();
+                sample.sample_ts_ns += i * 100_000_000;
+                let captured_ns = sample.sample_ts_ns;
+                let sample = Arc::new(sample);
+                hub.publish_sample(Published {
+                    sample,
+                    ipc: Vec::new(),
+                    captured_ns,
+                });
+                i += 1;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            i
+        }
+    });
+    let mut busy = ws_connect(server.addr).await?;
+    hello(&mut busy).await?;
+    send_json(
+        &mut busy,
+        &json!({"t": "sub", "topics": ["book", "status"]}),
+    )
+    .await?;
+    // Five: starved, the heartbeat still slipped through now and then, when the publisher
+    // missed a whole send interval, but never four times in ten seconds.
+    let times = status_times(&mut busy, 5, WITHIN).await;
+    publishing.store(false, Ordering::Relaxed);
+    let samples = publisher.join().map_err(|_| "the publisher panicked")?;
+    let times = times.map_err(|error| format!("busy, {samples} samples published: {error}"))?;
+    assert!(periodic(&times), "busy: {times:?}");
     server.stop().await;
     fs::remove_dir_all(&dir)?;
     Ok(())

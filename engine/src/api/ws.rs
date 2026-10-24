@@ -323,13 +323,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             tokio::select! {
                 biased;
                 incoming = self.ws.next() => self.on_incoming(incoming).await?,
+                // The heartbeat and the replay before the hub's wake-up: a hub publishing faster
+                // than this connection sends keeps the wake-up ready every turn, so an arm after
+                // it was never polled (#85). The wake-up losing a turn costs nothing: `collect`
+                // reads every channel on every turn.
+                _ = heartbeat.tick() => self.status_due = true,
+                item = next_item(&mut self.mode) => self.on_replay(item),
                 changed = self.changed.changed() => {
                     if changed.is_err() {
                         return Ok(());
                     }
                 }
-                item = next_item(&mut self.mode) => self.on_replay(item),
-                _ = heartbeat.tick() => self.status_due = true,
             }
             sleep_until(next_flush).await;
             self.collect()?;
