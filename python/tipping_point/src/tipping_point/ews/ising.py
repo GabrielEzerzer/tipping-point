@@ -557,13 +557,16 @@ def _cells(
     rng: np.random.Generator,
 ) -> Prepared:
     """Every sensitivity cell of one L and cadence: AUC rows, plus surrogate and alarm rows at the
-    headline cell."""
+    headline cell. The null rows depend on h only through the span, which is mostly the same at
+    every h, so they are scored and surrogate-tested once per pipeline and reused (#70)."""
     ind, sens, sc = doc["indicators"], doc["sensitivity"], doc["scoring"]
     segment = float(doc["event"]["segment"])
     horizons = [float(h) for h in doc["event"]["horizons"]]
     band = (max(horizons) + segment, min(horizons))
     prep = prepare(inputs, cadence, tau_c, float(ind["thin"]), band)
     headline = (float(sens["headline"]["window"]), float(sens["headline"]["bandwidth"]))
+    null_scores: dict[tuple[str, Pipeline], list[np.ndarray]] = {}
+    null_pvalues: dict[tuple[str, Pipeline], dict[str, np.ndarray]] = {}
     for window_taus in map(float, sens["window"]):
         window = prep.samples(window_taus, tau_c)
         for bandwidth_taus in map(float, sens["bandwidth"]):
@@ -578,6 +581,9 @@ def _cells(
                     neg_rows = [null_slices(s.observable(observable), span) for _, s in prep.nulls]
                     for name in ind["names"]:
                         pipe = Pipeline(name, window, length, bandwidth, int(ind["lag"]))
+                        key = (observable, pipe)  # the pipeline fixes the span
+                        if key not in null_scores:
+                            null_scores[key] = [pipe(g) for g in neg_rows]
                         cell = {
                             "indicator": name,
                             "observable": observable,
@@ -589,7 +595,7 @@ def _cells(
                             "headline": top,
                             "direction": ind["direction"][name],
                         }
-                        pos, neg = [pipe(g) for g in pos_rows], [pipe(g) for g in neg_rows]
+                        pos, neg = [pipe(g) for g in pos_rows], null_scores[key]
                         samples = {
                             "window": window,
                             "bandwidth": np.nan if bandwidth is None else bandwidth,
@@ -599,7 +605,11 @@ def _cells(
                         }
                         tables["auc"].append(_auc_row(cell, pos, neg, sc, rng) | samples)
                         if top or sc["surrogates"]["cells"] == "all":
-                            rows = _surrogate_rows(cell, pipe, pos_rows, neg_rows, sc, rng)
+                            direction = cell["direction"]
+                            if key not in null_pvalues:
+                                null_pvalues[key] = _pvalues(neg_rows, pipe, sc, rng, direction)
+                            p_pos = _pvalues(pos_rows, pipe, sc, rng, direction)
+                            rows = _surrogate_rows(cell, p_pos, null_pvalues[key], sc)
                             tables["surrogates"] += rows
             if top:
                 rows, eps = _alarms(doc, prep, L, tau_c, window, bandwidth)
@@ -630,36 +640,40 @@ def _auc_row(
     }
 
 
-def _surrogate_rows(
-    cell: Row,
+def _pvalues(
+    rows: list[np.ndarray],
     pipe: Pipeline,
-    pos_rows: list[np.ndarray],
-    neg_rows: list[np.ndarray],
     sc: dict[str, Any],
     rng: np.random.Generator,
+    direction: str,
+) -> dict[str, np.ndarray]:
+    """Per surrogate test of the prereg, the one-sided p-value of every row of every seed."""
+    s, x = sc["surrogates"], np.concatenate(rows)
+    tests = {kind: surrogates.KINDS[kind] for kind in (s["primary"], s["secondary"])}
+    return {
+        kind: scoring.surrogate_test(x, pipe, make, int(s["n"]), rng, direction)[1]
+        for kind, make in tests.items()
+    }
+
+
+def _surrogate_rows(
+    cell: Row, p_pos: dict[str, np.ndarray], p_neg: dict[str, np.ndarray], sc: dict[str, Any]
 ) -> list[Row]:
     """The share of positive and of null series each surrogate test flags at alpha."""
     s, alpha = sc["surrogates"], float(sc["alpha"])
-    direction = cell["direction"]
-    rows = []
-    for kind in (s["primary"], s["secondary"]):
-        make, n = surrogates.KINDS[kind], int(s["n"])
-        pos, neg = np.concatenate(pos_rows), np.concatenate(neg_rows)
-        _, p_pos = scoring.surrogate_test(pos, pipe, make, n, rng, direction)
-        _, p_neg = scoring.surrogate_test(neg, pipe, make, n, rng, direction)
-        rows.append(
-            cell
-            | {
-                "surrogate": kind,
-                "n_surrogates": n,
-                "alpha": alpha,
-                "detected": float(np.nanmean(p_pos <= alpha)),
-                "false_positive": float(np.nanmean(p_neg <= alpha)),
-                "n_pos": len(p_pos),
-                "n_neg": len(p_neg),
-            }
-        )
-    return rows
+    return [
+        cell
+        | {
+            "surrogate": kind,
+            "n_surrogates": int(s["n"]),
+            "alpha": alpha,
+            "detected": float(np.nanmean(p_pos[kind] <= alpha)),
+            "false_positive": float(np.nanmean(p_neg[kind] <= alpha)),
+            "n_pos": len(p_pos[kind]),
+            "n_neg": len(p_neg[kind]),
+        }
+        for kind in (s["primary"], s["secondary"])
+    ]
 
 
 def _alarms(

@@ -4,14 +4,19 @@ the result folder it writes, the trials it logs, and the refusals that keep it h
 import hashlib
 import json
 import subprocess
+import tomllib
+from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyarrow.parquet as pq
 import pytest
 from ews_planted import NULL_EPS, PILOT_RUN, PLATEAU
-from tipping_point.ews import prereg
+from tipping_point.ews import ising, prereg, scoring
 from tipping_point.ews.__main__ import main
+from tipping_point.ews.trend import Pipeline
 
 PREREG = """
 id = "{id}"
@@ -139,6 +144,15 @@ def _git(root: Path, *args: str) -> str:
     return done.stdout.strip()
 
 
+def _text(data_dir: Path, prereg_id: str, pilot_run: str) -> str:
+    """The planted prereg, pinned to the planted pilot record."""
+    pilot = data_dir / "ising" / PILOT_RUN / "pilot.json"
+    digest = hashlib.sha256(pilot.read_bytes()).hexdigest()
+    return PREREG.format(
+        id=prereg_id, pilot_run=pilot_run, pilot_sha256=digest, eps=list(NULL_EPS), plateau=PLATEAU
+    )
+
+
 def _repo(root: Path, data_dir: Path, **files: str) -> dict[str, Path]:
     """A scratch repository with one committed paper/prereg/<id>-v1.toml per keyword."""
     root.mkdir(parents=True, exist_ok=True)
@@ -151,19 +165,10 @@ def _repo(root: Path, data_dir: Path, **files: str) -> dict[str, Path]:
         _git(root, "config", key, value)
     folder = root / "paper" / "prereg"
     folder.mkdir(parents=True)
-    pilot = data_dir / "ising" / PILOT_RUN / "pilot.json"
-    digest = hashlib.sha256(pilot.read_bytes()).hexdigest()
     paths = {}
     for prereg_id, pilot_run in files.items():
-        text = PREREG.format(
-            id=prereg_id,
-            pilot_run=pilot_run,
-            pilot_sha256=digest,
-            eps=list(NULL_EPS),
-            plateau=PLATEAU,
-        )
         paths[prereg_id] = folder / f"{prereg_id}-v1.toml"
-        paths[prereg_id].write_bytes(text.encode())
+        paths[prereg_id].write_bytes(_text(data_dir, prereg_id, pilot_run).encode())
     _git(root, "add", ".")
     _git(root, "commit", "-q", "-m", "preregs")
     return paths
@@ -228,6 +233,48 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     logged = [json.loads(line) for line in lines]
     assert len(logged) == 32 and {t["result"] for t in logged} == {run_dir.name}
     assert all(t["prereg"]["sha256"] == demo.sha256 for t in logged)
+
+
+def test_null_rows_are_scored_and_surrogate_tested_once_per_pipeline(
+    planted: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#70: the null rows depend on h only through the span, which is mostly the same at every
+    h (here everywhere but L = 16 matched, 230 and 231 samples), yet they were rebuilt, scored
+    and tested against their surrogates once per h, more than half of the day the first real run
+    would take. No input may go through the same pipeline, or the same pipeline and surrogate
+    test, twice; and every pipeline still tests the nulls at its own span, so a cache that
+    ignored the span would leave a pipeline with its positives tested and no null."""
+    called: Counter[tuple[Pipeline, str]] = Counter()
+    tested: Counter[tuple[Pipeline, Callable[..., np.ndarray], str]] = Counter()
+    real_call, real_test = Pipeline.__call__, scoring.surrogate_test
+
+    def digest(x: np.ndarray) -> str:
+        return hashlib.sha256(np.ascontiguousarray(x, dtype=np.float64)).hexdigest()
+
+    def call(pipe: Pipeline, x: np.ndarray) -> np.ndarray:
+        called[(pipe, digest(x))] += 1
+        return real_call(pipe, x)
+
+    def surrogate_test(
+        x: np.ndarray,
+        pipe: Pipeline,
+        make: Callable[..., np.ndarray],
+        n: int,
+        rng: np.random.Generator,
+        direction: str = "greater",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tested[(pipe, make, digest(x))] += 1
+        return real_test(x, pipe, make, n, rng, direction)
+
+    monkeypatch.setattr(Pipeline, "__call__", call)
+    monkeypatch.setattr(scoring, "surrogate_test", surrogate_test)
+    doc = tomllib.loads(_text(planted.root, "demo", PILOT_RUN))
+    evaluation = ising.evaluate(doc, planted.root, np.random.default_rng(3), allow_stale=True)
+    assert len(evaluation.tables["surrogates"]) == 32  # 2 tests x 16 headline cells, as before
+    assert max(called.values()) == 1, [k[0] for k, v in called.items() if v > 1]
+    assert max(tested.values()) == 1, [k[0] for k, v in tested.items() if v > 1]
+    per_pipeline = Counter((pipe, make) for pipe, make, _ in tested)
+    assert min(per_pipeline.values()) >= 2  # its positives, and the nulls at its span
 
 
 def test_score_refuses_unfrozen_over_budget_and_pilotless(
