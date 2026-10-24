@@ -24,8 +24,9 @@ use engine::store::samples::{BookRow, Sample};
 use engine::store::writer::LogConfig;
 use engine::venue::Venue;
 use engine_harness::api::{
-    Frame, ISING_RUN, LivePath, Outcome, Server, copy_ising_fixture, decode_stream, fixture,
-    get_arrow, golden, merged, next_frame, next_json, one_batch, script, send_json, ws_connect,
+    Frame, ISING_RUN, LivePath, Outcome, Server, Socket, copy_ising_fixture, decode_stream,
+    fixture, get_arrow, golden, hello, merged, next_frame, next_json, one_batch, script, send_json,
+    ws_connect,
 };
 use engine_harness::load::Generator;
 use serde_json::{Value, json};
@@ -781,11 +782,37 @@ async fn a_replay_opening_on_a_slow_disk_holds_up_no_other_connection() -> Outco
     Ok(())
 }
 
-/// Publishing takes JSON objects on the relayed topics only.
+/// The relayed messages a client reads until nothing more comes for `quiet`: each as its topic and
+/// data.
+async fn relayed_until_quiet(ws: &mut Socket, quiet: Duration) -> Outcome<Vec<(String, Value)>> {
+    let mut got = Vec::new();
+    loop {
+        match next_frame(ws, quiet).await {
+            Frame::Text(text) => {
+                let message: Value = serde_json::from_str(&text)?;
+                let topic = message["t"].as_str().unwrap_or_default().to_owned();
+                got.push((topic, message["data"].clone()));
+            }
+            Frame::Silent => return Ok(got),
+            other => return Err(format!("the socket stopped: {other:?}").into()),
+        }
+    }
+}
+
+/// Publishing takes JSON objects on the relayed topics only, and an app client of a production
+/// (coalescing) hub gets each result on its own topic, once (#72): the harness's lossless path
+/// is the only other way these reach a client, and the golden session takes that one. A second
+/// P&L for a symbol replaces the first: it goes out, and a client subscribing later gets only it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_objects_on_relayed_topics_are_published() -> Outcome {
     let dir = scratch("api-publish");
-    let server = Server::start(Hub::new(HubConfig::default()), ApiConfig::new(dir.clone())).await?;
+    let hub = Hub::new(HubConfig::default());
+    let feed = VenueSource {
+        scales: BTreeMap::new(),
+        run: None,
+    };
+    assert!(hub.start(Venue::BinanceUsdm, feed));
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
     let client = reqwest::Client::new();
     let post = |topic: &str, body: &str| {
         client
@@ -793,6 +820,51 @@ async fn only_objects_on_relayed_topics_are_published() -> Outcome {
             .body(body.to_owned())
             .send()
     };
+    let relayed = json!({"t": "sub", "topics": ["meters", "jev", "pnl", "ising"]});
+    let mut app = ws_connect(server.addr).await?;
+    hello(&mut app).await?;
+    send_json(&mut app, &relayed).await?;
+    assert_eq!(
+        next_json(&mut app, WAIT).await?,
+        json!({"t": "source", "mode": "live"})
+    );
+    let quiet = Duration::from_millis(500);
+    for (topic, data) in results() {
+        assert_eq!(
+            post(topic, &data.to_string()).await?.status(),
+            204,
+            "{topic}"
+        );
+    }
+    let mut got = relayed_until_quiet(&mut app, quiet).await?;
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut want: Vec<(String, Value)> = results()
+        .into_iter()
+        .map(|(topic, data)| (topic.to_owned(), data))
+        .collect();
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(got, want, "each result once, on its own topic");
+    let mut pnl = results()[2].1.clone();
+    assert_eq!(results()[2].0, "pnl");
+    pnl["pnl"] = json!(7.5);
+    assert_eq!(post("pnl", &pnl.to_string()).await?.status(), 204);
+    let got = relayed_until_quiet(&mut app, quiet).await?;
+    assert_eq!(got, vec![("pnl".to_owned(), pnl.clone())], "the newer P&L");
+    // Latest wins: a later subscriber gets the meters and only the second P&L, and no append
+    // topic's past.
+    let mut later = ws_connect(server.addr).await?;
+    hello(&mut later).await?;
+    send_json(&mut later, &relayed).await?;
+    let _ack = next_json(&mut later, WAIT).await?;
+    let mut got = relayed_until_quiet(&mut later, quiet).await?;
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    let meters = results()[0].1.clone();
+    assert_eq!(
+        got,
+        vec![("meters".to_owned(), meters), ("pnl".to_owned(), pnl)],
+        "the latest per topic"
+    );
+
     assert_eq!(post("meters", r#"{"v":1}"#).await?.status(), 204);
     assert_eq!(post("book", r#"{"v":1}"#).await?.status(), 404);
     assert_eq!(post("meters", "[1,2]").await?.status(), 400);
