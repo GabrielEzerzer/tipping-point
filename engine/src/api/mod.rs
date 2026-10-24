@@ -99,6 +99,9 @@ pub struct ApiConfig {
     pub arrow_stall: Duration,
     /// Harness only: a failure every Arrow stream meets partway. `None` in production.
     pub fault: Option<Fault>,
+    /// Harness only: a wait every WebSocket replay takes as it opens its run's files, as on a
+    /// slow disk. `None` in production.
+    pub open_delay: Option<Duration>,
 }
 
 impl ApiConfig {
@@ -111,6 +114,7 @@ impl ApiConfig {
             ws_stall: Duration::from_secs(10),
             arrow_stall: Duration::from_secs(10),
             fault: None,
+            open_delay: None,
         }
     }
 }

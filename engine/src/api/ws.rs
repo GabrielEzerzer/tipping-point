@@ -285,7 +285,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         );
         self.queue(&ServerMessage::Welcome(&welcome));
         for text in early {
-            self.on_text(&text)?;
+            self.on_text(&text).await?;
         }
         self.flush().await?;
         if self.ordered.is_some() {
@@ -322,7 +322,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         loop {
             tokio::select! {
                 biased;
-                incoming = self.ws.next() => self.on_incoming(incoming)?,
+                incoming = self.ws.next() => self.on_incoming(incoming).await?,
                 changed = self.changed.changed() => {
                     if changed.is_err() {
                         return Ok(());
@@ -348,7 +348,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             };
             tokio::select! {
                 biased;
-                incoming = self.ws.next() => self.on_incoming(incoming)?,
+                incoming = self.ws.next() => self.on_incoming(incoming).await?,
                 item = ordered.recv() => match item {
                     Ok(item) => self.on_ordered(item),
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -460,9 +460,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         }
     }
 
-    fn on_incoming(&mut self, incoming: Option<Result<Message, WsError>>) -> Result<(), Closing> {
+    async fn on_incoming(
+        &mut self,
+        incoming: Option<Result<Message, WsError>>,
+    ) -> Result<(), Closing> {
         match incoming {
-            Some(Ok(Message::Text(text))) => self.on_text(&text),
+            Some(Ok(Message::Text(text))) => self.on_text(&text).await,
             Some(Ok(Message::Binary(_))) => Err(bad("the engine takes text messages only")),
             Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => Ok(()),
             Some(Err(WsError::Capacity(_))) => Err(bad("message too large")),
@@ -470,13 +473,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         }
     }
 
-    fn on_text(&mut self, text: &str) -> Result<(), Closing> {
+    async fn on_text(&mut self, text: &str) -> Result<(), Closing> {
         let message = serde_json::from_str::<ClientMessage>(text)
             .map_err(|error| bad(format!("unreadable message: {error}")))?;
-        self.on_client(message)
+        self.on_client(message).await
     }
 
-    fn on_client(&mut self, message: ClientMessage) -> Result<(), Closing> {
+    async fn on_client(&mut self, message: ClientMessage) -> Result<(), Closing> {
         match message {
             ClientMessage::Hello { .. } => Err(bad("hello was already said")),
             ClientMessage::Sub {
@@ -496,7 +499,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 run,
                 from_ms,
                 speed,
-            } => self.replay(run, from_ms, speed),
+            } => self.replay(run, from_ms, speed).await,
             ClientMessage::Seek { to_ms } => {
                 // A replay that is over can still be sought in: it starts again from there.
                 let (Mode::Replay { run, speed, .. }
@@ -505,7 +508,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                     return Err(bad("seek needs a replay"));
                 };
                 let (run, speed) = (run.clone(), *speed);
-                self.replay(run, Some(to_ms), speed)
+                self.replay(run, Some(to_ms), speed).await
             }
             ClientMessage::Pause | ClientMessage::Play => {
                 let play = matches!(message, ClientMessage::Play);
@@ -610,7 +613,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         Ok(())
     }
 
-    fn replay(&mut self, run: String, from_ms: Option<i64>, speed: f64) -> Result<(), Closing> {
+    async fn replay(
+        &mut self,
+        run: String,
+        from_ms: Option<i64>,
+        speed: f64,
+    ) -> Result<(), Closing> {
         if !super::replay::valid_speed(speed) {
             return Err(bad(format!(
                 "speed is 0 (as fast as possible) or at least {}",
@@ -623,7 +631,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             &run,
             from_ms,
             speed,
+            self.api.config.open_delay,
         )
+        .await
         .map_err(|error| match error {
             TableError::BadName(why) | TableError::NotFound(why) => bad(why),
             TableError::Store(error) => bad(format!("cannot replay {run}: {error}")),

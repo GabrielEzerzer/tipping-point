@@ -719,6 +719,68 @@ async fn foreign_origins_and_hosts_are_refused() -> Outcome {
     Ok(())
 }
 
+/// A replay opening its run on a slow disk holds up no other connection, even with the whole
+/// server on one thread: the opening runs on a blocking thread, so another client asking meanwhile
+/// is answered at once. Then the replay of a run that is not there is refused with 4000, as ever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_opening_on_a_slow_disk_holds_up_no_other_connection() -> Outcome {
+    const SLOW: Duration = Duration::from_secs(3);
+    let dir = scratch("api-slow-open");
+    let hub = Hub::new(HubConfig::default());
+    let feed = engine::market::feed::Feed::new(Venue::BinanceUsdm, BTreeMap::new());
+    let mut tap = engine::api::hub::LiveTap::new(Arc::clone(&hub));
+    engine::market::live::Observer::started(&mut tap, &feed, None);
+    let config = ApiConfig {
+        open_delay: Some(SLOW),
+        ..ApiConfig::new(dir.clone())
+    };
+    let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = std::thread::spawn(move || -> std::io::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async move {
+            let server = Server::start(hub, config).await?;
+            let _ = addr_tx.send(server.addr);
+            let _ = stop_rx.await;
+            server.stop().await;
+            Ok(())
+        })
+    });
+    let addr = addr_rx.await?;
+    let mut clients = Vec::new();
+    for _ in 0..2 {
+        let mut ws = ws_connect(addr).await?;
+        send_json(&mut ws, &json!({"t": "hello", "v": PROTOCOL})).await?;
+        assert_eq!(next_json(&mut ws, WAIT).await?["t"], "welcome");
+        clients.push(ws);
+    }
+    let missing = json!({"t": "replay", "run": "20990101T000000Z-none", "speed": 0});
+    send_json(&mut clients[0], &missing).await?;
+    // The server has the replay well before the other client asks.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let asked = std::time::Instant::now();
+    send_json(&mut clients[1], &json!({"t": "sub", "topics": ["status"]})).await?;
+    let answer = next_json(&mut clients[1], WAIT).await?;
+    let waited = asked.elapsed();
+    assert_eq!(answer, json!({"t": "source", "mode": "live"}));
+    assert!(
+        waited < SLOW / 3,
+        "answered after {waited:?}, behind the slow disk"
+    );
+    let refused = next_frame(&mut clients[0], WAIT).await;
+    assert_eq!(
+        refused,
+        Frame::Closed(Some(4000)),
+        "a run that is not there"
+    );
+    let _ = stop_tx.send(());
+    server.join().map_err(|_| "the server thread panicked")??;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
 /// Publishing takes JSON objects on the relayed topics only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn only_objects_on_relayed_topics_are_published() -> Outcome {

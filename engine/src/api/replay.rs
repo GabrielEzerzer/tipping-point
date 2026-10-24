@@ -133,21 +133,39 @@ struct Recording {
 }
 
 impl Replay {
-    /// Starts replaying `run` from `from_ms` (its start when `None`).
+    /// Starts replaying `run` from `from_ms` (its start when `None`). The run's files are opened
+    /// on a blocking thread, so a slow disk holds up no other connection; `open_delay` (the
+    /// harness's slow disk, `None` in production) is waited there first.
     ///
     /// # Errors
     /// Returns [`TableError`] when the run is neither recorded with book samples nor the run
     /// being recorded live.
-    pub fn start(
+    pub async fn start(
         data_dir: &Path,
         hub: Arc<Hub>,
         run: &str,
         from_ms: Option<i64>,
         speed: f64,
+        open_delay: Option<Duration>,
     ) -> Result<Self, TableError> {
         // The venue whose live feed records this run, if one does: memory carries the run on.
         let live = hub.started().and_then(|source| source.venue_recording(run));
-        let tables = Tables::open(data_dir, run, live.is_some())?;
+        let opened = {
+            let (data_dir, run, recording) = (data_dir.to_owned(), run.to_owned(), live.is_some());
+            tokio::task::spawn_blocking(move || {
+                if let Some(delay) = open_delay {
+                    std::thread::sleep(delay);
+                }
+                Tables::open(&data_dir, &run, recording)
+            })
+            .await
+        };
+        let tables = opened.map_err(|stopped| {
+            TableError::Store(StoreError::Io {
+                path: data_dir.join(MARKET).join(run),
+                source: std::io::Error::other(stopped),
+            })
+        })??;
         if tables.samples.is_none() && live.is_none() {
             return Err(TableError::NotFound(format!(
                 "market run {run:?} has no book samples to replay"
@@ -790,8 +808,9 @@ mod tests {
             hub.publish_trade(captured, trade);
         }
 
-        let mut replay =
-            Replay::start(&dir, Arc::clone(&hub), RUN, None, 0.0).expect("the live run replays");
+        let mut replay = Replay::start(&dir, Arc::clone(&hub), RUN, None, 0.0, None)
+            .await
+            .expect("the live run replays");
         // The replay waits on its full queue inside the first file while rotate adds the next.
         write_segment(&run_dir, 650..1300, &[725, 825, 925, 1025, 1125, 1225]);
         let (mut instants, mut trades) = (Vec::new(), Vec::new());
