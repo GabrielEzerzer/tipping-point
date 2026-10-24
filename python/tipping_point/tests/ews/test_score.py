@@ -240,9 +240,9 @@ def test_score_writes_stamped_results_and_logs_every_cell(
         # the rate theta was set at is at most the target of 2 per 100 tau_c, and close to it:
         # 1.90-2.00 planted, 1.39-1.79 when the budget is counted per score instead of per tau_c
         assert 1.8 <= r["far_set"] <= 2.0 + 1e-9 and 0.5 < r["far_test"] < 6, r
-        # the planted rise is under way as the band opens at eps_L = 2 (a third to two thirds of
-        # the replicas are above theta there, censored), so the rest alarm within one eps_L of it
-        assert 1.0 <= r["alarm_eps_median"] <= 2.0, r  # 1.26-1.69 planted
+        # inside the band [2, -1]; NaN, every replica censored or missed, fails. Where in the
+        # band depends on the draw: the band-entry rule is pinned on designed s(t) below
+        assert -1.0 <= r["alarm_eps_median"] <= 2.0, r
         assert 0.0 < r["censored"] < 1.0 and r["miss_rate"] <= 0.25, r
     rows = pq.read_table(run_dir / "fss" / f"{0:020d}.parquet").to_pylist()
     fss = {r["quantity"]: r for r in rows}
@@ -332,7 +332,7 @@ def test_a_falling_direction_reaches_the_surrogate_test_and_the_alarms(planted: 
 
 def test_the_first_seed_sets_theta_and_the_second_tests_it(planted: Any) -> None:
     """#64: alternate seeds set theta and test its false-alarm rate. Swapped, every theta, rate
-    and alarm position in the results moves while the planted ranges barely notice (one median
+    and alarm position in the results moves while the planted ranges do not notice (one median
     alarm eps_L goes from 1.30 to 0.97). With the second seed's null blocks blanked, theta still
     comes from the first seed's and is finite, and the blank half raises no false alarm; set on
     the blank half, theta would be -inf."""
@@ -350,6 +350,40 @@ def test_the_first_seed_sets_theta_and_the_second_tests_it(planted: Any) -> None
     rows, _ = ising._alarms(doc, replace(prep, nulls=blank), 16, tau_c, window, bandwidth)
     assert [r["indicator"] for r in rows] == ["variance", "ac"]
     assert all(math.isfinite(r["theta"]) and r["far_test"] == 0.0 for r in rows), rows
+
+
+def test_an_alarm_is_a_rise_inside_the_band_and_one_before_it_is_censored(
+    planted: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#64, the band-entry rule on designed s(t). The nulls score 0.5 throughout, so theta =
+    0.5; the ramp scores at times j - 2 .. j + 2, j the first inside the band [2, -1]. A replica
+    that rises above theta between j - 2 and j - 1 was above it as the band opened: censored,
+    never an alarm at eps_L ~ 2. One that rises at j, the first score inside, alarms there.
+    Reading the entry score one step too early (j - 2) turns the first into an alarm at the
+    band's edge; one step too late (j) censors the second."""
+    doc = tomllib.loads(_text(planted.root, "demo", PILOT_RUN))
+    doc["fss"]["dynamic"]["indicators"] = ["variance"]
+    ind, top, event = doc["indicators"], doc["sensitivity"]["headline"], doc["event"]
+    band = (max(event["horizons"]) + event["segment"], min(event["horizons"]))
+    inputs = ising.select(*ising.find_runs(planted.root), doc["data"])[16]
+    tau_c = ising.read_pilot(planted.root, PILOT_RUN, allow_stale=True).tau(16)
+    prep = ising.prepare(inputs, "dense", tau_c, ind["thin"], band)
+    run, ramp = prep.ramps[0]
+    eps = run.eps(ramp.temperature)
+    j = int(np.flatnonzero(eps <= doc["scoring"]["alarms"]["band"][0])[0])
+    rising = np.array([[0.0, 0.9, 0.9, 0.9, 0.9], [0.0, 0.0, 0.9, 0.9, 0.9]])
+    designed = {
+        id(s.abs_m): (np.arange(2), np.full((len(s.replicas), 2), 0.5)) for _, s in prep.nulls
+    }
+    designed[id(ramp.abs_m)] = (np.arange(j - 2, j + 3), rising)
+    monkeypatch.setattr(ising, "trailing_score", lambda x, pipe, every=1: designed[id(x)])
+    window, bandwidth = prep.samples(top["window"], tau_c), top["bandwidth"] * tau_c / prep.sweeps
+    one_ramp = replace(prep, ramps=[(run, ramp)])
+    (row,), found = ising._alarms(doc, one_ramp, 16, tau_c, window, bandwidth)
+    (alarm,), censored = found["variance", "dense"]
+    assert row["theta"] == 0.5 and censored == 0.5
+    assert np.isnan(alarm[0]) and alarm[1] == pytest.approx(eps[j]) and eps[j - 1] > 2.0
+    assert row["alarm_eps_median"] == pytest.approx(eps[j]) and row["miss_rate"] == 0.0
 
 
 def test_score_refuses_unfrozen_over_budget_and_pilotless(
