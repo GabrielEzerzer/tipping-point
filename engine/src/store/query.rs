@@ -48,8 +48,9 @@ pub fn table_files(run_dir: &Path, table: &str) -> Result<Vec<PathBuf>, StoreErr
     Ok(files)
 }
 
-/// A path as a `DuckDB` string literal: forward slashes, single quotes doubled.
-fn literal(path: &Path) -> String {
+/// A path as a `DuckDB` string literal: forward slashes, single quotes doubled. Every path that
+/// reaches SQL goes through here, the API's tables included.
+pub(crate) fn literal(path: &Path) -> String {
     let text = path
         .to_string_lossy()
         .replace('\\', "/")
