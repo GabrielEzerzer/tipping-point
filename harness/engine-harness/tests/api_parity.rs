@@ -422,8 +422,8 @@ async fn check_replays(played: &Played, stored: &RecordBatch, rows: &[BookRow]) 
 }
 
 /// The app's replay controls on one connection: a replay at real speed, paused (nothing comes),
-/// played on, sought forward (only later samples come), then back to the live feed, each change
-/// answered by a `source` message.
+/// played on, sought forward (only later samples come), controls racing its end, then back to the
+/// live feed, each change answered by a `source` message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
     let played = play(scratch("api-controls")).await?;
@@ -457,6 +457,21 @@ async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
         !books.is_empty() && books.iter().all(|book| book.2 >= to_ms),
         "{books:?}"
     );
+
+    // Controls sent as the replay ran out, which the engine has before the client hears `ended`:
+    // pause and play are told it ended, and a seek starts it again.
+    for control in ["pause", "play"] {
+        send_json(&mut viewer, &json!({"t": control})).await?;
+        let told = next_json(&mut viewer, WAIT).await?;
+        let ended = json!({"t": "source", "mode": "ended", "run": RUN});
+        assert_eq!(told, ended, "{control} after the end");
+    }
+    let near_end = last_ms - 500;
+    send_json(&mut viewer, &json!({"t": "seek", "to_ms": near_end})).await?;
+    let again = until_source(&mut viewer, "replay").await?;
+    assert_eq!(again["from_ms"], near_end);
+    let (books, _, _) = read_until_ended(&mut viewer).await?;
+    assert!(books.iter().all(|book| book.2 >= near_end), "{books:?}");
 
     send_json(&mut viewer, &json!({"t": "live"})).await?;
     until_source(&mut viewer, "live").await?;

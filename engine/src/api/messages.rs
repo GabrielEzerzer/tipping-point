@@ -128,11 +128,11 @@ pub enum ClientMessage {
         #[serde(default = "one")]
         speed: f64,
     },
-    /// Jumps the replay to `to_ms`.
+    /// Jumps the replay to `to_ms`; a replay that has ended starts again from there.
     Seek { to_ms: i64 },
-    /// Holds the replay where it is.
+    /// Holds the replay where it is; after it ended, the answer says it ended.
     Pause,
-    /// Carries the replay on.
+    /// Carries the replay on; after it ended, the answer says it ended.
     Play,
     /// Back to the live feed.
     Live,
@@ -311,7 +311,8 @@ impl VenueStatus {
 pub struct SourceMessage {
     /// `live`, `replay`, `paused`, `ended` (a replay ran out, or the live feed stopped), or
     /// `failed` (a replay could not go on; `error` says why). After `ended` and `failed` nothing
-    /// comes until `replay` or `live`.
+    /// comes until `replay`, `seek` (in the replay that ended) or `live`; `pause` and `play` are
+    /// answered with the same `ended` or `failed`.
     pub mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
