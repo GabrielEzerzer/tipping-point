@@ -626,6 +626,7 @@ def test_a_red_cargo_test_record_names_the_failing_test_and_keeps_its_panic(
             "0 filtered out; finished in 0.00s",
         ],
         "failures": [f"{lib}: ---- deliberate::deliberately_fails stdout ----"],
+        "skipped": [],
     }
     assert row["output_tail"] == fixture("cargo-test-no-fail-fast-red.txt").splitlines()
     assert "assertion `left == right` failed: deliberate" in row["output_tail"]
@@ -640,6 +641,27 @@ def test_the_record_keeps_the_last_lines_of_a_long_output(tmp_path, monkeypatch)
     assert len(row["output_tail"]) == gate.TAIL_LINES == 200
     assert row["output_tail"][-2:] == ["499", "All checks passed!"]
     assert row["evidence"] == {}  # only cargo-test reads extra evidence from its output
+
+
+# ---------- a check a test skipped is counted, never passed silently (#60)
+
+
+def test_a_check_a_test_skipped_is_counted_in_the_summary_and_the_record() -> None:
+    # api_load's real output on a loaded machine (2026-10-24, while the threshold was 10 ms): its
+    # latency bound skipped on a line of its own, past libtest's capture of a passing test
+    output = fixture("cargo-test-skipped-green.txt")
+    verdict = gate.judge_cargo_test(0, output)
+    assert verdict.green, verdict.source
+    assert verdict.source == "1 test result lines: 1 passed; 0 failed; 1 skipped"
+    (skip,) = gate.cargo_test_evidence(output)["skipped"]
+    assert skip.startswith("tests\\api_load.rs: SKIPPED: api_load's latency bound")
+
+
+def test_only_a_line_that_starts_with_skipped_counts() -> None:
+    output = fixture("cargo-test-green.txt").replace(
+        "test tests::version_is_set ... ok", "test tests::version_is_set ... ok (SKIPPED: no)"
+    )
+    assert gate.judge_cargo_test(0, output).source == "2 test result lines: 1 passed; 0 failed"
 
 
 # ---------- a shared laptop: strays, build jobs, priority and load (#61)

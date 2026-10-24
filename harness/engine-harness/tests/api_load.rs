@@ -3,18 +3,22 @@
 //! second, through the live path with its log recording. Nine app clients and two Arrow clients
 //! read normally; one app client and one Arrow client stop reading at once.
 //!
-//! The feed must not wait: the generator keeps its rate, the log writer's queue never fills, and
-//! the stalled clients change nothing for the others. Each client is cut or coalesced as its kind
-//! says: the stalled ones are cut, the normal app clients skip book samples but get every trade,
-//! and the normal Arrow clients get every batch. Capture-to-receive latency, delivered against
-//! produced, gaps, the writer's queue, the live path's own time per input and peak memory go to
-//! `harness/out/api-load-<ms>.json`. Five seconds by default; `TP_LOAD_SECONDS` runs longer.
+//! The feed must not wait: no input takes the live path anywhere near the stall timeout that
+//! waiting on a stalled client would cost, the log writer's queue never fills, and the stalled
+//! clients change nothing for the others. Each client is cut or coalesced as its kind says: the
+//! stalled ones are cut, the normal app clients skip book samples but get every trade, and the
+//! normal Arrow clients get every batch. Capture-to-receive latency, delivered against produced,
+//! the rates achieved, gaps, the writer's queue, the live path's own time per input, peak memory,
+//! the cores and how loaded the machine was go to `harness/out/api-load-<ms>.json`. On a loaded
+//! machine the latency bound is skipped with a SKIPPED line the gate counts (#60). Five seconds by
+//! default; `TP_LOAD_SECONDS` runs longer.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Int64Array, RecordBatch};
@@ -57,6 +61,33 @@ const PROFILE: &str = if cfg!(debug_assertions) {
 } else {
     "release"
 };
+/// Sleeps 1 ms at a time on a thread of its own until `stop`, and returns how late each sleep
+/// woke: the scheduler delay each of a message's two or three wakeups also waits through,
+/// measured apart from the engine's code, so a slow engine cannot excuse itself. The machine
+/// counts as loaded, and the latency bound is skipped, when the p99 passes a quarter of
+/// `LATENCY_BOUND`, where waiting for a core could spend most of the bound. On the development
+/// laptop on 2026-10-24, with other jobs running, it read 17.1 ms at p99 while the latency p99s
+/// sat at 34 to 40 ms, and 44.8 ms under heavier load while they rose to 38 to 88 ms.
+fn wake_probe(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<Duration>> {
+    std::thread::spawn(move || {
+        let mut late = Vec::new();
+        while !stop.load(Ordering::Relaxed) {
+            let asleep = Instant::now();
+            std::thread::sleep(Duration::from_millis(1));
+            late.push(asleep.elapsed().saturating_sub(Duration::from_millis(1)));
+        }
+        late
+    })
+}
+
+/// Prints a line the gate counts as a skip. libtest keeps a passing test's `println!` output to
+/// itself, so this writes to stdout's handle, which it does not capture.
+fn skipped(why: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "\nSKIPPED: {why}");
+    let _ = out.flush();
+}
 
 /// What one app client got: book messages and trades with when they arrived, and gaps.
 #[derive(Debug, Default)]
@@ -279,6 +310,8 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
     let mut per_input = Vec::new();
     let mut max_queued = 0;
     let (mut depth, mut trades) = (0_u64, 0_u64);
+    let probing = Arc::new(AtomicBool::new(false));
+    let probe = wake_probe(Arc::clone(&probing));
     let start = Instant::now();
     let length = Duration::from_secs(seconds);
     let mut tick = tokio::time::interval(Duration::from_millis(1));
@@ -310,6 +343,12 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
         );
     }
     let elapsed = start.elapsed();
+    probing.store(true, Ordering::Relaxed);
+    let mut wake_late = probe.join().map_err(|_| "the wake probe panicked")?;
+    let wake_p99 = percentile(&mut wake_late, 99.0);
+    let loaded_above = LATENCY_BOUND / 4;
+    let loaded = wake_p99 > loaded_above;
+    let cores = std::thread::available_parallelism().map_or(0, NonZeroUsize::get);
     let apps_at_end = hub.counters.ws_clients.load(Ordering::Relaxed);
     let arrows_at_end = hub.arrow_subscribers();
     hub.end();
@@ -411,7 +450,14 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
             "trades": {"p50": millis(percentile(&mut trade_latency, 50.0)), "p99": millis(percentile(&mut trade_latency, 99.0)), "n": trade_latency.len()},
             "arrow": {"p50": millis(percentile(&mut arrow_latency, 50.0)), "p99": millis(percentile(&mut arrow_latency, 99.0)), "n": arrow_latency.len()},
             "bound_p99": millis(LATENCY_BOUND),
+            "bound_checked": !loaded,
             "research_target_p99": 50.0,
+        },
+        "machine": {
+            "cores": cores,
+            "wake_late_ms": {"p50": millis(percentile(&mut wake_late, 50.0)), "p99": millis(wake_p99), "max": millis(wake_late.last().copied().unwrap_or_default()), "n": wake_late.len()},
+            "loaded_above_wake_p99_ms": millis(loaded_above),
+            "loaded": loaded,
         },
         "live_path_ms_per_input": {"p50": millis(percentile(&mut per_input, 50.0)), "p99": millis(percentile(&mut per_input, 99.0)), "max": millis(per_input.iter().copied().max().unwrap_or_default())},
         "writer_queue": {"max": max_queued, "capacity": LogConfig::default().queue},
@@ -423,14 +469,15 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
     fs::write(&out, serde_json::to_string_pretty(&report)?)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
 
-    // The feed did not wait.
-    let (depth_rate, trade_rate) = (
-        depth as f64 / elapsed.as_secs_f64(),
-        trades as f64 / elapsed.as_secs_f64(),
-    );
+    // The feed did not wait: waiting on a stalled client costs a push the whole stall timeout.
+    // The rates achieved stay in the report only: on a shared machine they measure the CPU this
+    // test got, not the engine (60% of target under load, every other check holding, #60).
     assert!(
-        depth_rate >= 0.9 * DEPTH_PER_S && trade_rate >= 0.9 * TRADES_PER_S,
-        "the feed fell behind its rate: {report}"
+        per_input
+            .iter()
+            .max()
+            .is_some_and(|slowest| *slowest < STALL / 2),
+        "the live path waited on a client: {report}"
     );
     assert!(
         max_queued < LogConfig::default().queue,
@@ -494,6 +541,15 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
             "Arrow batches out of order"
         );
     }
+    // Latency on a loaded machine measures the machine: skipped, visibly, never passed silently.
+    if loaded {
+        skipped(&format!(
+            "api_load's latency bound (p99 under {LATENCY_BOUND:?}): the machine was loaded, a \
+             1 ms sleep woke {wake_p99:?} late at p99 (over {loaded_above:?}) on {cores} \
+             cores; the p99s are in {file}",
+            file = out.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
     for (name, values) in [
         ("book", &book_latency),
         ("trades", &trade_latency),
@@ -503,7 +559,7 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
         let mut values = values.clone();
         let p99 = percentile(&mut values, 99.0);
         assert!(
-            p99 < LATENCY_BOUND,
+            loaded || p99 < LATENCY_BOUND,
             "{name} p99 {p99:?} over {LATENCY_BOUND:?}: {report}"
         );
     }

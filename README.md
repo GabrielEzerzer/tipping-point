@@ -165,7 +165,11 @@ app's mock replays; a change fails `api_contract` until they are regenerated in 
 (`TP_UPDATE_GOLDEN=1 cargo test -p engine-harness`). `api_load` drives ten times the live rate
 into nine app clients, two Arrow clients and one stalled client of each kind, and writes its
 measurements to `harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
-default 5 s. The Python round trip (`api_python`) runs the repository's `.venv` Python, or
+default 5 s. It fails if any input takes the live path half the stall timeout or longer; the rates
+achieved are recorded, not asserted, since on a shared machine they measure the CPU the test got.
+The report also holds the cores and how late a 1 ms sleep woke through the load: past a quarter of
+the latency bound at p99 the machine counts as loaded, and the latency bound is skipped with a
+`SKIPPED:` line, which the gate counts in the cargo test summary. The Python round trip (`api_python`) runs the repository's `.venv` Python, or
 `$TP_PYTHON`.
 
 ## Ising simulator

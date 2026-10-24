@@ -84,6 +84,9 @@ _TEST_RESULT = re.compile(
 # The line cargo prints above each test binary's output: "Running unittests src\lib.rs (...)",
 # "Running tests\smoke.rs (...)", "Doc-tests engine".
 _TEST_HEADER = re.compile(r"^\s*(?:Running (?P<binary>.+?)|(?P<doctests>Doc-tests \S+))\s*$")
+# A check a passing test skipped and said so on a line of its own, past libtest's capture
+# (api_load's latency bound on a loaded machine, #60): counted, never passed silently.
+_SKIPPED = re.compile(r"^SKIPPED: \S")
 
 
 def judge_cargo_test(returncode: int, output: str) -> Verdict:
@@ -91,10 +94,12 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     ok, and every test binary except doc-tests must pass >=1 test: headers name binaries, not
     crates, so any exemption would let a crate of exempt binaries ride on another's tests. A
     binary may opt out with `test = false` only while its crate keeps a tested target: an
-    opted-out binary prints no header at all, so test_gate checks that against cargo metadata."""
+    opted-out binary prints no header at all, so test_gate checks that against cargo metadata.
+    The summary counts every SKIPPED line a test printed."""
     # (name, is cargo's own Doc-tests header, results): the flag records which branch matched,
     # because a [[test]] at path "Doc-tests x.rs" prints "Running Doc-tests x.rs (...)"
     binaries: list[tuple[str, bool, list[re.Match[str]]]] = []
+    skipped = 0
     for line in output.splitlines():
         if header := _TEST_HEADER.match(line):
             doctests = header["doctests"] is not None
@@ -103,12 +108,16 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
             if not binaries:
                 return Verdict(False, f"unparseable: no cargo header above {line.strip()!r}")
             binaries[-1][2].append(result)  # doc-tests can print two (merged + standalone)
+        elif _SKIPPED.match(line):
+            skipped += 1
     results = [m for *_, found in binaries for m in found]
     if not results:
         return Verdict(False, f"no 'test result:' line (exit {returncode})")
     passed = sum(int(m["passed"]) for m in results)
     failed = sum(int(m["failed"]) for m in results)
     summary = f"{len(results)} test result lines: {passed} passed; {failed} failed"
+    if skipped:
+        summary += f"; {skipped} skipped"
     if any(m["status"] != "ok" for m in results) or failed:
         return Verdict(False, summary)
     for name, doctests, found in binaries:
@@ -127,10 +136,10 @@ _FAILURE_HEADER = re.compile(r"^---- .+ ----$")  # libtest's "---- <test> stdout
 
 
 def cargo_test_evidence(output: str) -> dict[str, list[str]]:
-    """What the record keeps of a cargo-test run besides its tail: every 'test result:' line and
-    every failing test's output header, each under the binary that printed it, so a red run
-    names what failed however far above the tail it sits."""
-    binary, evidence = "(no header)", {"results": [], "failures": []}
+    """What the record keeps of a cargo-test run besides its tail: every 'test result:' line,
+    every failing test's output header and every SKIPPED line, each under the binary that
+    printed it, so a red run names what failed however far above the tail it sits."""
+    binary, evidence = "(no header)", {"results": [], "failures": [], "skipped": []}
     for line in output.splitlines():
         if header := _TEST_HEADER.match(line):
             binary = (header["binary"] or header["doctests"]).split(" (")[0]
@@ -138,6 +147,8 @@ def cargo_test_evidence(output: str) -> dict[str, list[str]]:
             evidence["results"].append(f"{binary}: {line.strip()}")
         elif _FAILURE_HEADER.match(line.strip()):
             evidence["failures"].append(f"{binary}: {line.strip()}")
+        elif _SKIPPED.match(line):
+            evidence["skipped"].append(f"{binary}: {line.strip()}")
     return evidence
 
 
