@@ -25,6 +25,7 @@ use engine_harness::api::{
     Frame, LivePath, Outcome, Script, Server, Socket, fixture, get_arrow, hello, merged,
     next_frame, next_json, one_batch, read_parquet, script, send_json, ws_connect,
 };
+use engine_harness::load::Generator;
 use serde_json::{Value, json};
 
 const RUN: &str = "20231114T221320Z-session";
@@ -477,6 +478,89 @@ async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
     until_source(&mut viewer, "live").await?;
     played.server.stop().await;
     fs::remove_dir_all(&played.dir)?;
+    Ok(())
+}
+
+/// Going back to live after a replay brings the trades back (#84). Starting a replay drops the
+/// connection's live trades; only going back to live subscribes them again. Here the feed is
+/// still running: a viewer subscribed to book and trades replays the live run to its end
+/// halfway through, goes back to live, and gets the rest of the session, every trade and newer
+/// books, none of them from before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn going_back_to_live_after_a_replay_brings_the_trades_back() -> Outcome {
+    const LIVE_RUN: &str = "20261024T120000Z-golive";
+    const T0: i64 = 1_700_000_000_000_000_000;
+    /// Each half: a depth update and a trade every 50 ms of the capture clock.
+    const HALF: usize = 100;
+    let dir = scratch("api-go-live");
+    let mut generator = Generator::default();
+    let hub = Hub::new(HubConfig::default());
+    let mut live = LivePath::new(
+        Venue::BinanceUsdm,
+        generator.scales(),
+        Arc::clone(&hub),
+        &dir,
+        Some(LIVE_RUN),
+        LogConfig::default(),
+    )?;
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+    let mut at = T0;
+    for message in generator.opening(at) {
+        live.push(message).await?;
+    }
+    for _ in 0..HALF {
+        at += 50_000_000;
+        live.push(generator.depth(at)).await?;
+        live.push(generator.trade(at)).await?;
+    }
+
+    let mut viewer = ws_connect(server.addr).await?;
+    hello(&mut viewer).await?;
+    let sub = json!({"t": "sub", "topics": ["book", "trades"]});
+    send_json(&mut viewer, &sub).await?;
+    until_source(&mut viewer, "live").await?;
+    let replay = json!({"t": "replay", "run": LIVE_RUN, "speed": 0});
+    send_json(&mut viewer, &replay).await?;
+    until_replay(&mut viewer).await?;
+    let (books, trades, _) = read_until_ended(&mut viewer).await?;
+    let seqs = |trades: &[Value]| -> Vec<u64> {
+        trades.iter().filter_map(|t| t["seq"].as_u64()).collect()
+    };
+    let replayed = seqs(&trades);
+    assert_eq!(
+        replayed.len(),
+        HALF,
+        "the replay sent the first half's trades"
+    );
+    let last_trade = replayed.iter().copied().max().ok_or("replayed trades")?;
+    let last_book = books.iter().map(|b| b.2).max().ok_or("replayed books")?;
+
+    send_json(&mut viewer, &json!({"t": "live"})).await?;
+    until_source(&mut viewer, "live").await?;
+    for _ in 0..HALF {
+        at += 50_000_000;
+        live.push(generator.depth(at)).await?;
+        live.push(generator.trade(at)).await?;
+    }
+    hub.end();
+    let (books, trades, _) = read_until_ended(&mut viewer).await?;
+    let after = seqs(&trades);
+    assert_eq!(
+        after.len(),
+        HALF,
+        "every trade of the rest of the session, live: {after:?}"
+    );
+    assert!(
+        after.windows(2).all(|w| w[0] < w[1]) && after.first() > Some(&last_trade),
+        "the live trades, in order and after the replay's last ({last_trade}): {after:?}"
+    );
+    assert!(
+        books.iter().all(|b| b.2 >= last_book) && books.iter().any(|b| b.2 > last_book),
+        "the live books, from the newest on: {books:?}"
+    );
+    live.finish().await?;
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
     Ok(())
 }
 
