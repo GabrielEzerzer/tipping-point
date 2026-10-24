@@ -10,8 +10,9 @@
 //! normal Arrow clients get every batch. Capture-to-receive latency, delivered against produced,
 //! the rates achieved, gaps, the writer's queue, the live path's own time per input, peak memory,
 //! the cores and how loaded the machine was go to `harness/out/api-load-<ms>.json`. The latency
-//! bound is checked on every run; on a loaded machine a p99 over it is excused with a SKIPPED line
-//! the gate counts (#60). Five seconds by default; `TP_LOAD_SECONDS` runs longer.
+//! bound is checked on every run; on a loaded machine a p99 over it by less than three wakeups'
+//! lateness is excused with a SKIPPED line the gate counts (#60). Five seconds by default;
+//! `TP_LOAD_SECONDS` runs longer.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -65,9 +66,11 @@ const PROFILE: &str = if cfg!(debug_assertions) {
 /// woke: the scheduler delay each of a message's two or three wakeups also waits through,
 /// measured apart from the engine's code, so a slow engine cannot excuse itself. Past a quarter
 /// of `LATENCY_BOUND` at p99, where waiting for a core could spend most of the bound, the machine
-/// counts as loaded, and a latency p99 over the bound is excused rather than failed. On the
-/// development laptop on 2026-10-24, with other jobs running, it read 17.1 ms at p99 while the
-/// latency p99s sat at 34 to 40 ms, and 44.8 ms under heavier load while they rose to 38 to 88 ms.
+/// counts as loaded, and a latency p99 over the bound is excused rather than failed, as long as
+/// it stays under the bound plus three times that p99, no more than those wakeups could have
+/// waited; past that it fails, loaded or not. On the development laptop on 2026-10-24, with other
+/// jobs running, it read 17.1 ms at p99 while the latency p99s sat at 34 to 40 ms, and 44.8 ms
+/// under heavier load while they rose to 38 to 88 ms.
 fn wake_probe(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<Duration>> {
     std::thread::spawn(move || {
         let mut late = Vec::new();
@@ -540,8 +543,14 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
             "Arrow batches out of order"
         );
     }
-    // The bound is checked on every run. A p99 over it on a loaded machine measures the machine,
-    // so it is excused on a line the gate counts: a skip means the bound was missed under load.
+    // The bound is checked on every run. A p99 over it on a loaded machine, by less than three
+    // wakeups' lateness, measures the machine, so it is excused on a line the gate counts: a skip
+    // means the bound was missed under load. Past that it fails, loaded or not.
+    let excused_below = if loaded {
+        LATENCY_BOUND + 3 * wake_p99
+    } else {
+        LATENCY_BOUND
+    };
     for (name, values) in [
         ("book", &book_latency),
         ("trades", &trade_latency),
@@ -550,18 +559,20 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
         assert!(!values.is_empty(), "no {name} latency measured");
         let mut values = values.clone();
         let p99 = percentile(&mut values, 99.0);
-        if p99 >= LATENCY_BOUND && loaded {
+        if p99 >= LATENCY_BOUND && p99 < excused_below {
             skipped(&format!(
                 "api_load's {name} p99 {p99:?} over its {LATENCY_BOUND:?} bound, excused: the \
                  machine was loaded, a 1 ms sleep woke {wake_p99:?} late at p99 (over \
-                 {loaded_above:?}) on {cores} cores; see {file}",
+                 {loaded_above:?}) on {cores} cores, and the p99 is under {excused_below:?}, \
+                 the bound plus three such wakeups; see {file}",
                 file = out.file_name().unwrap_or_default().to_string_lossy()
             ));
             continue;
         }
         assert!(
             p99 < LATENCY_BOUND,
-            "{name} p99 {p99:?} over {LATENCY_BOUND:?}: {report}"
+            "{name} p99 {p99:?} over {LATENCY_BOUND:?} (loaded: {loaded}, excused under \
+             {excused_below:?}): {report}"
         );
     }
     server.stop().await;
