@@ -7,22 +7,30 @@ Every leg always runs; the gate exits nonzero if any leg is RED. Stdlib only.
 
 The cargo legs cover only the root workspace's members; test_gate fails engine/ or any crate
 under harness/ that is outside it, so app/src-tauri must join members and that check when it lands.
+
+On a shared laptop (#61): the gate kills strays (strays.py) as it starts and ends, cargo builds
+on half the logical cores unless CARGO_BUILD_JOBS is set, every leg starts at BelowNormal priority
+on Windows, and the record says how busy the CPU was at the start.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 import time
 import tomllib
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+import strays
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "harness" / "out"
@@ -77,6 +85,9 @@ _TEST_RESULT = re.compile(
 # The line cargo prints above each test binary's output: "Running unittests src\lib.rs (...)",
 # "Running tests\smoke.rs (...)", "Doc-tests engine".
 _TEST_HEADER = re.compile(r"^\s*(?:Running (?P<binary>.+?)|(?P<doctests>Doc-tests \S+))\s*$")
+# A check a passing test skipped and said so on a line of its own, past libtest's capture
+# (api_load's latency bound on a loaded machine, #60): counted, never passed silently.
+_SKIPPED = re.compile(r"^SKIPPED: \S")
 
 
 def judge_cargo_test(returncode: int, output: str) -> Verdict:
@@ -84,10 +95,12 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     ok, and every test binary except doc-tests must pass >=1 test: headers name binaries, not
     crates, so any exemption would let a crate of exempt binaries ride on another's tests. A
     binary may opt out with `test = false` only while its crate keeps a tested target: an
-    opted-out binary prints no header at all, so test_gate checks that against cargo metadata."""
+    opted-out binary prints no header at all, so test_gate checks that against cargo metadata.
+    The summary counts every SKIPPED line a test printed."""
     # (name, is cargo's own Doc-tests header, results): the flag records which branch matched,
     # because a [[test]] at path "Doc-tests x.rs" prints "Running Doc-tests x.rs (...)"
     binaries: list[tuple[str, bool, list[re.Match[str]]]] = []
+    skipped = 0
     for line in output.splitlines():
         if header := _TEST_HEADER.match(line):
             doctests = header["doctests"] is not None
@@ -96,12 +109,16 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
             if not binaries:
                 return Verdict(False, f"unparseable: no cargo header above {line.strip()!r}")
             binaries[-1][2].append(result)  # doc-tests can print two (merged + standalone)
+        elif _SKIPPED.match(line):
+            skipped += 1
     results = [m for *_, found in binaries for m in found]
     if not results:
         return Verdict(False, f"no 'test result:' line (exit {returncode})")
     passed = sum(int(m["passed"]) for m in results)
     failed = sum(int(m["failed"]) for m in results)
     summary = f"{len(results)} test result lines: {passed} passed; {failed} failed"
+    if skipped:
+        summary += f"; {skipped} skipped"
     if any(m["status"] != "ok" for m in results) or failed:
         return Verdict(False, summary)
     for name, doctests, found in binaries:
@@ -114,6 +131,41 @@ def judge_cargo_test(returncode: int, output: str) -> Verdict:
     if returncode != 0:
         return Verdict(False, f"exit {returncode} despite: {summary}")
     return Verdict(True, summary)
+
+
+_FAILURE_HEADER = re.compile(r"^---- .+ ----$")  # libtest's "---- <test> stdout ----"
+
+
+def cargo_test_evidence(output: str) -> dict[str, list[Any]]:
+    """What the record keeps of a cargo-test run besides its tail, each under the binary that
+    printed it, exe and all (engine's and engine-harness's lib tests both run as "unittests
+    src\\lib.rs"): every 'test result:' line, every SKIPPED line, and every failing test's whole
+    section of output, from its '---- <test> stdout ----' header to the next 'failures:' line, so
+    a failure early in a --no-fail-fast run reads in full after it has left the tail."""
+    binary, section = "(no header)", None
+    evidence: dict[str, list[Any]] = {"results": [], "failures": [], "skipped": []}
+    for line in output.splitlines():
+        header, failure = _TEST_HEADER.match(line), _FAILURE_HEADER.match(line.strip())
+        ends = header or failure or line.strip() == "failures:" or _TEST_RESULT.search(line)
+        if section is not None and not ends:
+            section.append(line)
+        elif header:
+            section, binary = None, header["binary"] or header["doctests"]
+        elif failure:
+            section = [f"{binary}: {line.strip()}"]
+            evidence["failures"].append(section)
+        else:
+            section = None
+            if _TEST_RESULT.search(line):
+                evidence["results"].append(f"{binary}: {line.strip()}")
+            elif _SKIPPED.match(line):
+                evidence["skipped"].append(f"{binary}: {line.strip()}")
+    for lines in evidence["failures"]:  # without the blank lines around each section's output
+        while len(lines) > 1 and not lines[-1].strip():
+            lines.pop()
+        while len(lines) > 1 and not lines[1].strip():
+            del lines[1]
+    return evidence
 
 
 def judge_ruff_check(returncode: int, output: str) -> Verdict:
@@ -217,6 +269,7 @@ class Leg:
     name: str
     argv: list[str]
     judge: Callable[[int, str], Verdict]
+    evidence: Callable[[str], dict[str, list[Any]]] | None = None  # kept beside the tail
 
 
 def _judge_pytest_from_disk(returncode: int, _output: str) -> Verdict:
@@ -231,7 +284,13 @@ LEGS: list[Leg] = [
         ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
         judge_clippy,
     ),
-    Leg("cargo-test", ["cargo", "test", "--workspace"], judge_cargo_test),
+    # --no-fail-fast: one failing binary must not hide whether the ones after it pass
+    Leg(
+        "cargo-test",
+        ["cargo", "test", "--workspace", "--no-fail-fast"],
+        judge_cargo_test,
+        cargo_test_evidence,
+    ),
     Leg("ruff-check", ["ruff", "check"], judge_ruff_check),
     Leg("ruff-format", ["ruff", "format", "--check"], judge_ruff_format),
     Leg("pyright", ["pyright"], judge_pyright),
@@ -245,6 +304,55 @@ LEGS: list[Leg] = [
 ]
 
 
+TAIL_LINES = 200  # of each leg's output, kept in the record so a red leg reads without a re-run
+# What a leg starts (rustc, test binaries, the engine processes tests spawn) inherits this
+PRIORITY = subprocess.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 0
+
+
+def leg_env(environ: Mapping[str, str], cores: int | None) -> dict[str, str]:
+    """The legs' environment: cargo builds on half the logical cores unless CARGO_BUILD_JOBS is
+    already set."""
+    return {"CARGO_BUILD_JOBS": str(max(1, (cores or 2) // 2)), **environ}
+
+
+def machine(interval: float = 1.0) -> dict[str, object]:
+    """Logical cores and how busy they were as the gate started, so a leg that went red under
+    load says so: on Windows the share of all cores' time not idle over `interval` seconds,
+    elsewhere the 1-minute load average."""
+    cores = os.cpu_count()
+    if sys.platform != "win32":
+        return {"cores": cores, "load_average_1m": os.getloadavg()[0]}
+    import ctypes
+    from ctypes import wintypes
+
+    def busy_and_total() -> tuple[int, int]:
+        idle, kernel, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+        ctypes.windll.kernel32.GetSystemTimes(*(ctypes.byref(t) for t in (idle, kernel, user)))
+        idle_t, kernel_t, user_t = (
+            (t.dwHighDateTime << 32) | t.dwLowDateTime for t in (idle, kernel, user)
+        )
+        return kernel_t + user_t - idle_t, kernel_t + user_t  # kernel time includes idle time
+
+    busy0, total0 = busy_and_total()
+    time.sleep(interval)
+    busy1, total1 = busy_and_total()
+    busy = round(100 * (busy1 - busy0) / max(1, total1 - total0), 1)
+    return {"cores": cores, "cpu_busy_percent": busy}
+
+
+def sweep_strays(when: str) -> list[dict[str, object]] | str | None:
+    """Kill the strays and print what was found: the record's rows, None where processes cannot
+    be listed, or why the sweep failed, which never stops the gate."""
+    try:
+        rows = strays.sweep(ROOT)
+    except Exception as exc:  # housekeeping: the legs run whatever happens here
+        print(f"strays at {when}: sweep failed: {exc!r}", flush=True)
+        return f"sweep failed: {exc!r}"
+    for line in strays.describe(rows):
+        print(f"strays at {when}: {line}", flush=True)
+    return rows
+
+
 @dataclass(frozen=True)
 class LegResult:
     leg: str
@@ -252,10 +360,13 @@ class LegResult:
     duration: float
     verdict: str
     verdict_source: str
+    output_tail: list[str]
+    evidence: dict[str, list[Any]]
 
 
 def run_leg(leg: Leg) -> LegResult:
     start = time.perf_counter()
+    output = ""
     try:
         if leg.name == "pytest":
             JUNIT.unlink(missing_ok=True)  # a stale report must never vouch for this run
@@ -268,13 +379,15 @@ def run_leg(leg: Leg) -> LegResult:
             encoding="utf-8",
             errors="replace",
             check=False,
+            env=leg_env(os.environ, os.cpu_count()),
+            creationflags=PRIORITY,
         )
     except FileNotFoundError:
         verdict, returncode = judge_missing_tool(leg.argv[0]), None
     except OSError as exc:  # also a stale JUnit report that cannot be deleted (held open)
         verdict, returncode = Verdict(False, f"tool could not start: {exc}"), None
     else:
-        returncode = proc.returncode
+        returncode, output = proc.returncode, proc.stdout
         try:
             verdict = leg.judge(proc.returncode, proc.stdout)
         except Exception as exc:  # a crashing judge is a RED leg, never a dead gate
@@ -285,6 +398,8 @@ def run_leg(leg: Leg) -> LegResult:
         duration=round(time.perf_counter() - start, 2),
         verdict="GREEN" if verdict.green else "RED",
         verdict_source=verdict.source,
+        output_tail=output.splitlines()[-TAIL_LINES:],
+        evidence=leg.evidence(output) if leg.evidence else {},
     )
 
 
@@ -296,6 +411,9 @@ def main(argv: list[str] | None = None) -> int:
     selected = [leg for leg in LEGS if not args.leg or leg.name in args.leg]
 
     OUT.mkdir(parents=True, exist_ok=True)
+    swept = {"start": sweep_strays("start")}  # before the load sample: a stray's CPU is not load
+    load = machine()
+    print(f"machine at start: {', '.join(f'{k} {v}' for k, v in load.items())}", flush=True)
     results = []
     for leg in selected:
         result = run_leg(leg)
@@ -305,11 +423,21 @@ def main(argv: list[str] | None = None) -> int:
             f"{result.verdict_source}",
             flush=True,
         )
+    swept["end"] = sweep_strays("end")
 
     record = OUT / f"gate-{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"
-    record.write_text(json.dumps([asdict(r) for r in results], indent=2), encoding="utf-8")
+    legs = [asdict(r) for r in results]
+    record.write_text(
+        json.dumps({"machine": load, "strays": swept, "legs": legs}, indent=2), encoding="utf-8"
+    )
     red = [r.leg for r in results if r.verdict != "GREEN"]
-    print(f"gate {'RED: ' + ', '.join(red) if red else 'GREEN'}  (record: {record})")
+    skips = [(r.leg, len(r.evidence["skipped"])) for r in results if r.evidence.get("skipped")]
+    if red:  # each skip named by its leg, so it never reads as a red leg's
+        named = "; skipped: " + ", ".join(f"{leg} {n}" for leg, n in skips) if skips else ""
+        verdict = f"RED: {', '.join(red)}{named}"
+    else:  # a green gate that skipped says so
+        verdict = f"GREEN ({sum(n for _, n in skips)} skipped)" if skips else "GREEN"
+    print(f"gate {verdict}  (record: {record})")
     return 1 if red else 0
 
 

@@ -221,7 +221,7 @@ def stamp(path: Path, record: dict[str, Any]) -> dict[str, Any]:
     in, never a local path) and sha256, the kernel it measured, and whether that was stale
     (possible only with --allow-stale-pilot)."""
     return {
-        "run_id": Path(path).parent.name,
+        "run_id": Path(path).resolve().parent.name,  # resolved: a bare "pilot.json" has a folder
         "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
         "kernel_commit": record["kernel_commit"],
         "kernel_sha256": record.get("kernel_sha256"),

@@ -165,8 +165,14 @@ app's mock replays; a change fails `api_contract` until they are regenerated in 
 (`TP_UPDATE_GOLDEN=1 cargo test -p engine-harness`). `api_load` drives ten times the live rate
 into nine app clients, two Arrow clients and one stalled client of each kind, and writes its
 measurements to `harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
-default 5 s. The Python round trip (`api_python`) runs the repository's `.venv` Python, or
-`$TP_PYTHON`.
+default 5 s. It fails if any input takes the live path half the stall timeout or longer; the rates
+achieved are recorded, not asserted, since on a shared machine they measure the CPU the test got.
+The report also holds the cores and how late a 1 ms sleep woke through the load: past a quarter of
+the latency bound at p99 the machine counts as loaded. The latency bound is checked on every run;
+only on a loaded machine is a p99 over it excused, and only while it stays under the bound plus
+three times that lateness (a message's two or three wakeups), with a `SKIPPED:` line the gate
+counts, so a skip means the bound was missed under load. Past that it fails, loaded or not. The
+Python round trip (`api_python`) runs the repository's `.venv` Python, or `$TP_PYTHON`.
 
 ## Ising simulator
 
@@ -357,4 +363,4 @@ uv run python harness/gate.py            # all legs
 uv run python harness/gate.py --leg pytest
 ```
 
-Needs `cargo` on `PATH`. Each leg (cargo fmt, clippy, test; ruff check, format; pyright; pytest) runs on its own and is GREEN only when its exit code is 0 and its own summary evidence is positive. The gate exits nonzero if any leg is RED; the full record lands in `harness/out/gate-<timestamp>.json`. The cargo legs cover only the root workspace's members: `harness/tests/test_gate.py` fails `engine/` or any crate under `harness/` that is outside it, so when `app/src-tauri` lands it must be added to `members` and to that check.
+Needs `cargo` on `PATH`. Each leg (cargo fmt, clippy, test; ruff check, format; pyright; pytest) runs on its own and is GREEN only when its exit code is 0 and its own summary evidence is positive. The gate exits nonzero if any leg is RED, and its last line counts any check a leg skipped (`gate GREEN (1 skipped)`); the full record lands in `harness/out/gate-<timestamp>.json`, with each leg's last 200 lines of output and, for cargo test, every `test result` line and every failing test's whole section of output (from its `---- <name> ----` header to the next `failures:` line), each under the binary and exe that printed it, so a red leg can be read without a re-run however early it failed. `cargo test` runs with `--no-fail-fast`, so one failing binary does not hide the ones after it. As it starts and ends, the gate kills strays (`harness/strays.py`; `uv run python harness/strays.py --dry-run` only lists them): processes of `serve`, `store`, `ingest`, `record`, `soak`, `crash-writer` or the `api_python` test that run from a debug target dir of this repository or any of its worktrees, are older than ten minutes and whose owner is gone, as a killed test run leaves them. The owner is looked for up through cargo, bash, sh, cmd and other debug binaries, since a background shell killed without its tree leaves the bash it forked and its cargo running in between. A process with a live owner (a debug `serve --record` started from a terminal) is spared, and so is `api_load`, which holds its server in-process however long `TP_LOAD_SECONDS` runs it. Release builds, where a soak or a recording runs, are never touched. Cargo builds on half the logical cores unless `CARGO_BUILD_JOBS` is set, every leg runs at BelowNormal priority on Windows, and the record notes the cores and how busy the CPU was at the start, so a leg that goes red under load says so. The cargo legs cover only the root workspace's members: `harness/tests/test_gate.py` fails `engine/` or any crate under `harness/` that is outside it, so when `app/src-tauri` lands it must be added to `members` and to that check.

@@ -5,6 +5,7 @@ red = deliberately broken files; any other name = files deliberately edited into
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -15,10 +16,24 @@ import gate
 import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures"
+REAL_MACHINE = gate.machine
 
 
 def fixture(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def no_real_sweep_or_cpu_sample(monkeypatch) -> None:
+    """main() kills strays and samples the CPU for a second: here it does neither, so no test
+    kills a real process."""
+    monkeypatch.setattr(gate.strays, "sweep", lambda root: [])
+    monkeypatch.setattr(gate, "machine", lambda: {"cores": 8, "cpu_busy_percent": 12.5})
+
+
+def _record(out: Path) -> dict:
+    (record,) = out.glob("gate-*.json")
+    return json.loads(record.read_text(encoding="utf-8"))
 
 
 # (leg judge, fixture stem) for every text-judged leg
@@ -553,20 +568,257 @@ def test_all_legs_run_after_a_failure_and_gate_exits_nonzero(tmp_path, monkeypat
         ],
     )
     assert gate.main([]) == 1
-    (record,) = tmp_path.glob("gate-*.json")
-    rows = json.loads(record.read_text(encoding="utf-8"))
+    rows = _record(tmp_path)["legs"]
     assert [(r["leg"], r["verdict"]) for r in rows] == [
         ("first", "RED"),
         ("ghost", "RED"),
         ("last", "GREEN"),
     ]
-    assert set(rows[0]) == {"leg", "returncode", "duration", "verdict", "verdict_source"}
+    assert set(rows[0]) == {
+        "leg",
+        "returncode",
+        "duration",
+        "verdict",
+        "verdict_source",
+        "output_tail",
+        "evidence",
+    }
 
 
 def test_gate_exits_zero_only_when_all_green(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(gate, "OUT", tmp_path)
     monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", "print('All checks passed!')")])
     assert gate.main([]) == 0
+
+
+# ---------- the record diagnoses a red leg without a re-run (#59)
+
+
+def test_cargo_test_runs_every_binary_past_a_failing_one() -> None:
+    # without it cargo stops at the first failing binary: the RED run of 2026-10-22 never ran
+    # api_parity, api_python, crash_recovery, replay_equals_live or the doc tests
+    (leg,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    assert "--no-fail-fast" in leg.argv
+
+
+def test_a_red_cargo_test_record_names_the_failing_test_and_keeps_its_panic(
+    tmp_path, monkeypatch
+) -> None:
+    # 2026-10-22: the RED record held only "151 passed; 1 failed", so the test that failed
+    # (api_load, #60) could not be named without re-running the suite
+    (real,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    path = FIXTURES / "cargo-test-no-fail-fast-red.txt"
+    code = f"import sys; sys.stdout.buffer.write(open({str(path)!r}, 'rb').read())"
+    fake = gate.Leg("cargo-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [fake])
+    assert gate.main([]) == 1
+    (row,) = _record(tmp_path)["legs"]
+    assert row["verdict"] == "RED"
+    lib = "unittests src\\lib.rs (target\\debug\\deps\\engine-ceeaaad3673c0ec7.exe)"
+    smoke = "tests\\smoke.rs (target\\debug\\deps\\smoke-5a66701626c5dd9a.exe)"
+    assert row["evidence"] == {
+        "results": [
+            f"{lib}: test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 0.01s",
+            f"{smoke}: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 0.00s",
+            "Doc-tests engine: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 0.00s",
+        ],
+        "failures": [[f"{lib}: ---- deliberate::deliberately_fails stdout ----", *PANIC]],
+        "skipped": [],
+    }
+    assert row["output_tail"] == fixture("cargo-test-no-fail-fast-red.txt").splitlines()
+    assert "assertion `left == right` failed: deliberate" in row["output_tail"]
+
+
+# the panic of the real red engine run (cargo-test-red.txt), as its failure section holds it
+PANIC = [
+    "thread 'deliberate::deliberately_fails' (22964) panicked at engine\\src\\lib.rs:23:9:",
+    "assertion `left == right` failed: deliberate",
+    "  left: 2",
+    " right: 3",
+    "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+]
+
+
+def _planted_early_failure() -> str:
+    """The real workspace run with the real red engine run's failure planted in its first
+    binary, as --no-fail-fast prints it: every binary after the failing one still reports."""
+    red = fixture("cargo-test-red.txt")
+    failure = red[red.index("failures:") : red.index("test result: FAILED")]
+    first = WORKSPACE.index("test result: ok. 38 passed; 0 failed")
+    rest = WORKSPACE[first:].replace("ok. 38 passed; 0 failed", "FAILED. 37 passed; 1 failed", 1)
+    return WORKSPACE[:first] + failure + rest
+
+
+def test_an_early_failure_keeps_its_whole_section_after_it_leaves_the_tail(
+    tmp_path, monkeypatch
+) -> None:
+    # --no-fail-fast runs every binary after a failing one, so on the whole workspace an early
+    # failure's panic scrolls past the 200-line tail; this real workspace run is shorter, so the
+    # tail is cut to match
+    log = tmp_path / "cargo-test.txt"
+    log.write_bytes(_planted_early_failure().encode("utf-8"))
+    code = f"import sys; sys.stdout.buffer.write(open({str(log)!r}, 'rb').read())"
+    (real,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    monkeypatch.setattr(gate, "TAIL_LINES", 40)
+    leg = gate.Leg("cargo-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    result = gate.run_leg(leg)
+    assert result.verdict == "RED"
+    assert not set(PANIC) & set(result.output_tail)
+    lib = "unittests src\\lib.rs (target\\debug\\deps\\engine-9f819c0ddae3f0f5.exe)"
+    assert result.evidence["failures"] == [
+        [f"{lib}: ---- deliberate::deliberately_fails stdout ----", *PANIC]
+    ]
+    assert len(result.evidence["results"]) == 9  # and every binary after it reported
+
+
+def test_two_binaries_of_one_name_are_told_apart_by_their_exe() -> None:
+    # engine's and engine-harness's lib tests both run as "unittests src\lib.rs"
+    engine = fixture("cargo-test-green.txt")
+    harness = engine.replace("engine-ceeaaad3673c0ec7.exe", "engine_harness-0123456789abcdef.exe")
+    results = gate.cargo_test_evidence(engine + harness)["results"]
+    labels = [r.split(": test result")[0] for r in results if r.startswith("unittests")]
+    assert labels == [
+        "unittests src\\lib.rs (target\\debug\\deps\\engine-ceeaaad3673c0ec7.exe)",
+        "unittests src\\lib.rs (target\\debug\\deps\\engine_harness-0123456789abcdef.exe)",
+    ]
+
+
+def test_the_record_keeps_the_last_lines_of_a_long_output(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    code = "for i in range(500): print(i)\nprint('All checks passed!')"
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("long", code)])
+    assert gate.main([]) == 0
+    (row,) = _record(tmp_path)["legs"]
+    assert len(row["output_tail"]) == gate.TAIL_LINES == 200
+    assert row["output_tail"][-2:] == ["499", "All checks passed!"]
+    assert row["evidence"] == {}  # only cargo-test reads extra evidence from its output
+
+
+# ---------- a check a test skipped is counted, never passed silently (#60)
+
+
+def test_a_check_a_test_skipped_is_counted_in_the_summary_and_the_record() -> None:
+    # api_load's real output on a loaded machine (2026-10-24), a line of its own past libtest's
+    # capture of a passing test; the line is edited into the excuse api_load prints now, for a p99
+    # over the bound under load, since no run here missed the bound
+    output = fixture("cargo-test-skipped-green.txt")
+    verdict = gate.judge_cargo_test(0, output)
+    assert verdict.green, verdict.source
+    assert verdict.source == "1 test result lines: 1 passed; 0 failed; 1 skipped"
+    (skip,) = gate.cargo_test_evidence(output)["skipped"]
+    api_load = "tests\\api_load.rs (target\\debug\\deps\\api_load-8652aba3279d7f40.exe)"
+    assert skip.startswith(f"{api_load}: SKIPPED: api_load's arrow p99 131.0442ms over its")
+
+
+def test_only_a_line_that_starts_with_skipped_counts() -> None:
+    output = fixture("cargo-test-green.txt").replace(
+        "test tests::version_is_set ... ok", "test tests::version_is_set ... ok (SKIPPED: no)"
+    )
+    assert gate.judge_cargo_test(0, output).source == "2 test result lines: 1 passed; 0 failed"
+
+
+@pytest.mark.parametrize(
+    ("stem", "last"),
+    [
+        ("cargo-test-skipped-green.txt", "gate GREEN (1 skipped)"),
+        ("cargo-test-green.txt", "gate GREEN"),
+    ],
+    ids=["skipped", "none-skipped"],
+)
+def test_the_gate_line_counts_the_checks_its_legs_skipped(
+    tmp_path, monkeypatch, capsys, stem: str, last: str
+) -> None:
+    # a green gate whose legs skipped a check says so on its last line, not only in a leg's
+    (real,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    code = f"import sys; sys.stdout.buffer.write(open({str(FIXTURES / stem)!r}, 'rb').read())"
+    fake = gate.Leg("cargo-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [fake])
+    assert gate.main([]) == 0
+    assert capsys.readouterr().out.splitlines()[-1].startswith(f"{last}  (record: ")
+
+
+def test_a_red_gate_names_the_leg_that_skipped(tmp_path, monkeypatch, capsys) -> None:
+    # "gate RED: ruff-check (1 skipped)" would read as the red leg's skip
+    (real,) = [leg for leg in gate.LEGS if leg.name == "cargo-test"]
+    path = FIXTURES / "cargo-test-skipped-green.txt"
+    code = f"import sys; sys.stdout.buffer.write(open({str(path)!r}, 'rb').read())"
+    fake = gate.Leg("cargo-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("ruff-check", "raise SystemExit(1)"), fake])
+    assert gate.main([]) == 1
+    last = capsys.readouterr().out.splitlines()[-1]
+    assert last.startswith("gate RED: ruff-check; skipped: cargo-test 1  (record: ")
+
+
+# ---------- a shared laptop: strays, build jobs, priority and load (#61)
+
+
+def test_cargo_builds_on_half_the_cores_unless_told_otherwise() -> None:
+    assert gate.leg_env({}, 8)["CARGO_BUILD_JOBS"] == "4"
+    assert gate.leg_env({"CARGO_BUILD_JOBS": "6"}, 8)["CARGO_BUILD_JOBS"] == "6"
+    assert gate.leg_env({}, 1)["CARGO_BUILD_JOBS"] == "1"
+    assert gate.leg_env({}, None)["CARGO_BUILD_JOBS"] == "1"
+    assert gate.leg_env({"PATH": "bin"}, 8)["PATH"] == "bin"
+
+
+def test_every_leg_runs_with_the_capped_build_jobs(monkeypatch) -> None:
+    monkeypatch.delenv("CARGO_BUILD_JOBS", raising=False)
+    leg = _python_leg("env", "import os; print(os.environ['CARGO_BUILD_JOBS'])")
+    assert gate.run_leg(leg).output_tail == [str(max(1, (os.cpu_count() or 2) // 2))]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="priority classes are Windows'")
+def test_every_leg_starts_at_below_normal_priority() -> None:
+    # (HANDLE)-1 is the process's own pseudo-handle, whole: GetCurrentProcess() through ctypes'
+    # default int return comes back truncated, and GetPriorityClass then fails with 0
+    code = "import ctypes; print(ctypes.windll.kernel32.GetPriorityClass(ctypes.c_void_p(-1)))"
+    below_normal = 0x4000
+    assert gate.run_leg(_python_leg("priority", code)).output_tail == [str(below_normal)]
+
+
+def test_the_record_says_how_busy_the_cpu_was_and_what_was_swept(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    # a leg that goes red under load (#60) must be explainable from the record alone
+    killed = {"pid": 7, "exe": "serve.exe", "minutes": 41.0, "action": "SUCCESS"}
+    sweeps = iter([[killed], []])
+    monkeypatch.setattr(gate.strays, "sweep", lambda root: next(sweeps))
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", "print('All checks passed!')")])
+    assert gate.main([]) == 0
+    record = _record(tmp_path)
+    assert record["machine"] == {"cores": 8, "cpu_busy_percent": 12.5}
+    assert record["strays"] == {"start": [killed], "end": []}
+    printed = capsys.readouterr().out
+    assert "strays at start: serve.exe (pid 7, 41.0 min): SUCCESS" in printed
+    assert "machine at start: cores 8, cpu_busy_percent 12.5" in printed
+    assert "strays at end: none" in printed
+
+
+def test_a_failing_sweep_costs_the_legs_nothing(tmp_path, monkeypatch) -> None:
+    def denied(root: Path) -> None:
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(gate.strays, "sweep", denied)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", "print('All checks passed!')")])
+    assert gate.main([]) == 0
+    record = _record(tmp_path)
+    assert record["strays"]["start"] == "sweep failed: PermissionError('access denied')"
+    assert [row["verdict"] for row in record["legs"]] == ["GREEN"]
+
+
+def test_the_machine_sample_is_cores_and_cpu_load() -> None:
+    sample = REAL_MACHINE(interval=0.05)
+    assert sample["cores"] == os.cpu_count()
+    load = sample["cpu_busy_percent" if sys.platform == "win32" else "load_average_1m"]
+    assert isinstance(load, float) and load >= 0
+    assert sys.platform != "win32" or load <= 100
 
 
 # ---------- lie: a tool that cannot start, a judge that crashes
@@ -585,8 +837,7 @@ def test_unstartable_tool_is_red_and_the_rest_still_run(tmp_path, monkeypatch) -
         ],
     )
     assert gate.main([]) == 1
-    (record,) = tmp_path.glob("gate-*.json")
-    rows = json.loads(record.read_text(encoding="utf-8"))
+    rows = _record(tmp_path)["legs"]
     assert [(r["leg"], r["verdict"]) for r in rows] == [("broken", "RED"), ("last", "GREEN")]
     assert rows[0]["returncode"] is None
     assert "could not start" in rows[0]["verdict_source"]
@@ -616,7 +867,6 @@ def test_undeletable_stale_junit_is_red_and_the_rest_still_run(tmp_path, monkeyp
         ],
     )
     assert gate.main([]) == 1
-    (record,) = tmp_path.glob("gate-*.json")
-    rows = json.loads(record.read_text(encoding="utf-8"))
+    rows = _record(tmp_path)["legs"]
     assert [(r["leg"], r["verdict"]) for r in rows] == [("pytest", "RED"), ("last", "GREEN")]
     assert "held open by another process" in rows[0]["verdict_source"]
