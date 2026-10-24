@@ -50,7 +50,9 @@ fn config() -> LogConfig {
     }
 }
 
-fn main() -> ExitCode {
+/// On a runtime of its own so that it appends through the live loop's own `append`.
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Args {
         run_dir,
@@ -94,7 +96,7 @@ fn main() -> ExitCode {
             capture_ts_ns: now_ns(),
             payload: crash_payload(i),
         };
-        if let Err(error) = log.append_blocking(entry) {
+        if let Err(error) = log.append(entry).await {
             eprintln!("crash-writer: {error}");
             return ExitCode::FAILURE;
         }
