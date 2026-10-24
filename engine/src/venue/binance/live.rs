@@ -113,7 +113,12 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
     let rest = Rest::new()?;
     let scales = rest.fetch_scales(&config.symbols).await?;
     let mut log = match &config.record {
-        Some(recording) => Log::recorded(start_recording(recording, &config.symbols, &scales)?),
+        Some(recording) => Log::recorded(start_recording(
+            recording,
+            Venue::BinanceUsdm,
+            &config.symbols,
+            &scales,
+        )?),
         None => Log::unrecorded(),
     };
     let mut pipeline = Pipeline::new(Feed::new(Venue::BinanceUsdm, scales));
@@ -218,13 +223,19 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
     recorded.and(ended)
 }
 
-/// Creates the run folder and its manifest, then starts the log writer.
-fn start_recording(
+/// Creates the run folder and its manifest for a feed of `venue`'s `symbols` at `scales`, then
+/// starts the log writer. Every recorded feed starts here, this loop's and `serve`'s scripted
+/// one alike, so a scripted run is recorded exactly as a live one (#75).
+///
+/// # Errors
+/// Returns an error when the run folder or its manifest cannot be created (the folder must not
+/// exist yet), or the log writer cannot start.
+pub fn start_recording(
     recording: &Recording,
+    venue: Venue,
     symbols: &[Symbol],
     scales: &BTreeMap<Symbol, Scales>,
 ) -> Result<LogWriter, LiveError> {
-    let venue = Venue::BinanceUsdm;
     let params = MarketParams {
         venue,
         symbols: symbols.to_vec(),
@@ -246,9 +257,17 @@ fn start_recording(
     Ok(log)
 }
 
-/// Closes the log, then writes `complete.json` if the loop itself ended cleanly: a run cut short
-/// by an error stays incomplete even though its log closed properly.
-async fn finish_recording(log: LogWriter, run_dir: &Path, clean: bool) -> Result<(), LiveError> {
+/// Closes the log, then writes `complete.json` if the feed itself ended cleanly: a run cut short
+/// by an error stays incomplete even though its log closed properly. Every recorded feed ends
+/// here, as it starts in [`start_recording`].
+///
+/// # Errors
+/// Returns the error that stopped the writer, or the I/O error from writing `complete.json`.
+pub async fn finish_recording(
+    log: LogWriter,
+    run_dir: &Path,
+    clean: bool,
+) -> Result<(), LiveError> {
     let summary = tokio::task::spawn_blocking(move || log.finish())
         .await
         .map_err(|_| LogError::WriterPanicked)??;
