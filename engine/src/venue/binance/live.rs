@@ -98,8 +98,8 @@ pub struct Recording {
 /// A finished snapshot fetch: the symbol, when its reply arrived, and the body or the error.
 type Fetched = (Symbol, i64, Result<String, RestError>);
 
-/// A finished fetch of one symbol's scales.
-type FetchedScales = (Symbol, Result<Scales, RestError>);
+/// A finished fetch of the scales of the symbols due a check, all from one exchange-info reply.
+type FetchedScales = (Vec<Symbol>, Result<BTreeMap<Symbol, Scales>, RestError>);
 
 /// Why the loop could not start or record.
 #[derive(Debug, Error)]
@@ -183,8 +183,8 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
                 capture_ns,
                 result: result.map_err(|error| error.to_string()),
             },
-            Some((symbol, fetched)) = scales_rx.recv() => {
-                say_if_scales_changed(pipeline.feed(), &symbol, fetched, &mut observer);
+            Some((symbols, fetched)) = scales_rx.recv() => {
+                say_what_scales_show(pipeline.feed(), &symbols, &fetched, &mut observer);
                 continue;
             }
             _ = report.tick() => {
@@ -272,44 +272,48 @@ fn fetch_at(
     at
 }
 
-/// Raises [`LiveEvent::ScalesChanged`] when a fetch of `symbol`'s scales found others than its
-/// feed reads it at. Said, not applied: a run keeps one set of scales (#45).
-fn say_if_scales_changed(
+/// Raises, for each of `symbols`, [`LiveEvent::ScalesChanged`] when the fetch found other scales
+/// than its feed reads it at, or [`LiveEvent::ScalesCheckFailed`] when the fetch failed, so a
+/// check that could not be made never reads as unchanged scales (#100). Said, not applied: a run
+/// keeps one set of scales (#45).
+fn say_what_scales_show(
     feed: &Feed,
-    symbol: &str,
-    fetched: Result<Scales, RestError>,
+    symbols: &[Symbol],
+    fetched: &Result<BTreeMap<Symbol, Scales>, RestError>,
     observer: &mut impl Observer,
 ) {
-    if let (Ok(now), Some(was)) = (fetched, feed.scales(symbol))
-        && now != was
-    {
-        observer.event(LiveEvent::ScalesChanged { symbol, was, now });
+    let failed = fetched.as_ref().err().map(ToString::to_string);
+    for symbol in symbols {
+        if let Some(error) = &failed {
+            observer.event(LiveEvent::ScalesCheckFailed { symbol, error });
+        } else if let (Ok(scales), Some(was)) = (fetched, feed.scales(symbol))
+            && let Some(&now) = scales.get(symbol)
+            && now != was
+        {
+            observer.event(LiveEvent::ScalesChanged { symbol, was, now });
+        }
     }
 }
 
-/// Starts a fetch of the scales of every symbol [`scales_due`] names; the replies come back on
-/// `tx`.
+/// Starts one fetch of the scales of every symbol [`scales_due`] names, however many: exchange
+/// info is one multi-MB download that holds every symbol, so the symbols due together share it
+/// (#100). The reply comes back on `tx`.
 fn fetch_scales(
     feed: &Feed,
     rest: &Rest,
     tx: &mpsc::Sender<FetchedScales>,
     checked: &mut BTreeMap<Symbol, Instant>,
 ) {
-    for symbol in scales_due(feed, checked, Instant::now()) {
-        let rest = rest.clone();
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let fetched = rest
-                .fetch_scales(std::slice::from_ref(&symbol))
-                .await
-                .and_then(|mut scales| {
-                    scales
-                        .remove(&symbol)
-                        .ok_or_else(|| RestError::MissingSymbol(symbol.clone()))
-                });
-            let _ = tx.send((symbol, fetched)).await;
-        });
+    let due = scales_due(feed, checked, Instant::now());
+    if due.is_empty() {
+        return;
     }
+    let rest = rest.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let fetched = rest.fetch_scales(&due).await;
+        let _ = tx.send((due, fetched)).await;
+    });
 }
 
 /// The symbols whose scales to ask the venue for again now (#45): those whose last
@@ -391,6 +395,9 @@ pub async fn finish_recording(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     /// A tick size made finer fails every depth update of its symbol: after ten in a row the loop
@@ -426,6 +433,100 @@ mod tests {
             scales_due(&feed, &mut checked, start + RECHECK_SCALES_EVERY),
             btc
         );
+    }
+
+    /// Exchange info for a stand-in venue: BTCUSDT's tick made finer (1 decimal to 2), ETHUSDT's
+    /// as it was.
+    const EXCHANGE_INFO: &str = r#"{"symbols":[
+        {"symbol":"BTCUSDT","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.01"},
+            {"filterType":"LOT_SIZE","stepSize":"0.001"}]},
+        {"symbol":"ETHUSDT","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.01"},
+            {"filterType":"LOT_SIZE","stepSize":"0.001"}]}]}"#;
+
+    /// Serves [`EXCHANGE_INFO`] on 127.0.0.1, counting the downloads, after a 429 to the first.
+    /// Its base URL.
+    async fn exchange_info_stand_in(downloads: Arc<AtomicUsize>) -> std::io::Result<String> {
+        use axum::http::StatusCode;
+
+        let app = axum::Router::new().route(
+            "/fapi/v1/exchangeInfo",
+            axum::routing::get(move || {
+                let first = downloads.fetch_add(1, Ordering::SeqCst) == 0;
+                async move {
+                    if first {
+                        (StatusCode::TOO_MANY_REQUESTS, "Too many requests")
+                    } else {
+                        (StatusCode::OK, EXCHANGE_INFO)
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Ok(base)
+    }
+
+    /// Two symbols due a check of their scales at once share one exchange-info download, where
+    /// each had its own; and a check the venue fails is said for each, where it was dropped and
+    /// read as "the scales did not change" (#100).
+    #[tokio::test]
+    async fn due_symbols_share_one_scales_download_and_a_failed_check_is_said()
+    -> Result<(), Box<dyn std::error::Error>> {
+        install_crypto_provider();
+        let downloads = Arc::new(AtomicUsize::new(0));
+        let rest = Rest::at(&exchange_info_stand_in(Arc::clone(&downloads)).await?)?;
+        let scale = |price_decimals| Scales {
+            price_decimals,
+            qty_decimals: 3,
+        };
+        let mut feed = Feed::new(
+            Venue::BinanceUsdm,
+            BTreeMap::from([
+                ("BTCUSDT".to_owned(), scale(1)),
+                ("ETHUSDT".to_owned(), scale(2)),
+            ]),
+        );
+        // Each symbol's updates stop converting: prices finer than its tick.
+        for u in 1..=u64::from(RECHECK_SCALES_AFTER) {
+            for (symbol, price) in [("BTCUSDT", "100.05"), ("ETHUSDT", "100.005")] {
+                let text = format!(
+                    r#"{{"stream":"{}@depth@100ms","data":{{"e":"depthUpdate","E":1,"T":1,"s":"{symbol}","U":{u},"u":{u},"pu":{},"b":[["{price}","1.000"]],"a":[]}}}}"#,
+                    symbol.to_lowercase(),
+                    u - 1
+                );
+                assert!(feed.on_text(&text).is_err());
+            }
+        }
+        let (tx, mut rx) = mpsc::channel(4);
+        let (mut checked, mut said) = (BTreeMap::new(), Vec::new());
+        for round in 1..=2 {
+            fetch_scales(&feed, &rest, &tx, &mut checked);
+            let (symbols, fetched) = rx.recv().await.ok_or("a reply")?;
+            assert_eq!(symbols, ["BTCUSDT", "ETHUSDT"], "round {round}");
+            assert_eq!(
+                downloads.load(Ordering::SeqCst),
+                round,
+                "one download a round"
+            );
+            let mut observer = |event: LiveEvent<'_>| said.push(format!("{event:?}"));
+            say_what_scales_show(&feed, &symbols, &fetched, &mut observer);
+            checked.clear();
+        }
+        assert_eq!(said.len(), 3, "{said:#?}");
+        for (event, symbol) in said.iter().zip(["BTCUSDT", "ETHUSDT"]) {
+            assert!(
+                event.starts_with(&format!("ScalesCheckFailed {{ symbol: \"{symbol}\""))
+                    && event.contains("429"),
+                "{event}"
+            );
+        }
+        assert!(
+            said[2].starts_with("ScalesChanged { symbol: \"BTCUSDT\""),
+            "only BTCUSDT changed: {}",
+            said[2]
+        );
+        Ok(())
     }
 
     /// A symbol whose snapshots keep failing is refetched a floor apart, never at round-trip

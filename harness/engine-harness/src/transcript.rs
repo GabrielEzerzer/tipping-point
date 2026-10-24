@@ -90,7 +90,8 @@ impl Transcript {
             }
             LiveEvent::Report { .. }
             | LiveEvent::ConnectFailed { .. }
-            | LiveEvent::ScalesChanged { .. } => {}
+            | LiveEvent::ScalesChanged { .. }
+            | LiveEvent::ScalesCheckFailed { .. } => {}
             other => self.pending.push(format!("{other:?}")),
         }
     }
@@ -297,8 +298,9 @@ mod tests {
         assert!(transcript.raised("SequenceGap") && transcript.raised("Reconnect"));
     }
 
-    /// Changed scales the live loop found on the venue are no effect of an input: a replay never
-    /// raises them, so a live transcript must not hold them (#45).
+    /// Changed scales the live loop found on the venue, or a check of them that failed, are no
+    /// effect of an input: a replay never raises them, so a live transcript must not hold them
+    /// (#45, #100).
     #[test]
     fn scales_found_changed_are_left_out() {
         let mut transcript = Transcript::default();
@@ -314,6 +316,10 @@ mod tests {
             symbol: "BTCUSDT",
             was,
             now,
+        });
+        transcript.observe(&LiveEvent::ScalesCheckFailed {
+            symbol: "ETHUSDT",
+            error: "/fapi/v1/exchangeInfo answered 429: Too many requests",
         });
         let feed = feed();
         let applied = engine::market::pipeline::Applied::Control;

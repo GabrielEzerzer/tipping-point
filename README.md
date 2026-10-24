@@ -50,7 +50,9 @@ so a tick or lot size made finer mid-run leaves that symbol's depth updates unco
 book down (`parse_errors` climbs). After ten such updates in a row the Binance loop asks for the
 symbol's exchange info again, at most every ten minutes, and if the scales did change it says so
 (`ScalesChanged`, printed by `ingest` and `soak`); a restart records a new run at the new scales
-(#45).
+(#45). A check the venue fails (a 429, a timeout) says so as well (`ScalesCheckFailed`), so
+silence never stands for unchanged scales, and the symbols due a check at once share one
+exchange-info download (#100).
 
 ```sh
 cargo run --release -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs

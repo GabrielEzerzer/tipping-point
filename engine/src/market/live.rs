@@ -87,6 +87,15 @@ pub enum LiveEvent<'a> {
         was: Scales,
         now: Scales,
     },
+    /// A check of `symbol`'s scales could not be made: the venue's exchange info did not come
+    /// (a 429, a timeout, a 5xx) or did not read. Said, so that the lack of a
+    /// [`LiveEvent::ScalesChanged`] is never taken for unchanged scales while the symbol's
+    /// updates fail to convert; the loop asks again at its next check (#100). The loop's own
+    /// business, like `ScalesChanged`.
+    ScalesCheckFailed {
+        symbol: &'a str,
+        error: &'a str,
+    },
     Report {
         elapsed: Duration,
         feed: &'a Feed,
