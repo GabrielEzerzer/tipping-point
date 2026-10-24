@@ -92,6 +92,8 @@ pub struct Feed {
     syncs: BTreeMap<Symbol, BookSync>,
     pending_snapshot: BTreeSet<Symbol>,
     stats: Stats,
+    /// How many depth updates in a row each symbol failed to convert; none once one converts.
+    unconverted: BTreeMap<Symbol, u32>,
 }
 
 impl Feed {
@@ -109,6 +111,7 @@ impl Feed {
             syncs,
             pending_snapshot: BTreeSet::new(),
             stats: Stats::default(),
+            unconverted: BTreeMap::new(),
         }
     }
 
@@ -145,6 +148,13 @@ impl Feed {
     #[must_use]
     pub fn stats(&self) -> &Stats {
         &self.stats
+    }
+
+    /// How many depth updates in a row `symbol` failed to convert at its scales: a stray bad
+    /// frame makes one, a tick or lot size that got finer makes every one (#45).
+    #[must_use]
+    pub fn unconverted_in_a_row(&self, symbol: &str) -> u32 {
+        self.unconverted.get(symbol).copied().unwrap_or(0)
     }
 
     /// Feeds the text of one stream frame.
@@ -186,8 +196,15 @@ impl Feed {
                 let converted = raw.convert(scales);
                 let symbol = raw.into_symbol();
                 let depth = match converted {
-                    Ok(depth) => depth,
+                    Ok(depth) => {
+                        if !self.unconverted.is_empty() {
+                            self.unconverted.remove(&symbol);
+                        }
+                        depth
+                    }
                     Err(error) => {
+                        let in_a_row = self.unconverted.entry(symbol.clone()).or_default();
+                        *in_a_row = in_a_row.saturating_add(1);
                         let book_lost = self.invalidate(&symbol, ResyncReason::BadFrame);
                         return Err(FeedError::BadDepth {
                             symbol,
@@ -465,6 +482,23 @@ mod tests {
         let stats = feed.stats();
         assert_eq!(stats.parse_errors, 1);
         assert_eq!((stats.resyncs, stats.bad_frame_resyncs), (1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn depth_updates_that_do_not_convert_are_counted_in_a_row() -> Result<(), FeedError> {
+        let mut feed = synced_feed()?;
+        for u in 13..23 {
+            let finer_than_the_tick = depth(u, u, u - 1, r#"[["100.05","1.000"]]"#, "[]");
+            assert!(feed.on_text(&finer_than_the_tick).is_err());
+        }
+        assert_eq!(feed.unconverted_in_a_row("BTCUSDT"), 10);
+        feed.on_text(&depth(23, 23, 22, "[]", "[]"))?;
+        assert_eq!(
+            feed.unconverted_in_a_row("BTCUSDT"),
+            0,
+            "one that converts ends the run"
+        );
         Ok(())
     }
 

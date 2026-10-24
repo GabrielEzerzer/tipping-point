@@ -37,6 +37,14 @@ pub const TRADE_HOST: &str = "wss://fstream.binance.com/market/stream";
 /// Binance closes a connection after 24 h; leaving before that keeps the reconnect on our terms.
 pub const DEFAULT_MAX_CONNECTION_AGE: Duration = Duration::from_hours(23);
 
+/// Depth updates in a row a symbol must fail to convert before the loop asks for its scales
+/// again: one bad frame is no changed tick size, but a finer one fails every update (#45).
+const RECHECK_SCALES_AFTER: u32 = 10;
+
+/// The least time between two such asks for one symbol, which stays down meanwhile: exchange
+/// info costs REST weight, and Binance announces tick changes days ahead.
+const RECHECK_SCALES_EVERY: Duration = Duration::from_mins(10);
+
 /// Combined-stream URL for the given symbols and stream suffix, e.g. `depth@100ms`.
 #[must_use]
 pub fn stream_url(host: &str, symbols: &[Symbol], suffix: &str) -> String {
@@ -89,6 +97,9 @@ pub struct Recording {
 
 /// A finished snapshot fetch: the symbol, when its reply arrived, and the body or the error.
 type Fetched = (Symbol, i64, Result<String, RestError>);
+
+/// A finished fetch of one symbol's scales.
+type FetchedScales = (Symbol, Result<Scales, RestError>);
 
 /// Why the loop could not start or record.
 #[derive(Debug, Error)]
@@ -146,6 +157,8 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
 
     let (snapshot_tx, mut snapshot_rx) = mpsc::channel::<Fetched>(16);
     let mut next_fetch_allowed: BTreeMap<Symbol, Instant> = BTreeMap::new();
+    let (scales_tx, mut scales_rx) = mpsc::channel::<FetchedScales>(4);
+    let mut scales_checked: BTreeMap<Symbol, Instant> = BTreeMap::new();
 
     let start = Instant::now();
     // tokio caps a very long sleep rather than overflowing, so "forever" is just a long sleep.
@@ -172,6 +185,15 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
                 capture_ns,
                 result: result.map_err(|error| error.to_string()),
             },
+            // Said, not applied: the run keeps one set of scales (see LiveEvent::ScalesChanged).
+            Some((symbol, fetched)) = scales_rx.recv() => {
+                if let (Ok(now), Some(was)) = (fetched, pipeline.feed().scales(&symbol))
+                    && now != was
+                {
+                    observer.event(LiveEvent::ScalesChanged { symbol: &symbol, was, now });
+                }
+                continue;
+            }
             _ = report.tick() => {
                 observer.event(LiveEvent::Report { elapsed: start.elapsed(), feed: pipeline.feed(), stats: pipeline.stats() });
                 if let Err(error) = log.tick().await {
@@ -209,6 +231,22 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
                 let _ = tx.send((symbol, now_ns(), result)).await;
             });
         }
+
+        for symbol in scales_due(pipeline.feed(), &mut scales_checked, Instant::now()) {
+            let rest = rest.clone();
+            let tx = scales_tx.clone();
+            tokio::spawn(async move {
+                let fetched = rest
+                    .fetch_scales(std::slice::from_ref(&symbol))
+                    .await
+                    .and_then(|mut scales| {
+                        scales
+                            .remove(&symbol)
+                            .ok_or_else(|| RestError::MissingSymbol(symbol.clone()))
+                    });
+                let _ = tx.send((symbol, fetched)).await;
+            });
+        }
     };
 
     depth_reader.abort();
@@ -221,6 +259,26 @@ pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result
     };
     // The writer's own error explains a loop that stopped because the writer did.
     recorded.and(ended)
+}
+
+/// The symbols whose scales to ask the venue for again now (#45): those whose last
+/// [`RECHECK_SCALES_AFTER`] depth updates did not convert, each at most once every
+/// [`RECHECK_SCALES_EVERY`]. Marks them checked at `now`.
+fn scales_due(feed: &Feed, checked: &mut BTreeMap<Symbol, Instant>, now: Instant) -> Vec<Symbol> {
+    let due: Vec<Symbol> = feed
+        .symbols()
+        .filter(|symbol| feed.unconverted_in_a_row(symbol) >= RECHECK_SCALES_AFTER)
+        .filter(|symbol| {
+            checked
+                .get(*symbol)
+                .is_none_or(|at| now >= *at + RECHECK_SCALES_EVERY)
+        })
+        .cloned()
+        .collect();
+    for symbol in &due {
+        checked.insert(symbol.clone(), now);
+    }
+    due
 }
 
 /// Creates the run folder and its manifest for a feed of `venue`'s `symbols` at `scales`, then
@@ -283,6 +341,41 @@ pub async fn finish_recording(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tick size made finer fails every depth update of its symbol: after ten in a row the loop
+    /// asks for the symbol's scales again, then not before ten minutes have passed (#45).
+    #[tokio::test]
+    async fn scales_are_asked_for_again_once_a_symbols_updates_stop_converting() {
+        let scales = Scales {
+            price_decimals: 1,
+            qty_decimals: 3,
+        };
+        let mut feed = Feed::new(
+            Venue::BinanceUsdm,
+            BTreeMap::from([("BTCUSDT".to_owned(), scales)]),
+        );
+        let mut finer_than_the_tick = (1..).map(|u: u64| {
+            format!(
+                r#"{{"stream":"btcusdt@depth@100ms","data":{{"e":"depthUpdate","E":1,"T":1,"s":"BTCUSDT","U":{u},"u":{u},"pu":{},"b":[["100.05","1.000"]],"a":[]}}}}"#,
+                u - 1
+            )
+        });
+        let (mut checked, start) = (BTreeMap::new(), Instant::now());
+        let btc = vec!["BTCUSDT".to_owned()];
+        for text in finer_than_the_tick.by_ref().take(9) {
+            assert!(feed.on_text(&text).is_err());
+        }
+        assert_eq!(scales_due(&feed, &mut checked, start), Vec::<Symbol>::new());
+        let tenth = finer_than_the_tick.next().unwrap_or_default();
+        assert!(feed.on_text(&tenth).is_err());
+        assert_eq!(scales_due(&feed, &mut checked, start), btc);
+        let later = start + Duration::from_mins(1);
+        assert_eq!(scales_due(&feed, &mut checked, later), Vec::<Symbol>::new());
+        assert_eq!(
+            scales_due(&feed, &mut checked, start + RECHECK_SCALES_EVERY),
+            btc
+        );
+    }
 
     #[test]
     fn builds_combined_stream_urls() {

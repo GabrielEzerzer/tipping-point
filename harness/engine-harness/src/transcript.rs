@@ -68,8 +68,9 @@ impl Default for Transcript {
 
 impl Transcript {
     /// Takes in one event. Events raised while applying an input come before its
-    /// [`LiveEvent::Applied`], which closes the step. Reports and failed connection attempts are
-    /// the loop's own business, not effects of an input, and are left out.
+    /// [`LiveEvent::Applied`], which closes the step. Reports, failed connection attempts and
+    /// changed scales found on the venue are the loop's own business, not effects of an input,
+    /// and are left out.
     pub fn observe(&mut self, event: &LiveEvent<'_>) {
         match event {
             LiveEvent::Applied {
@@ -87,7 +88,9 @@ impl Transcript {
                     books,
                 });
             }
-            LiveEvent::Report { .. } | LiveEvent::ConnectFailed { .. } => {}
+            LiveEvent::Report { .. }
+            | LiveEvent::ConnectFailed { .. }
+            | LiveEvent::ScalesChanged { .. } => {}
             other => self.pending.push(format!("{other:?}")),
         }
     }
@@ -292,6 +295,35 @@ mod tests {
         let cached: Vec<u32> = transcript.steps.iter().map(|step| step.books).collect();
         assert_eq!(cached, fresh);
         assert!(transcript.raised("SequenceGap") && transcript.raised("Reconnect"));
+    }
+
+    /// Changed scales the live loop found on the venue are no effect of an input: a replay never
+    /// raises them, so a live transcript must not hold them (#45).
+    #[test]
+    fn scales_found_changed_are_left_out() {
+        let mut transcript = Transcript::default();
+        let was = Scales {
+            price_decimals: 1,
+            qty_decimals: 3,
+        };
+        let now = Scales {
+            price_decimals: 2,
+            ..was
+        };
+        transcript.observe(&LiveEvent::ScalesChanged {
+            symbol: "BTCUSDT",
+            was,
+            now,
+        });
+        let feed = feed();
+        let applied = engine::market::pipeline::Applied::Control;
+        transcript.observe(&LiveEvent::Applied {
+            kind: engine::store::frame::Kind::Control,
+            applied: &applied,
+            feed: &feed,
+            stats: &engine::market::live::LiveStats::default(),
+        });
+        assert_eq!(transcript.steps[0].events, Vec::<String>::new());
     }
 
     #[test]

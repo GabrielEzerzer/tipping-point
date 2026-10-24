@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::Scales;
 use super::feed::Feed;
 use super::pipeline::{Applied, Message, Pipeline, entries};
 use super::sync::ResyncReason;
@@ -75,6 +76,16 @@ pub enum LiveEvent<'a> {
     SnapshotFailed {
         symbol: &'a str,
         error: &'a str,
+    },
+    /// The venue now gives `symbol` other scales than its feed reads it at (`was`): its tick or
+    /// lot size changed, so its depth updates stopped converting (#45). Every price and
+    /// quantity of a run is at one scale, so the feed keeps `was` and the symbol's book stays
+    /// down until a restart records a new run at `now`. The loop's own business, like
+    /// [`LiveEvent::Report`]: no input raised it, and no replay raises it again.
+    ScalesChanged {
+        symbol: &'a str,
+        was: Scales,
+        now: Scales,
     },
     Report {
         elapsed: Duration,

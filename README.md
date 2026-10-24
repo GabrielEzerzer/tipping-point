@@ -45,6 +45,13 @@ snapshot, then deltas whose update id runs on by one; a skipped id drops the boo
 snapshot); it has no live loop yet and is read from Bybit's archive. One run holds one venue, and
 one `serve` hub takes several venues' loops at once.
 
+A run keeps the scales it started with, from its manifest to its Parquet and the API's `welcome`,
+so a tick or lot size made finer mid-run leaves that symbol's depth updates unconvertible and its
+book down (`parse_errors` climbs). After ten such updates in a row the Binance loop asks for the
+symbol's exchange info again, at most every ten minutes, and if the scales did change it says so
+(`ScalesChanged`, printed by `ingest` and `soak`); a restart records a new run at the new scales
+(#45).
+
 ```sh
 cargo run --release -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
 cargo run --release -p engine --bin ingest -- --record                # ...and records a run to the data dir (Ctrl-C ends it cleanly)
