@@ -7,22 +7,29 @@ Every leg always runs; the gate exits nonzero if any leg is RED. Stdlib only.
 
 The cargo legs cover only the root workspace's members; test_gate fails engine/ or any crate
 under harness/ that is outside it, so app/src-tauri must join members and that check when it lands.
+
+On a shared laptop (#61): the gate kills strays (strays.py) as it starts and ends, cargo builds
+on half the logical cores unless CARGO_BUILD_JOBS is set, every leg starts at BelowNormal priority
+on Windows, and the record says how busy the CPU was at the start.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 import time
 import tomllib
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+
+import strays
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "harness" / "out"
@@ -271,6 +278,52 @@ LEGS: list[Leg] = [
 
 
 TAIL_LINES = 200  # of each leg's output, kept in the record so a red leg reads without a re-run
+# What a leg starts (rustc, test binaries, the engine processes tests spawn) inherits this
+PRIORITY = subprocess.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 0
+
+
+def leg_env(environ: Mapping[str, str], cores: int | None) -> dict[str, str]:
+    """The legs' environment: cargo builds on half the logical cores unless CARGO_BUILD_JOBS is
+    already set."""
+    return {"CARGO_BUILD_JOBS": str(max(1, (cores or 2) // 2)), **environ}
+
+
+def machine(interval: float = 1.0) -> dict[str, object]:
+    """Logical cores and how busy they were as the gate started, so a leg that went red under
+    load says so: on Windows the share of all cores' time not idle over `interval` seconds,
+    elsewhere the 1-minute load average."""
+    cores = os.cpu_count()
+    if sys.platform != "win32":
+        return {"cores": cores, "load_average_1m": os.getloadavg()[0]}
+    import ctypes
+    from ctypes import wintypes
+
+    def busy_and_total() -> tuple[int, int]:
+        idle, kernel, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+        ctypes.windll.kernel32.GetSystemTimes(*(ctypes.byref(t) for t in (idle, kernel, user)))
+        idle_t, kernel_t, user_t = (
+            (t.dwHighDateTime << 32) | t.dwLowDateTime for t in (idle, kernel, user)
+        )
+        return kernel_t + user_t - idle_t, kernel_t + user_t  # kernel time includes idle time
+
+    busy0, total0 = busy_and_total()
+    time.sleep(interval)
+    busy1, total1 = busy_and_total()
+    busy = round(100 * (busy1 - busy0) / max(1, total1 - total0), 1)
+    return {"cores": cores, "cpu_busy_percent": busy}
+
+
+def sweep_strays(when: str) -> list[dict[str, object]] | str | None:
+    """Kill the strays and print what was found: the record's rows, None where processes cannot
+    be listed, or why the sweep failed, which never stops the gate."""
+    try:
+        rows = strays.sweep(ROOT)
+    except Exception as exc:  # housekeeping: the legs run whatever happens here
+        print(f"strays at {when}: sweep failed: {exc!r}", flush=True)
+        return f"sweep failed: {exc!r}"
+    for line in strays.describe(rows):
+        print(f"strays at {when}: {line}", flush=True)
+    return rows
 
 
 @dataclass(frozen=True)
@@ -299,6 +352,8 @@ def run_leg(leg: Leg) -> LegResult:
             encoding="utf-8",
             errors="replace",
             check=False,
+            env=leg_env(os.environ, os.cpu_count()),
+            creationflags=PRIORITY,
         )
     except FileNotFoundError:
         verdict, returncode = judge_missing_tool(leg.argv[0]), None
@@ -329,6 +384,9 @@ def main(argv: list[str] | None = None) -> int:
     selected = [leg for leg in LEGS if not args.leg or leg.name in args.leg]
 
     OUT.mkdir(parents=True, exist_ok=True)
+    swept = {"start": sweep_strays("start")}  # before the load sample: a stray's CPU is not load
+    load = machine()
+    print(f"machine at start: {', '.join(f'{k} {v}' for k, v in load.items())}", flush=True)
     results = []
     for leg in selected:
         result = run_leg(leg)
@@ -338,9 +396,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{result.verdict_source}",
             flush=True,
         )
+    swept["end"] = sweep_strays("end")
 
     record = OUT / f"gate-{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"
-    record.write_text(json.dumps([asdict(r) for r in results], indent=2), encoding="utf-8")
+    legs = [asdict(r) for r in results]
+    record.write_text(
+        json.dumps({"machine": load, "strays": swept, "legs": legs}, indent=2), encoding="utf-8"
+    )
     red = [r.leg for r in results if r.verdict != "GREEN"]
     print(f"gate {'RED: ' + ', '.join(red) if red else 'GREEN'}  (record: {record})")
     return 1 if red else 0
