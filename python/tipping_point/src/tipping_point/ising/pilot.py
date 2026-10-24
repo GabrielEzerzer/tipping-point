@@ -217,10 +217,11 @@ def stale(record: dict[str, Any]) -> str | None:
 
 
 def stamp(path: Path, record: dict[str, Any]) -> dict[str, Any]:
-    """What a run's manifest records of the pilot record it read: the file, the kernel it
-    measured, and whether that was stale (possible only with --allow-stale-pilot)."""
+    """What a run's manifest records of the pilot record it read: its run id (the folder it sits
+    in, never a local path) and sha256, the kernel it measured, and whether that was stale
+    (possible only with --allow-stale-pilot)."""
     return {
-        "path": str(Path(path).resolve()),
+        "run_id": Path(path).parent.name,
         "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
         "kernel_commit": record["kernel_commit"],
         "kernel_sha256": record.get("kernel_sha256"),

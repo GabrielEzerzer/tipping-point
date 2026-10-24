@@ -178,7 +178,7 @@ its acceptance table) that the pilot runs ran; every run's manifest records its 
 commit cannot decide this: it moves with every merge, kernel or not. A record written before #55
 has no `kernel_sha256` and counts as stale. `--allow-stale-pilot` uses a stale record anyway, with
 a warning. Either way the run's manifest names the record it read as `params.pilot`:
-`{"path", "sha256", "kernel_commit", "kernel_sha256", "stale"}`, and EWS results repeat that stamp
+`{"run_id", "sha256", "kernel_commit", "kernel_sha256", "stale"}`, and EWS results repeat that stamp
 for each input run beside their own record's `kernel_sha256` and `stale` in `params.pilot`. #50's
 record below predates the field, so ramps, nulls and scoring read against the copy in the data
 dir need `--allow-stale-pilot` until the pilot is re-run. Its numbers still stand: `kernel.py` is

@@ -39,7 +39,7 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> Planted:
             }
             for tag, (schedule, values) in plan.items():
                 if "-qs-" not in tag:  # a staircase dwells on tau.json, not on a pilot record
-                    stamps[tag] = {"path": f"pilot-{tag}.json", "sha256": "0" * 64, "stale": False}
+                    stamps[tag] = {"run_id": f"pilot-{tag}", "sha256": "0" * 64, "stale": False}
                 runs[tag] = write_run(root, tag, schedule, L, seed, values, pilot=stamps.get(tag))
     pilot(root)
     return Planted(root, runs, stamps)

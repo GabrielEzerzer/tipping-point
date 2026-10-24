@@ -69,7 +69,7 @@ def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
     assert (params["x"], params["A"], params["z"]) == (2.0, fit["A"], fit["z"])
     assert params["rate"] == protocol.rate_for(4, 2.0, fit["A"], fit["z"])
     assert manifest["pilot"] == {
-        "path": str(PILOT.resolve()),
+        "run_id": PILOT.parent.name,  # a run id, never a local path
         "sha256": hashlib.sha256(PILOT.read_bytes()).hexdigest(),
         "kernel_commit": record["kernel_commit"],
         "kernel_sha256": record["kernel_sha256"],
