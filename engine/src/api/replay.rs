@@ -289,9 +289,10 @@ async fn feed(
 }
 
 /// Grid instants missing between where the replay is (the last sample sent, or else the
-/// requested start, but never before the run's first sample `first_ever`) and the first sample
-/// memory still holds; `None` when they meet or when there is nothing to compare. Samples are one
-/// grid step apart however quiet the market, so a longer step is samples lost to the replay.
+/// requested start, but never before the run's first sample `first_ever`, where a replay with no
+/// start begins) and the first sample memory still holds; `None` when they meet or when there is
+/// nothing to compare. Samples are one grid step apart however quiet the market, so a longer step
+/// is samples lost to the replay.
 fn missing_instants(
     last_sample: i64,
     start_ns: i64,
@@ -312,7 +313,7 @@ fn missing_instants(
             .checked_mul(every_ns)?;
         first_ever.map_or(start, |first_ever| start.max(first_ever))
     } else {
-        return None;
+        first_ever?
     };
     let lost = u64::try_from((first - expected).div_euclid(every_ns)).ok()?;
     (lost > 0).then_some(lost)
@@ -849,8 +850,10 @@ mod tests {
         assert_eq!(lost(i64::MIN, 0, Some(1_500), Some(1_500)), None);
         assert_eq!(lost(i64::MIN, 0, Some(1_500), Some(2_000)), Some(5));
         assert_eq!(lost(i64::MIN, 1_750, Some(1_500), Some(2_000)), Some(2));
-        let no_start = lost(i64::MIN, i64::MIN, Some(1_500), Some(1_500));
-        assert_eq!(no_start, None);
+        // No start: from the run's first sample.
+        let no_start = |first_held| lost(i64::MIN, i64::MIN, Some(1_500), Some(first_held));
+        assert_eq!(no_start(1_500), None);
+        assert_eq!(no_start(2_000), Some(5), "memory let the first samples go");
         assert_eq!(lost(1_000, i64::MIN, Some(0), None), None, "memory empty");
     }
 

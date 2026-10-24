@@ -604,9 +604,10 @@ async fn a_producer_that_panics_fails_at_the_client() -> Outcome {
     Ok(())
 }
 
-/// Replaying the live run when memory no longer reaches back to the requested start (nothing
-/// rotated, a ring of 400 ms): the client is told how many instants are missing with a book gap,
-/// before the samples memory still holds.
+/// Replaying the live run when memory no longer reaches back to the requested start, or to the
+/// run's first sample when the replay names no start (nothing rotated, a ring of 400 ms): the
+/// client is told how many instants are missing with a book gap, before the samples memory still
+/// holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     let dir = scratch("api-gap");
@@ -672,6 +673,13 @@ async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     // From before the run's first sample, as from the run's start: the same instants are lost.
     let early = json!({"t": "replay", "run": RUN, "from_ms": first_ms - 2_000, "speed": 0});
     send_json(&mut viewer, &early).await?;
+    until_replay(&mut viewer).await?;
+    let gap = next_json(&mut viewer, WAIT).await?;
+    assert_eq!(gap, json!({"t": "gap", "topic": "book", "lost": lost}));
+    read_until_ended(&mut viewer).await?;
+    // With no start at all, the replay begins at the run's first sample: the same are lost.
+    let whole = json!({"t": "replay", "run": RUN, "speed": 0});
+    send_json(&mut viewer, &whole).await?;
     until_replay(&mut viewer).await?;
     let gap = next_json(&mut viewer, WAIT).await?;
     assert_eq!(gap, json!({"t": "gap", "topic": "book", "lost": lost}));
