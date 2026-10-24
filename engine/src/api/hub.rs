@@ -24,7 +24,7 @@ use super::messages::{
     Status, StreamStatus, Streams, SymbolStatus, Topic, TradeMessage, VenueStatus,
 };
 use crate::market::feed::{Event, Feed};
-use crate::market::live::{LiveEvent, LiveStats, Observer, Stream};
+use crate::market::live::{LiveEvent, LiveStats, Observer, Stream, utc_clock};
 use crate::market::pipeline::Applied;
 use crate::market::sync::BookSync;
 use crate::market::{Scales, Symbol};
@@ -134,7 +134,8 @@ pub type Latest<K = String, V = Value> = Arc<BTreeMap<K, Arc<V>>>;
 pub struct Counters {
     pub samples: AtomicU64,
     pub trades: AtomicU64,
-    /// Samples that could not be made or encoded; never expected.
+    /// Samples that could not be made or encoded, and live feeds refused because their venue
+    /// had one already; never expected. `/v1/health` reports it.
     pub errors: AtomicU64,
     pub ws_clients: AtomicUsize,
 }
@@ -628,6 +629,15 @@ impl Observer for LiveTap {
             run: run_id.map(str::to_owned),
         };
         if !self.hub.start(venue, started.clone()) {
+            // This loop still records its log, but its samples, trades and status reach no
+            // client: say so, rather than serve on looking healthy (#95).
+            self.hub.counters.errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "{} the API already has a {venue} feed: a second one (run {}) is refused and \
+                 publishes nothing",
+                utc_clock(),
+                run_id.unwrap_or("none")
+            );
             return;
         }
         // Every venue's samples go out in one stream schema; this tap's batches only need its
@@ -744,9 +754,15 @@ mod tests {
         let feed = Feed::new(Venue::BinanceUsdm, BTreeMap::new());
         let mut first = LiveTap::new(Arc::clone(&hub));
         first.started(&feed, Some("first"));
+        assert_eq!(hub.counters.errors.load(Ordering::Relaxed), 0);
         let mut second = LiveTap::new(Arc::clone(&hub));
         second.started(&feed, Some("second"));
         assert_eq!(run(&hub).as_deref(), Some("first"));
+        assert_eq!(
+            hub.counters.errors.load(Ordering::Relaxed),
+            1,
+            "the refusal is counted (#95)"
+        );
         let entry = |capture_ts_ns| Entry {
             kind: crate::store::frame::Kind::Control,
             source_ts_ns: capture_ts_ns,

@@ -23,12 +23,16 @@ use super::messages::TradeMessage;
 use super::table::{Table, TableError, locate};
 use crate::market::sync::Level;
 use crate::store::run::MARKET;
-use crate::store::samples::{BookRow, Sample};
+use crate::store::samples::{BookRow, Sample, grid_ceil};
 use crate::store::{StoreError, query};
 use crate::venue::Venue;
 
-/// The capture-clock span read from Parquet at a time.
-const SLICE_NS: i64 = 10_000_000_000;
+/// The capture-clock span read from Parquet at a time: ten minutes (#69). Every slice pays a fixed
+/// cost, a `DuckDB` connection, every file's footer read and its hour's row group decoded again,
+/// so 10 s slices made a recorded hour take most of a minute at speed 0, more with every hour
+/// recorded. Ten minutes of a busy pair of symbols is 6,000 instants and some tens of thousands
+/// of trades, a few MB.
+const SLICE_NS: i64 = 600_000_000_000;
 /// Items queued for the connection; the replay waits when it is full.
 const QUEUE: usize = 256;
 
@@ -325,15 +329,12 @@ fn missing_instants(
     } else if start_ns != i64::MIN {
         // The first grid instant at or after the start; a run's first sample comes a second or
         // two after the run starts, and there is nothing before it to lose.
-        let start = start_ns
-            .div_euclid(every_ns)
-            .checked_add(i64::from(start_ns.rem_euclid(every_ns) != 0))?
-            .checked_mul(every_ns)?;
+        let start = grid_ceil(start_ns, every_ns);
         first_ever.map_or(start, |first_ever| start.max(first_ever))
     } else {
         first_ever?
     };
-    let lost = u64::try_from((first - expected).div_euclid(every_ns)).ok()?;
+    let lost = u64::try_from(first.checked_sub(expected)?.div_euclid(every_ns)).ok()?;
     (lost > 0).then_some(lost)
 }
 
@@ -849,6 +850,156 @@ mod tests {
         assert_eq!(trades_files(true), Some(2));
         assert_eq!(trades_files(false), Some(3));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// One recorded hour as rotate leaves it, for the replay measurement: `book_samples` (a sample
+    /// every 100 ms of two symbols at 20 levels a side) and `trades` (30 a second each), written
+    /// with rotate's Parquet settings (zstd, row groups of up to 256K rows, so one per hourly file).
+    fn write_hour(run_dir: &Path, hour: i64) {
+        use parquet::basic::{Compression, ZstdLevel};
+        use parquet::file::properties::WriterProperties;
+
+        const INSTANTS: i64 = 36_000;
+        const TRADES: i64 = 216_000;
+        let write = |table: &str, batch: &RecordBatch| {
+            let path = run_dir
+                .join(table)
+                .join(format!("{:020}.parquet", hour * 1_000_000));
+            fs::create_dir_all(path.parent().expect("a table dir")).expect("the table dir");
+            let properties = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(ZstdLevel::default()))
+                .set_max_row_group_row_count(Some(256 * 1024))
+                .build();
+            let file = fs::File::create(&path).expect("a Parquet file");
+            let mut writer =
+                parquet::arrow::ArrowWriter::try_new(file, batch.schema(), Some(properties))
+                    .expect("a Parquet writer");
+            writer.write(batch).expect("rows written");
+            writer.close().expect("a footer");
+        };
+        let side = |i: i64, sign: i64| -> Vec<Level> {
+            (1..=20)
+                .map(|k| Level {
+                    price: 500_000 + sign * k,
+                    qty: 1 + (i + k) % 9,
+                })
+                .collect()
+        };
+        let mut rows = SampleRows::new(20);
+        for i in hour * INSTANTS..(hour + 1) * INSTANTS {
+            rows.push(&Sample {
+                sample_ts_ns: T0 + i * STEP,
+                seq: 3 * i,
+                venue: Venue::BinanceUsdm,
+                rows: ["BTCUSDT", "ETHUSDT"]
+                    .into_iter()
+                    .map(|symbol| BookRow {
+                        symbol: symbol.to_owned(),
+                        synced: true,
+                        last_update_id: Some(i),
+                        bids: side(i, -1),
+                        asks: side(i, 1),
+                    })
+                    .collect(),
+            });
+        }
+        write("book_samples", &rows.take().expect("a book_samples batch"));
+        let trades: Vec<i64> = (hour * TRADES..(hour + 1) * TRADES).collect();
+        let captured = |k: &i64| T0 + k * (INSTANTS * STEP / TRADES);
+        let int64 = |value: &dyn Fn(&i64) -> i64| -> ArrayRef {
+            Arc::new(Int64Array::from(
+                trades.iter().map(value).collect::<Vec<_>>(),
+            ))
+        };
+        let field = |name: &str, kind: DataType| Field::new(name, kind, false);
+        let schema = Arc::new(Schema::new(vec![
+            field("seq", DataType::Int64),
+            field("trade_ts_ns", DataType::Int64),
+            field("capture_ts_ns", DataType::Int64),
+            field("venue", DataType::Utf8),
+            field("symbol", DataType::Utf8),
+            field("trade_id", DataType::Utf8),
+            field("price", DataType::Int64),
+            field("qty", DataType::Int64),
+            field("buyer_is_maker", DataType::Boolean),
+        ]));
+        let symbols: Vec<&str> = trades
+            .iter()
+            .map(|k| if k % 2 == 0 { "BTCUSDT" } else { "ETHUSDT" })
+            .collect();
+        let columns = vec![
+            int64(&|k| 3 * k + 1),
+            int64(&captured),
+            int64(&captured),
+            Arc::new(StringArray::from(vec!["binance-usdm"; trades.len()])) as ArrayRef,
+            Arc::new(StringArray::from(symbols)) as ArrayRef,
+            Arc::new(StringArray::from(
+                trades.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            )) as ArrayRef,
+            int64(&|k| 500_000 + k % 7),
+            int64(&|k| 1 + k % 5),
+            Arc::new(BooleanArray::from(
+                trades.iter().map(|k| k % 3 == 0).collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ];
+        write(
+            "trades",
+            &RecordBatch::try_new(schema, columns).expect("a trades batch"),
+        );
+    }
+
+    /// How fast a WebSocket replay reads recorded hours (#69): `TP_REPLAY_HOURS` hours (2 by
+    /// default) of [`write_hour`], replayed at speed 0 from the replay's own queue, prints the
+    /// seconds per recorded hour. A measurement, not a check: ignored unless asked for.
+    #[ignore = "a measurement (#69): TP_REPLAY_HOURS=2 cargo test -p engine --lib replay_speed -- --ignored --nocapture"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_speed() {
+        let hours: i64 = std::env::var("TP_REPLAY_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let dir = std::env::temp_dir().join(format!("tp-replay-speed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let run_dir = dir.join(MARKET).join(RUN);
+        fs::create_dir_all(&run_dir).expect("the run dir");
+        let manifest =
+            r#"{"key":"seq","tables":["trades","book_samples"],"params":{"venue":"binance-usdm"}}"#;
+        fs::write(run_dir.join(MANIFEST), manifest).expect("the manifest");
+        for hour in 0..hours {
+            write_hour(&run_dir, hour);
+        }
+        let hub = Hub::new(HubConfig::default());
+        let started = std::time::Instant::now();
+        let mut replay = Replay::start(&dir, hub, RUN, None, 0.0, None)
+            .await
+            .expect("the run replays");
+        let (mut samples, mut trades) = (0_u64, 0_u64);
+        loop {
+            match replay.items.recv().await.expect("the replay ends with End") {
+                Item::Sample(_) => samples += 1,
+                Item::Trade(_) => trades += 1,
+                Item::BookGap(lost) => panic!("a gap of {lost} instants"),
+                Item::End => break,
+                Item::Failed(why) => panic!("the replay failed: {why}"),
+            }
+        }
+        let took = started.elapsed();
+        let _ = fs::remove_dir_all(&dir);
+        #[allow(clippy::cast_precision_loss)]
+        let per_hour = took.as_secs_f64() / hours as f64;
+        println!(
+            "replay_speed: {hours} recorded hours, {samples} samples and {trades} trades, slices of \
+             {} s, in {:.1} s at speed 0: {per_hour:.2} s per recorded hour ({} build)",
+            SLICE_NS / 1_000_000_000,
+            took.as_secs_f64(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
+        assert_eq!(samples, u64::try_from(hours * 36_000).unwrap_or(0));
+        assert_eq!(trades, u64::try_from(hours * 216_000).unwrap_or(0));
     }
 
     #[test]

@@ -31,6 +31,8 @@ pub enum RestError {
 #[derive(Debug, Clone)]
 pub struct Rest {
     client: reqwest::Client,
+    /// [`BASE_URL`], or a test's stand-in for it.
+    base: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,10 +61,21 @@ impl Rest {
     /// # Errors
     /// Returns an error when the TLS-backed HTTP client cannot be built.
     pub fn new() -> Result<Self, RestError> {
+        Self::at(BASE_URL)
+    }
+
+    /// A client against `base`: [`BASE_URL`], or a local stand-in in a test.
+    ///
+    /// # Errors
+    /// Returns an error when the TLS-backed HTTP client cannot be built.
+    pub(crate) fn at(base: &str) -> Result<Self, RestError> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("tipping-point-engine/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            base: base.to_owned(),
+        })
     }
 
     /// Reads tick and lot sizes for the given symbols from `/fapi/v1/exchangeInfo`.
@@ -100,7 +113,7 @@ impl Rest {
     }
 
     async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<String, RestError> {
-        let url = format!("{BASE_URL}{path}");
+        let url = format!("{}{path}", self.base);
         let response = self.client.get(&url).query(query).send().await?;
         let status = response.status();
         let body = response.text().await?;

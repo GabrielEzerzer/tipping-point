@@ -21,6 +21,7 @@ use engine::store::rotate::rotate;
 use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams};
 use engine::store::segment::{self, LOG_DIR, SegmentReader};
 use engine::store::writer::{Entry, LogConfig, LogWriter};
+use engine_harness::skipped;
 use engine_harness::transcript::{FORMAT, Transcript};
 
 type Outcome = Result<(), Box<dyn Error>>;
@@ -187,8 +188,9 @@ async fn a_session_with_every_fault_replays_exactly_as_it_ran() -> Outcome {
 }
 
 /// The recordings `record` made, if any: each run's log replays (and its Parquet replays)
-/// exactly as the live loop ran while recording it. Skips, and says so, when there are none,
-/// and passes over (saying so) a run whose transcript an older harness wrote.
+/// exactly as the live loop ran while recording it. With none, the check did not run, and it
+/// says so on a `SKIPPED:` line the gate counts, never as a silent pass (#71); a run whose
+/// transcript an older harness wrote is compared with nothing, and skipped the same way (#101).
 #[test]
 fn recorded_sessions_replay_exactly_as_they_ran_live() -> Outcome {
     let recorded = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -199,20 +201,24 @@ fn recorded_sessions_replay_exactly_as_they_ran_live() -> Outcome {
         .filter(|run| run.join("live-transcript.json").is_file())
         .collect();
     if runs.is_empty() {
-        println!(
-            "skipped: no recorded runs with a live transcript in {}",
+        skipped(&format!(
+            "recorded sessions replay as they ran live: no recorded run with a live transcript in \
+             {} (record one with `cargo run --release -p engine-harness --bin record`)",
             recorded.display()
-        );
+        ));
         return Ok(());
     }
     for original in runs {
         let live = Transcript::load(&original.join("live-transcript.json"))?;
         if live.format != FORMAT {
-            println!(
-                "passed over {}: its transcript is format {}, this harness writes {FORMAT}; record it again",
+            // Compared with nothing, so a skip the gate counts, never a silent pass (#101).
+            skipped(&format!(
+                "recorded session {} not replayed: its transcript is format {}, this harness \
+                 writes {FORMAT}; record it again with `cargo run --release -p engine-harness \
+                 --bin record` and delete this run",
                 original.display(),
                 live.format
-            );
+            ));
             continue;
         }
         // A copy, so rotating never leaves Parquet from older code next to the recording.

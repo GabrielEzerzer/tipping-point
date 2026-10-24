@@ -50,7 +50,9 @@ so a tick or lot size made finer mid-run leaves that symbol's depth updates unco
 book down (`parse_errors` climbs). After ten such updates in a row the Binance loop asks for the
 symbol's exchange info again, at most every ten minutes, and if the scales did change it says so
 (`ScalesChanged`, printed by `ingest` and `soak`); a restart records a new run at the new scales
-(#45).
+(#45). A check the venue fails (a 429, a timeout) says so as well (`ScalesCheckFailed`), so
+silence never stands for unchanged scales, and the symbols due a check at once share one
+exchange-info download (#100).
 
 ```sh
 cargo run --release -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
@@ -124,8 +126,13 @@ Windows the build also copies `duckdb.dll` next to the binaries (`target/<profil
 a binary copied elsewhere needs that DLL beside it. Linux and macOS binaries find the library
 through their rpath.
 
-Recorded fixtures are never committed; the replay tests replay any present locally and skip
-otherwise. The committed tests use synthetic streams and a golden log
+Recorded fixtures are never committed; `replay_equals_live` replays any present locally and,
+with none, says so on a `SKIPPED:` line the gate counts rather than passing silently. A
+recording whose `live-transcript.json` an older harness wrote is skipped the same way: its
+`format` is below `FORMAT` (`harness/engine-harness/src/transcript.rs`, bumped whenever what a
+transcript step records changes), so there is nothing to compare it with. Record it again
+(`cargo run --release -p engine-harness --bin record -- --seconds 60`) and delete the old run
+from `harness/fixtures/recorded/market/` (#101). The committed tests use synthetic streams and a golden log
 (`engine/tests/fixtures/synthetic/`) and generated ones (property tests and fault injection in
 `engine/tests/`, crash injection and replay-equals-live in `harness/engine-harness/tests/`).
 `TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default). With `TP_ROTATE_SOAK`
@@ -148,7 +155,7 @@ cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --
 
 | route | what |
 |---|---|
-| `GET /v1/health` | alive, protocol version, whether the live feed has started or ended, the run each venue records |
+| `GET /v1/health` | alive, protocol version, whether the live feed has started or ended, the run each venue records, and `errors`: samples that could not be made and live feeds refused because their venue had one, both never expected (#95) |
 | `GET /v1/runs` | every run in the data dir, by domain, a market run with its venue |
 | `GET /v1/live/book_samples` | Arrow IPC stream: live book samples, each batch one or more whole 100 ms instants (one per batch live; a backfill or an unpaced replay sends several); `?backfill_s=` first replays that much of the recent past from memory (no gap, no overlap), `?run=&speed=` replays a recorded run instead |
 | `GET /v1/table/{domain}/{run}/{table}` | Arrow IPC stream: any table of a market or Ising run, `?start=&end=` a range of its key, read through DuckDB and cast back to the schema stored in the Parquet footer |
@@ -171,15 +178,21 @@ cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --
 - **Checks on every request:** `Host` must name the server (stops DNS rebinding) and a browser's
   `Origin` must be on the allowlist (the Tauri webview, the Vite dev server, `--allow-origin`).
 - **Replay and scrub:** rotated hours come from Parquet through DuckDB, the hour not yet rotated
-  from memory, as the same `book` and `trades` messages.
+  from memory, as the same `book` and `trades` messages. The Parquet is read ten minutes of the
+  run at a time: each read pays a fixed cost (a DuckDB connection, every file's footer, an hour's
+  row group decoded), so reading 10 s at a time took 46 s per recorded hour at speed 0 in a debug
+  build, against 3.3 s now (#69). `replay_speed` in `engine/src/api/replay.rs` measures it:
+  `TP_REPLAY_HOURS=2 cargo test -p engine --lib replay_speed -- --ignored --nocapture`.
 
 Training reads Parquet directly (`tipping_point.engine.read`, no engine); the engine's Arrow
 streams serve live inference and replay tests of it (`live`, `table`, `publish`; stdlib and
 pyarrow only). The protocol is pinned by golden files in `engine/tests/fixtures/api/`, which the
 app's mock replays; a change fails `api_contract` until they are regenerated in the same commit
-(`TP_UPDATE_GOLDEN=1 cargo test -p engine-harness`). `api_load` drives ten times the live rate
-into nine app clients, two Arrow clients and one stalled client of each kind, and writes its
-measurements to `harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
+(`TP_UPDATE_GOLDEN=1 cargo test -p engine-harness`). `api_load` drives ten times the live rate,
+its depth frames as deep as Binance's (20 to 60 levels a side, one in a hundred 150 to 500, from
+the captured frames, #83), into nine app clients, two Arrow clients and one stalled client of
+each kind, and writes its measurements, the live path's time per depth frame among them, to
+`harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
 default 5 s. It fails if any input takes the live path half the stall timeout or longer; the rates
 achieved are recorded, not asserted, since on a shared machine they measure the CPU the test got.
 The report also holds the cores and how late a 1 ms sleep woke through the load: past a quarter of

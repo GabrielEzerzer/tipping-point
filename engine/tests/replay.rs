@@ -1,8 +1,8 @@
 //! Fixture replay: the same pipeline the live loop runs, driven from JSON-lines scripts.
 //!
-//! The committed fixtures are small hand-built synthetic streams. Depth-only JSON-lines
-//! recordings from before the binary log, if any, live in the gitignored
-//! `harness/fixtures/recorded/` and are replayed only when present.
+//! The committed fixtures are small hand-built synthetic streams. Real recorded sessions are
+//! binary-log runs, which `replay_equals_live` in the harness replays against the transcript the
+//! live loop wrote while recording them (#71).
 
 use std::fs::File;
 use std::io::BufReader;
@@ -21,10 +21,6 @@ fn synthetic(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/synthetic")
         .join(name)
-}
-
-fn recorded_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/fixtures/recorded")
 }
 
 #[test]
@@ -146,61 +142,5 @@ fn a_bybit_session_keeps_its_books_from_the_stream() -> Result<(), RecordingErro
         replayed.pipeline.feed_mut().snapshots_due().is_empty(),
         "a Bybit book never waits on a REST fetch"
     );
-    Ok(())
-}
-
-/// Replays every local recording; skips (and says so) when there is none.
-#[test]
-fn recorded_fixtures_replay_with_no_unexpected_resync() -> Result<(), RecordingError> {
-    let dir = recorded_dir();
-    let mut paths: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    paths.sort();
-    if paths.is_empty() {
-        println!("skipped: no recordings in {}", dir.display());
-        return Ok(());
-    }
-
-    for path in paths {
-        let replayed = replay_file(&path)?;
-        let feed = replayed.pipeline.feed();
-        let stats = feed.stats();
-        println!(
-            "{}: frames={} applied={} buffered={} stale={} snapshots={} resyncs={} crossed={}",
-            path.display(),
-            stats.frames,
-            stats.applied,
-            stats.buffered,
-            stats.dropped_stale,
-            stats.snapshots,
-            stats.resyncs,
-            stats.crossed
-        );
-        assert_eq!(stats.parse_errors, 0, "{}", path.display());
-        assert_eq!(stats.resyncs, 0, "{}: unexpected resync", path.display());
-        assert_eq!(stats.crossed, 0, "{}: crossed book", path.display());
-        assert!(stats.applied > 0, "{}: nothing applied", path.display());
-        for symbol in feed.symbols() {
-            let sync = feed.sync(symbol).expect("tracked symbol");
-            assert!(
-                sync.is_synced(),
-                "{}: {symbol} did not sync",
-                path.display()
-            );
-            let book = sync.book().expect("synced book");
-            assert!(!book.is_crossed(), "{}: {symbol} crossed", path.display());
-            assert!(
-                book.bids().chain(book.asks()).all(|l| l.qty > 0),
-                "{}: {symbol} holds a zero level",
-                path.display()
-            );
-        }
-    }
     Ok(())
 }

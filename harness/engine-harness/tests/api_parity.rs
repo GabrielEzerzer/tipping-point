@@ -12,11 +12,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use arrow::array::{Array, BooleanArray, Int64Array, RecordBatch, StringArray};
 use engine::api::ApiConfig;
-use engine::api::hub::{Hub, HubConfig};
+use engine::api::hub::{Hub, HubConfig, VenueSource};
+use engine::api::messages::Topic;
 use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
 use engine::store::writer::{LogConfig, LogWriter};
@@ -25,6 +27,7 @@ use engine_harness::api::{
     Frame, LivePath, Outcome, Script, Server, Socket, fixture, get_arrow, hello, merged,
     next_frame, next_json, one_batch, read_parquet, script, send_json, ws_connect,
 };
+use engine_harness::load::Generator;
 use serde_json::{Value, json};
 
 const RUN: &str = "20231114T221320Z-session";
@@ -477,6 +480,312 @@ async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
     until_source(&mut viewer, "live").await?;
     played.server.stop().await;
     fs::remove_dir_all(&played.dir)?;
+    Ok(())
+}
+
+/// Going back to live after a replay brings the trades back (#84). Starting a replay drops the
+/// connection's live trades; only going back to live subscribes them again. Here the feed is
+/// still running: a viewer subscribed to book and trades replays the live run to its end
+/// halfway through, goes back to live, and gets the rest of the session, every trade and newer
+/// books, none of them from before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn going_back_to_live_after_a_replay_brings_the_trades_back() -> Outcome {
+    const LIVE_RUN: &str = "20261024T120000Z-golive";
+    const T0: i64 = 1_700_000_000_000_000_000;
+    /// Each half: a depth update and a trade every 50 ms of the capture clock.
+    const HALF: usize = 100;
+    let dir = scratch("api-go-live");
+    let mut generator = Generator::default();
+    let hub = Hub::new(HubConfig::default());
+    let mut live = LivePath::new(
+        Venue::BinanceUsdm,
+        generator.scales(),
+        Arc::clone(&hub),
+        &dir,
+        Some(LIVE_RUN),
+        LogConfig::default(),
+    )?;
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+    let mut at = T0;
+    for message in generator.opening(at) {
+        live.push(message).await?;
+    }
+    for _ in 0..HALF {
+        at += 50_000_000;
+        live.push(generator.depth(at)).await?;
+        live.push(generator.trade(at)).await?;
+    }
+
+    let mut viewer = ws_connect(server.addr).await?;
+    hello(&mut viewer).await?;
+    let sub = json!({"t": "sub", "topics": ["book", "trades"]});
+    send_json(&mut viewer, &sub).await?;
+    until_source(&mut viewer, "live").await?;
+    let replay = json!({"t": "replay", "run": LIVE_RUN, "speed": 0});
+    send_json(&mut viewer, &replay).await?;
+    until_replay(&mut viewer).await?;
+    let (books, trades, _) = read_until_ended(&mut viewer).await?;
+    let seqs = |trades: &[Value]| -> Vec<u64> {
+        trades.iter().filter_map(|t| t["seq"].as_u64()).collect()
+    };
+    let replayed = seqs(&trades);
+    assert_eq!(
+        replayed.len(),
+        HALF,
+        "the replay sent the first half's trades"
+    );
+    let last_trade = replayed.iter().copied().max().ok_or("replayed trades")?;
+    let last_book = books.iter().map(|b| b.2).max().ok_or("replayed books")?;
+
+    send_json(&mut viewer, &json!({"t": "live"})).await?;
+    until_source(&mut viewer, "live").await?;
+    for _ in 0..HALF {
+        at += 50_000_000;
+        live.push(generator.depth(at)).await?;
+        live.push(generator.trade(at)).await?;
+    }
+    hub.end();
+    let (books, trades, _) = read_until_ended(&mut viewer).await?;
+    let after = seqs(&trades);
+    assert_eq!(
+        after.len(),
+        HALF,
+        "every trade of the rest of the session, live: {after:?}"
+    );
+    assert!(
+        after.windows(2).all(|w| w[0] < w[1]) && after.first() > Some(&last_trade),
+        "the live trades, in order and after the replay's last ({last_trade}): {after:?}"
+    );
+    assert!(
+        books.iter().all(|b| b.2 >= last_book) && books.iter().any(|b| b.2 > last_book),
+        "the live books, from the newest on: {books:?}"
+    );
+    live.finish().await?;
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A WebSocket `sub` with a backfill, sent halfway through the session, gets every book sample
+/// and trade memory holds, then the rest of the session live, with no gap and no overlap (#85):
+/// the books are the stored rows up to where the client joined and then a coalesced run of later
+/// ones, no instant twice; the trades are the stored ones, each once. No test had sent a
+/// `backfill_s`, so the dedupe of the newest book and the trades taken under the ring's lock had
+/// never run on real data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_websocket_backfill_runs_on_into_live_with_no_gap_and_no_overlap() -> Outcome {
+    let dir = scratch("api-ws-backfill");
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let hub = Hub::new(HubConfig::default());
+    let mut live = LivePath::new(
+        venue,
+        scales,
+        Arc::clone(&hub),
+        &dir,
+        Some(RUN),
+        LogConfig::default(),
+    )?;
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+    let (first, rest) = messages.split_at(messages.len() / 2);
+    for message in first {
+        live.push(message.clone()).await?;
+    }
+    let held = hub.recent(venue, i64::MIN);
+    let mut app = ws_connect(server.addr).await?;
+    hello(&mut app).await?;
+    let sub = json!({"t": "sub", "topics": ["book", "trades"], "backfill_s": 3600});
+    send_json(&mut app, &sub).await?;
+    // The backfill goes out before the subscription's answer.
+    let (mut backfilled, mut trades) = (Vec::new(), Vec::new());
+    loop {
+        let message = next_json(&mut app, WAIT).await?;
+        match message["t"].as_str() {
+            Some("book") => backfilled.push(book_of(&message)),
+            Some("trades") => {
+                trades.extend(message["trades"].as_array().cloned().unwrap_or_default());
+            }
+            Some("source") if message["mode"] == "live" => break,
+            _ => return Err(format!("in the backfill: {message}").into()),
+        }
+    }
+    for message in rest {
+        live.push(message.clone()).await?;
+        // Real time between inputs, so the client coalesces some samples and gets others.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    hub.end();
+    let (books, later, _) = read_until_ended(&mut app).await?;
+    trades.extend(later);
+    live.finish().await?;
+    let run_dir = dir.join("market").join(RUN);
+    rotate(&run_dir)?;
+
+    let (schema, batches) = read_parquet(&run_dir, "book_samples")?;
+    let rows = book_rows(&one_batch(&schema, &batches)?);
+    let held_rows: usize = held.samples.iter().map(|sample| sample.rows.len()).sum();
+    assert!(held_rows > 0, "memory held no samples at the join");
+    assert_eq!(
+        backfilled.len(),
+        held_rows,
+        "the backfill is every row memory held"
+    );
+    assert_eq!(
+        backfilled,
+        rows[..held_rows],
+        "the backfill is the stored rows up to the join, none coalesced"
+    );
+    let joined = backfilled.last().map_or(i64::MIN, |row| row.2);
+    assert!(
+        books.iter().all(|book| book.2 > joined),
+        "a live book at or before the join ({joined}), sent twice: {books:?}"
+    );
+    assert_subsequence(&books, &rows[held_rows..], "live after the backfill");
+    let (_, stored) = read_parquet(&run_dir, "trades")?;
+    let stored: Vec<i64> = stored
+        .iter()
+        .flat_map(|batch| int64(batch, "seq").values().to_vec())
+        .collect();
+    let sent: Vec<i64> = trades.iter().filter_map(|t| t["seq"].as_i64()).collect();
+    assert!(!held.trades.is_empty(), "memory held no trades at the join");
+    assert_eq!(
+        sent, stored,
+        "every trade once, the held ones then the live ones"
+    );
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// An Arrow backfill longer than one batch (#85): a worker joining after 1,200 instants gets them
+/// in batches of 512, then the rest live, and its stream is the rotated table. The one test of the
+/// Arrow backfill joined after 18 instants, one small batch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_arrow_backfill_of_several_batches_is_the_stored_table() -> Outcome {
+    const BACKFILLED_RUN: &str = "20261024T130000Z-backfill";
+    const T0: i64 = 1_700_000_000_000_000_000;
+    const STEP: i64 = 100_000_000;
+    let dir = scratch("api-arrow-backfill");
+    let mut generator = Generator::default();
+    let hub = Hub::new(HubConfig::default());
+    let mut live = LivePath::new(
+        Venue::BinanceUsdm,
+        generator.scales(),
+        Arc::clone(&hub),
+        &dir,
+        Some(BACKFILLED_RUN),
+        LogConfig::default(),
+    )?;
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+    let mut at = T0;
+    for message in generator.opening(at) {
+        live.push(message).await?;
+    }
+    // A depth update every 100 ms moves the clock past one instant each; a trade every 500 ms.
+    for i in 0..1_200 {
+        at += STEP;
+        live.push(generator.depth(at)).await?;
+        if i % 5 == 0 {
+            live.push(generator.trade(at)).await?;
+        }
+    }
+    let (held, _) = hub.ring_len();
+    assert!(held > 2 * 512, "{held} instants held");
+    let url = server.url("/v1/live/book_samples?backfill_s=3600");
+    let arrow = tokio::spawn(async move { get_arrow(&url).await });
+    while hub.arrow_subscribers() == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for _ in 0..100 {
+        at += STEP;
+        live.push(generator.depth(at)).await?;
+    }
+    hub.end();
+    let (schema, batches) = arrow.await??;
+    live.finish().await?;
+    let run_dir = dir.join("market").join(BACKFILLED_RUN);
+    rotate(&run_dir)?;
+    let (stored_schema, stored) = read_parquet(&run_dir, "book_samples")?;
+    assert_eq!(
+        one_batch(&schema, &batches)?,
+        one_batch(&stored_schema, &stored)?,
+        "the backfilled stream is the stored table"
+    );
+    // Two symbols an instant: the backfill's batches hold 512 instants until the last.
+    let sizes: Vec<usize> = batches.iter().map(RecordBatch::num_rows).collect();
+    let backfill_batches = held.div_ceil(512);
+    assert_eq!(
+        sizes[..backfill_batches - 1],
+        vec![2 * 512; backfill_batches - 1],
+        "{sizes:?}"
+    );
+    assert_eq!(
+        sizes[backfill_batches - 1],
+        2 * (held - 512 * (backfill_batches - 1))
+    );
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A replay runs on while the hub is busy (#85): a client replaying a run while results are
+/// relayed to it faster than it is sent to reaches the run's end with the relaying still going,
+/// where the replay's items came after the hub's wake-up among what a connection waits on and
+/// lost every turn to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replay_runs_on_while_the_hub_is_busy() -> Outcome {
+    const THREE: &str = "20261022T000000Z-three";
+    const RELAY_AT_MOST: Duration = Duration::from_secs(30);
+    let dir = scratch("api-busy-replay");
+    write_three_symbol_run(&dir.join("market").join(THREE))?;
+    let hub = Hub::new(HubConfig::default());
+    let feed = VenueSource {
+        scales: BTreeMap::new(),
+        run: None,
+    };
+    assert!(hub.start(Venue::BinanceUsdm, feed));
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+    let mut viewer = ws_connect(server.addr).await?;
+    hello(&mut viewer).await?;
+    let sub = json!({"t": "sub", "topics": ["book", "meters"]});
+    send_json(&mut viewer, &sub).await?;
+    until_source(&mut viewer, "live").await?;
+    let relaying = Arc::new(AtomicBool::new(true));
+    let relayer = std::thread::spawn({
+        let (hub, relaying) = (Arc::clone(&hub), Arc::clone(&relaying));
+        move || {
+            let started = std::time::Instant::now();
+            let mut n = 0_u64;
+            while relaying.load(Ordering::Relaxed) && started.elapsed() < RELAY_AT_MOST {
+                let meter = json!({"venue": "binance-usdm", "symbol": "AAAUSDT", "n": n});
+                hub.relay(Topic::Meters, meter);
+                n += 1;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            n
+        }
+    });
+    let replay = json!({"t": "replay", "run": THREE, "speed": 0});
+    send_json(&mut viewer, &replay).await?;
+    let outcome = loop {
+        let message = next_json(&mut viewer, WAIT).await?;
+        if message["t"] == "source" && message["mode"] != "replay" {
+            break message;
+        }
+    };
+    let still_relaying = !relayer.is_finished();
+    relaying.store(false, Ordering::Relaxed);
+    let meters = relayer.join().map_err(|_| "the relayer panicked")?;
+    assert_eq!(outcome["mode"], "ended", "{outcome}");
+    assert!(
+        still_relaying,
+        "the replay ended only once {meters} relayed meters stopped coming"
+    );
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
     Ok(())
 }
 

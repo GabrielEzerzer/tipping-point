@@ -1,4 +1,5 @@
-//! The API at ten times the live load: 200 depth frames and 2,000 trades a second, with the
+//! The API at ten times the live load: 200 depth frames and 2,000 trades a second, the depth
+//! frames as deep as Binance's (20 to 60 levels a side, now and then hundreds, #83), with the
 //! capture clock running ten times faster than the wall so the book is sampled 100 times a
 //! second, through the live path with its log recording. Nine app clients and two Arrow clients
 //! read normally; one app client and one Arrow client stop reading at once.
@@ -8,8 +9,9 @@
 //! clients change nothing for the others. Each client is cut or coalesced as its kind says: the
 //! stalled ones are cut, the normal app clients skip book samples but get every trade, and the
 //! normal Arrow clients get every batch. Capture-to-receive latency, delivered against produced,
-//! the rates achieved, gaps, the writer's queue, the live path's own time per input, peak memory,
-//! the cores and how loaded the machine was go to `harness/out/api-load-<ms>.json`. The latency
+//! the rates achieved, gaps, the writer's queue, the live path's own time per input and per depth
+//! frame, the levels a depth frame held, peak memory, the cores and how loaded the machine was go
+//! to `harness/out/api-load-<ms>.json`. The latency
 //! bound is checked on every run; on a loaded machine a p99 over it by less than three wakeups'
 //! lateness is excused with a SKIPPED line the gate counts (#60). Five seconds by default;
 //! `TP_LOAD_SECONDS` runs longer.
@@ -34,6 +36,7 @@ use engine_harness::api::{
     Frame, LivePath, Outcome, Server, hello, next_frame, next_json, send_json, ws_connect,
 };
 use engine_harness::load::{Generator, peak_memory_bytes, percentile};
+use engine_harness::skipped;
 use futures_util::SinkExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -54,7 +57,11 @@ const STALL: Duration = Duration::from_secs(2);
 /// the CPU, fifteen runs on 2026-10-22: book p99 26.6 to 41.8 ms, trades 28.4 to 58.2 ms, Arrow
 /// 8.7 to 49.9 ms. The bound is about twice the worst of those, so a real regression fails and a
 /// busy machine does not. The research's 50 ms target was an estimate awaiting this measurement.
-/// Re-measure and tighten it when the profile or the machine changes; the report records both.
+/// Re-measured once the depth frames were as deep as Binance's (#83; they held one level a side
+/// before), three runs on 2026-10-24: book p99 29.2 to 32.2 ms, trades 30.3 to 44.1 ms, Arrow 33.4
+/// to 44.9 ms, with a depth frame taking the live path 1.4 to 1.7 ms on average (0.6 to 0.7 ms at
+/// one level a side), so the bound stands. Re-measure and tighten it when the profile or the
+/// machine changes; the report records both.
 const LATENCY_BOUND: Duration = Duration::from_millis(120);
 /// The build profile the measurement above was taken in, which the report records.
 const PROFILE: &str = if cfg!(debug_assertions) {
@@ -81,15 +88,6 @@ fn wake_probe(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<Duration>> {
         }
         late
     })
-}
-
-/// Prints a line the gate counts as a skip. libtest keeps a passing test's `println!` output to
-/// itself, so this writes to stdout's handle, which it does not capture.
-fn skipped(why: &str) {
-    use std::io::Write;
-    let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "\nSKIPPED: {why}");
-    let _ = out.flush();
 }
 
 /// What one app client got: book messages and trades with when they arrived, and gaps.
@@ -310,7 +308,7 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
         "every client is connected when the load starts"
     );
 
-    let mut per_input = Vec::new();
+    let (mut per_input, mut per_depth) = (Vec::new(), Vec::new());
     let mut max_queued = 0;
     let (mut depth, mut trades) = (0_u64, 0_u64);
     let probing = Arc::new(AtomicBool::new(false));
@@ -337,7 +335,11 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
             };
             let began = Instant::now();
             live.push(message).await?;
-            per_input.push(began.elapsed());
+            let took = began.elapsed();
+            per_input.push(took);
+            if depth_next {
+                per_depth.push(took);
+            }
         }
         max_queued = max_queued.max(
             live.log
@@ -346,6 +348,7 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
         );
     }
     let elapsed = start.elapsed();
+    let depth_levels = generator.depth_levels();
     probing.store(true, Ordering::Relaxed);
     let mut wake_late = probe.join().map_err(|_| "the wake probe panicked")?;
     let wake_p99 = percentile(&mut wake_late, 99.0);
@@ -462,6 +465,8 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
             "loaded": loaded,
         },
         "live_path_ms_per_input": {"p50": millis(percentile(&mut per_input, 50.0)), "p99": millis(percentile(&mut per_input, 99.0)), "max": millis(per_input.iter().copied().max().unwrap_or_default())},
+        "live_path_ms_per_depth_frame": {"mean": millis(per_depth.iter().sum::<Duration>() / u32::try_from(per_depth.len().max(1)).unwrap_or(u32::MAX)), "p50": millis(percentile(&mut per_depth, 50.0)), "p99": millis(percentile(&mut per_depth, 99.0))},
+        "depth_levels_per_frame": {"mean": depth_levels.1 as f64 / depth_levels.0.max(1) as f64, "max": depth_levels.2},
         "writer_queue": {"max": max_queued, "capacity": LogConfig::default().queue},
         "memory": {"peak_bytes": peak_memory_bytes(), "ring_samples": ring_samples, "ring_trades": ring_trades},
         "books_synced": pipeline.feed().symbols().all(|s| pipeline.feed().sync(s).is_some_and(engine::market::sync::BookSync::is_synced)),
