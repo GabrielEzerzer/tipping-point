@@ -65,27 +65,33 @@ def folder(dataset_run: Path, run_id: str, step: int) -> Path:
     return Path(dataset_run) / LATENTS / f"{run_id}-step{step:07d}"
 
 
-def _ending(checkpoint: Path) -> str:
-    """How the checkpoint's training ended, from its complete.json, for a refusal."""
-    for training in (checkpoint.parent, checkpoint.parent.parent):
-        done = training / "complete.json"
-        if done.is_file():
-            record = io.read_json(done)
-            collapse = record.get("collapse", {})
-            if collapse.get("collapsed"):
-                fired = "; ".join((collapse.get("first_fired") or {}).get("fired", []))
-                return f"{done} records a collapse at step {collapse['collapsed_at']} ({fired})"
-            return f"{done} records stopped_early = {record.get('stopped_early')}"
-    return "its training has no complete.json (running or crashed)"
+def _refusal(checkpoint: Path, digest: str) -> str | None:
+    """Why a trained checkpoint is refused, read from the complete.json of the training it sits
+    in: there is none (running or crashed), it does not list this file, or it records a collapse
+    (on any step, the last included) or an early stop. None when the training ran to its end
+    without collapsing."""
+    done = checkpoint.parent / "complete.json"
+    if not done.is_file():
+        return "its training has no complete.json (running or crashed)"
+    record = io.read_json(done)
+    if record.get("files", {}).get(checkpoint.name) != digest:
+        return f"{done} does not list it with its sha256"
+    collapse = record.get("collapse") or {}
+    if collapse.get("collapsed"):
+        fired = "; ".join((collapse.get("first_fired") or {}).get("fired", []))
+        return f"{done} records a collapse at step {collapse['collapsed_at']} ({fired})"
+    if record.get("stopped_early"):
+        return f"{done} records stopped_early at step {record.get('last_key')}"
+    return None
 
 
 def _manifest(out: Path, run: Run, ckpt: Checkpoint, device: torch.device) -> dict[str, Any]:
     assert ckpt.pca is not None
     root = run.path.parents[1]
     try:
-        where = ckpt.path.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError:
-        where = str(ckpt.path)
+        where: str | None = ckpt.path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:  # outside the data dir: its sha256 names it, never a local path (#94)
+        where = None
     hidden, _ = evaluation_masks(ckpt.config, run.L)
     return {
         "format": 1,
@@ -130,7 +136,9 @@ def _manifest(out: Path, run: Run, ckpt: Checkpoint, device: torch.device) -> di
 def extract(
     checkpoint: Path, dataset_run: Path, device: str | None = None, sites: int = 65_536
 ) -> Path:
-    """Write a checkpoint's latents table for a complete simulator run; returns its folder."""
+    """Write a checkpoint's latents table for a complete simulator run; returns its folder. A
+    trained checkpoint needs its training's complete.json to vouch for it (#89); the untrained
+    twin is the null whatever became of its training."""
     dev = torch.device(device or default_device())
     deterministic(dev)
     run = open_run(Path(dataset_run))
@@ -138,11 +146,11 @@ def extract(
     pca = ckpt.pca
     if pca is None:
         raise DataError(f"{checkpoint} holds no PCA basis: extract from final.pt or the twin")
-    if 0 < ckpt.step < ckpt.config.steps:  # the twin is step 0, a finished training's last step
+    why = None if ckpt.untrained else _refusal(Path(checkpoint), ckpt.sha256)
+    if why is not None:
         raise DataError(
-            f"{checkpoint} is step {ckpt.step} of {ckpt.config.steps}, so its training stopped "
-            f"early: {_ending(Path(checkpoint))}. Latents come from a training that ran to its "
-            "end, or from its untrained twin"
+            f"{checkpoint} is step {ckpt.step} of {ckpt.config.steps}, but {why}. Latents come "
+            "from a training that ran to its end without collapsing, or from its untrained twin"
         )
     chunks = io.chunks(run.path, "configs")
     if not chunks:
