@@ -33,6 +33,10 @@ use crate::store::samples::{Sample, SampleRows, Sampler};
 use crate::store::writer::Entry;
 use crate::venue::Venue;
 
+/// How much of the capture clock an unchanged status lets pass before it goes out again with its
+/// newer `ts_ms`.
+const STATUS_EVERY_MS: i64 = 1000;
+
 /// How much the hub keeps and how far a reader may fall behind.
 #[derive(Debug, Clone)]
 pub struct HubConfig {
@@ -669,11 +673,12 @@ impl Observer for LiveTap {
                     );
                 }
                 let status = self.status(feed, stats, captured_ns.div_euclid(1_000_000));
-                if !self
-                    .last_status
-                    .as_ref()
-                    .is_some_and(|last| last.same_as(&status))
-                {
+                // Unchanged, it still goes out once a second of the feed has passed, so its time
+                // keeps up with a steady feed.
+                let due = self.last_status.as_ref().is_none_or(|last| {
+                    !last.same_as(&status) || status.ts_ms - last.ts_ms >= STATUS_EVERY_MS
+                });
+                if due {
                     self.last_status = Some(status.clone());
                     self.hub.publish_status(venue, status);
                 }

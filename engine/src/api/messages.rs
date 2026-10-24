@@ -275,7 +275,9 @@ pub struct SymbolStatus {
 }
 
 /// What every venue's ingest is doing, venue by venue. `ts_ms` is the capture time of the newest
-/// input any venue's state reflects, so a client tells stale data from its own clock.
+/// input any venue's state reflects, so a client tells stale data from its own clock: a venue's
+/// status goes out on every change and, unchanged, once a second of its input has passed, so
+/// while its feed flows its `ts_ms` is less than a second behind its newest input.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Status {
     pub ts_ms: i64,

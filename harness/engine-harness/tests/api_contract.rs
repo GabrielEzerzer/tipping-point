@@ -27,6 +27,7 @@ use engine_harness::api::{
     Frame, ISING_RUN, LivePath, Outcome, Server, copy_ising_fixture, decode_stream, fixture,
     get_arrow, golden, merged, next_frame, next_json, one_batch, script, send_json, ws_connect,
 };
+use engine_harness::load::Generator;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -526,6 +527,45 @@ async fn every_arrow_schema_matches_its_golden_file() -> Outcome {
     let ising = find("ising", ISING_RUN).ok_or("the Ising run is listed")?;
     assert_eq!(ising["key"], "step");
     server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A steady feed leaves the status unchanged for as long as it stays steady, yet the status's
+/// `ts_ms` keeps up with it: unchanged, it goes out again once a second of the feed has passed,
+/// so a client comparing `ts_ms` with its own clock never takes a healthy feed for a stale one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_status_time_keeps_up_with_a_steady_feed() -> Outcome {
+    const T0: i64 = 1_700_000_000_000_000_000;
+    let dir = scratch("api-status-time");
+    let mut generator = Generator::default();
+    let hub = Hub::new(HubConfig::default());
+    let mut live = LivePath::new(
+        Venue::BinanceUsdm,
+        generator.scales(),
+        Arc::clone(&hub),
+        &dir,
+        None,
+        LogConfig::default(),
+    )?;
+    for message in generator.opening(T0) {
+        live.push(message).await?;
+    }
+    let status = hub.watch_status();
+    // Ten seconds of depth updates 50 ms apart: each book syncs on its first and stays synced.
+    for i in 1..=200 {
+        let captured_ms = (T0 + i * 50_000_000) / 1_000_000;
+        live.push(generator.depth(captured_ms * 1_000_000)).await?;
+        let times = status.borrow().as_ref().and_then(|status| {
+            let venue = status.venues.get(&Venue::BinanceUsdm)?;
+            Some((status.ts_ms, venue.ts_ms))
+        });
+        let (ts_ms, venue_ts_ms) = times.ok_or("a status")?;
+        for behind in [captured_ms - ts_ms, captured_ms - venue_ts_ms] {
+            assert!(behind < 1000, "input {i}: the status is {behind} ms behind");
+        }
+    }
+    live.finish().await?;
     fs::remove_dir_all(&dir)?;
     Ok(())
 }
