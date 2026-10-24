@@ -3,6 +3,7 @@
 Fixture process lists only: no test here kills a real process.
 """
 
+import math
 import os
 import subprocess
 import sys
@@ -13,50 +14,72 @@ import strays
 from strays import Process
 
 MIN = 60.0
+HASH = "0123456789abcdef"
 
 
 def _fixture(root: Path) -> tuple[list[Path], list[Process], list[Process]]:
     """The main checkout's and a worktree's target dirs, then the strays among a process list,
-    then everything else on it."""
+    then everything else on it. PIDs from 9000 up are gone; 300 is a live shell, 301 a live cargo
+    run, 302 a new process that took over a dead parent's PID, 303 one this account cannot read."""
     main, lane = root / "code" / "target", root / ".worktrees" / "r2a" / "target"
-    hash16 = "0123456789abcdef"
     found = [
-        Process(101, lane / "debug" / "deps" / "api_load-8652aba3279d7f40.exe", 41 * MIN),
-        Process(102, main / "debug" / "serve.exe", 11 * MIN),
-        Process(103, lane / "debug" / "crash-writer.exe", 30 * MIN),
-        Process(104, main / "debug" / "deps" / f"crash_writer-{hash16}.exe", 30 * MIN),
-        Process(105, lane / "debug" / "deps" / f"api_python-{hash16}.exe", 12 * MIN),
-        Process(106, main / "debug" / "store.exe", 90 * MIN),
-        Process(107, main / "debug" / "ingest.exe", 90 * MIN),
-        Process(108, main / "debug" / "record.exe", 90 * MIN),
-        Process(109, main / "debug" / "soak.exe", 90 * MIN),
+        Process(102, 9001, main / "debug" / "serve.exe", 11 * MIN),
+        Process(103, 302, lane / "debug" / "crash-writer.exe", 30 * MIN),  # parent PID reused
+        Process(104, 9002, main / "debug" / "deps" / f"crash_writer-{HASH}.exe", 30 * MIN),
+        Process(105, 9003, lane / "debug" / "deps" / f"api_python-{HASH}.exe", 12 * MIN),
+        Process(106, 9004, main / "debug" / "store.exe", 90 * MIN),
+        Process(107, 9004, main / "debug" / "ingest.exe", 90 * MIN),
+        Process(108, 9004, main / "debug" / "record.exe", 90 * MIN),
+        Process(109, 9004, main / "debug" / "soak.exe", 90 * MIN),
     ]
     spared = [
-        Process(201, main / "release" / "serve.exe", 300 * MIN),  # a recording session
-        Process(202, main / "release" / "soak.exe", 1440 * MIN),  # the 24-hour soak
-        Process(203, lane / "debug" / "deps" / "api_load-8652aba3279d7f40.exe", 9 * MIN),
-        Process(204, root / "other-repo" / "target" / "debug" / "serve.exe", 60 * MIN),
-        Process(205, main / "debug" / "deps" / f"api_parity-{hash16}.exe", 60 * MIN),
-        Process(206, main / "debug" / "build" / "cargo.exe", 60 * MIN),
-        Process(207, root / "code" / ".venv" / "Scripts" / "python.exe", 60 * MIN),
-        Process(208, main / "debug" / "serve-extra.exe", 60 * MIN),
-        Process(209, root / "code" / "target2" / "debug" / "serve.exe", 60 * MIN),
+        Process(300, 9000, root / "bin" / "pwsh.exe", 600 * MIN),
+        Process(301, 300, root / "bin" / "cargo.exe", 50 * MIN),
+        Process(302, 300, root / "bin" / "notepad.exe", 5 * MIN),
+        Process(303, 4, Path(), math.inf),
+        Process(201, 300, main / "debug" / "serve.exe", 90 * MIN),  # `serve --record` by hand
+        Process(202, 301, main / "debug" / "serve.exe", 20 * MIN),  # under a live cargo run
+        Process(203, 303, main / "debug" / "store.exe", 60 * MIN),  # a parent it cannot read
+        Process(204, 9005, lane / "debug" / "deps" / f"api_load-{HASH}.exe", 41 * MIN),
+        Process(205, 9006, main / "release" / "serve.exe", 300 * MIN),  # a recording session
+        Process(206, 9006, main / "release" / "soak.exe", 1440 * MIN),  # the 24-hour soak
+        Process(207, 9007, lane / "debug" / "deps" / f"api_python-{HASH}.exe", 9 * MIN),
+        Process(208, 9008, root / "other-repo" / "target" / "debug" / "serve.exe", 60 * MIN),
+        Process(209, 9008, main / "debug" / "deps" / f"api_parity-{HASH}.exe", 60 * MIN),
+        Process(210, 9008, main / "debug" / "build" / "cargo.exe", 60 * MIN),
+        Process(211, 9008, root / "code" / ".venv" / "Scripts" / "python.exe", 60 * MIN),
+        Process(212, 9008, main / "debug" / "serve-extra.exe", 60 * MIN),
+        Process(213, 9008, root / "code" / "target2" / "debug" / "serve.exe", 60 * MIN),
     ]
     return [main, lane], found, spared
 
 
-def test_only_old_debug_engine_processes_of_this_repo_are_strays(tmp_path: Path) -> None:
-    """Spared: release builds (the soak, a recording), a test still within ten minutes, another
-    repo's or a look-alike dir's binaries, binaries not named, and every other program."""
+def test_only_old_orphaned_debug_engine_processes_of_this_repo_are_strays(tmp_path: Path) -> None:
+    """Spared: a process whose parent lives (a debug serve started from a shell, one under a live
+    cargo run, one whose parent this account cannot read), the api_load test, release builds (the
+    soak, a recording), a test within ten minutes, another repo's or a look-alike dir's binaries,
+    binaries not named, and every other program."""
     targets, found, spared = _fixture(tmp_path)
     assert strays.find(spared + found, targets) == found
+
+
+def test_a_long_api_load_run_is_never_swept(tmp_path: Path) -> None:
+    # TP_LOAD_SECONDS=1800 runs it for half an hour, its server in-process: nothing to sweep
+    target = tmp_path / "target"
+    for parent in (9, 1):  # orphaned, or under a live cargo
+        processes = [
+            Process(1, 0, tmp_path / "cargo.exe", 60 * MIN),
+            Process(2, parent, target / "debug" / "deps" / f"api_load-{HASH}.exe", 30 * MIN),
+        ]
+        assert strays.find(processes, [target]) == []
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows paths ignore case")
 def test_a_path_typed_in_another_case_is_the_same_dir(tmp_path: Path) -> None:
     target = tmp_path / "code" / "target"
-    shouted = Path(str(target).upper()) / "DEBUG" / "DEPS" / "API_LOAD-8652ABA3279D7F40.EXE"
-    assert strays.find([Process(1, shouted, 60 * MIN)], [target]) == [Process(1, shouted, 60 * MIN)]
+    shouted = Path(str(target).upper()) / "DEBUG" / "DEPS" / f"CRASH_WRITER-{HASH.upper()}.EXE"
+    orphan = Process(1, 9, shouted, 60 * MIN)
+    assert strays.find([orphan], [target]) == [orphan]
 
 
 def _git(cwd: Path, *argv: str) -> None:
@@ -101,11 +124,11 @@ def test_a_kill_takes_the_children_and_spares_a_reused_pid(monkeypatch: pytest.M
         return subprocess.CompletedProcess(argv, 0, stdout=said, stderr="")
 
     monkeypatch.setattr(strays.subprocess, "run", taskkill)
-    exe = Path("target") / "debug" / "deps" / "api_load-8652aba3279d7f40.exe"
-    said = strays.kill(Process(101, exe, 60 * MIN))
+    exe = Path("target") / "debug" / "deps" / f"crash_writer-{HASH}.exe"
+    said = strays.kill(Process(101, 9, exe, 60 * MIN))
     assert said == "SUCCESS: The process with PID 101 (child process of PID 9) has been terminated."
     assert calls == [
-        ["taskkill", "/F", "/T", "/PID", "101", "/FI", "IMAGENAME eq api_load-8652aba3279d7f40.exe"]
+        ["taskkill", "/F", "/T", "/PID", "101", "/FI", f"IMAGENAME eq crash_writer-{HASH}.exe"]
     ]
 
 
@@ -133,9 +156,11 @@ def test_where_processes_cannot_be_listed_the_sweep_says_so(
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="processes are listed on Windows only")
-def test_the_listing_names_each_process_by_executable_and_age() -> None:
+def test_the_listing_names_each_process_by_parent_executable_and_age() -> None:
     processes = strays.list_processes()
     assert processes is not None
-    (me,) = [p for p in processes if p.pid == os.getpid()]
+    by_pid = {p.pid: p for p in processes}
+    me = by_pid[os.getpid()]
     assert me.exe.is_absolute() and me.exe.name.lower().startswith("python")
     assert 0 <= me.age < 86400
+    assert by_pid[me.parent].age >= me.age  # the launcher that started this process lives
