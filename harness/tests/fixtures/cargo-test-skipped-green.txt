@@ -3,7 +3,7 @@
 
 running 1 test
 
-SKIPPED: api_load's latency bound (p99 under 120ms): the machine was loaded, a 1 ms sleep woke 17.1159ms late at p99 (over 10ms) on 8 cores; the p99s are in api-load-1792859543990.json
+SKIPPED: api_load's arrow p99 131.0442ms over its 120ms bound, excused: the machine was loaded, a 1 ms sleep woke 44.8364ms late at p99 (over 30ms) on 8 cores; see api-load-1792859754356.json
 test ten_times_the_live_load_never_waits_on_a_client ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.95s

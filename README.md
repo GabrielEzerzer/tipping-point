@@ -168,9 +168,10 @@ measurements to `harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it long
 default 5 s. It fails if any input takes the live path half the stall timeout or longer; the rates
 achieved are recorded, not asserted, since on a shared machine they measure the CPU the test got.
 The report also holds the cores and how late a 1 ms sleep woke through the load: past a quarter of
-the latency bound at p99 the machine counts as loaded, and the latency bound is skipped with a
-`SKIPPED:` line, which the gate counts in the cargo test summary. The Python round trip (`api_python`) runs the repository's `.venv` Python, or
-`$TP_PYTHON`.
+the latency bound at p99 the machine counts as loaded. The latency bound is checked on every run;
+only on a loaded machine is a p99 over it excused, with a `SKIPPED:` line the gate counts, so a
+skip means the bound was missed under load. The Python round trip (`api_python`) runs the
+repository's `.venv` Python, or `$TP_PYTHON`.
 
 ## Ising simulator
 

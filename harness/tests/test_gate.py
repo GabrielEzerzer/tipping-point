@@ -647,14 +647,15 @@ def test_the_record_keeps_the_last_lines_of_a_long_output(tmp_path, monkeypatch)
 
 
 def test_a_check_a_test_skipped_is_counted_in_the_summary_and_the_record() -> None:
-    # api_load's real output on a loaded machine (2026-10-24, while the threshold was 10 ms): its
-    # latency bound skipped on a line of its own, past libtest's capture of a passing test
+    # api_load's real output on a loaded machine (2026-10-24), a line of its own past libtest's
+    # capture of a passing test; the line is edited into the excuse api_load prints now, for a p99
+    # over the bound under load, since no run here missed the bound
     output = fixture("cargo-test-skipped-green.txt")
     verdict = gate.judge_cargo_test(0, output)
     assert verdict.green, verdict.source
     assert verdict.source == "1 test result lines: 1 passed; 0 failed; 1 skipped"
     (skip,) = gate.cargo_test_evidence(output)["skipped"]
-    assert skip.startswith("tests\\api_load.rs: SKIPPED: api_load's latency bound")
+    assert skip.startswith("tests\\api_load.rs: SKIPPED: api_load's arrow p99 131.0442ms over its")
 
 
 def test_only_a_line_that_starts_with_skipped_counts() -> None:
