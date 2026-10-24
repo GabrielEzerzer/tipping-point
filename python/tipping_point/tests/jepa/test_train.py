@@ -23,6 +23,7 @@ from tipping_point.jepa import data, extract, lattice, train
 from tipping_point.jepa.lattice import Jepa, unpack
 
 SHORT = jepa_toy.config(steps=12, checkpoint_every=4, monitor_every=4, pca_frames=128)
+V1 = Path(__file__).resolve().parents[4] / "paper" / "prereg" / "ising-ews-v1.toml"
 
 
 @pytest.fixture(scope="module")
@@ -145,11 +146,34 @@ def test_the_manifest_names_its_data_code_seeds_and_pilot(ising: jepa_ising.Isin
     assert manifest["data"]["refused_seeds"] == [1, 2, 3, 4, 5]
     assert set(manifest["params"]["seeds"]) == set(train.STREAMS)
     assert train.Config.from_json(manifest["params"]["config"]) == jepa_ising.CONFIG
-    pilot = hashlib.sha256(jepa_ising.PILOT.read_bytes()).hexdigest()
-    assert manifest["pilot"]["sha256"] == pilot and manifest["prereg"] is None
+    record = json.loads(jepa_ising.PILOT.read_text("utf-8"))
+    assert manifest["pilot"] == {  # #94: the record's run id, never its path on this machine
+        "run_id": "fixtures",
+        "sha256": hashlib.sha256(jepa_ising.PILOT.read_bytes()).hexdigest(),
+        "kernel_commit": record["kernel_commit"],
+        "L": [16, 32, 64],
+    }
+    assert manifest["prereg"] is None
     assert "git_sha" in manifest["producer"] and "dirty" in manifest["producer"]
     assert manifest["env"]["use_deterministic_algorithms"] and manifest["env"]["amp"] is None
     assert manifest["params"]["receptive_field"] == 14
+
+
+def test_records_a_training_names_carry_no_local_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#94: the pilot record went into the training manifest as typed on the command line, an
+    absolute path with the account name in it, into a run folder that is uploaded (Kaggle, a
+    second developer). The pilot record is named by its run id, the folder it sits in, however
+    its path was typed; the pre-registration by its id and version, sha256 pinning both."""
+    absolute = train.pilot_record(jepa_ising.PILOT)
+    monkeypatch.chdir(jepa_ising.PILOT.parent)
+    assert train.pilot_record(Path(jepa_ising.PILOT.name)) == absolute
+    assert absolute["run_id"] == "fixtures" and "path" not in absolute
+    assert train.prereg_record(V1) == {
+        "id": "ising-ews",
+        "version": 1,
+        "sha256": hashlib.sha256(V1.read_bytes()).hexdigest(),
+        "seeds": [1, 2, 3, 4, 5],
+    }
 
 
 def test_trainings_and_latents_take_their_commit_from_the_one_helper(

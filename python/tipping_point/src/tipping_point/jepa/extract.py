@@ -89,9 +89,9 @@ def _manifest(out: Path, run: Run, ckpt: Checkpoint, device: torch.device) -> di
     assert ckpt.pca is not None
     root = run.path.parents[1]
     try:
-        where = ckpt.path.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError:
-        where = str(ckpt.path)
+        where: str | None = ckpt.path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:  # outside the data dir: its sha256 names it, never a local path (#94)
+        where = None
     hidden, _ = evaluation_masks(ckpt.config, run.L)
     return {
         "format": 1,

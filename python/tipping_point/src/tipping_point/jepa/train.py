@@ -257,18 +257,21 @@ def load_model(path: Path, device: str | torch.device = "cpu") -> Checkpoint:
 
 
 def pilot_record(path: Path) -> dict[str, Any]:
-    """The #50 pilot record a training names: its path, sha256 and kernel commit."""
+    """The #50 pilot record a training names: its run id (the folder it sits in, never a local
+    path: manifests travel, #94), sha256, kernel commit and the sizes it measured."""
     raw = Path(path).read_bytes()
     try:
         record = json.loads(raw)
         commit, measured = record["kernel_commit"], sorted(int(L) for L in record["per_L"])
     except (ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{path}: not a pilot record ({exc!r})") from exc
-    return {"path": str(path), "sha256": sha256(raw), "kernel_commit": commit, "L": measured}
+    run_id = Path(path).resolve().parent.name  # resolved: a bare "pilot.json" has a folder too
+    return {"run_id": run_id, "sha256": sha256(raw), "kernel_commit": commit, "L": measured}
 
 
 def prereg_record(path: Path) -> dict[str, Any]:
-    """A pre-registration a training names: id, version, sha256 and the seeds it scores."""
+    """A pre-registration a training names: id, version, sha256 and the seeds it scores; id and
+    version name its file and sha256 pins it, so no local path is kept (#94)."""
     raw = Path(path).read_bytes()
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
@@ -276,9 +279,7 @@ def prereg_record(path: Path) -> dict[str, Any]:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, ValueError) as exc:
         raise ValueError(f"{path}: not a pre-registration ({exc!r})") from exc
     scored = [int(s) for s in doc.get("data", {}).get("seeds", [])]
-    return {"path": str(path), "id": prereg_id, "version": version, "sha256": sha256(raw)} | {
-        "seeds": scored
-    }
+    return {"id": prereg_id, "version": version, "sha256": sha256(raw), "seeds": scored}
 
 
 def append_line(path: Path, record: dict[str, Any]) -> None:

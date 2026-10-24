@@ -62,6 +62,26 @@ def test_the_manifest_names_the_checkpoint_and_the_dataset_by_sha256(
     assert train.verify(ramp_latents) == []
 
 
+def test_a_checkpoint_outside_the_data_dir_is_named_by_its_sha256(
+    tmp_path: Path, ising: jepa_ising.Ising
+) -> None:
+    """#94: a checkpoint outside the data dir (a training downloaded from Kaggle, say) went into
+    the latents manifest as its full local path, account name included. It is named by its
+    sha256, run id and step alone; inside the data dir, by its path relative to it."""
+    elsewhere = shutil.copytree(ising.training, tmp_path / "downloads" / ising.training.name)
+    ckpt = train.load_model(elsewhere / train.FINAL)
+    manifest = extract._manifest(
+        tmp_path / "out", ews_ising.open_run(ising.runs["ramp"]), ckpt, torch.device("cpu")
+    )
+    assert manifest["params"]["checkpoint"] == {
+        "path": None,
+        "sha256": _sha256(ising.training / train.FINAL),
+        "run_id": ising.training.name,
+        "step": jepa_ising.CONFIG.steps,
+        "untrained": False,
+    }
+
+
 def test_latents_keep_the_configs_contract_the_scorer_reads(
     ising: jepa_ising.Ising, ramp_latents: Path
 ) -> None:
