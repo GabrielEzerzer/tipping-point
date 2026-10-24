@@ -3,7 +3,7 @@
 //!
 //! | route | what |
 //! |---|---|
-//! | `GET /v1/health` | JSON: alive, protocol version, whether the live feed has started, the run each venue records |
+//! | `GET /v1/health` | JSON: alive, protocol version, whether the live feed has started, the run each venue records, and `errors` (samples that could not be made, live feeds refused because their venue had one) |
 //! | `GET /v1/runs` | JSON: every recorded run in the data dir, by domain, a market run with its venue |
 //! | `GET /v1/live/book_samples` | Arrow stream: live book samples, each batch one or more whole 100 ms instants (one per batch live); `?backfill_s=` starts with that much of the recent past, `?run=&speed=` replays a recorded run instead |
 //! | `GET /v1/table/{domain}/{run}/{table}` | Arrow stream: any table of a market or Ising run, `?start=&end=` a range of its key, through `DuckDB`, in the stored schema |
@@ -35,6 +35,7 @@ use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -274,6 +275,7 @@ async fn health(State(api): State<Arc<Api>>) -> Json<Value> {
         "engine": crate::version(),
         "source": state,
         "runs": runs,
+        "errors": api.hub.counters.errors.load(Ordering::Relaxed),
     }))
 }
 
@@ -556,5 +558,33 @@ mod tests {
             (site, "cross-site"),
         ];
         assert_eq!(api.refuse(&headers(&app)), None, "the app's own fetch");
+    }
+
+    /// What `GET /v1/health` answers, through the router.
+    async fn get_health(api: &Arc<Api>) -> Result<Value, Box<dyn std::error::Error>> {
+        let request = axum::http::Request::get("/v1/health")
+            .header(header::HOST, "127.0.0.1:9")
+            .body(Body::empty())?;
+        let response = router(Arc::clone(api)).oneshot(request).await?;
+        let body = axum::body::to_bytes(response.into_body(), MAX_PUBLISH).await?;
+        Ok(serde_json::from_slice(&body)?)
+    }
+
+    /// A second live feed for a venue publishes nothing, so `/v1/health` counts it among its
+    /// errors, where before the server looked healthy (#95).
+    #[tokio::test]
+    async fn a_refused_second_feed_shows_in_health() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::market::feed::Feed;
+        use crate::market::live::Observer;
+
+        let api = Arc::new(api());
+        let feed = Feed::new(Venue::BinanceUsdm, std::collections::BTreeMap::new());
+        hub::LiveTap::new(Arc::clone(&api.hub)).started(&feed, Some("first"));
+        assert_eq!(get_health(&api).await?["errors"], 0);
+        hub::LiveTap::new(Arc::clone(&api.hub)).started(&feed, Some("second"));
+        let health = get_health(&api).await?;
+        assert_eq!(health["errors"], 1, "{health}");
+        assert_eq!(health["runs"]["binance-usdm"], "first", "{health}");
+        Ok(())
     }
 }
