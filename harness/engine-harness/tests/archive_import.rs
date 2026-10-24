@@ -288,6 +288,11 @@ fn a_bybit_book_day_round_trips_into_parquet() -> Outcome {
     );
     assert_eq!((check.resyncs, check.errors, check.crossed), (1, 0, 0));
     assert_eq!(
+        check.unsynced_samples,
+        u64::try_from(unsynced)?,
+        "the import counts the rows the gap left unsynced"
+    );
+    assert_eq!(
         (check.first_ts_ns, check.last_ts_ns),
         (Some(first), Some(last))
     );
@@ -391,6 +396,7 @@ fn a_binance_trades_day_round_trips_into_parquet() -> Outcome {
         (24, 1, Some(1), None)
     );
     assert_eq!((check.errors, check.resyncs, check.outside_day), (0, 0, 0));
+    assert_eq!(check.unsynced_samples, 0, "no book samples in a trades run");
     let manifest: Manifest = run::read_json(&run_dir.join(run::MANIFEST))?;
     assert_eq!(manifest.params.venue, Venue::BinanceUsdm);
     assert_eq!(manifest.params.streams, vec!["aggTrade".to_owned()]);
@@ -562,6 +568,14 @@ fn local_archive_days_import_cleanly() -> Outcome {
         let check = &imported.integrity;
         println!("{}: {:?} {check:?}", path.display(), imported.rows);
         assert_eq!((check.errors, check.crossed), (0, 0), "{}", path.display());
+        // A real day keeps its book: no lost message, no resync, and so no instant without a
+        // trustworthy book, which would otherwise import as hours of null rows.
+        assert_eq!(
+            (check.id_gaps, check.resyncs, check.unsynced_samples),
+            (0, 0, 0),
+            "{}",
+            path.display()
+        );
         // A Bybit day runs on to its next snapshot, half a second past midnight: those few
         // records are the next file's first and are counted, not refused. The day itself is
         // whole: its last record is at most a second past midnight.

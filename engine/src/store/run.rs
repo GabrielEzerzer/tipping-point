@@ -261,6 +261,11 @@ pub struct Integrity {
     pub crossed: u64,
     /// Book-sample instants left unsampled across exchange-clock jumps of over a day.
     pub skipped_samples: u64,
+    /// Book-sample rows written while their book was not synced: instants with no trustworthy
+    /// book, before the first snapshot or after a gap until the next one. A day that lost one
+    /// message and never got a snapshot again shows here, not as an error.
+    #[serde(default)]
+    pub unsynced_samples: u64,
 }
 
 /// The venue of every run recorded before manifests said which venue they were.

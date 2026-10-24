@@ -264,6 +264,7 @@ fn merge(scanned: &Integrity, piped: &Integrity) -> Integrity {
         resyncs: piped.resyncs,
         crossed: piped.crossed,
         skipped_samples: piped.skipped_samples,
+        unsynced_samples: piped.unsynced_samples,
         ..scanned.clone()
     }
 }
@@ -402,6 +403,7 @@ fn ingest(
     }
     let mut written = Vec::new();
     out.finish(&mut written)?;
+    let unsynced_samples = ingest.unsynced;
     let (replayed, skipped_samples) = ingest.finish()?;
     let stats = replayed.pipeline.feed().stats();
     let integrity = Integrity {
@@ -409,6 +411,7 @@ fn ingest(
         resyncs: stats.resyncs,
         crossed: stats.crossed,
         skipped_samples,
+        unsynced_samples,
         ..Integrity::default()
     };
     Ok((written, seq, integrity))

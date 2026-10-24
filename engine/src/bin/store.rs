@@ -175,7 +175,7 @@ fn run(command: &Command) -> Result<(), Box<dyn std::error::Error>> {
             println!("{}: {}", imported.run_dir.display(), rows.join(" "));
             let check = &imported.integrity;
             println!(
-                "records={} outside_day={} id_gaps={} trade_id_gaps={} snapshots={} errors={} resyncs={} crossed={}",
+                "records={} outside_day={} id_gaps={} trade_id_gaps={} snapshots={} errors={} resyncs={} crossed={} unsynced_samples={}",
                 check.records,
                 check.outside_day,
                 check.id_gaps,
@@ -187,7 +187,8 @@ fn run(command: &Command) -> Result<(), Box<dyn std::error::Error>> {
                     .map_or_else(|| "-".to_owned(), |n| n.to_string()),
                 check.errors,
                 check.resyncs,
-                check.crossed
+                check.crossed,
+                check.unsynced_samples
             );
         }
     }

@@ -153,6 +153,8 @@ pub(super) struct Ingest {
     scales: BTreeMap<Symbol, Scales>,
     /// Depth, trade and snapshot frames that gave no rows because they did not parse or convert.
     pub(super) unparsed: u64,
+    /// Book-sample rows written while their book was not synced.
+    pub(super) unsynced: u64,
 }
 
 impl Ingest {
@@ -165,6 +167,7 @@ impl Ingest {
             venue,
             scales,
             unparsed: 0,
+            unsynced: 0,
         }
     }
 
@@ -203,6 +206,8 @@ impl Ingest {
                     let sample = Sample::of_feed(pipeline.feed(), t, seq, self.sampler.levels())?;
                     if tables.samples.enabled {
                         tables.samples.rows.push(&sample);
+                        let unsynced = sample.rows.iter().filter(|row| !row.synced).count();
+                        self.unsynced += unsynced as u64;
                     }
                 }
             }

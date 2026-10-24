@@ -73,7 +73,8 @@ SHA-256 (checked against Binance's `.CHECKSUM` when one sits beside it). An arch
 the exchange's clock (`clock: exchange`), so join it to live runs on exchange time, never on
 capture time. Its scales come from a pre-scan of the file, not from today's exchange info, and
 `complete.json` keeps the integrity checks: records, gaps in the venue's id chain, snapshots,
-times outside the day, and what the pipeline made of them. Re-running is safe; another archive
+times outside the day, and what the pipeline made of them, down to the book-sample rows written
+while the book was not synced. Re-running is safe; another archive
 for the same run is refused. Binance's archives are CC BY-NC-SA 4.0: anything derived from them
 and published carries that licence and the "Binance Vision" attribution.
 
