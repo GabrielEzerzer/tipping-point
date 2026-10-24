@@ -107,6 +107,11 @@ engine-harness --test archive_import local_archive_days`). The committed tests u
 
 DuckDB is linked from its prebuilt library, which the build downloads once per target dir
 (`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network. On
+Windows the build accepts only the archive whose SHA-256 is pinned in
+`engine/build/duckdb_archive.rs` (x64's; Windows on Arm fails until its archive is pinned too)
+and fails on any other: libduckdb-sys checks no hash, and a GitHub release's assets can be
+replaced under the same tag (#66). A DuckDB bump changes that pin in the same commit as the
+`duckdb` and `libduckdb-sys` pins, taking the new release asset's digest from GitHub. On
 Windows the build also copies `duckdb.dll` next to the binaries (`target/<profile>/`,
 `engine/build.rs`), so `store.exe` and `serve.exe` start from any shell, not only under cargo;
 a binary copied elsewhere needs that DLL beside it. Linux and macOS binaries find the library

@@ -28,6 +28,10 @@ tokio-tungstenite.workspace = true
 tower.workspace = true
 zip.workspace = true
 
+[build-dependencies]
+# The build script checks the downloaded DuckDB archive against its pinned SHA-256 (#66).
+sha2.workspace = true
+
 [dev-dependencies]
 proptest = "1.12.0"
 tokio = { workspace = true, features = ["test-util"] }
