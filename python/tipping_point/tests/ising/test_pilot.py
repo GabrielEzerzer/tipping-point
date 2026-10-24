@@ -168,3 +168,18 @@ def test_a_record_of_another_kernel_is_refused_unless_allowed(
     assert pilot.read(path, allow_stale=True) == record
     assert why in str(pilot.stale(record))
     assert pilot.stamp(path, record)["stale"] is True
+
+
+def test_the_stamp_names_the_records_folder_however_its_path_was_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches #96: `--pilot pilot.json` typed inside the record's folder has no parent in the
+    path as typed, so an unresolved stamp named the run "" in every manifest that read it."""
+    folder = tmp_path / "20261024T120000Z-tauc-L16-32-64"
+    folder.mkdir()
+    path = Path(shutil.copyfile(FIXTURE, folder / "pilot.json"))
+    record = pilot.read(path)
+    typed_whole = pilot.stamp(path, record)
+    monkeypatch.chdir(folder)
+    assert pilot.stamp(Path("pilot.json"), record) == typed_whole
+    assert typed_whole["run_id"] == folder.name
