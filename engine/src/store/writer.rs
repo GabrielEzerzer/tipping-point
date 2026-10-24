@@ -509,6 +509,7 @@ mod tests {
                 git_sha: None,
                 dirty: None,
             },
+            venue: crate::venue::Venue::BinanceUsdm,
             scales: BTreeMap::new(),
         };
         let writer = LogWriter::start(&dir, meta, LogConfig::default())?;

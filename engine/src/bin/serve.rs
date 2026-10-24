@@ -24,17 +24,17 @@ use std::time::Duration;
 
 use engine::api::hub::{Hub, HubConfig, LiveTap};
 use engine::api::{ApiConfig, DEFAULT_PORT, serve};
-use engine::binance::feed::Feed;
-use engine::binance::live::{
-    DEPTH_STREAM, LiveConfig, Log, Observer, Recording, TRADE_STREAM, handle, run_live, utc_clock,
-};
-use engine::binance::pipeline::Pipeline;
-use engine::binance::recording::{Record, read_records};
+use engine::market::feed::Feed;
+use engine::market::live::{Log, Observer, handle, utc_clock};
+use engine::market::pipeline::Pipeline;
+use engine::market::recording::{Record, read_records};
 use engine::store::frame::Meta;
 use engine::store::rotate::rotate;
-use engine::store::run::{self, BookSample, MarketParams};
+use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams};
 use engine::store::segment::{self, LOG_DIR};
 use engine::store::writer::{LogConfig, LogWriter};
+use engine::venue::Venue;
+use engine::venue::binance::live::{LiveConfig, Recording, run_live};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, sleep_until};
@@ -128,7 +128,20 @@ async fn main() -> ExitCode {
 
 async fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let data_dir = args.data_dir.clone().unwrap_or_else(run::data_dir);
-    let hub = Hub::new(HubConfig::default());
+    // A script is read before anything starts: its venue is the one the hub serves.
+    let script = match &args.script {
+        Some(path) => Some(read_records(BufReader::new(File::open(path)?))?),
+        None => None,
+    };
+    let venue = match script.as_deref() {
+        Some([Record::Scales { venue, .. }, ..]) => *venue,
+        Some(_) => return Err("a script starts with its scales".into()),
+        None => Venue::BinanceUsdm,
+    };
+    let hub = Hub::new(HubConfig {
+        venues: vec![venue],
+        ..HubConfig::default()
+    });
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, args.port)).await?;
     let port = listener.local_addr()?.port();
     let mut config = ApiConfig::new(data_dir.clone());
@@ -161,7 +174,7 @@ async fn run(args: Args) -> Result<(), Box<dyn Error>> {
         .clone()
         .map(|run_dir| tokio::spawn(rotate_closed_segments(run_dir, rotating_stopped)));
 
-    let fed = if let Some(script) = &args.script {
+    let fed = if let Some(script) = script {
         play_script(script, args.speed, recording.as_deref(), &hub).await
     } else {
         let config = LiveConfig {
@@ -217,22 +230,25 @@ async fn run(args: Args) -> Result<(), Box<dyn Error>> {
 
 /// Plays a recorded script through the live path, paced at `speed` times its own clock.
 async fn play_script(
-    path: &Path,
+    records: Vec<Record>,
     speed: f64,
     recording: Option<&Path>,
     hub: &Arc<Hub>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut records = read_records(BufReader::new(File::open(path)?))?.into_iter();
-    let Some(Record::Scales { scales }) = records.next() else {
+    let mut records = records.into_iter();
+    let Some(Record::Scales { venue, scales }) = records.next() else {
         return Err("a script starts with its scales".into());
     };
     let mut log = match recording {
         Some(run_dir) => {
             let params = MarketParams {
+                venue,
                 symbols: scales.keys().cloned().collect(),
                 scales: scales.clone(),
-                streams: vec![DEPTH_STREAM.to_owned(), TRADE_STREAM.to_owned()],
+                streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
                 book_sample: BookSample::default(),
+                clock: Clock::Capture,
+                source: DataSource::Live,
             };
             let manifest = run::create(run_dir, params)?;
             let writer = LogWriter::start(run_dir, Meta::for_run(&manifest), LogConfig::default())?;
@@ -240,7 +256,7 @@ async fn play_script(
         }
         None => Log::unrecorded(),
     };
-    let mut pipeline = Pipeline::new(Feed::new(scales));
+    let mut pipeline = Pipeline::new(Feed::new(venue, scales));
     let mut tap = LiveTap::new(Arc::clone(hub));
     let run_id = recording
         .and_then(Path::file_name)

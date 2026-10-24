@@ -1,5 +1,5 @@
-//! The order-book sync state machine for one symbol: pure, IO-free, fed with snapshots and
-//! depth updates, and answering with what happened.
+//! Binance's order-book sync rule for one symbol: a pure, IO-free state machine, fed with
+//! snapshots and depth updates, and answering with what happened.
 //!
 //! The rules are Binance's USD-M "how to manage a local order book correctly":
 //! 1. buffer depth updates until a snapshot arrives;
@@ -9,73 +9,8 @@
 
 use std::collections::VecDeque;
 
-use super::book::Book;
-
-/// One price level in integer units.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Level {
-    pub price: i64,
-    pub qty: i64,
-}
-
-/// A depth diff in integer units. `first_id`/`last_id`/`prev_last_id` are Binance's `U`/`u`/`pu`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DepthUpdate {
-    pub first_id: u64,
-    pub last_id: u64,
-    pub prev_last_id: u64,
-    pub bids: Vec<Level>,
-    pub asks: Vec<Level>,
-}
-
-/// A REST depth snapshot in integer units.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snapshot {
-    pub last_update_id: u64,
-    pub bids: Vec<Level>,
-    pub asks: Vec<Level>,
-}
-
-/// What the machine did with an input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    /// The book changed (an update applied, or a snapshot installed).
-    Applied,
-    /// Held until a snapshot arrives.
-    Buffered,
-    /// Older than what the book already holds; ignored.
-    DroppedStale,
-    /// The book is no longer trustworthy and was cleared; fetch a fresh snapshot.
-    NeedsResync(ResyncReason),
-}
-
-/// What installing a snapshot did: its own outcome plus the outcome of every buffered update
-/// replayed on top of it, so a caller can count those too.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotOutcome {
-    /// `Applied` when the snapshot is in place (synced, or bridging until the covering update
-    /// arrives), `NeedsResync` when the buffered updates could not be joined to it, and
-    /// `DroppedStale` when the machine was not waiting for a snapshot.
-    pub outcome: Outcome,
-    /// One `(outcome, crossed)` per buffered update, in the order they were replayed; `crossed`
-    /// is whether the book was crossed right after that update.
-    pub drained: Vec<(Outcome, bool)>,
-}
-
-/// Why a resync became necessary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResyncReason {
-    /// An update's `pu` did not match the last applied `u`: something was lost or reordered.
-    SequenceGap { expected: u64, got: u64 },
-    /// The snapshot predates every update we hold, so the gap can never be bridged.
-    SnapshotTooOld { snapshot_id: u64, first_id: u64 },
-    /// The reader dropped frames because the channel was full.
-    Backpressure,
-    /// The socket reconnected, so frames were missed.
-    Reconnect,
-    /// A depth update could not be read, so it was lost and the update chain is broken.
-    BadFrame,
-}
+use crate::market::book::Book;
+use crate::market::sync::{DepthUpdate, Outcome, ResyncReason, Snapshot, SnapshotOutcome};
 
 /// Buffered updates beyond this are the oldest, least useful ones; dropping them at worst makes
 /// the next snapshot look too old, which the machine already handles with a resync.
@@ -237,6 +172,7 @@ impl BookSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market::sync::Level;
 
     fn update(first: u64, last: u64, prev: u64, bid: (i64, i64)) -> DepthUpdate {
         DepthUpdate {

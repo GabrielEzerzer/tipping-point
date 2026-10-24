@@ -4,7 +4,18 @@
 //! a `PATH` of system folders only, so it can load `DuckDB` only from beside itself (#52).
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
+
+/// A child killed and reaped when the test ends, however it ends short of the runner itself
+/// being killed (`serve` is also started with `--seconds`, so it never runs on for long).
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 /// Runs `exe` with `args` and an environment holding only what any process needs.
 fn run_bare(exe: &str, args: &[&str]) -> Output {
@@ -68,8 +79,8 @@ fn serve_plays_a_script_records_it_and_serves_its_tables() -> Result<(), Box<dyn
             command.env(name, value);
         }
     }
-    let mut child = command.spawn()?;
-    let mut lines = BufReader::new(child.stdout.take().ok_or("stdout")?).lines();
+    let mut child = KillOnDrop(command.spawn()?);
+    let mut lines = BufReader::new(child.0.stdout.take().ok_or("stdout")?).lines();
     let ready = lines.next().ok_or("serve printed nothing")??;
     let port: u16 = ready
         .strip_prefix("serve listening on http://127.0.0.1:")
@@ -111,8 +122,8 @@ fn serve_plays_a_script_records_it_and_serves_its_tables() -> Result<(), Box<dyn
             .any(|w| w == [0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]),
         "the stream ends with Arrow's end marker"
     );
-    child.kill()?;
-    child.wait()?;
+    child.0.kill()?;
+    child.0.wait()?;
     let _ = std::fs::remove_dir_all(&data);
     Ok(())
 }

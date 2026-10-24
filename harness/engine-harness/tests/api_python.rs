@@ -17,9 +17,10 @@ use engine::api::hub::{Hub, HubConfig};
 use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
 use engine::store::writer::LogConfig;
+use engine_harness::KillOnDrop;
 use engine_harness::api::{
-    ISING_RUN, LivePath, Outcome, Server, copy_ising_fixture, fixture, hello, next_json, python,
-    script, send_json, ws_connect,
+    ISING_RUN, LivePath, Outcome, Script, Server, copy_ising_fixture, fixture, hello, next_json,
+    python, script, send_json, ws_connect,
 };
 use serde_json::json;
 
@@ -29,13 +30,14 @@ fn client() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api_client.py")
 }
 
-/// Starts the client with `args`.
-fn spawn(args: &[&str]) -> std::io::Result<std::process::Child> {
+/// Starts the client with `args`, killed if the test ends first.
+fn spawn(args: &[&str]) -> std::io::Result<KillOnDrop> {
     Command::new(python())
         .arg(client())
         .args(args)
         .env("PYTHONUTF8", "1")
         .spawn()
+        .map(KillOnDrop)
 }
 
 /// Waits for a child without blocking the runtime, at most `limit`.
@@ -60,13 +62,17 @@ async fn the_python_client_reads_every_stream_and_publishes_back() -> Outcome {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
     copy_ising_fixture(&dir)?;
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig::default());
     let small = LogConfig {
         max_segment_bytes: 2048,
         ..LogConfig::default()
     };
-    let mut live = LivePath::new(scales, Arc::clone(&hub), &dir, Some(RUN), small)?;
+    let mut live = LivePath::new(venue, scales, Arc::clone(&hub), &dir, Some(RUN), small)?;
     let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
     let url = server.url("");
 
@@ -138,6 +144,7 @@ async fn the_python_client_reads_every_stream_and_publishes_back() -> Outcome {
         }
     };
     assert_eq!(meter["data"]["from"], "python");
+    assert_eq!(meter["data"]["venue"], "binance-usdm");
     assert_eq!(meter["data"]["symbol"], "BTCUSDT");
     server.stop().await;
     fs::remove_dir_all(&dir)?;
@@ -152,9 +159,14 @@ async fn a_stream_cut_by_a_producer_panic_raises_in_python() -> Outcome {
         .join(format!("api-python-cut-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig::default());
     let mut live = LivePath::new(
+        venue,
         scales,
         Arc::clone(&hub),
         &dir,

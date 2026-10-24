@@ -31,13 +31,19 @@ On a laptop, run one heavy job at a time: a cargo build, `cargo test` or the gat
 session or a by-hand `store rotate`, a simulator run, a training. They share the same cores, so
 two at once each run slower, and a recording's live loop can fall behind the feed.
 
-## Binance ingest
+## Venues and the live feed
 
-`engine/src/binance/` keeps a correct local order book for BTCUSDT and ETHUSDT from the USD-M
-depth stream (snapshot plus diffs, sequence-gap detection, resync, backpressure) and reads aggTrades.
-The sync logic is a pure state machine (`sync.rs`) behind a multi-symbol `feed.rs`, and
-`pipeline.rs` holds the one copy of how the engine reacts to every input; the network layer
-(`ws.rs`, `rest.rs`, `live.rs`) is thin around it.
+`engine/src/market/` is the market-data core every venue shares: integer-unit order books, a
+multi-symbol `feed.rs` that turns a venue's raw frames into book updates, and `pipeline.rs`, the
+one copy of how the engine reacts to every input; the network layer (`ws.rs`, `live.rs`) is thin
+around it. What differs between venues (wire format, sync rule, scales, endpoints) lives in
+`engine/src/venue/`, reached by matching on `enum Venue`. `venue/binance/` keeps a correct local
+order book for BTCUSDT and ETHUSDT from the USD-M depth stream (REST snapshot plus diffs,
+sequence-gap detection, resync, backpressure) and reads aggTrades; its sync rule is a pure state
+machine (`sync.rs`). `venue/bybit/` reads Bybit's linear order book, which comes in band (a
+snapshot, then deltas whose update id runs on by one; a skipped id drops the book until the next
+snapshot); it has no live loop yet and is read from Bybit's archive. One run holds one venue, and
+one `serve` hub takes several venues' loops at once.
 
 ```sh
 cargo run --release -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
@@ -54,7 +60,7 @@ dropped under backpressure, failed snapshots) — to an append-only binary log: 
 payload, CRC-32C, one `write_all` per frame, `sync_data` every second, a new segment every UTC hour
 or 1 GiB. A crash can only tear the tail; recovery cuts it back to the last good frame and refuses
 damage in the middle. An offline step rotates closed segments into Parquet (`frames`,
-`depth_updates`, `agg_trades`, `snapshots`, `book_samples`), and DuckDB queries and replays it
+`depth_updates`, `trades`, `snapshots`, `book_samples`), and DuckDB queries and replays it
 through the same pipeline the live loop runs.
 
 Runs live in `<data dir>/market/<run_id>/` (`manifest.json`, `log/`, one Parquet file per table per
@@ -69,6 +75,35 @@ cargo run --release -p engine --bin store -- recover <run dir>              # af
 cargo run --release -p engine --bin store -- rotate <run dir>               # closed segments → Parquet (safe to re-run)
 cargo run --release -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the books from the log or the Parquet
 ```
+
+### Historical archives
+
+`store import` turns one downloaded archive day into a run: Bybit's free linear order-book
+archive (`<yyyy-mm-dd>_<SYMBOL>_ob200.data.zip`: 200 levels every 100 ms, 500 before 2025-08-21;
+the source of book features) or Binance's USD-M aggregated trades
+(`<SYMBOL>-aggTrades-<yyyy-mm-dd>.zip`: the source of labels). Each record goes through its
+venue's adapter as the frame the live stream would have carried, into the same pipeline and
+sampler the live loop and rotate run, and out as Parquet in
+`<data dir>/market/<yyyymmdd>T000000Z-<venue>-<symbol>/`: book samples for a book and trades for
+trades by default, `--tables` for more (`frames`, `depth_updates`, `snapshots`). There is no
+binary log: the downloaded file is the lossless copy, named in the manifest with its URL, size and
+SHA-256 (checked against Binance's `.CHECKSUM` when one sits beside it). An archive run runs on
+the exchange's clock (`clock: exchange`), so join it to live runs on exchange time, never on
+capture time. Its scales come from a pre-scan of the file, not from today's exchange info, and
+`complete.json` keeps the integrity checks: records, gaps in the venue's id chain, snapshots,
+times outside the day, and what the pipeline made of them, down to the book-sample rows written
+while the book was not synced. Re-running is safe; another archive
+for the same run is refused. Binance's archives are CC BY-NC-SA 4.0: anything derived from them
+and published carries that licence and the "Binance Vision" attribution.
+
+```sh
+cargo run --release -p engine --bin store -- import <archive> [--data-dir DIR] [--tables T,...]
+```
+
+Downloaded days stay local (`harness/fixtures/archives/`, gitignored); with `TP_ARCHIVE_DAYS`
+set, the import tests import every day found there (`TP_ARCHIVE_DAYS=1 cargo test --release -p
+engine-harness --test archive_import local_archive_days`). The committed tests use tiny synthetic archives in each venue's format
+(`engine/tests/fixtures/archives/`, made by `harness/engine-harness/tests/make_archive_fixtures.py`).
 
 DuckDB is linked from its prebuilt library, which the build downloads once per target dir
 (`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network. On
@@ -98,12 +133,12 @@ cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --
 
 | route | what |
 |---|---|
-| `GET /v1/health` | alive, protocol version, whether the live feed has started or ended |
-| `GET /v1/runs` | every run in the data dir, by domain |
+| `GET /v1/health` | alive, protocol version, whether the live feed has started or ended, the run each venue records |
+| `GET /v1/runs` | every run in the data dir, by domain, a market run with its venue |
 | `GET /v1/live/book_samples` | Arrow IPC stream: live book samples, each batch one or more whole 100 ms instants (one per batch live; a backfill or an unpaced replay sends several); `?backfill_s=` first replays that much of the recent past from memory (no gap, no overlap), `?run=&speed=` replays a recorded run instead |
 | `GET /v1/table/{domain}/{run}/{table}` | Arrow IPC stream: any table of a market or Ising run, `?start=&end=` a range of its key, read through DuckDB and cast back to the schema stored in the Parquet footer |
 | `POST /v1/publish/{topic}` | a JSON result (`meters`, `jev`, `pnl`, `ising`) relayed to the app |
-| `GET /v1/ws` | the app's WebSocket: JSON `book` (top 20 per symbol), `trades`, `status`, and the relayed topics; replay and seek of recorded runs; binary frames carry only Ising lattices |
+| `GET /v1/ws` | the app's WebSocket (protocol 2): JSON `book` (top 20 per venue and symbol), `trades`, `status` (per venue), and the relayed topics; replay and seek of recorded runs; binary frames carry only Ising lattices |
 
 - **Live samples come from rotate's own sampler** (`store/samples.rs`), each row carrying the log
   seq of the last frame applied, which the live loop now assigns: the live stream equals the
@@ -114,6 +149,10 @@ cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --
   lossless or cut, its response aborted so a reader never takes it for a short table.
 - **Times on the wire are milliseconds** (`ts_ms`), prices and quantities integer ticks and lots at
   the scales sent in `welcome`; storage keeps nanoseconds.
+- **Venues:** two venues can share a symbol (Binance and Bybit both say `BTCUSDT`), so every
+  message, table row and Arrow stream that names a symbol names its `venue` too; trade ids are
+  strings (Bybit's are UUIDs). A market stream's `tp.runs` and `tp.scales` are keyed by venue; the
+  market tables keyed by venue are at schema major 2.
 - **Checks on every request:** `Host` must name the server (stops DNS rebinding) and a browser's
   `Origin` must be on the allowlist (the Tauri webview, the Vite dev server, `--allow-origin`).
 - **Replay and scrub:** rotated hours come from Parquet through DuckDB, the hour not yet rotated

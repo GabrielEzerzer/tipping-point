@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engine::store::frame::Kind;
 use engine::store::segment::{self, Ending, LOG_DIR, SegmentReader, recover_run};
-use engine_harness::crash_payload;
+use engine_harness::{KillOnDrop, crash_payload};
 
 #[test]
 fn a_killed_writer_loses_no_good_frame_once_recovered() -> Result<(), Box<dyn Error>> {
@@ -34,11 +34,16 @@ fn a_killed_writer_loses_no_good_frame_once_recovered() -> Result<(), Box<dyn Er
         let run_dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("crash-{}-{round}", std::process::id()));
         let _ = fs::remove_dir_all(&run_dir);
-        let mut child = Command::new(env!("CARGO_BIN_EXE_crash-writer"))
-            .arg(&run_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        // Killed on drop if this round fails early; its stdin closes with this process, which
+        // ends the writer even if the whole test runner is killed.
+        let mut child = KillOnDrop(
+            Command::new(env!("CARGO_BIN_EXE_crash-writer"))
+                .arg(&run_dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+        );
         // Time the kill from when the writer has its log open, not from the spawn: a slow
         // start (a scan of a fresh binary, a loaded machine) must not eat the random delay.
         let started = Instant::now();

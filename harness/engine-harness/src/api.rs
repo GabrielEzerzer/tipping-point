@@ -17,14 +17,16 @@ use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::StreamReader;
 use engine::api::hub::{Hub, LiveTap};
 use engine::api::{ApiConfig, serve};
-use engine::binance::feed::Feed;
-use engine::binance::live::{LiveEvent, Log, Observer, handle};
-use engine::binance::pipeline::{Message, Pipeline};
-use engine::binance::recording::{Record, read_records};
-use engine::binance::{Scales, Symbol};
+use engine::market::feed::Feed;
+use engine::market::live::{LiveEvent, Log, Observer, handle};
+use engine::market::pipeline::{Message, Pipeline};
+use engine::market::recording::{Record, read_records};
+use engine::market::ws::Inbound;
+use engine::market::{Scales, Symbol};
 use engine::store::frame::Meta;
-use engine::store::run::{self, BookSample, MarketParams};
+use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams};
 use engine::store::writer::{Entry, LogConfig, LogWriter, Summary};
+use engine::venue::Venue;
 use futures_util::{SinkExt, StreamExt};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::Value;
@@ -156,12 +158,13 @@ pub struct LivePath {
 }
 
 impl LivePath {
-    /// A path recording to `data_dir/market/<run_id>` (small segments by `log`), or recording
-    /// nothing when `run_id` is `None`.
+    /// A path for `venue`'s streams recording to `data_dir/market/<run_id>` (small segments by
+    /// `log`), or recording nothing when `run_id` is `None`.
     ///
     /// # Errors
     /// Returns the error from creating the run or starting its log.
     pub fn new(
+        venue: Venue,
         scales: BTreeMap<Symbol, Scales>,
         hub: Arc<Hub>,
         data_dir: &Path,
@@ -172,10 +175,13 @@ impl LivePath {
             Some(run_id) => {
                 let run_dir = data_dir.join(run::MARKET).join(run_id);
                 let params = MarketParams {
+                    venue,
                     symbols: scales.keys().cloned().collect(),
                     scales: scales.clone(),
-                    streams: vec!["depth@100ms".to_owned(), "aggTrade".to_owned()],
+                    streams: venue.streams().iter().map(|&s| s.to_owned()).collect(),
                     book_sample: BookSample::default(),
+                    clock: Clock::Capture,
+                    source: DataSource::Live,
                 };
                 let manifest = run::create(&run_dir, params)?;
                 let writer = LogWriter::start(&run_dir, Meta::for_run(&manifest), log)?;
@@ -183,7 +189,7 @@ impl LivePath {
             }
             None => (Log::unrecorded(), None),
         };
-        let pipeline = Pipeline::new(Feed::new(scales));
+        let pipeline = Pipeline::new(Feed::new(venue, scales));
         let mut observer = Watched {
             tap: LiveTap::new(hub),
             inputs: Vec::new(),
@@ -226,19 +232,67 @@ impl LivePath {
     }
 }
 
-/// A script's scales and its messages.
+/// A script: its venue, its scales and its messages.
+#[derive(Debug)]
+pub struct Script {
+    pub venue: Venue,
+    pub scales: BTreeMap<Symbol, Scales>,
+    pub messages: Vec<Message>,
+}
+
+/// When a live-loop message was captured; a failed connection attempt carries no time.
+#[must_use]
+pub fn captured(message: &Message) -> i64 {
+    match message {
+        Message::Socket { inbound, .. } => match inbound {
+            Inbound::Connected { capture_ns, .. }
+            | Inbound::Text { capture_ns, .. }
+            | Inbound::Disconnected { capture_ns, .. } => *capture_ns,
+            Inbound::ConnectFailed { .. } => i64::MIN,
+        },
+        Message::Snapshot { capture_ns, .. } => *capture_ns,
+    }
+}
+
+/// Two venues' messages as their loops would meet them: in capture order, each script's own order
+/// kept, `first`'s message first on a tie. Each comes with 0 (from `first`) or 1 (from `second`).
+#[must_use]
+pub fn merged(first: Vec<Message>, second: Vec<Message>) -> Vec<(usize, Message)> {
+    let (mut first, mut second) = (first.into_iter().peekable(), second.into_iter().peekable());
+    let mut out = Vec::new();
+    loop {
+        let take_first = match (first.peek(), second.peek()) {
+            (Some(a), Some(b)) => captured(a) <= captured(b),
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return out,
+        };
+        let next = if take_first {
+            first.next().map(|message| (0, message))
+        } else {
+            second.next().map(|message| (1, message))
+        };
+        out.extend(next);
+    }
+}
+
+/// Reads a script.
 ///
 /// # Errors
 /// Returns the error from reading the script.
-pub fn script(path: &Path) -> Outcome<(BTreeMap<Symbol, Scales>, Vec<Message>)> {
+pub fn script(path: &Path) -> Outcome<Script> {
     let mut records = read_records(BufReader::new(File::open(path)?))?.into_iter();
-    let Some(Record::Scales { scales }) = records.next() else {
+    let Some(Record::Scales { venue, scales }) = records.next() else {
         return Err("a script starts with its scales".into());
     };
     let messages = records
         .map(|record| record.into_message().ok_or("scales only on the first line"))
         .collect::<Result<_, _>>()?;
-    Ok((scales, messages))
+    Ok(Script {
+        venue,
+        scales,
+        messages,
+    })
 }
 
 /// Reads a whole Arrow IPC stream from the engine: the schema and every batch. An aborted
@@ -383,7 +437,8 @@ pub async fn next_json(socket: &mut Socket, wait: Duration) -> Outcome<Value> {
 /// # Errors
 /// Returns what came instead.
 pub async fn hello(socket: &mut Socket) -> Outcome<Value> {
-    send_json(socket, &serde_json::json!({"t": "hello", "v": 1})).await?;
+    let v = engine::api::messages::PROTOCOL;
+    send_json(socket, &serde_json::json!({"t": "hello", "v": v})).await?;
     let welcome = next_json(socket, Duration::from_secs(10)).await?;
     if welcome["t"] != "welcome" {
         return Err(format!("wanted welcome, got {welcome}").into());

@@ -105,6 +105,11 @@
         "type": "Int64"
       },
       {
+        "name": "venue",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
         "name": "symbol",
         "nullable": false,
         "type": "Utf8"
@@ -527,74 +532,9 @@
     ],
     "metadata": {
       "tp.domain": "market",
-      "tp.run": "20231114T221320Z-session",
-      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
-      "tp.schema": "book_samples/1"
-    }
-  },
-  "market/agg_trades": {
-    "fields": [
-      {
-        "name": "seq",
-        "nullable": false,
-        "type": "Int64"
-      },
-      {
-        "name": "source_ts_ns",
-        "nullable": false,
-        "type": "Int64"
-      },
-      {
-        "name": "trade_ts_ns",
-        "nullable": false,
-        "type": "Int64"
-      },
-      {
-        "name": "capture_ts_ns",
-        "nullable": false,
-        "type": "Int64"
-      },
-      {
-        "name": "symbol",
-        "nullable": false,
-        "type": "Utf8"
-      },
-      {
-        "name": "agg_trade_id",
-        "nullable": false,
-        "type": "Int64"
-      },
-      {
-        "name": "first_trade_id",
-        "nullable": true,
-        "type": "Int64"
-      },
-      {
-        "name": "last_trade_id",
-        "nullable": true,
-        "type": "Int64"
-      },
-      {
-        "name": "price",
-        "nullable": false,
-        "type": "Int64"
-      },
-      {
-        "name": "qty",
-        "nullable": false,
-        "type": "Int64"
-      },
-      {
-        "name": "buyer_is_maker",
-        "nullable": false,
-        "type": "Boolean"
-      }
-    ],
-    "metadata": {
-      "tp.domain": "market",
-      "tp.run": "20231114T221320Z-session",
-      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
-      "tp.schema": "agg_trades/1"
+      "tp.runs": "{\"binance-usdm\":\"20231114T221320Z-session\",\"bybit-linear\":\"20231114T221320Z-bybit\"}",
+      "tp.scales": "{\"binance-usdm\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}},\"bybit-linear\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":2}}}",
+      "tp.schema": "book_samples/2"
     }
   },
   "market/book_samples": {
@@ -605,6 +545,11 @@
         "type": "Int64"
       },
       {
+        "name": "venue",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
         "name": "symbol",
         "nullable": false,
         "type": "Utf8"
@@ -1027,9 +972,9 @@
     ],
     "metadata": {
       "tp.domain": "market",
-      "tp.run": "20231114T221320Z-session",
-      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
-      "tp.schema": "book_samples/1"
+      "tp.runs": "{\"binance-usdm\":\"20231114T221320Z-session\"}",
+      "tp.scales": "{\"binance-usdm\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}}",
+      "tp.schema": "book_samples/2"
     }
   },
   "market/depth_updates": {
@@ -1046,7 +991,7 @@
       },
       {
         "name": "transaction_ts_ns",
-        "nullable": false,
+        "nullable": true,
         "type": "Int64"
       },
       {
@@ -1055,13 +1000,18 @@
         "type": "Int64"
       },
       {
+        "name": "venue",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
         "name": "symbol",
         "nullable": false,
         "type": "Utf8"
       },
       {
         "name": "first_update_id",
-        "nullable": false,
+        "nullable": true,
         "type": "Int64"
       },
       {
@@ -1071,7 +1021,7 @@
       },
       {
         "name": "prev_last_update_id",
-        "nullable": false,
+        "nullable": true,
         "type": "Int64"
       },
       {
@@ -1097,9 +1047,9 @@
     ],
     "metadata": {
       "tp.domain": "market",
-      "tp.run": "20231114T221320Z-session",
-      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
-      "tp.schema": "depth_updates/1"
+      "tp.runs": "{\"binance-usdm\":\"20231114T221320Z-session\"}",
+      "tp.scales": "{\"binance-usdm\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}}",
+      "tp.schema": "depth_updates/2"
     }
   },
   "market/frames": {
@@ -1132,8 +1082,8 @@
     ],
     "metadata": {
       "tp.domain": "market",
-      "tp.run": "20231114T221320Z-session",
-      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
+      "tp.runs": "{\"binance-usdm\":\"20231114T221320Z-session\"}",
+      "tp.scales": "{\"binance-usdm\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}}",
       "tp.schema": "frames/1"
     }
   },
@@ -1153,6 +1103,11 @@
         "name": "capture_ts_ns",
         "nullable": false,
         "type": "Int64"
+      },
+      {
+        "name": "venue",
+        "nullable": false,
+        "type": "Utf8"
       },
       {
         "name": "symbol",
@@ -1187,9 +1142,79 @@
     ],
     "metadata": {
       "tp.domain": "market",
-      "tp.run": "20231114T221320Z-session",
-      "tp.scales": "{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}",
-      "tp.schema": "snapshots/1"
+      "tp.runs": "{\"binance-usdm\":\"20231114T221320Z-session\"}",
+      "tp.scales": "{\"binance-usdm\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}}",
+      "tp.schema": "snapshots/2"
+    }
+  },
+  "market/trades": {
+    "fields": [
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "source_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "trade_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "capture_ts_ns",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "venue",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
+        "name": "symbol",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
+        "name": "trade_id",
+        "nullable": false,
+        "type": "Utf8"
+      },
+      {
+        "name": "first_trade_id",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "last_trade_id",
+        "nullable": true,
+        "type": "Int64"
+      },
+      {
+        "name": "price",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "qty",
+        "nullable": false,
+        "type": "Int64"
+      },
+      {
+        "name": "buyer_is_maker",
+        "nullable": false,
+        "type": "Boolean"
+      }
+    ],
+    "metadata": {
+      "tp.domain": "market",
+      "tp.runs": "{\"binance-usdm\":\"20231114T221320Z-session\"}",
+      "tp.scales": "{\"binance-usdm\":{\"BTCUSDT\":{\"price_decimals\":1,\"qty_decimals\":3},\"ETHUSDT\":{\"price_decimals\":2,\"qty_decimals\":3}}}",
+      "tp.schema": "trades/2"
     }
   }
 }

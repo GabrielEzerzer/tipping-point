@@ -1,4 +1,4 @@
-//! Exact conversion of Binance's decimal strings to integer units, with no float round-trip.
+//! Exact conversion of venues' decimal strings to integer units, with no float round-trip.
 
 use thiserror::Error;
 

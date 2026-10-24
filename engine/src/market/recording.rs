@@ -1,4 +1,4 @@
-//! A script of what the live loop received, one JSON line per message: the format of the
+//! A script of what a live loop received, one JSON line per message: the format of the
 //! hand-written synthetic fixtures and of the depth recordings made before the binary log
 //! existed. Replaying a script drives the same [`Pipeline`] the live loop runs, without the
 //! network. The engine's own recordings are binary logs ([`crate::store`]).
@@ -16,13 +16,19 @@ use super::pipeline::{Message, Pipeline, Replayed, Report, entries};
 use super::ws::Inbound;
 use super::{Scales, Symbol};
 use crate::store::ms_to_ns;
+use crate::venue::Venue;
 
 /// One line of a script.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Record {
-    /// Always first: the scales the frames must be parsed with.
-    Scales { scales: BTreeMap<Symbol, Scales> },
+    /// Always first: the venue whose streams the script holds (Binance's, for scripts written
+    /// before there were others) and the scales its frames must be parsed with.
+    Scales {
+        #[serde(default = "binance")]
+        venue: Venue,
+        scales: BTreeMap<Symbol, Scales>,
+    },
     /// The raw text of one socket frame: the depth socket's unless `stream` says otherwise,
     /// with how many frames the reader dropped just before it.
     Frame {
@@ -64,6 +70,11 @@ pub enum Record {
 /// Scripts from before the trade socket was recorded hold depth frames only.
 fn depth() -> Stream {
     Stream::Depth
+}
+
+/// Scripts from before there were venues are Binance's.
+fn binance() -> Venue {
+    Venue::BinanceUsdm
 }
 
 impl Record {
@@ -188,16 +199,16 @@ pub fn read_records(input: impl BufRead) -> Result<Vec<Record>, RecordingError> 
 /// Returns an error when the scales are missing or appear again later.
 pub fn replay(records: impl IntoIterator<Item = Record>) -> Result<Replayed, RecordingError> {
     let mut records = records.into_iter();
-    let Some(Record::Scales { scales }) = records.next() else {
+    let Some(Record::Scales { venue, scales }) = records.next() else {
         return Err(RecordingError::MissingScales);
     };
-    let mut pipeline = Pipeline::new(Feed::new(scales));
+    let mut pipeline = Pipeline::new(Feed::new(venue, scales));
     let mut report = Report::default();
     for (index, record) in (1u64..).zip(records) {
         let message = record
             .into_message()
             .ok_or(RecordingError::MisplacedScales(index))?;
-        for entry in entries(message) {
+        for entry in entries(venue, message) {
             let applied = pipeline.apply(entry.kind, &entry.payload, &mut |_| {});
             report.note(index, &applied);
         }
@@ -211,6 +222,7 @@ mod tests {
 
     fn scales() -> Record {
         Record::Scales {
+            venue: Venue::BinanceUsdm,
             scales: BTreeMap::from([(
                 "BTCUSDT".to_owned(),
                 Scales {

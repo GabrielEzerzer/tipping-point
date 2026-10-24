@@ -11,26 +11,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::api::ApiConfig;
-use engine::api::hub::{Hub, HubConfig};
+use engine::api::hub::{Hub, HubConfig, Source, VenueSource};
 use engine::api::ipc::{Encoder, SCHEMA_KEY};
 use engine::api::messages::{
-    BookMessage, ClientMessage, LatticeHeader, ServerMessage, SourceMessage, Status, StreamStatus,
-    Streams, SymbolStatus, Topic, TradeMessage, Welcome, lattice_frame,
+    BookMessage, ClientMessage, LatticeHeader, PROTOCOL, ServerMessage, SourceMessage, Status,
+    StreamStatus, Streams, SymbolStatus, Topic, TradeMessage, VenueStatus, Welcome, lattice_frame,
 };
-use engine::binance::Scales;
-use engine::binance::sync::Level;
+use engine::market::Scales;
+use engine::market::sync::Level;
 use engine::store::rotate::rotate;
 use engine::store::samples::{BookRow, Sample};
 use engine::store::writer::LogConfig;
+use engine::venue::Venue;
 use engine_harness::api::{
     Frame, ISING_RUN, LivePath, Outcome, Server, copy_ising_fixture, decode_stream, fixture,
-    get_arrow, golden, next_frame, next_json, one_batch, script, send_json, ws_connect,
+    get_arrow, golden, merged, next_frame, next_json, one_batch, script, send_json, ws_connect,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const RUN: &str = "20231114T221320Z-session";
+/// The Bybit run recorded beside it.
+const BYBIT_RUN: &str = "20231114T221320Z-bybit";
 const WAIT: Duration = Duration::from_secs(20);
 
 fn scratch(name: &str) -> PathBuf {
@@ -66,24 +69,44 @@ fn results() -> [(&'static str, Value); 4] {
     ]
 }
 
-/// The committed session through the live path, with the API attached and a lossless client
-/// and an Arrow subscriber connected from the start; then results published for the app. The
-/// WebSocket frames, as text, in the order they arrived, and the live Arrow stream's bytes.
+/// The committed sessions, Binance's and Bybit's at once, each through its own live path into one
+/// hub, with the API attached and a lossless client and an Arrow subscriber connected from the
+/// start; then results published for the app. The WebSocket frames, as text, in the order they
+/// arrived, the live Arrow stream's bytes, and the Binance run's folder.
 async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> {
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let binance = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let bybit = script(&fixture("synthetic/bybit-session.jsonl"))?;
     let hub = Hub::new(HubConfig {
         lossless: true,
+        venues: vec![binance.venue, bybit.venue],
         ..HubConfig::default()
     });
     let config = LogConfig {
         max_segment_bytes: 2048,
         ..LogConfig::default()
     };
-    let mut live = LivePath::new(scales, Arc::clone(&hub), dir, Some(RUN), config)?;
+    let mut loops = [
+        LivePath::new(
+            binance.venue,
+            binance.scales,
+            Arc::clone(&hub),
+            dir,
+            Some(RUN),
+            config.clone(),
+        )?,
+        LivePath::new(
+            bybit.venue,
+            bybit.scales,
+            Arc::clone(&hub),
+            dir,
+            Some(BYBIT_RUN),
+            config,
+        )?,
+    ];
     let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.to_owned())).await?;
 
     let mut ws = ws_connect(server.addr).await?;
-    send_json(&mut ws, &json!({"t": "hello", "v": 1})).await?;
+    send_json(&mut ws, &json!({"t": "hello", "v": PROTOCOL})).await?;
     let mut frames = Vec::new();
     let Frame::Text(welcome) = next_frame(&mut ws, WAIT).await else {
         return Err("no welcome".into());
@@ -101,8 +124,8 @@ async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> 
     while hub.arrow_subscribers() == 0 {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    for message in messages {
-        live.push(message).await?;
+    for (which, message) in merged(binance.messages, bybit.messages) {
+        loops[which].push(message).await?;
     }
     let client = reqwest::Client::new();
     for (topic, body) in results() {
@@ -127,7 +150,9 @@ async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> 
         }
     }
     let arrow = arrow.await??.to_vec();
-    let (_summary, _, _) = live.finish().await?;
+    for live in loops {
+        live.finish().await?;
+    }
     server.stop().await;
     Ok((frames, arrow, dir.join("market").join(RUN)))
 }
@@ -159,16 +184,25 @@ async fn the_session_is_sent_as_its_golden_files_say() -> Outcome {
         .filter_map(|text| serde_json::from_str::<Value>(text).ok())
         .filter(|v| v["t"] == "status")
         .collect();
-    let last = statuses.last().ok_or("no status")?;
+    let status = statuses.last().ok_or("no status")?;
+    assert_eq!(status["venues"]["bybit-linear"]["resyncs"], 5, "{status}");
+    let venues: std::collections::BTreeSet<String> = frames
+        .iter()
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(|v| v["t"] == "book")
+        .filter_map(|v| v["venue"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(venues.len(), 2, "both venues' books were sent: {venues:?}");
+    let last = &status["venues"]["binance-usdm"];
     assert!(
         last["streams"]["depth"]["reconnects"].as_u64() >= Some(1),
-        "{last}"
+        "{status}"
     );
     assert!(
         last["streams"]["depth"]["frames_dropped"].as_u64() >= Some(1),
-        "{last}"
+        "{status}"
     );
-    assert!(last["resyncs"].as_u64() >= Some(1), "{last}");
+    assert!(last["resyncs"].as_u64() >= Some(1), "{status}");
 
     let mut text = frames.join("\n");
     text.push('\n');
@@ -203,6 +237,7 @@ fn catalog_sample() -> Sample {
     Sample {
         sample_ts_ns: 1_700_000_000_300_000_000,
         seq: 12,
+        venue: Venue::BinanceUsdm,
         rows: vec![
             BookRow {
                 symbol: "BTCUSDT".to_owned(),
@@ -229,7 +264,7 @@ fn catalog_status() -> Status {
         reconnects,
         frames_dropped,
     };
-    Status {
+    let binance = VenueStatus {
         ts_ms: 1_700_000_000_300,
         streams: Streams {
             depth: stream(true, 1, 2),
@@ -243,6 +278,22 @@ fn catalog_status() -> Status {
         sequence_gaps: 1,
         snapshot_failures: 1,
         parse_errors: 2,
+    };
+    let bybit = VenueStatus {
+        ts_ms: 1_700_000_000_250,
+        streams: Streams {
+            depth: stream(true, 0, 0),
+            trades: stream(false, 0, 0),
+        },
+        symbols: BTreeMap::from([("BTCUSDT".to_owned(), SymbolStatus { synced: true })]),
+        resyncs: 1,
+        sequence_gaps: 1,
+        snapshot_failures: 0,
+        parse_errors: 0,
+    };
+    Status {
+        ts_ms: 1_700_000_000_300,
+        venues: BTreeMap::from([(Venue::BinanceUsdm, binance), (Venue::BybitLinear, bybit)]),
     }
 }
 
@@ -258,7 +309,25 @@ fn every_server_message_matches_the_catalog() -> Outcome {
         ("BTCUSDT".to_owned(), scale(1, 3)),
         ("ETHUSDT".to_owned(), scale(2, 3)),
     ]);
-    let welcome = Welcome::new(&scales, Some(RUN.to_owned()), 20, 100_000_000);
+    let source = Source {
+        venues: BTreeMap::from([
+            (
+                Venue::BinanceUsdm,
+                VenueSource {
+                    scales,
+                    run: Some(RUN.to_owned()),
+                },
+            ),
+            (
+                Venue::BybitLinear,
+                VenueSource {
+                    scales: BTreeMap::from([("BTCUSDT".to_owned(), scale(1, 3))]),
+                    run: Some(BYBIT_RUN.to_owned()),
+                },
+            ),
+        ]),
+    };
+    let welcome = Welcome::new(&source, 20, 100_000_000);
     let sample = catalog_sample();
     let books: Vec<BookMessage<'_>> = sample
         .rows
@@ -266,10 +335,11 @@ fn every_server_message_matches_the_catalog() -> Outcome {
         .map(|row| BookMessage::new(&sample, row, 20))
         .collect();
     let trades = [TradeMessage {
+        venue: Venue::BinanceUsdm,
         symbol: "BTCUSDT".to_owned(),
         seq: 5,
         ts_ms: 1_700_000_000_149,
-        id: 1,
+        id: "1".to_owned(),
         px: 500_005,
         qty: 10,
         buyer_is_maker: false,
@@ -334,15 +404,17 @@ fn every_server_message_matches_the_catalog() -> Outcome {
 fn every_client_message_matches_the_catalog() -> Outcome {
     let topics = Topic::ALL.to_vec();
     let client = [
-        ClientMessage::Hello { v: 1 },
+        ClientMessage::Hello { v: PROTOCOL },
         ClientMessage::Sub {
             topics: topics.clone(),
+            venues: None,
             symbols: None,
             levels: None,
             backfill_s: None,
         },
         ClientMessage::Sub {
             topics: vec![Topic::Book, Topic::Status],
+            venues: Some(vec![Venue::BinanceUsdm]),
             symbols: Some(vec!["BTCUSDT".to_owned()]),
             levels: Some(5),
             backfill_s: Some(30.0),
@@ -416,7 +488,7 @@ async fn every_arrow_schema_matches_its_golden_file() -> Outcome {
     let tables = [
         ("market", RUN, "frames"),
         ("market", RUN, "depth_updates"),
-        ("market", RUN, "agg_trades"),
+        ("market", RUN, "trades"),
         ("market", RUN, "snapshots"),
         ("market", RUN, "book_samples"),
         ("ising", ISING_RUN, "stats"),
@@ -426,7 +498,14 @@ async fn every_arrow_schema_matches_its_golden_file() -> Outcome {
         let (schema, batches) =
             get_arrow(&server.url(&format!("/v1/table/{domain}/{run}/{table}"))).await?;
         assert!(!batches.is_empty(), "{domain}/{table} has rows");
-        assert_eq!(schema.metadata()[SCHEMA_KEY], format!("{table}/1"));
+        // The market tables keyed by venue are at 2; frames and the Ising tables at 1.
+        let major = if domain == "market" && table != "frames" {
+            2
+        } else {
+            1
+        };
+        let id = format!("{table}/{major}");
+        assert_eq!(schema.metadata()[SCHEMA_KEY], id);
         schemas.insert(format!("{domain}/{table}"), describe(&schema));
     }
     let text = serde_json::to_string_pretty(&Value::Object(schemas))? + "\n";
@@ -443,6 +522,7 @@ async fn every_arrow_schema_matches_its_golden_file() -> Outcome {
     let market = find("market", RUN).ok_or("the market run is listed")?;
     assert_eq!(market["complete"], true);
     assert_eq!(market["key"], "seq");
+    assert_eq!(market["venue"], "binance-usdm");
     let ising = find("ising", ISING_RUN).ok_or("the Ising run is listed")?;
     assert_eq!(ising["key"], "step");
     server.stop().await;
@@ -456,13 +536,14 @@ async fn every_arrow_schema_matches_its_golden_file() -> Outcome {
 async fn protocol_errors_close_with_their_codes() -> Outcome {
     let dir = scratch("api-close");
     let hub = Hub::new(HubConfig::default());
-    let feed = engine::binance::feed::Feed::new(BTreeMap::new());
+    let feed = engine::market::feed::Feed::new(Venue::BinanceUsdm, BTreeMap::new());
     let mut tap = engine::api::hub::LiveTap::new(Arc::clone(&hub));
-    engine::binance::live::Observer::started(&mut tap, &feed, None);
+    engine::market::live::Observer::started(&mut tap, &feed, None);
     let server = Server::start(hub, ApiConfig::new(dir.clone())).await?;
 
+    // A client of the protocol before venues.
     let mut ws = ws_connect(server.addr).await?;
-    send_json(&mut ws, &json!({"t": "hello", "v": 2})).await?;
+    send_json(&mut ws, &json!({"t": "hello", "v": 1})).await?;
     assert_eq!(next_frame(&mut ws, WAIT).await, Frame::Closed(Some(4001)));
 
     let mut ws = ws_connect(server.addr).await?;
@@ -470,13 +551,13 @@ async fn protocol_errors_close_with_their_codes() -> Outcome {
     assert_eq!(next_frame(&mut ws, WAIT).await, Frame::Closed(Some(4000)));
 
     let mut ws = ws_connect(server.addr).await?;
-    send_json(&mut ws, &json!({"t": "hello", "v": 1})).await?;
+    send_json(&mut ws, &json!({"t": "hello", "v": PROTOCOL})).await?;
     assert_eq!(next_json(&mut ws, WAIT).await?["t"], "welcome");
     send_json(&mut ws, &json!({"t": "subscribe"})).await?;
     assert_eq!(next_frame(&mut ws, WAIT).await, Frame::Closed(Some(4000)));
 
     let mut ws = ws_connect(server.addr).await?;
-    send_json(&mut ws, &json!({"t": "hello", "v": 1})).await?;
+    send_json(&mut ws, &json!({"t": "hello", "v": PROTOCOL})).await?;
     assert_eq!(next_json(&mut ws, WAIT).await?["t"], "welcome");
     send_json(&mut ws, &json!({"t": "seek", "to_ms": 1})).await?;
     assert_eq!(
@@ -500,15 +581,15 @@ async fn a_subscription_sent_before_the_welcome_is_answered_after_it() -> Outcom
 
     // The feed not started yet: the welcome waits for it.
     let mut waiting = ws_connect(server.addr).await?;
-    send_json(&mut waiting, &json!({"t": "hello", "v": 1})).await?;
+    send_json(&mut waiting, &json!({"t": "hello", "v": PROTOCOL})).await?;
     send_json(&mut waiting, &sub).await?;
     assert_eq!(
         next_frame(&mut waiting, Duration::from_millis(300)).await,
         Frame::Silent
     );
-    let feed = engine::binance::feed::Feed::new(BTreeMap::new());
+    let feed = engine::market::feed::Feed::new(Venue::BinanceUsdm, BTreeMap::new());
     let mut tap = engine::api::hub::LiveTap::new(Arc::clone(&hub));
-    engine::binance::live::Observer::started(&mut tap, &feed, None);
+    engine::market::live::Observer::started(&mut tap, &feed, None);
     assert_eq!(next_json(&mut waiting, WAIT).await?["t"], "welcome");
     assert_eq!(
         next_json(&mut waiting, WAIT).await?,
@@ -518,7 +599,7 @@ async fn a_subscription_sent_before_the_welcome_is_answered_after_it() -> Outcom
     // The feed running: the same, many times over, never a refusal.
     for _ in 0..20 {
         let mut eager = ws_connect(server.addr).await?;
-        send_json(&mut eager, &json!({"t": "hello", "v": 1})).await?;
+        send_json(&mut eager, &json!({"t": "hello", "v": PROTOCOL})).await?;
         send_json(&mut eager, &sub).await?;
         assert_eq!(next_json(&mut eager, WAIT).await?["t"], "welcome");
         assert_eq!(
@@ -614,6 +695,7 @@ fn an_encoded_stream_round_trips() -> Outcome {
     rows.push(&Sample {
         sample_ts_ns: 1,
         seq: 0,
+        venue: Venue::BinanceUsdm,
         rows: Vec::new(),
     });
     bytes.extend(encoder.batch(&rows.take()?)?);

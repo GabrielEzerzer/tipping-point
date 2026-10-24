@@ -3,7 +3,8 @@
 mod common;
 
 use common::{Scenario, all_levels_positive, scenario, wild_stream};
-use engine::binance::sync::{BookSync, Outcome};
+use engine::market::sync::Outcome;
+use engine::venue::binance::sync::BookSync;
 use proptest::prelude::*;
 
 /// Buffers the first `buffered` events, installs `snapshots[snapshot_index]`, then feeds the
@@ -72,7 +73,7 @@ proptest! {
         let mut sync = BookSync::new();
         let (_, outcomes) = drive(&mut sync, &scenario, 0, snapshot_index, |_, _| {});
 
-        let applied: Vec<&engine::binance::sync::DepthUpdate> = scenario
+        let applied: Vec<&engine::market::sync::DepthUpdate> = scenario
             .events
             .iter()
             .zip(&outcomes)
@@ -154,7 +155,7 @@ proptest! {
         let mut sync = BookSync::new();
         let first = &events[0];
         prop_assert_eq!(sync.on_event(first.clone()), Outcome::Buffered);
-        let snapshot = engine::binance::sync::Snapshot {
+        let snapshot = engine::market::sync::Snapshot {
             last_update_id: first.first_id,
             bids: vec![],
             asks: vec![],

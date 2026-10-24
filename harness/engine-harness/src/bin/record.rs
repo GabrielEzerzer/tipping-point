@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use engine::binance::live::{LiveConfig, LiveEvent, Recording, run_live, utc_clock};
+use engine::market::live::{LiveEvent, utc_clock};
 use engine::store::replay::replay_log;
 use engine::store::run;
 use engine::store::writer::LogConfig;
+use engine::venue::binance::live::{LiveConfig, Recording, run_live};
 use engine_harness::transcript::Transcript;
 
 /// Where the live loop's transcript goes, inside the run folder.

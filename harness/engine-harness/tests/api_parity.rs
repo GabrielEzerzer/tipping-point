@@ -5,7 +5,8 @@
 //! and replayed `book` messages are each an in-order subsequence of those rows (coalescing skips,
 //! never alters), ending on the same last row per symbol; a replay through the API equals the
 //! replay through the log that rotate made the rows from. A stream that fails partway fails at
-//! the client; it never passes for a short table.
+//! the client; it never passes for a short table. Two venues fed at once, each by its own loop,
+//! serve each venue's rows exactly as that venue's own run stores them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -18,10 +19,11 @@ use engine::api::ApiConfig;
 use engine::api::hub::{Hub, HubConfig};
 use engine::api::stream::Fault;
 use engine::store::rotate::rotate;
-use engine::store::writer::LogConfig;
+use engine::store::writer::{LogConfig, LogWriter};
+use engine::venue::Venue;
 use engine_harness::api::{
-    Frame, LivePath, Outcome, Server, Socket, fixture, get_arrow, hello, next_frame, next_json,
-    one_batch, read_parquet, script, send_json, ws_connect,
+    Frame, LivePath, Outcome, Script, Server, Socket, fixture, get_arrow, hello, merged,
+    next_frame, next_json, one_batch, read_parquet, script, send_json, ws_connect,
 };
 use serde_json::{Value, json};
 
@@ -35,8 +37,10 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// One `book_samples` row as a book message carries it.
+/// One `book_samples` row as a book message carries it: venue, symbol, instant (ms), seq,
+/// synced, last update id, bids, asks.
 type BookRow = (
+    String,
     String,
     i64,
     i64,
@@ -55,10 +59,13 @@ fn int64<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int64Array {
 
 /// The rows of `book_samples` batches, as book messages would carry them.
 fn book_rows(batch: &RecordBatch) -> Vec<BookRow> {
-    let symbols = batch
-        .column_by_name("symbol")
-        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-        .expect("a symbol column");
+    let strings = |name: &str| {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .unwrap_or_else(|| panic!("a {name} column"))
+    };
+    let (venues, symbols) = (strings("venue"), strings("symbol"));
     let synced = batch
         .column_by_name("synced")
         .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
@@ -80,6 +87,7 @@ fn book_rows(batch: &RecordBatch) -> Vec<BookRow> {
     (0..batch.num_rows())
         .map(|row| {
             (
+                venues.value(row).to_owned(),
                 symbols.value(row).to_owned(),
                 times.value(row) / 1_000_000,
                 seqs.value(row),
@@ -106,6 +114,7 @@ fn book_of(message: &Value) -> BookRow {
             .collect()
     };
     (
+        message["venue"].as_str().expect("venue").to_owned(),
         message["symbol"].as_str().expect("symbol").to_owned(),
         message["ts_ms"].as_i64().expect("ts_ms"),
         message["seq"].as_i64().expect("seq"),
@@ -128,15 +137,18 @@ fn assert_subsequence(messages: &[BookRow], rows: &[BookRow], what: &str) {
         };
         at += offset + 1;
     }
-    let mut last_rows: BTreeMap<&str, &BookRow> = BTreeMap::new();
+    let mut last_rows: BTreeMap<(&str, &str), &BookRow> = BTreeMap::new();
     for row in rows {
-        last_rows.insert(&row.0, row);
+        last_rows.insert((&row.0, &row.1), row);
     }
-    let mut last_messages: BTreeMap<&str, &BookRow> = BTreeMap::new();
+    let mut last_messages: BTreeMap<(&str, &str), &BookRow> = BTreeMap::new();
     for message in messages {
-        last_messages.insert(&message.0, message);
+        last_messages.insert((&message.0, &message.1), message);
     }
-    assert_eq!(last_messages, last_rows, "{what}: the last book per symbol");
+    assert_eq!(
+        last_messages, last_rows,
+        "{what}: the last book per venue and symbol"
+    );
 }
 
 /// Skips what the live feed sent before the replay began (the newest live book goes to every
@@ -188,13 +200,17 @@ struct Played {
 /// The session through the live path with an Arrow subscriber and a coalescing app client
 /// connected from the start, then the log closed and rotated.
 async fn play(dir: PathBuf) -> Outcome<Played> {
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig::default());
     let small = LogConfig {
         max_segment_bytes: 2048,
         ..LogConfig::default()
     };
-    let mut live = LivePath::new(scales, Arc::clone(&hub), &dir, Some(RUN), small)?;
+    let mut live = LivePath::new(venue, scales, Arc::clone(&hub), &dir, Some(RUN), small)?;
     let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
     let url = server.url("/v1/live/book_samples");
     let arrow = tokio::spawn(async move { get_arrow(&url).await });
@@ -213,6 +229,17 @@ async fn play(dir: PathBuf) -> Outcome<Played> {
     }
     // Rotate while the log is still open: the closed segments become Parquet, the newest stays
     // in the log, so a replay now reads the rotated hours through DuckDB and the rest from memory.
+    // The writer thread can lag the loop on a loaded machine; let it catch up first, so the
+    // segments the loop has closed are on disk when rotate looks; a writer that stalls fails here.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while let Some(queued) = live.log.writer().map(LogWriter::queued).filter(|&q| q > 0) {
+        if tokio::time::Instant::now() > deadline {
+            return Err(
+                format!("the log writer still had {queued} frames queued after {WAIT:?}").into(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let run_dir = dir.join("market").join(RUN);
     let early = rotate(&run_dir)?;
     assert!(early.open.is_some() && early.segments >= 2, "{early:?}");
@@ -272,7 +299,7 @@ async fn the_api_serves_exactly_what_is_stored() -> Outcome {
     // Live book messages: an in-order subsequence of the rows, and every trade arrived.
     let rows = book_rows(&stored);
     assert_subsequence(&played.live_books, &rows, "live");
-    let (_, trades) = read_parquet(&played.run_dir, "agg_trades")?;
+    let (_, trades) = read_parquet(&played.run_dir, "trades")?;
     let trades: usize = trades.iter().map(RecordBatch::num_rows).sum();
     assert_eq!(
         played.live_trades.len(),
@@ -303,7 +330,7 @@ async fn check_table_reads(played: &Played) -> Outcome {
     let tables = [
         "frames",
         "depth_updates",
-        "agg_trades",
+        "trades",
         "snapshots",
         "book_samples",
     ];
@@ -376,18 +403,18 @@ async fn check_replays(played: &Played, stored: &RecordBatch, rows: &[BookRow]) 
         "replayed trades are the live ones"
     );
 
-    let from_ms = rows[rows.len() / 2].1;
+    let from_ms = rows[rows.len() / 2].2;
     let seek = json!({"t": "replay", "run": RUN, "from_ms": from_ms, "speed": 0});
     send_json(&mut viewer, &seek).await?;
     until_replay(&mut viewer).await?;
     let (sought, _, _) = read_until_ended(&mut viewer).await?;
     assert!(
-        sought.iter().all(|book| book.1 >= from_ms),
+        sought.iter().all(|book| book.2 >= from_ms),
         "nothing before the seek"
     );
     let later: Vec<BookRow> = rows
         .iter()
-        .filter(|row| row.1 >= from_ms)
+        .filter(|row| row.2 >= from_ms)
         .cloned()
         .collect();
     assert_subsequence(&sought, &later, "replay after a seek");
@@ -402,7 +429,7 @@ async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
     let played = play(scratch("api-controls")).await?;
     let (stored_schema, stored_batches) = read_parquet(&played.run_dir, "book_samples")?;
     let rows = book_rows(&one_batch(&stored_schema, &stored_batches)?);
-    let (first_ms, last_ms) = (rows[0].1, rows[rows.len() - 1].1);
+    let (first_ms, last_ms) = (rows[0].2, rows[rows.len() - 1].2);
     let mut viewer = ws_connect(played.server.addr).await?;
     hello(&mut viewer).await?;
     send_json(&mut viewer, &json!({"t": "sub", "topics": ["book"]})).await?;
@@ -427,7 +454,7 @@ async fn the_replay_controls_pause_play_seek_and_go_live() -> Outcome {
     assert_eq!(sought["from_ms"], to_ms);
     let (books, _, _) = read_until_ended(&mut viewer).await?;
     assert!(
-        !books.is_empty() && books.iter().all(|book| book.1 >= to_ms),
+        !books.is_empty() && books.iter().all(|book| book.2 >= to_ms),
         "{books:?}"
     );
 
@@ -453,9 +480,14 @@ async fn until_source(socket: &mut Socket, mode: &str) -> Outcome<Value> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_that_fails_partway_fails_at_the_client() -> Outcome {
     let dir = scratch("api-fail");
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig::default());
     let mut live = LivePath::new(
+        venue,
         scales,
         Arc::clone(&hub),
         &dir,
@@ -505,9 +537,14 @@ async fn a_stream_that_fails_partway_fails_at_the_client() -> Outcome {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_producer_that_panics_fails_at_the_client() -> Outcome {
     let dir = scratch("api-panic");
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig::default());
     let mut live = LivePath::new(
+        venue,
         scales,
         Arc::clone(&hub),
         &dir,
@@ -558,12 +595,17 @@ async fn a_producer_that_panics_fails_at_the_client() -> Outcome {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     let dir = scratch("api-gap");
-    let (scales, messages) = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let Script {
+        venue,
+        scales,
+        messages,
+    } = script(&fixture("synthetic/session-faults.jsonl"))?;
     let hub = Hub::new(HubConfig {
         ring: Duration::from_millis(400),
         ..HubConfig::default()
     });
     let mut live = LivePath::new(
+        venue,
         scales,
         Arc::clone(&hub),
         &dir,
@@ -582,8 +624,8 @@ async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     hub.end();
     let (schema, batches) = arrow.await??;
     let all = book_rows(&one_batch(&schema, &batches)?);
-    let first_ms = all.first().ok_or("the session has samples")?.1;
-    let held = hub.recent(i64::MIN).samples;
+    let first_ms = all.first().ok_or("the session has samples")?.2;
+    let held = hub.recent(Venue::BinanceUsdm, i64::MIN).samples;
     let first_held_ms = held.first().ok_or("memory holds samples")?.sample_ts_ns / 1_000_000;
     assert!(
         first_held_ms > first_ms + 100,
@@ -603,12 +645,12 @@ async fn a_replay_says_when_memory_does_not_reach_back() -> Outcome {
     // Unpaced, the books coalesce to the newest; whatever comes is from memory, after the gap.
     let (books, _, _) = read_until_ended(&mut viewer).await?;
     assert!(
-        books.iter().all(|book| book.1 >= first_held_ms),
+        books.iter().all(|book| book.2 >= first_held_ms),
         "{books:?}"
     );
     let held_rows: Vec<BookRow> = all
         .iter()
-        .filter(|row| row.1 >= first_held_ms)
+        .filter(|row| row.2 >= first_held_ms)
         .cloned()
         .collect();
     assert_subsequence(&books, &held_rows, "replay from memory after a gap");
@@ -658,6 +700,181 @@ async fn a_replay_that_fails_says_so_and_never_ended() -> Outcome {
         "{outcome}"
     );
     played.server.stop().await;
+    fs::remove_dir_all(&played.dir)?;
+    Ok(())
+}
+
+/// What a two-venue live phase left: the rotated runs' folders, the live Arrow rows, and what the
+/// app received.
+struct TwoVenues {
+    dir: PathBuf,
+    live: Vec<BookRow>,
+    books: Vec<BookRow>,
+    trades: Vec<Value>,
+    others: Vec<Value>,
+}
+
+/// The Bybit run recorded beside the Binance one.
+const BYBIT_RUN: &str = "20231114T221320Z-bybit";
+
+/// Binance's and Bybit's sessions at once, each through its own live path into one hub, with an
+/// Arrow subscriber and a coalescing app client connected from the start; then both runs rotated.
+async fn play_two_venues(dir: PathBuf) -> Outcome<TwoVenues> {
+    let binance = script(&fixture("synthetic/session-faults.jsonl"))?;
+    let bybit = script(&fixture("synthetic/bybit-session.jsonl"))?;
+    let hub = Hub::new(HubConfig {
+        venues: vec![binance.venue, bybit.venue],
+        ..HubConfig::default()
+    });
+    let small = LogConfig {
+        max_segment_bytes: 2048,
+        ..LogConfig::default()
+    };
+    let mut loops = [
+        LivePath::new(
+            binance.venue,
+            binance.scales,
+            Arc::clone(&hub),
+            &dir,
+            Some(RUN),
+            small.clone(),
+        )?,
+        LivePath::new(
+            bybit.venue,
+            bybit.scales,
+            Arc::clone(&hub),
+            &dir,
+            Some(BYBIT_RUN),
+            small,
+        )?,
+    ];
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+    let url = server.url("/v1/live/book_samples");
+    let arrow = tokio::spawn(async move { get_arrow(&url).await });
+    let mut app = ws_connect(server.addr).await?;
+    let welcome = hello(&mut app).await?;
+    assert_eq!(
+        welcome["runs"],
+        json!({"binance-usdm": RUN, "bybit-linear": BYBIT_RUN})
+    );
+    let venues: BTreeSet<&str> = welcome["symbols"]
+        .as_array()
+        .ok_or("welcome symbols")?
+        .iter()
+        .filter_map(|s| s["venue"].as_str())
+        .collect();
+    assert_eq!(venues, BTreeSet::from(["binance-usdm", "bybit-linear"]));
+    send_json(
+        &mut app,
+        &json!({"t": "sub", "topics": ["book", "trades", "status"]}),
+    )
+    .await?;
+    while hub.arrow_subscribers() == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for (which, message) in merged(binance.messages, bybit.messages) {
+        loops[which].push(message).await?;
+        // Real time between inputs, so the app client coalesces some samples and sends others.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    hub.end();
+    let (live_schema, live_batches) = arrow.await??;
+    let (books, trades, others) = read_until_ended(&mut app).await?;
+    for live in loops {
+        live.finish().await?;
+    }
+    for run in [RUN, BYBIT_RUN] {
+        rotate(&dir.join("market").join(run))?;
+    }
+    server.stop().await;
+    Ok(TwoVenues {
+        dir,
+        live: book_rows(&one_batch(&live_schema, &live_batches)?),
+        books,
+        trades,
+        others,
+    })
+}
+
+/// Two venues at once, as `serve` will run Binance and Bybit: each venue's live loop, through
+/// its own tap, feeds one hub. The welcome lists both venues' symbols and runs; every live Arrow
+/// row, book message and trade names its venue; each venue's live rows equal its own run's
+/// rotated Parquet field for field, on one absolute grid, so the venues join exactly on
+/// `sample_ts_ns`; the app's book messages for each venue are an in-order subsequence of that
+/// venue's rows; the status holds each venue's own sockets and counters.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_venues_serve_exactly_what_each_stores() -> Outcome {
+    let played = play_two_venues(scratch("api-two-venues")).await?;
+    let mut grids = Vec::new();
+    for (venue, run) in [("binance-usdm", RUN), ("bybit-linear", BYBIT_RUN)] {
+        let (schema, batches) = read_parquet(&played.dir.join("market").join(run), "book_samples")?;
+        let stored = book_rows(&one_batch(&schema, &batches)?);
+        assert!(
+            stored.iter().all(|row| row.0 == venue),
+            "{run} holds only {venue}"
+        );
+        let live: Vec<BookRow> = played
+            .live
+            .iter()
+            .filter(|row| row.0 == venue)
+            .cloned()
+            .collect();
+        assert_eq!(live, stored, "{venue}: the live rows are its rotated table");
+        assert!(stored.len() >= 30, "{venue}: {} rows", stored.len());
+        let books: Vec<BookRow> = played
+            .books
+            .iter()
+            .filter(|b| b.0 == venue)
+            .cloned()
+            .collect();
+        assert_subsequence(&books, &stored, venue);
+        let instants: BTreeSet<i64> = stored.iter().map(|row| row.2).collect();
+        assert!(
+            instants.iter().all(|ms| ms % 100 == 0),
+            "{venue}: an absolute grid"
+        );
+        grids.push(instants);
+    }
+    let lo = grids
+        .iter()
+        .filter_map(|g| g.first())
+        .copied()
+        .max()
+        .ok_or("instants")?;
+    let hi = grids
+        .iter()
+        .filter_map(|g| g.last())
+        .copied()
+        .min()
+        .ok_or("instants")?;
+    let overlap = |grid: &BTreeSet<i64>| grid.range(lo..=hi).copied().collect::<Vec<i64>>();
+    assert_eq!(
+        overlap(&grids[0]),
+        overlap(&grids[1]),
+        "both venues are sampled at the same instants where they overlap"
+    );
+
+    // Only Binance's script trades; every trade says its venue and carries a string id.
+    let (_, stored) = read_parquet(&played.dir.join("market").join(RUN), "trades")?;
+    let stored: usize = stored.iter().map(RecordBatch::num_rows).sum();
+    assert_eq!(played.trades.len(), stored, "every trade reached the app");
+    for trade in &played.trades {
+        assert_eq!(trade["venue"], "binance-usdm", "{trade}");
+        assert!(trade["id"].is_string(), "{trade}");
+    }
+    let status = played
+        .others
+        .iter()
+        .rev()
+        .find(|m| m["t"] == "status")
+        .ok_or("a status")?;
+    let bybit = &status["venues"]["bybit-linear"];
+    assert_eq!(bybit["streams"]["depth"]["reconnects"], 1, "{status}");
+    assert_eq!(bybit["resyncs"], 5, "{status}");
+    assert!(
+        status["venues"]["binance-usdm"]["resyncs"].as_u64() >= Some(1),
+        "{status}"
+    );
     fs::remove_dir_all(&played.dir)?;
     Ok(())
 }
@@ -717,9 +934,174 @@ async fn replays_send_whole_instants_across_duckdb_chunks() -> Outcome {
     Ok(())
 }
 
+/// A run rotated before there were venues (a format-1 manifest without a venue, `book_samples`
+/// without its `venue` column, trades in `agg_trades` with numeric ids) is served as it was stored:
+/// its tables at major 1, never labelled with a contract they do not keep, and the app's replay of
+/// it puts the run's venue (Binance's, for such runs) on every book and trade and runs to its end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_rotated_before_venues_is_served_as_it_was_stored() -> Outcome {
+    const OLD: &str = "20261021T000000Z-before-venues";
+    let dir = scratch("api-before-venues");
+    write_pre_venue_run(&dir.join("market").join(OLD))?;
+    let hub = Hub::new(HubConfig::default());
+    let feed = engine::market::feed::Feed::new(Venue::BinanceUsdm, BTreeMap::new());
+    let mut tap = engine::api::hub::LiveTap::new(Arc::clone(&hub));
+    engine::market::live::Observer::started(&mut tap, &feed, None);
+    let server = Server::start(Arc::clone(&hub), ApiConfig::new(dir.clone())).await?;
+
+    let url = server.url(&format!("/v1/table/market/{OLD}/book_samples"));
+    let (schema, batches) = get_arrow(&url).await?;
+    assert_eq!(schema.metadata()["tp.schema"], "book_samples/1");
+    assert!(schema.field_with_name("venue").is_err(), "{schema:?}");
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 30);
+    let url = server.url(&format!("/v1/table/market/{OLD}/agg_trades"));
+    let (schema, _) = get_arrow(&url).await?;
+    assert_eq!(schema.metadata()["tp.schema"], "agg_trades/1");
+
+    let mut viewer = ws_connect(server.addr).await?;
+    hello(&mut viewer).await?;
+    let sub = json!({"t": "sub", "topics": ["book", "trades"]});
+    send_json(&mut viewer, &sub).await?;
+    let _ack = next_json(&mut viewer, WAIT).await?;
+    send_json(&mut viewer, &json!({"t": "replay", "run": OLD, "speed": 0})).await?;
+    until_replay(&mut viewer).await?;
+    let (mut books, mut trades) = (0, Vec::new());
+    let outcome = loop {
+        let message = next_json(&mut viewer, WAIT).await?;
+        match message["t"].as_str() {
+            Some("book") => {
+                assert_eq!(message["venue"], "binance-usdm", "{message}");
+                books += 1;
+            }
+            Some("trades") => {
+                trades.extend(message["trades"].as_array().cloned().unwrap_or_default());
+            }
+            Some("source") => break message,
+            _ => {}
+        }
+    };
+    assert_eq!(outcome["mode"], "ended", "{outcome}");
+    assert!(books > 0, "the replay sent books");
+    let ids: Vec<&str> = trades.iter().filter_map(|t| t["id"].as_str()).collect();
+    assert_eq!(ids, ["1", "2", "3"], "numeric ids as strings");
+    assert!(
+        trades.iter().all(|t| t["venue"] == "binance-usdm"),
+        "{trades:?}"
+    );
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A market run as rotate wrote it before there were venues: a format-1 manifest without a venue,
+/// 30 instants of `book_samples` without the `venue` column, three trades in `agg_trades`.
+fn write_pre_venue_run(run_dir: &Path) -> Outcome {
+    use arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use engine::market::sync::Level;
+    use engine::store::samples::{BookRow as Row, Sample, SampleRows};
+
+    const T0: i64 = 1_792_540_800_000_000_000;
+    fs::create_dir_all(run_dir.join("book_samples"))?;
+    fs::create_dir_all(run_dir.join("agg_trades"))?;
+    let manifest = json!({
+        "format": 1, "domain": "market", "run_id": run_dir.file_name().and_then(|n| n.to_str()),
+        "producer": {"name": "engine", "version": "0.1.0", "git_sha": null, "dirty": null},
+        "started_ns": T0, "key": "seq",
+        "tables": ["frames", "depth_updates", "agg_trades", "snapshots", "book_samples"],
+        "params": {
+            "symbols": ["BTCUSDT"],
+            "scales": {"BTCUSDT": {"price_decimals": 1, "qty_decimals": 3}},
+            "streams": ["depth@100ms", "aggTrade"],
+            "book_sample": {"levels": 2, "every_ns": 100_000_000},
+        },
+    });
+    fs::write(run_dir.join("manifest.json"), manifest.to_string())?;
+
+    let mut rows = SampleRows::new(2);
+    for i in 0..30_i64 {
+        rows.push(&Sample {
+            sample_ts_ns: T0 + i * 100_000_000,
+            seq: i,
+            venue: Venue::BinanceUsdm,
+            rows: vec![Row {
+                symbol: "BTCUSDT".to_owned(),
+                synced: true,
+                last_update_id: Some(i),
+                bids: vec![Level {
+                    price: 1000,
+                    qty: 1 + i,
+                }],
+                asks: vec![Level {
+                    price: 1001,
+                    qty: 2,
+                }],
+            }],
+        });
+    }
+    let samples = rows.take()?;
+    // Every column but the venue, as rotate wrote them then.
+    let kept: Vec<usize> = (0..samples.num_columns())
+        .filter(|&i| samples.schema().field(i).name() != "venue")
+        .collect();
+    write_parquet(
+        &run_dir
+            .join("book_samples")
+            .join(format!("{:020}.parquet", 0)),
+        &samples.project(&kept)?,
+    )?;
+
+    let int64 = |name: &str, nullable: bool| Field::new(name, DataType::Int64, nullable);
+    let schema = Arc::new(Schema::new(vec![
+        int64("seq", false),
+        int64("source_ts_ns", false),
+        int64("trade_ts_ns", false),
+        int64("capture_ts_ns", false),
+        Field::new("symbol", DataType::Utf8, false),
+        int64("agg_trade_id", false),
+        int64("first_trade_id", true),
+        int64("last_trade_id", true),
+        int64("price", false),
+        int64("qty", false),
+        Field::new("buyer_is_maker", DataType::Boolean, false),
+    ]));
+    let times: Vec<i64> = (1..=3).map(|k| T0 + k * 700_000_000).collect();
+    let column = |values: Vec<i64>| -> ArrayRef { Arc::new(Int64Array::from(values)) };
+    let trades = RecordBatch::try_new(
+        schema,
+        vec![
+            column(vec![40, 41, 42]),
+            column(times.clone()),
+            column(times.clone()),
+            column(times),
+            Arc::new(StringArray::from(vec!["BTCUSDT"; 3])),
+            column(vec![1, 2, 3]),
+            column(vec![10, 11, 13]),
+            column(vec![10, 12, 13]),
+            column(vec![1000, 1001, 1000]),
+            column(vec![5, 6, 7]),
+            Arc::new(BooleanArray::from(vec![false, true, false])),
+        ],
+    )?;
+    write_parquet(
+        &run_dir
+            .join("agg_trades")
+            .join(format!("{:020}.parquet", 0)),
+        &trades,
+    )
+}
+
+fn write_parquet(path: &Path, batch: &RecordBatch) -> Outcome {
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(fs::File::create(path)?, batch.schema(), None)?;
+    writer.write(batch)?;
+    writer.close()?;
+    Ok(())
+}
+
 /// A market run with three symbols and 1,500 instants of book samples (4,500 rows, one row group).
 fn write_three_symbol_run(run_dir: &Path) -> Outcome {
-    use engine::binance::sync::Level;
+    use engine::market::sync::Level;
     use engine::store::samples::{BookRow as Row, Sample, SampleRows};
 
     let symbols = ["AAAUSDT", "BBBUSDT", "CCCUSDT"];
@@ -743,6 +1125,7 @@ fn write_three_symbol_run(run_dir: &Path) -> Outcome {
         let sample = Sample {
             sample_ts_ns: 1_700_000_000_000_000_000 + i * 100_000_000,
             seq: i,
+            venue: Venue::BinanceUsdm,
             rows: symbols
                 .iter()
                 .map(|symbol| Row {

@@ -5,11 +5,11 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use engine::binance::decimal::format_units;
-use engine::binance::live::Stream;
-use engine::binance::pipeline::Message;
-use engine::binance::ws::Inbound;
-use engine::binance::{Scales, Symbol};
+use engine::market::decimal::format_units;
+use engine::market::live::Stream;
+use engine::market::pipeline::Message;
+use engine::market::ws::Inbound;
+use engine::market::{Scales, Symbol};
 
 /// Levels each side of a snapshot holds.
 const LEVELS: i64 = 20;
@@ -222,8 +222,9 @@ pub fn peak_memory_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use engine::binance::feed::Feed;
-    use engine::binance::pipeline::{Pipeline, entries};
+    use engine::market::feed::Feed;
+    use engine::market::pipeline::{Pipeline, entries};
+    use engine::venue::Venue;
 
     use super::*;
 
@@ -231,14 +232,14 @@ mod tests {
     #[test]
     fn generated_frames_keep_both_books_synced() {
         let mut generator = Generator::default();
-        let mut pipeline = Pipeline::new(Feed::new(generator.scales()));
+        let mut pipeline = Pipeline::new(Feed::new(Venue::BinanceUsdm, generator.scales()));
         let mut messages = generator.opening(1_000_000_000);
         for i in 0..200 {
             messages.push(generator.depth(1_000_000_000 + i));
             messages.push(generator.trade(1_000_000_000 + i));
         }
         for message in messages {
-            for entry in entries(message) {
+            for entry in entries(Venue::BinanceUsdm, message) {
                 let applied = pipeline.apply(entry.kind, &entry.payload, &mut |_| {});
                 assert_eq!(applied.error(), None, "{}", entry.payload);
             }
@@ -247,7 +248,7 @@ mod tests {
         for symbol in ["BTCUSDT", "ETHUSDT"] {
             assert!(
                 feed.sync(symbol)
-                    .is_some_and(engine::binance::sync::BookSync::is_synced)
+                    .is_some_and(engine::market::sync::BookSync::is_synced)
             );
         }
         assert_eq!(feed.stats().resyncs, 0);

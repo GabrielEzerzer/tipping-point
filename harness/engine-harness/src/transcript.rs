@@ -7,10 +7,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use engine::binance::book::Book;
-use engine::binance::feed::Feed;
-use engine::binance::live::LiveEvent;
-use engine::binance::sync::BookSync;
+use engine::market::book::Book;
+use engine::market::feed::Feed;
+use engine::market::live::LiveEvent;
+use engine::market::sync::BookSync;
 use engine::store::frame::crc32c;
 use serde::{Deserialize, Serialize};
 
@@ -34,8 +34,9 @@ pub struct Step {
 }
 
 /// Bumped whenever what a step records changes, so that a transcript saved by an older harness
-/// is recognised as such rather than read as a replay that differs.
-pub const FORMAT: u32 = 1;
+/// is recognised as such rather than read as a replay that differs. 2: trades carry their id as
+/// a string (venues).
+pub const FORMAT: u32 = 2;
 
 /// Every applied input of a run, in order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,8 +198,9 @@ pub fn book_digest(feed: &Feed, symbol: &str) -> u32 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use engine::binance::Scales;
-    use engine::binance::sync::ResyncReason;
+    use engine::market::Scales;
+    use engine::market::sync::ResyncReason;
+    use engine::venue::Venue;
 
     use super::*;
 
@@ -207,7 +209,10 @@ mod tests {
             price_decimals: 1,
             qty_decimals: 3,
         };
-        Feed::new(BTreeMap::from([("BTCUSDT".to_owned(), scales)]))
+        Feed::new(
+            Venue::BinanceUsdm,
+            BTreeMap::from([("BTCUSDT".to_owned(), scales)]),
+        )
     }
 
     #[test]
@@ -228,9 +233,9 @@ mod tests {
     /// reconnect and a reinstall.
     #[test]
     fn the_cached_digest_matches_hashing_every_book_afresh() {
-        use engine::binance::live::Stream;
-        use engine::binance::pipeline::{Message, Pipeline, entries};
-        use engine::binance::ws::Inbound;
+        use engine::market::live::Stream;
+        use engine::market::pipeline::{Message, Pipeline, entries};
+        use engine::market::ws::Inbound;
 
         let depth = |first: u64, last: u64, prev: u64, bid: &str| Message::Socket {
             stream: Stream::Depth,
@@ -273,7 +278,7 @@ mod tests {
         let mut transcript = Transcript::default();
         let mut fresh = Vec::new();
         for message in script {
-            for entry in entries(message) {
+            for entry in entries(Venue::BinanceUsdm, message) {
                 pipeline.apply(entry.kind, &entry.payload, &mut |event| {
                     if let LiveEvent::Applied { feed, .. } = &event {
                         fresh.push(books_digest(feed));
@@ -295,12 +300,12 @@ mod tests {
             reason: ResyncReason::Reconnect,
         });
         let feed = feed();
-        let applied = engine::binance::pipeline::Applied::Control;
+        let applied = engine::market::pipeline::Applied::Control;
         transcript.observe(&LiveEvent::Applied {
             kind: engine::store::frame::Kind::Control,
             applied: &applied,
             feed: &feed,
-            stats: &engine::binance::live::LiveStats::default(),
+            stats: &engine::market::live::LiveStats::default(),
         });
         assert_eq!(transcript.steps.len(), 1);
         assert!(transcript.raised("Reconnect"));

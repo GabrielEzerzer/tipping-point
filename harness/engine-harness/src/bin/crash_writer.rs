@@ -3,6 +3,10 @@
 //! land mid-rotation too. Entry `i` carries [`crash_payload`]`(i)`. The crash-recovery test
 //! kills it at a random moment and checks what recovery keeps.
 //!
+//! It also ends when its stdin closes. The test gives it a pipe whose other end closes when the
+//! test's process ends, however that ends, so a killed test runner never leaves it writing
+//! forever. Run by hand, end it with Ctrl-C (or end of input).
+//!
 //! `crash-writer <run dir>`
 
 use std::collections::BTreeMap;
@@ -14,6 +18,7 @@ use engine::store::frame::{Kind, Meta};
 use engine::store::now_ns;
 use engine::store::run::Producer;
 use engine::store::writer::{Entry, LogConfig, LogWriter};
+use engine::venue::Venue;
 use engine_harness::crash_payload;
 
 fn parse_args(args: &[String]) -> Result<&Path, String> {
@@ -49,8 +54,13 @@ fn main() -> ExitCode {
             git_sha: None,
             dirty: None,
         },
+        venue: Venue::BinanceUsdm,
         scales: BTreeMap::new(),
     };
+    std::thread::spawn(|| {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        std::process::exit(0);
+    });
     let mut log = match LogWriter::start(run_dir, meta, config()) {
         Ok(log) => log,
         Err(error) => {
