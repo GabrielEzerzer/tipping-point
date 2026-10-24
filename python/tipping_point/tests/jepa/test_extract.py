@@ -128,6 +128,35 @@ def test_extract_refuses_a_training_that_stopped_early(
     assert not (ising.runs["ramp"] / extract.LATENTS / f"{training.name}-step0000001").exists()
 
 
+def test_extract_refuses_a_training_that_collapsed_on_its_last_step(
+    tmp_path: Path, ising: jepa_ising.Ising
+) -> None:
+    """#89: a collapse confirmed at the final evaluation ends the run on step == steps, so it
+    did not stop early and its final.pt passed the step check like a healthy seed's, although
+    its complete.json records the collapse. Floors no model meets fire at every evaluation (steps
+    0, 4 and 8) and patience 3 confirms the collapse on the third, the last step. Only the
+    checkpoint's own training can vouch for it: a lone final.pt, or one dropped into another
+    training's folder, is refused too."""
+    dataset = data.load(ising.root, [ising.runs["train"].name], [ising.runs["val"].name])
+    config = dataclasses.replace(jepa_ising.CONFIG, floors=Floors(spatial_std=100.0), patience=3)
+    training = train.start(config, dataset, tmp_path, "late", "cpu")
+    done = io.read_json(training / "complete.json")
+    assert not done["stopped_early"] and done["collapse"]["collapsed_at"] == config.steps == 8
+    ramp = ising.runs["ramp"]
+    with pytest.raises(DataError, match=r"step 8 of 8, but .*records a collapse at step 8 \(L16"):
+        extract.extract(training / train.FINAL, ramp, "cpu")
+    alone = tmp_path / "alone"
+    alone.mkdir()
+    shutil.copy(ising.training / train.FINAL, alone)
+    with pytest.raises(DataError, match=r"no complete\.json"):
+        extract.extract(alone / train.FINAL, ramp, "cpu")
+    swapped = shutil.copytree(ising.training, tmp_path / "swapped")
+    shutil.copy(training / train.FINAL, swapped / train.FINAL)  # healthy record, collapsed model
+    with pytest.raises(DataError, match="does not list it with its sha256"):
+        extract.extract(swapped / train.FINAL, ramp, "cpu")
+    assert not (ramp / extract.LATENTS / f"{training.name}-step0000008").exists()
+
+
 def test_a_latents_table_is_written_once_and_resumes_after_an_interruption(
     tmp_path: Path, ising: jepa_ising.Ising
 ) -> None:
