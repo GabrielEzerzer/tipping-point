@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use engine::market::feed::Stats;
+use engine::market::feed::{Feed, Stats};
 use engine::market::live::{LiveEvent, LiveStats, utc_clock};
 use engine::market::recording::now_ms;
 use engine::market::sync::BookSync;
@@ -104,47 +104,67 @@ async fn soak(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             stats,
         } => {
             period += 1;
-            let feed_stats = *feed.stats();
-            let synced = feed
-                .symbols()
-                .filter(|s| feed.sync(s).is_some_and(BookSync::is_synced))
-                .count();
             let line = format!(
-                "{} period={period} elapsed={}s gaps={} (+{}) resyncs={} (+{}) reconnects={} (+{}) \
-                 dropped={} (+{}) snapshots={} (+{}) crossed={} applied={} trades={} synced={}/{}",
+                "{} {}",
                 utc_clock(),
-                elapsed.as_secs(),
-                feed_stats.sequence_gaps,
-                feed_stats.sequence_gaps - previous.0.sequence_gaps,
-                feed_stats.resyncs,
-                feed_stats.resyncs - previous.0.resyncs,
-                stats.depth_reconnects + stats.trade_reconnects,
-                stats.depth_reconnects + stats.trade_reconnects
-                    - previous.1.depth_reconnects
-                    - previous.1.trade_reconnects,
-                stats.depth_frames_dropped + stats.trade_frames_dropped,
-                stats.depth_frames_dropped + stats.trade_frames_dropped
-                    - previous.1.depth_frames_dropped
-                    - previous.1.trade_frames_dropped,
-                stats.snapshot_fetches,
-                stats.snapshot_fetches - previous.1.snapshot_fetches,
-                feed_stats.crossed,
-                feed_stats.applied,
-                feed_stats.trades,
-                synced,
-                feed.symbols().count(),
+                report_line(period, elapsed, feed, stats, &previous)
             );
             println!("{line}");
             if let Err(error) = writeln!(file, "{line}").and_then(|()| file.flush()) {
                 eprintln!("could not write {}: {error}", args.out.display());
             }
-            previous = (feed_stats, *stats);
+            previous = (*feed.stats(), *stats);
         }
         LiveEvent::Applied { .. } => {}
         other => println!("{} {other:?}", utc_clock()),
     })
     .await?;
     Ok(())
+}
+
+/// One period's line: the counters, most with their change since the `previous` line, and how
+/// many symbols are in sync. Frames that could not be read or converted show as `parse_errors`,
+/// so a symbol that stopped syncing for good (every frame unreadable, or a finer tick size) says
+/// why rather than only `synced=1/2` with `applied` flat.
+fn report_line(
+    period: u64,
+    elapsed: Duration,
+    feed: &Feed,
+    stats: &LiveStats,
+    previous: &(Stats, LiveStats),
+) -> String {
+    let feed_stats = feed.stats();
+    let synced = feed
+        .symbols()
+        .filter(|s| feed.sync(s).is_some_and(BookSync::is_synced))
+        .count();
+    format!(
+        "period={period} elapsed={}s gaps={} (+{}) resyncs={} (+{}) reconnects={} (+{}) \
+         dropped={} (+{}) snapshots={} (+{}) parse_errors={} (+{}) crossed={} applied={} \
+         trades={} synced={}/{}",
+        elapsed.as_secs(),
+        feed_stats.sequence_gaps,
+        feed_stats.sequence_gaps - previous.0.sequence_gaps,
+        feed_stats.resyncs,
+        feed_stats.resyncs - previous.0.resyncs,
+        stats.depth_reconnects + stats.trade_reconnects,
+        stats.depth_reconnects + stats.trade_reconnects
+            - previous.1.depth_reconnects
+            - previous.1.trade_reconnects,
+        stats.depth_frames_dropped + stats.trade_frames_dropped,
+        stats.depth_frames_dropped + stats.trade_frames_dropped
+            - previous.1.depth_frames_dropped
+            - previous.1.trade_frames_dropped,
+        stats.snapshot_fetches,
+        stats.snapshot_fetches - previous.1.snapshot_fetches,
+        feed_stats.parse_errors,
+        feed_stats.parse_errors - previous.0.parse_errors,
+        feed_stats.crossed,
+        feed_stats.applied,
+        feed_stats.trades,
+        synced,
+        feed.symbols().count(),
+    )
 }
 
 #[cfg(test)]
@@ -182,5 +202,32 @@ mod tests {
             Some("--out wants a value")
         );
         assert!(parse(&["--days", "1"]).is_err());
+    }
+
+    /// A feed that stopped syncing because its frames no longer read says so on the periodic
+    /// line, with how many failed since the last one (#43).
+    #[test]
+    fn the_periodic_line_counts_unreadable_frames() {
+        let scales = engine::market::Scales {
+            price_decimals: 1,
+            qty_decimals: 3,
+        };
+        let mut feed = Feed::new(
+            engine::venue::Venue::BinanceUsdm,
+            std::collections::BTreeMap::from([("BTCUSDT".to_owned(), scales)]),
+        );
+        for _ in 0..3 {
+            assert!(feed.on_text("not json").is_err());
+        }
+        let stats = LiveStats::default();
+        let start = (Stats::default(), stats);
+        let first = report_line(1, Duration::from_secs(60), &feed, &stats, &start);
+        assert!(first.contains(" parse_errors=3 (+3) "), "{first}");
+        assert!(first.ends_with(" synced=0/1"), "{first}");
+
+        let since = (*feed.stats(), stats);
+        assert!(feed.on_text("not json either").is_err());
+        let second = report_line(2, Duration::from_secs(120), &feed, &stats, &since);
+        assert!(second.contains(" parse_errors=4 (+1) "), "{second}");
     }
 }
