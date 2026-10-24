@@ -653,7 +653,8 @@ async fn a_subscription_sent_before_the_welcome_is_answered_after_it() -> Outcom
 }
 
 /// A foreign `Origin` is refused, the WebSocket upgrade included, and so is a `Host` that names
-/// another server (DNS rebinding); the allowed origins and a client without `Origin` get in.
+/// another server (DNS rebinding) and a page's plain GET from another site, which carries no
+/// `Origin`; the allowed origins and a client without `Origin` get in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreign_origins_and_hosts_are_refused() -> Outcome {
     let dir = scratch("api-origin");
@@ -683,6 +684,20 @@ async fn foreign_origins_and_hosts_are_refused() -> Outcome {
         .send()
         .await?;
     assert_eq!(foreign.status(), 403);
+    // What a browser sends for `fetch(url, {mode: 'no-cors'})` or an image on another site's page.
+    let no_cors = client
+        .get(server.url("/v1/health"))
+        .header("Sec-Fetch-Site", "cross-site")
+        .header("Sec-Fetch-Mode", "no-cors")
+        .send()
+        .await?;
+    assert_eq!(no_cors.status(), 403, "a page's no-cors GET");
+    let typed = client
+        .get(server.url("/v1/health"))
+        .header("Sec-Fetch-Site", "none")
+        .send()
+        .await?;
+    assert_eq!(typed.status(), 200, "a URL typed into the address bar");
     let publish = client
         .post(server.url("/v1/publish/meters"))
         .header("Origin", "https://evil.example")

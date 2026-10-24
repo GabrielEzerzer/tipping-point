@@ -17,8 +17,11 @@
 //!
 //! No token, but two checks on every request, the WebSocket upgrade included: `Host` must name
 //! this server by loopback address or `localhost` (which stops DNS rebinding), and a browser's
-//! `Origin` must be on the allowlist (browsers apply no same-origin rule to a WebSocket). A request
-//! without `Origin` comes from a non-browser client and is let through.
+//! `Origin` must be on the allowlist (browsers apply no same-origin rule to a WebSocket). A
+//! browser sends no `Origin` on a plain GET (an image, a script, a `no-cors` fetch), but its
+//! `Sec-Fetch-Site` says the page is on another site, so that request is refused too. A request
+//! with neither header comes from a non-browser client (Python, the harness) and is let through,
+//! as is a URL typed into the address bar (`Sec-Fetch-Site: none`).
 
 pub mod hub;
 pub mod ipc;
@@ -63,6 +66,8 @@ use crate::venue::Venue;
 
 /// The port `serve` listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 7731;
+/// The header a browser says where a request comes from with (Fetch Metadata).
+const SEC_FETCH_SITE: &str = "sec-fetch-site";
 /// The largest result a client can publish.
 const MAX_PUBLISH: usize = 64 * 1024;
 /// Instants of a backfill sent per Arrow batch.
@@ -120,8 +125,8 @@ pub struct Api {
 }
 
 impl Api {
-    /// Why a request is refused, if it is: a `Host` naming another server, or a browser
-    /// `Origin` off the allowlist.
+    /// Why a request is refused, if it is: a `Host` naming another server, a browser `Origin`
+    /// off the allowlist, or a browser request from another site's page without an `Origin`.
     fn refuse(&self, headers: &HeaderMap) -> Option<&'static str> {
         let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
         if !host.is_some_and(|host| self.hosts.iter().any(|ours| ours == host)) {
@@ -133,6 +138,14 @@ impl Api {
                 .is_ok_and(|origin| self.config.origins.iter().any(|o| o == origin));
             if !allowed {
                 return Some("Origin not allowed");
+            }
+        } else {
+            let site = headers.get(SEC_FETCH_SITE).and_then(|v| v.to_str().ok());
+            let from_a_page = site.is_some_and(|site| {
+                site.eq_ignore_ascii_case("cross-site") || site.eq_ignore_ascii_case("same-site")
+            });
+            if from_a_page {
+                return Some("a request from another site's page needs an allowed Origin");
             }
         }
         None
@@ -521,5 +534,23 @@ mod tests {
             (header::ORIGIN, "https://evil.example"),
         ];
         assert_eq!(api.refuse(&headers(&foreign)), Some("Origin not allowed"));
+        // A page's plain GET (an image, a `no-cors` fetch) carries no Origin, but its Fetch
+        // Metadata says where it comes from: another site is refused, the address bar is not.
+        let site = header::HeaderName::from_static(SEC_FETCH_SITE);
+        for from in ["cross-site", "same-site"] {
+            let page = [(header::HOST, "127.0.0.1:9"), (site.clone(), from)];
+            assert!(
+                api.refuse(&headers(&page)).is_some(),
+                "{from} without Origin"
+            );
+        }
+        let typed = [(header::HOST, "127.0.0.1:9"), (site.clone(), "none")];
+        assert_eq!(api.refuse(&headers(&typed)), None, "a URL typed in");
+        let app = [
+            (header::HOST, "127.0.0.1:9"),
+            (header::ORIGIN, "http://tauri.localhost"),
+            (site, "cross-site"),
+        ];
+        assert_eq!(api.refuse(&headers(&app)), None, "the app's own fetch");
     }
 }
