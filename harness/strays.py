@@ -6,8 +6,10 @@ A stray is an orphaned process of an engine or harness binary (serve, store, ing
 crash-writer) or of the api_python test that spawns a client, whose executable lives in a debug
 target dir of this repository, the main checkout's or any worktree's, and that has run for more
 than ten minutes. A test run killed by a tool watchdog or a rate-limit stop leaves its children
-running, each holding a core, with no parent left to stop them. A process whose parent lives is
-someone's on purpose (a debug `serve --record` started from a shell), and the api_load test, which
+running, each holding a core, with no parent left to stop them; a background Git Bash killed
+without its tree leaves the bash it forked alive above the command, so the owner is looked for up
+through cargo, the shells and debug binaries. A process with a live owner is someone's on purpose
+(a debug `serve --record` started from a terminal), and the api_load test, which
 `TP_LOAD_SECONDS` runs for as long as asked, holds its server in-process and leaves nothing behind.
 Release builds are never touched: the long jobs (a soak, a recording session) run from there.
 
@@ -21,7 +23,7 @@ import math
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +34,8 @@ NAMES = re.compile(
     r"(serve|store|ingest|record|soak|crash[-_]writer|api_python)(-[0-9a-f]{16})?(\.exe)?",
     re.IGNORECASE,
 )
+# what a killed shell or test run can leave alive between a stray and its gone owner
+PASS_THROUGH = {"cargo", "bash", "sh", "cmd"}
 
 
 @dataclass(frozen=True)
@@ -63,20 +67,37 @@ def _in_debug(exe: Path, target: Path) -> bool:
     return exe.is_relative_to(target) and exe.relative_to(target).parts[0].lower() == "debug"
 
 
+def _orphaned(process: Process, by_pid: Mapping[int, Process], targets: Sequence[Path]) -> bool:
+    """Whether its owner is gone. Walking up through cargo, the shells (bash, sh, cmd) and debug
+    binaries, some parent is gone, or its PID is held by a process younger than its child: Windows
+    never re-parents a process, and reuses PIDs. The first other live parent (a terminal, an
+    agent, the gate's python), or one this account cannot read, owns it."""
+    child, seen = process, {process.pid}
+    while True:
+        parent = by_pid.get(child.parent)
+        if parent is None or parent.age < child.age:
+            return True
+        passes = parent.exe.stem.lower() in PASS_THROUGH or any(
+            _in_debug(parent.exe, target) for target in targets
+        )
+        if not passes or parent.pid in seen:
+            return False
+        child, seen = parent, seen | {parent.pid}
+
+
 def find(
     processes: Sequence[Process], targets: Sequence[Path], min_age: float = MIN_AGE
 ) -> list[Process]:
     """The strays among `processes`: a named binary in a target dir's debug profile that has run
-    longer than `min_age` seconds and whose parent is gone. Windows never re-parents a process, so
-    an orphan's parent PID is free, or held by a process that started after it did."""
-    ages = {p.pid: p.age for p in processes}
+    longer than `min_age` seconds and whose owner is gone."""
+    by_pid = {p.pid: p for p in processes}
     return [
         p
         for p in processes
         if p.age > min_age
         and NAMES.fullmatch(p.exe.name)
         and any(_in_debug(p.exe, target) for target in targets)
-        and ages.get(p.parent, -1.0) < p.age
+        and _orphaned(p, by_pid, targets)
     ]
 
 

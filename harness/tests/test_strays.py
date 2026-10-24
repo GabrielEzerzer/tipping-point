@@ -20,8 +20,12 @@ HASH = "0123456789abcdef"
 def _fixture(root: Path) -> tuple[list[Path], list[Process], list[Process]]:
     """The main checkout's and a worktree's target dirs, then the strays among a process list,
     then everything else on it. PIDs from 9000 up are gone; 300 is a live shell, 301 a live cargo
-    run, 302 a new process that took over a dead parent's PID, 303 one this account cannot read."""
+    run, 302 a new process that took over a dead parent's PID, 303 one this account cannot read;
+    600 is the bash a killed background Git Bash forked, still alive under its gone parent, 601
+    the cargo it ran, 602 a test binary whose cargo is gone; 604 is a live terminal (mintty)
+    running bash 603, which runs cargo 605."""
     main, lane = root / "code" / "target", root / ".worktrees" / "r2a" / "target"
+    git_bin = root / "git" / "usr" / "bin"
     found = [
         Process(102, 9001, main / "debug" / "serve.exe", 11 * MIN),
         Process(103, 302, lane / "debug" / "crash-writer.exe", 30 * MIN),  # parent PID reused
@@ -31,12 +35,21 @@ def _fixture(root: Path) -> tuple[list[Path], list[Process], list[Process]]:
         Process(107, 9004, main / "debug" / "ingest.exe", 90 * MIN),
         Process(108, 9004, main / "debug" / "record.exe", 90 * MIN),
         Process(109, 9004, main / "debug" / "soak.exe", 90 * MIN),
+        Process(110, 601, main / "debug" / "serve.exe", 35 * MIN),  # under a dead shell's cargo
+        Process(111, 602, lane / "debug" / "crash-writer.exe", 30 * MIN),  # its test's cargo gone
     ]
     spared = [
         Process(300, 9000, root / "bin" / "pwsh.exe", 600 * MIN),
         Process(301, 300, root / "bin" / "cargo.exe", 50 * MIN),
         Process(302, 300, root / "bin" / "notepad.exe", 5 * MIN),
         Process(303, 4, Path(), math.inf),
+        Process(600, 9009, git_bin / "bash.exe", 120 * MIN),
+        Process(601, 600, root / "bin" / "cargo.exe", 40 * MIN),
+        Process(602, 9010, lane / "debug" / "deps" / f"crash_recovery-{HASH}.exe", 40 * MIN),
+        Process(603, 604, git_bin / "bash.exe", 100 * MIN),
+        Process(604, 9011, root / "git" / "usr" / "bin" / "mintty.exe", 200 * MIN),
+        Process(605, 603, root / "bin" / "cargo.exe", 50 * MIN),
+        Process(214, 605, main / "debug" / "serve.exe", 30 * MIN),  # a live terminal's cargo run
         Process(201, 300, main / "debug" / "serve.exe", 90 * MIN),  # `serve --record` by hand
         Process(202, 301, main / "debug" / "serve.exe", 20 * MIN),  # under a live cargo run
         Process(203, 303, main / "debug" / "store.exe", 60 * MIN),  # a parent it cannot read
@@ -55,9 +68,11 @@ def _fixture(root: Path) -> tuple[list[Path], list[Process], list[Process]]:
 
 
 def test_only_old_orphaned_debug_engine_processes_of_this_repo_are_strays(tmp_path: Path) -> None:
-    """Spared: a process whose parent lives (a debug serve started from a shell, one under a live
-    cargo run, one whose parent this account cannot read), the api_load test, release builds (the
-    soak, a recording), a test within ten minutes, another repo's or a look-alike dir's binaries,
+    """Swept too: a serve whose cargo and bash still run under a killed shell, and one under a
+    live test binary whose cargo is gone. Spared: a process whose owner lives (a debug serve
+    started from a shell, one under a live cargo run, one a live terminal's bash and cargo run,
+    one whose parent this account cannot read), the api_load test, release builds (the soak, a
+    recording), a test within ten minutes, another repo's or a look-alike dir's binaries,
     binaries not named, and every other program."""
     targets, found, spared = _fixture(tmp_path)
     assert strays.find(spared + found, targets) == found
