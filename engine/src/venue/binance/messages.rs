@@ -331,7 +331,10 @@ mod tests {
     #[test]
     fn decimals_read_inline_escaped_or_not_and_overlong_ones_are_refused()
     -> Result<(), MessageError> {
-        let escaped = DEPTH.replace("\"50000.10\"", r#""50000.10""#);
+        // The 0 of 50000.10 as the JSON escape backslash-u-0030.
+        let backslash = char::from(0x5c_u8);
+        let escaped = DEPTH.replace("\"50000.10\"", &format!("\"5000{backslash}u0030.10\""));
+        assert_ne!(escaped, DEPTH);
         let Payload::Depth(raw) = parse_frame(&escaped)?.data else {
             panic!("expected a depth payload");
         };
