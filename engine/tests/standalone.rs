@@ -52,7 +52,8 @@ fn serve_starts_without_cargo_on_path() {
 
 /// The real `serve` process, as the app's sidecar or a shell would start it: a recorded script
 /// played back and recorded on an ephemeral port, then asked for its health and a table that
-/// only exists once it has rotated the run through `DuckDB`. Killed at the end.
+/// only exists once it has rotated the run through `DuckDB`. The run's manifest names the commit
+/// the binary was built from, though no git is on its `PATH` (#79). Killed at the end.
 #[test]
 fn serve_plays_a_script_records_it_and_serves_its_tables() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -122,6 +123,13 @@ fn serve_plays_a_script_records_it_and_serves_its_tables() -> Result<(), Box<dyn
             .any(|w| w == [0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]),
         "the stream ends with Arrow's end marker"
     );
+    let manifest = data.join("market").join(&run_id).join("manifest.json");
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest)?)?;
+    let producer = &manifest["producer"];
+    let built = option_env!("TP_GIT_SHA").ok_or("the build found no commit")?;
+    assert_eq!(producer["git_sha"], built, "{producer}");
+    let dirty = option_env!("TP_GIT_DIRTY") == Some("true");
+    assert_eq!(producer["dirty"], dirty, "{producer}");
     child.0.kill()?;
     child.0.wait()?;
     let _ = std::fs::remove_dir_all(&data);
