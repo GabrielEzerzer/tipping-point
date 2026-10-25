@@ -113,15 +113,6 @@ impl ImportError {
     }
 }
 
-/// The run an archive becomes, under `data_dir`.
-///
-/// # Errors
-/// Returns [`ImportError::NotAnArchive`] when the file name is not an archive's.
-pub fn run_dir_of(archive: &Path, data_dir: &Path) -> Result<PathBuf, ImportError> {
-    let name = archive_name(archive)?;
-    Ok(data_dir.join(MARKET).join(run_id(&name)))
-}
-
 fn archive_name(archive: &Path) -> Result<ArchiveName, ImportError> {
     archive
         .file_name()
@@ -550,19 +541,17 @@ mod tests {
 
     #[test]
     fn a_run_is_named_by_its_day_then_venue_and_symbol() -> Result<(), ImportError> {
-        let data = Path::new("data");
+        let run_of = |file: &str| archive_name(Path::new(file)).map(|name| run_id(&name));
         assert_eq!(
-            run_dir_of(Path::new("dl/2026-10-20_BTCUSDT_ob200.data.zip"), data)?,
-            data.join("market")
-                .join("20261020T000000Z-bybit-linear-btcusdt")
+            run_of("dl/2026-10-20_BTCUSDT_ob200.data.zip")?,
+            "20261020T000000Z-bybit-linear-btcusdt"
         );
         assert_eq!(
-            run_dir_of(Path::new("ETHUSDT-aggTrades-2023-06-15.zip"), data)?,
-            data.join("market")
-                .join("20230615T000000Z-binance-usdm-ethusdt")
+            run_of("ETHUSDT-aggTrades-2023-06-15.zip")?,
+            "20230615T000000Z-binance-usdm-ethusdt"
         );
         assert!(matches!(
-            run_dir_of(Path::new("notes.zip"), data),
+            run_of("notes.zip"),
             Err(ImportError::NotAnArchive(_))
         ));
         Ok(())

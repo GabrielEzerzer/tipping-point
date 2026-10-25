@@ -98,12 +98,6 @@ impl Day {
         days_from_civil(self.year, self.month, self.day).saturating_mul(DAY_NS)
     }
 
-    /// `yyyymmdd`.
-    #[must_use]
-    pub fn compact(self) -> String {
-        format!("{:04}{:02}{:02}", self.year, self.month, self.day)
-    }
-
     /// True when `ns` falls inside the day.
     #[must_use]
     pub fn holds(self, ns: i64) -> bool {
@@ -364,7 +358,6 @@ mod tests {
         let day = Day::parse("2026-10-20").expect("a day");
         assert_eq!(day.start_ns(), 1_792_454_400_000_000_000);
         assert!(day.holds(day.start_ns()) && !day.holds(day.start_ns() + DAY_NS));
-        assert_eq!(day.compact(), "20261020");
     }
 
     #[test]
