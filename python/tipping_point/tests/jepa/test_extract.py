@@ -220,8 +220,8 @@ def _bursts(table: pa.Table) -> dict[float, list[int]]:
 @pytest.mark.parametrize(
     ("rule", "bursts"),
     [
-        ("tc-plus", {1.5: [8], 2.269231: [4, 5, 6, 7], 3.5: [0]}),
-        ("tc-only", {2.269231: [4, 5, 6, 7]}),
+        ("tc-plus", {1.5: [16], 2.269231: list(range(8, 16)), 3.5: [0]}),
+        ("tc-only", {2.269231: list(range(8, 16))}),
     ],
 )
 def test_a_subsampled_table_is_the_full_tables_selected_rows(
@@ -232,10 +232,10 @@ def test_a_subsampled_table_is_the_full_tables_selected_rows(
     bursts: dict[float, list[int]],
 ) -> None:
     """Catches a rule keeping the wrong rows, or keeping the right ones with other values: on the
-    scored staircase (bursts 0-3 at T = 3.5, 4-7 at Tc, 8-11 at 1.5), the table `extract
+    scored staircase (bursts 0-7 at T = 3.5, 8-15 at Tc, 16-23 at 1.5), the table `extract
     --select` writes is the full table's rows that the rule keeps, row for row, keys and
     readouts alike. Of the run's four configs chunks the first holds no Tc frame and the last
-    only burst 11; each still gets its chunk, empty where the rule keeps nothing."""
+    only bursts 22 and 23; each still gets its chunk, empty where the rule keeps nothing."""
     final = ising.training / train.FINAL
     whole = _copy(ising.runs["scored"], tmp_path / "all")
     full = extract.read(whole, extract.extract(final, whole, "cpu").name)
@@ -279,7 +279,7 @@ def test_verify_refuses_a_latents_table_whose_rows_are_not_its_rules(
     rule drops, a chunk gone, a miscount, or a dataset run that changed underneath."""
     run = _copy(ising.runs["scored"], tmp_path)
     out = extract.extract(ising.training / train.TWIN, run, "cpu", select="tc-plus")
-    chunk = sorted(out.glob("*.parquet"))[1]  # bursts 4, 5 and 6 of the Tc plateau: 96 rows
+    chunk = sorted(out.glob("*.parquet"))[1]  # bursts 8-13 of the Tc plateau: 192 rows
     original = pq.read_table(chunk)
 
     def rewrite(table: pa.Table | None, path: Path = chunk) -> list[str]:
@@ -292,25 +292,25 @@ def test_verify_refuses_a_latents_table_whose_rows_are_not_its_rules(
         return extract.verify(out)
 
     assert rewrite(original.slice(1)) == [
-        f"{chunk.name}: 95 rows, not exactly the 96 configs rows the tc-plus selection keeps"
+        f"{chunk.name}: 191 rows, not exactly the 192 configs rows the tc-plus selection keeps"
     ]
     assert main(["verify", str(out)]) == 1
-    assert f"{out}: {chunk.name}: 95 rows" in capsys.readouterr().out
+    assert f"{out}: {chunk.name}: 191 rows" in capsys.readouterr().out
     configs = pq.read_table(run / "configs" / chunk.name, columns=list(extract.KEY))
-    dropped = configs.filter(configs["burst"].to_numpy() == 3).slice(0, 1)  # T = 3.5, not kept
+    dropped = configs.filter(configs["burst"].to_numpy() == 6).slice(0, 1)  # T = 3.5, not kept
     readouts_ = original.slice(0, 1).columns[len(extract.KEY) :]
     extra = pa.Table.from_arrays([*dropped.columns, *readouts_], schema=original.schema)
     assert rewrite(pa.concat_tables([original, extra])) == [
-        f"{chunk.name}: 97 rows, not exactly the 96 configs rows the tc-plus selection keeps"
+        f"{chunk.name}: 193 rows, not exactly the 192 configs rows the tc-plus selection keeps"
     ]
     assert main(["verify", str(out)]) == 1
     assert rewrite(original) == []
-    empty = sorted(out.glob("*.parquet"))[-1]  # burst 11: tc-plus keeps none of it
+    empty = sorted(out.glob("*.parquet"))[-1]  # bursts 22 and 23: tc-plus keeps none of them
     assert rewrite(None, empty) == [f"missing chunk {empty.name}"]
     record = io.read_json(out / "complete.json")
     record["rows"]["latents"] += 1
     (out / "complete.json").write_text(json.dumps(record), encoding="utf-8")
-    assert extract.verify(out)[-1] == "complete.json counts 193 rows, the chunks hold 192"
+    assert extract.verify(out)[-1] == "complete.json counts 321 rows, the chunks hold 320"
     (run / "complete.json").write_bytes((run / "complete.json").read_bytes() + b"\n")
     assert extract.verify(out) == [
         f"{run.name}: complete.json differs from the one this table was read from"
@@ -318,20 +318,32 @@ def test_verify_refuses_a_latents_table_whose_rows_are_not_its_rules(
     assert extract.verify(ising.training) == extract.verify(run) == []  # not latents tables
 
 
+def _schedule(run: Path, **params: object) -> None:
+    """Rewrite a copied run's recorded schedule parameters, the input extract's checks read."""
+    manifest = io.read_json(run / "manifest.json")
+    manifest["params"]["schedule"]["params"].update(params)
+    (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def test_extract_refuses_a_rule_it_cannot_apply(tmp_path: Path, ising: jepa_ising.Ising) -> None:
-    """Catches a subsampled table that silently lacks the plateau it exists for, and a resumed
-    extraction mixing two rules in one folder; nothing is written for either."""
+    """Catches a subsampled table that silently lacks the plateau it exists for, one in 8 bursts
+    taken unevenly across plateaus, and a resumed extraction mixing two rules in one folder;
+    nothing is written for any of them."""
     twin = ising.training / train.TWIN
     with pytest.raises(ValueError, match="selection must be one of"):
         extract.extract(twin, ising.runs["scored"], "cpu", select="tc")
     run = _copy(ising.runs["scored"], tmp_path / "no-tc")
-    manifest = io.read_json(run / "manifest.json")
-    manifest["params"]["schedule"]["params"]["temperatures"] = [3.5, 2.3, 1.5]
-    (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _schedule(run, temperatures=[3.5, 2.3, 1.5])
     for rule in ("tc-plus", "tc-only"):
         with pytest.raises(DataError, match=r"no plateau at T = 2\.269231 for tc-"):
             extract.extract(twin, run, "cpu", select=rule)
     assert not (run / extract.LATENTS).exists()
+    run = _copy(ising.runs["scored"], tmp_path / "uneven")
+    _schedule(run, saves=12)  # plateaus would keep bursts 0 and 8, then 16 alone, then 24 and 32
+    with pytest.raises(DataError, match="saves 12 bursts a plateau: one in 8 by burst index"):
+        extract.extract(twin, run, "cpu", select="tc-plus")
+    assert not (run / extract.LATENTS).exists()
+    assert extract.extract(twin, run, "cpu", select="tc-only").is_dir()  # no 1-in-8 to even out
     run = _copy(ising.runs["scored"], tmp_path / "resumed")
     out = extract.extract(twin, run, "cpu", select="tc-only")
     (out / "complete.json").unlink()  # as if interrupted

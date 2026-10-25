@@ -2,11 +2,12 @@
 values: real spins, real Parquet, real manifests), and a small model trained on two of them.
 
 At L = 16 with 4 replicas, each staircase holds three plateaus (3.5, Tc + 4.5e-5 inside the
-held-out band, and 1.5) of four bursts each; seeds 101 and 102 train and validate, seed 1 is a
-pre-registered seed (scored, never trained on), and a ramp and a fixed (null) run complete the set
-of kinds training must refuse. Runs flush every 250 sweeps, so a staircase's configs come in four
-chunks as a long run's come in many: the first holds no frame of the Tc plateau, the last only
-burst 11. Everything runs on the CPU in seconds.
+held-out band, and 1.5) of eight bursts each, a multiple of 8 as extract's tc-plus needs (the
+real staircases save 200); seeds 101 and 102 train and validate, seed 1 is a pre-registered seed
+(scored, never trained on), and a ramp and a fixed (null) run complete the set of kinds training
+must refuse. Runs flush every 250 sweeps, so a staircase's configs come in four chunks as a long
+run's come in many: the first holds no frame of the Tc plateau, the last only bursts 22 and 23.
+Everything runs on the CPU in seconds.
 """
 
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ PILOT = FIXTURES / "ising_pilot.json"
 L, REPLICAS = 16, 4
 FLUSH = 250  # sweeps per chunk
 PLATEAUS = (3.5, 2.269231, 1.5)
+SAVES = 8  # bursts a plateau
 CONFIG = train.Config(
     steps=8,
     model=ModelSpec(dim=32, pred_width=32),
@@ -35,7 +37,9 @@ CONFIG = train.Config(
 
 
 def staircase() -> protocol.Staircase:
-    return protocol.Staircase([2.0] * 3, PLATEAUS, warmup=50, min_therm=50, min_meas=200, saves=4)
+    return protocol.Staircase(
+        [2.0] * 3, PLATEAUS, warmup=50, min_therm=50, min_meas=200, saves=SAVES
+    )
 
 
 @dataclass(frozen=True)

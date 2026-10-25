@@ -17,7 +17,7 @@ Rows follow #22, one per configs row the selection keeps, keyed exactly like con
 Selections, by staircase rows (ramps and null runs are always read whole):
   all       every row, the default
   tc-plus   the plateau at T = 2.269231 whole, and one burst in 8 (burst index a multiple of 8) at
-            every other plateau
+            every other plateau; refused unless 8 divides the bursts a plateau saves
   tc-only   that plateau alone, for ablation checkpoints
 surprise  delta = 0: the squared error per channel of the predicted LayerNorm'd target features
           at the hidden cells, averaged over the checkpoint's two fixed evaluation masks
@@ -184,9 +184,17 @@ def extract(
     deterministic(dev)
     run = open_run(Path(dataset_run))
     if run.kind == "staircase" and select != "all":
-        grid = np.array(run.schedule["params"]["temperatures"], dtype=np.float64)
+        params = run.schedule["params"]
+        grid = np.array(params["temperatures"], dtype=np.float64)
         if not _at_plateau(grid, rule).any():
             raise DataError(f"{run.run_id} has no plateau at T = {TC_PLATEAU} for {select} to keep")
+        # shortcut: assumes every plateau holds `saves` bursts (its measuring window fits them, as
+        # 2,000 sweeps fit 200 bursts of 8); count bursts per plateau if a schedule saves fewer
+        if select == "tc-plus" and int(params["saves"]) % EVERY:
+            raise DataError(
+                f"{run.run_id} saves {params['saves']} bursts a plateau: one in {EVERY} by burst "
+                f"index keeps the same bursts at every plateau only when {EVERY} divides that"
+            )
     ckpt = load_model(checkpoint, dev)
     pca = ckpt.pca
     if pca is None:

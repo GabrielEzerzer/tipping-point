@@ -444,7 +444,8 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   prediction error over two fixed evaluation masks) and `pc_1`..`pc_8`, float32. Its manifest names
   the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it. `--select`
   subsamples staircases: `tc-plus` keeps the T = 2.269231 plateau whole and one burst in 8 (by
-  burst index) at every other plateau, `tc-only` that plateau alone, for ablation checkpoints;
+  burst index) at every other plateau, and refuses a staircase whose plateaus save a number of
+  bursts 8 does not divide; `tc-only` keeps that plateau alone, for ablation checkpoints;
   ramps and null runs are always read whole. The manifest records the rule, and `verify` checks
   that the table holds exactly the rows it keeps.
 - **Probes** read |m|, the energy and L^2 (|m| - <|m|>_T)^2 from frozen embeddings by ridge

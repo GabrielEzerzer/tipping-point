@@ -221,7 +221,7 @@ def test_held_out_and_unthermalised_plateaus_are_never_read(ising: jepa_ising.Is
     frame, through the device unpacker."""
     run = open_run(ising.runs["train"])
     every = data.read_bursts(run)
-    assert len(every) == len(jepa_ising.PLATEAUS) * 4 * jepa_ising.REPLICAS
+    assert len(every) == len(jepa_ising.PLATEAUS) * jepa_ising.SAVES * jepa_ising.REPLICAS
     configs = io.read_table(run.path, "configs")
     order = np.lexsort(
         [configs[k].to_numpy() for k in ("frame", "burst", "replica")]  # by replica, burst, frame

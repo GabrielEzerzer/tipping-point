@@ -124,7 +124,7 @@ def test_probe_reports_trained_beside_twin(ising: jepa_ising.Ising) -> None:
     runs them; without test runs, on the fit runs' odd replicas. Every row names its checkpoint
     by run id, step and sha256, its role and L."""
     final, twin = ising.training / train.FINAL, ising.training / train.TWIN
-    frames = len(jepa_ising.PLATEAUS) * 4 * jepa_ising.REPLICAS * 8
+    frames = len(jepa_ising.PLATEAUS) * jepa_ising.SAVES * jepa_ising.REPLICAS * 8
     rows = probes.probe([final, twin], [ising.runs["val"]], [ising.runs["scored"]], device="cpu")
     assert [(r["role"], r["target"], r["column"]) for r in rows] == [
         (role, t, c) for role in ("trained", "twin") for t in probes.TARGETS for c in probes.COLUMNS
@@ -148,7 +148,7 @@ def test_probe_reports_trained_beside_twin(ising: jepa_ising.Ising) -> None:
         for t in probes.TARGETS:
             raw, shuffled = by[role, t, "raw"]["r2"], by[role, t, "shuffle_within_T"]["r2"]
             assert by[role, t, "raw"]["selectivity"] == raw - shuffled
-            assert -0.2 < by[role, t, "iid"]["r2"] < 0.05  # 32 features fit 384 frames' noise
+            assert -0.2 < by[role, t, "iid"]["r2"] < 0.05  # 32 features fit 768 frames' noise
     split = probes.probe([final, twin], [ising.runs["val"]], limit=200, device="cpu")
     assert all(r["n_fit"] + r["n_test"] == 200 for r in split)
     with pytest.raises(DataError, match="ramp"):
