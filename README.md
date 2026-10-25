@@ -447,6 +447,10 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   burst index) at every other plateau, `tc-only` that plateau alone, for ablation checkpoints;
   ramps and null runs are always read whole. The manifest records the rule, and `verify` checks
   that the table holds exactly the rows it keeps.
+- **Probes** read |m|, the energy and L^2 (|m| - <|m|>_T)^2 from frozen embeddings by ridge
+  regression, each beside two control tasks: an i.i.d. Gaussian target (R^2 near 0) and the target
+  shuffled among the frames of each plateau. Selectivity, R^2 minus the shuffle's, is what the
+  embedding holds of a frame beyond its temperature.
 - **The untrained twin is the null:** a local encoder's pooled readouts inherit Ising scaling with
   random weights, so learning is claimed only as a margin over each run's step-0 twin, which goes
   through every test.

@@ -8,7 +8,8 @@
            written to <run>/latents/<training>-step<step>/; --select tc-plus or tc-only keeps
            a staircase's Tc plateau (plus one burst in 8 elsewhere, or alone)
   probe    ridge probes of |m|, energy and L^2 Var(|m|) from a training's frozen embeddings,
-           trained and untrained (step 0) side by side
+           each beside its iid and shuffle-within-T controls, with selectivity; trained and
+           untrained (step 0) side by side
   verify   check finished directories (trainings, latents tables, simulator runs) against their
            complete.json, and a latents table's rows against its selection; exit 1 on any
            problem
@@ -90,7 +91,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(command=_extract)
 
-    p = sub.add_parser("probe", parents=[device], help="ridge probes, trained beside untrained")
+    p = sub.add_parser(
+        "probe", parents=[device], help="ridge probes and their controls, trained beside twin"
+    )
     p.add_argument("run_dir", type=Path, help="a finished training")
     p.add_argument("--fit", type=Path, nargs="+", required=True, help="simulator run folders")
     p.add_argument("--test", type=Path, nargs="*", default=[], help="default: odd replicas")
@@ -154,15 +157,18 @@ def _probe(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir)
     if not (run_dir / "complete.json").is_file():
         raise ValueError(f"{run_dir}: not a finished training (no complete.json)")
-    checkpoints = {"trained": run_dir / train.FINAL, "untrained": run_dir / train.TWIN}
+    checkpoints = [run_dir / train.FINAL, run_dir / train.TWIN]
     rows = probes.probe(checkpoints, args.fit, args.test, args.limit, args.alpha, args.device)
-    r2 = {(r["checkpoint"], r["target"]): r["r2"] for r in rows}
-    print(
-        f"{'target':<8} {'trained':>9} {'untrained':>9}   R^2, n_fit {rows[0]['n_fit']:,}, "
-        f"n_test {rows[0]['n_test']:,}"
-    )
+    by = {(r["role"], r["target"], r["column"]): r for r in rows}
+    first = rows[0]
+    print(f"L = {first['L']}, R^2 on test, n_fit {first['n_fit']:,}, n_test {first['n_test']:,}")
+    print(f"{'target':<8} {'column':<17} {'trained':>9} {'twin':>9}")
     for target in probes.TARGETS:
-        print(f"{target:<8} {r2['trained', target]:>9.4f} {r2['untrained', target]:>9.4f}")
+        for column in probes.COLUMNS:
+            r2 = [by[role, target, column]["r2"] for role in ("trained", "twin")]
+            print(f"{target:<8} {column:<17} {r2[0]:>9.4f} {r2[1]:>9.4f}")
+        sel = [by[role, target, "raw"]["selectivity"] for role in ("trained", "twin")]
+        print(f"{target:<8} {'selectivity':<17} {sel[0]:>9.4f} {sel[1]:>9.4f}")
     if args.json:
         args.json.write_text(json.dumps(rows, indent=2), encoding="utf-8")
     return 0
