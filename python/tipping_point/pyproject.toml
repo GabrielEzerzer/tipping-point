@@ -3,6 +3,7 @@ name = "tipping-point"
 version = "0.1.0"
 description = "Tipping Point models (JEPA world model and friends)."
 requires-python = ">=3.13"
+license = "MIT"
 dependencies = ["numpy>=2.5.4", "pyarrow>=26.0.0"]
 
 # PyTorch comes in one build per machine: `uv sync --extra cpu` here, `--extra cu126` on a CUDA box.

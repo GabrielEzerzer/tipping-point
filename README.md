@@ -1,7 +1,52 @@
 ﻿# Tipping Point
 
-Open-source framework for detecting critical transitions in live data streams: a JEPA world model measures, Jev triages, and tool-calling agents investigate.
+Tipping Point is a research project and an open-source framework built around one question: do
+learned early-warning signals of critical transitions pass a falsification test based on
+finite-size scaling? The 2D Ising model is where the ground truth is exact: its critical
+temperature and exponents are known, so a signal that claims to detect its transition must change
+with lattice size as finite-size scaling predicts. The project trains a JEPA (joint-embedding
+predictive architecture) world model on raw Ising configurations, derives early-warning signals
+from its latents and tests them against that prediction, alongside the classic indicators computed
+on the raw signal. Crypto order books are the application: the same pre-registered protocol is run
+on volatility-regime shifts in Bitcoin and Ether perpetual futures. For live streams the framework
+also plans triage and an agent layer: Jev, a decision model that TypeSafe offers through a public
+API, answers fixed questions about a JSON summary of the measurements, and a tool-calling agent
+investigates only when its answer is confident. The desktop app and the agent layer are product,
+not part of the paper's claim.
 
+## Status as of 25 October 2026
+
+- Built and tested: the Rust market-data engine, with live and archive venues, storage and replay,
+  and the engine API; the GPU Ising simulator, validated against exact results; the classic
+  early-warning scoring, with its pre-registration tooling; the JEPA world-model core.
+- In progress: the pre-registered confirmatory datasets at L = 16, 32 and 64, generated only after
+  the pre-registration is frozen as a git tag; JEPA training.
+- Planned: the market experiments, the desktop app and the paper, aimed at an ICLR 2027 workshop.
+
+The plan lives on the issue tracker, starting from the map in [#1](https://github.com/GabrielEzerzer/tipping-point/issues/1).
+The pre-registration's design and the decisions behind it are in [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26).
+
+## Results so far (exploratory, not pre-registered)
+
+- At Tc the Binder ratio is 1.1709 at L = 16 and 1.1625 at L = 32, and both 95% CIs contain the exact value, 1.1679.
+- From L = 16 to 32, L^2 Var(|m|) scales as L^1.67 [1.57, 1.76] and the mean |m| as L^-0.113 [-0.125, -0.101]; the exact exponents, 7/4 and -1/8, lie inside these 95% CIs, -1/8 at the edge.
+- Two sizes give a slope, not a test: the pre-registered test at L = 16, 32 and 64 is next ([full tables on #26](https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6390788147)).
+
+## Quick start
+
+With [uv](https://docs.astral.sh/uv/) installed, run these from the repository root:
+
+```sh
+uv sync --extra cpu                             # the Python environment (--extra cu126 on a CUDA machine)
+uv run python harness/gate.py                   # the gate: every Rust and Python check; needs cargo on PATH
+uv run python -m tipping_point.ising validate   # a small L = 4 simulator run, checked against exact results
+```
+
+The sections below document the engine, the simulator, the scoring and the JEPA in detail.
+
+## Licence
+
+Tipping Point is released under the MIT licence; see [LICENSE](LICENSE).
 
 ## Layout
 
