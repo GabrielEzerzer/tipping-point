@@ -1,7 +1,52 @@
 ﻿# Tipping Point
 
-Open-source framework for detecting critical transitions in live data streams: a JEPA world model measures, Jev triages, and tool-calling agents investigate.
+Tipping Point is a research project and an open-source framework built around one question: do
+learned early-warning signals of critical transitions pass a falsification test based on
+finite-size scaling? The 2D Ising model is where the ground truth is exact: its critical
+temperature and exponents are known, so a signal that claims to detect its transition must change
+with lattice size as finite-size scaling predicts. The project trains a JEPA (joint-embedding
+predictive architecture) world model on raw Ising configurations, derives early-warning signals
+from its latents and tests them against that prediction, alongside the classic indicators computed
+on the raw signal. Crypto order books are the application: the same pre-registered protocol is run
+on volatility-regime shifts in Bitcoin and Ether perpetual futures. For live streams the framework
+also plans triage and an agent layer: Jev, a decision model that TypeSafe offers through a public
+API, answers fixed questions about a JSON summary of the measurements, and a tool-calling agent
+investigates only when its answer is confident. The desktop app and the agent layer are product,
+not part of the paper's claim.
 
+## Status as of 25 October 2026
+
+- Built and tested: the Rust market-data engine, with live and archive venues, storage and replay,
+  and the engine API; the GPU Ising simulator, validated against exact results; the classic
+  early-warning scoring, with its pre-registration tooling; the JEPA world-model core.
+- In progress: the pre-registered confirmatory datasets at L = 16, 32 and 64, generated only after
+  the pre-registration is frozen as a git tag; JEPA training.
+- Planned: the market experiments, the desktop app and the paper, aimed at an ICLR 2027 workshop.
+
+The plan lives on the issue tracker, starting from the map in [#1](https://github.com/GabrielEzerzer/tipping-point/issues/1).
+The pre-registration's design and the decisions behind it are in [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26).
+
+## Results so far (exploratory, not pre-registered)
+
+- At Tc the Binder ratio is 1.1709 at L = 16 and 1.1625 at L = 32, and both 95% CIs contain the exact value, 1.1679.
+- From L = 16 to 32, L^2 Var(|m|) scales as L^1.67 [1.57, 1.76] and the mean |m| as L^-0.113 [-0.125, -0.101]; the exact exponents, 7/4 and -1/8, lie inside these 95% CIs, -1/8 at the edge.
+- Two sizes give a slope, not a test: the pre-registered test at L = 16, 32 and 64 is next ([full tables on #26](https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6390788147)).
+
+## Quick start
+
+With [uv](https://docs.astral.sh/uv/) installed, run these from the repository root:
+
+```sh
+uv sync --extra cpu                             # the Python environment (--extra cu126 on a CUDA machine)
+uv run python harness/gate.py                   # the gate: every Rust and Python check; needs cargo on PATH
+uv run python -m tipping_point.ising validate   # a small L = 4 simulator run, checked against exact results
+```
+
+The sections below document the engine, the simulator, the scoring and the JEPA in detail.
+
+## Licence
+
+Tipping Point is released under the MIT licence; see [LICENSE](LICENSE).
 
 ## Layout
 
@@ -376,7 +421,7 @@ pre-registered seeds 1-5, ramps and null runs are refused.
 uv run python -m tipping_point.jepa train --L 16 32 64 --train-seeds 101 102 --val-seed 103 \
     --seed 1 --pilot <pilot run>/pilot.json [--held-out] [--prereg paper/prereg/<id>.toml]
 uv run python -m tipping_point.jepa resume <training>                # after a killed session
-uv run python -m tipping_point.jepa extract <training>/final.pt <simulator run>
+uv run python -m tipping_point.jepa extract <training>/final.pt <simulator run> [--select tc-plus]
 uv run python -m tipping_point.jepa probe <training> --fit <val run> --test <scored run>
 uv run python -m tipping_point.jepa verify <training> <run>/latents/<set> ...
 uv run python -m tipping_point.jepa budget --quota 30                # GPU hours per ISO week
@@ -397,10 +442,21 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   `<simulator run>/latents/<training>-step<step>/`: one row per `configs` row, keyed and ordered
   like `configs` (step, replica, temperature, segment, burst, frame), with `surprise` (the delta = 0
   prediction error over two fixed evaluation masks) and `pc_1`..`pc_8`, float32. Its manifest names
-  the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it.
+  the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it. `--select`
+  subsamples staircases: `tc-plus` keeps the T = 2.269231 plateau whole and one burst in 8 (by
+  burst index) at every other plateau, and refuses a staircase whose plateaus save a number of
+  bursts 8 does not divide; `tc-only` keeps that plateau alone, for ablation checkpoints;
+  ramps and null runs are always read whole. The manifest records the rule, and `verify` checks
+  that the table holds exactly the rows it keeps.
+- **Probes** read |m|, the energy and L^2 (|m| - <|m|>_T)^2 from frozen embeddings by ridge
+  regression, each beside two control tasks: an i.i.d. Gaussian target (R^2 near 0) and the target
+  shuffled among the frames of each plateau. Selectivity, R^2 minus the shuffle's, is what the
+  embedding holds of a frame beyond its temperature.
 - **The untrained twin is the null:** a local encoder's pooled readouts inherit Ising scaling with
   random weights, so learning is claimed only as a margin over each run's step-0 twin, which goes
-  through every test.
+  through every test. `tipping_point.ews.margins.paired` judges one: the CI of the mean margin
+  over model seeds (nested with paired data-bootstrap draws) must exclude 0 in the predicted
+  direction, and every seed's margin must carry the predicted sign.
 - **Kaggle:** `notebooks/kaggle_train.py` clones a pinned commit with a read-only token from
   Kaggle Secrets, installs with `--extra cu126`, checks the dataset's hashes, trains one model seed
   per T4 and resumes from the previous version's output.
