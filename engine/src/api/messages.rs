@@ -82,21 +82,6 @@ impl Topic {
             _ => None,
         }
     }
-
-    /// The name on the wire.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Book => "book",
-            Self::Trades => "trades",
-            Self::Status => "status",
-            Self::Meters => "meters",
-            Self::Jev => "jev",
-            Self::Pnl => "pnl",
-            Self::Lattice => "lattice",
-            Self::Ising => "ising",
-        }
-    }
 }
 
 /// What a client sends.

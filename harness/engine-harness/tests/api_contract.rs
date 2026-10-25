@@ -115,8 +115,7 @@ async fn record_session(dir: &Path) -> Outcome<(Vec<String>, Vec<u8>, PathBuf)> 
         return Err("no welcome".into());
     };
     frames.push(welcome);
-    let topics: Vec<&str> = Topic::ALL.iter().map(|topic| topic.name()).collect();
-    send_json(&mut ws, &json!({"t": "sub", "topics": topics})).await?;
+    send_json(&mut ws, &json!({"t": "sub", "topics": Topic::ALL})).await?;
     let Frame::Text(ack) = next_frame(&mut ws, WAIT).await else {
         return Err("no answer to sub".into());
     };
