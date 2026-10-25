@@ -10,11 +10,13 @@ Per symbol, three kinds of file, each published with a `.CHECKSUM` (`<sha256>  <
 
 `fetch` keeps each in <dest>/<kind>/<SYM>/ beside its .CHECKSUM. A file already there that matches
 its .CHECKSUM is skipped; a download whose SHA-256 differs is refused and never written; a file the
-archive does not publish (404) is recorded as missing. <dest>/manifest.json lists every file of
-every span fetched: URL, bytes, sha256, status and row checks (rows, header, rows out of order and,
-for the daily kinds, stamps missing from the day's grid as [from, to) ranges, stamps given twice,
-rows off the grid). A re-download whose sha256 differs from the one recorded keeps the old one as
-`previous_sha256`. `collect` hands the labeller a span's columns, from verified files only.
+archive does not publish (404) is recorded as missing; a file that matches its .CHECKSUM but cannot
+be parsed is kept and recorded as unreadable. <dest>/manifest.json lists every file of every span
+fetched: URL, bytes, sha256, status and row checks (rows, header, rows out of order and, for the
+daily kinds, stamps missing from the day's grid as [from, to) ranges, stamps given twice, rows off
+the grid). A re-download whose sha256 differs from the one recorded keeps the old one as
+`previous_sha256`. `collect` hands the labeller a span's columns, from verified, readable files
+only.
 
 The archive is CC BY-NC-SA 4.0: anything derived from it and published carries that licence and
 the "Binance Vision" attribution.
@@ -41,6 +43,7 @@ import pyarrow.csv as pacsv
 
 from .. import __version__
 from ..ising import io
+from .msvol import runs
 
 BASE_URL = "https://data.binance.vision/data/futures/um"
 SYMBOLS = ("BTCUSDT", "ETHUSDT")
@@ -177,8 +180,10 @@ def read(kind: str, path: Path) -> tuple[Columns, bool]:
         )
     except (zipfile.BadZipFile, pa.ArrowInvalid, KeyError) as error:
         raise ArchiveError(f"{path}: {error}") from error
-    out = {name: table[name].to_numpy() for name in types}
     stamp = columns[0]
+    if table[stamp].null_count:
+        raise ArchiveError(f"{path}: {table[stamp].null_count} rows have no {stamp}")
+    out = {name: table[name].to_numpy() for name in types}
     if out[stamp].dtype.kind == "M":  # metrics write their stamp as text
         out[stamp] = out[stamp].astype("datetime64[ms]").astype(np.int64)
     return out, header
@@ -204,7 +209,7 @@ def check(source: Source, columns: Columns, header: bool) -> dict[str, Any]:
     found["duplicates"] = [_iso(start + int(s) * step) for s in np.flatnonzero(counts > 1)]
     found["gaps"] = [
         [_iso(start + int(a) * step), _iso(start + int(b) * step)]
-        for a, b in zip(*_runs(counts == 0), strict=True)
+        for a, b in zip(*runs(counts == 0), strict=True)
     ]
     return found
 
@@ -278,18 +283,16 @@ def _fetch(source: Source, dest: Path, get: Get, previous: dict[str, Any] | None
         _replace(_checksum_path(path), checksum)
         entry["fetched"] = True
     sha256 = verify(path)
-    columns, header = read(source.kind, path)
-    entry |= {
-        "bytes": path.stat().st_size,
-        "sha256": sha256,
-        "status": "verified",
-        "checks": check(source, columns, header),
-    }
+    entry |= {"bytes": path.stat().st_size, "sha256": sha256}
     before = previous or {}
     changed = before.get("sha256") if before.get("sha256") not in (None, sha256) else None
     if changed or before.get("previous_sha256"):
         entry["previous_sha256"] = changed or before["previous_sha256"]
-    return entry
+    try:
+        columns, header = read(source.kind, path)
+    except ArchiveError as error:  # kept and recorded so the run goes on; collect refuses it
+        return {**entry, "status": "unreadable", "error": str(error)}
+    return {**entry, "status": "verified", "checks": check(source, columns, header)}
 
 
 @dataclass(frozen=True)
@@ -358,9 +361,3 @@ def _expected(text: str, name: str, where: object) -> str:
 
 def _iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _runs(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The [start, end) bounds of each run of True."""
-    edges = np.flatnonzero(np.diff(np.concatenate([[False], mask, [False]]).astype(np.int8)))
-    return edges[0::2], edges[1::2]

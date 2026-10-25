@@ -4,9 +4,10 @@ For cut times T at every refit boundary (the bar before a refit and the refit's 
 seeded bars of the planted 3-month series, the labeller run (i) on the bars truncated at T and
 (ii) on the bars perturbed after T must give, bit for bit, the full run's x, z, P, H and theta in
 force at every bar t <= T, every refit at r <= T, every episode whose class is settled by T (each
-event confirmed by T among them), and every null stretch that ends by T + 2 - d_min - Q. That last
-bound is d_min - 2 bars short of section 4's T - Q: a stretch ends Q bars before the next episode
-unless that one is a flicker, and an episode's class is known only d_min bars after its onset.
+event confirmed by T among them), and every null stretch that ends by T + 1 - d_min - Q. That last
+bound is d_min - 1 bars short of section 4's T - Q: a stretch ends Q bars before the next episode
+unless that one is a flicker, and a run of H = 1 that began at bar o is known not to be a flicker
+only at bar o + d_min - 1 (test_the_null_stretch_bound_holds_at_its_edge).
 
 The sweep keeps to seconds two ways. It memoises msvol.fit on its exact inputs (the training z's
 bytes, the start, tol and max_iter): EM is a pure function of those, so a hit returns what
@@ -65,9 +66,12 @@ def _assert_same_through(full: msvol.Labels, part: msvol.Labels, T: int, p: msvo
     assert [json.dumps(r) for r in part.refits[: len(done)]] == done, f"refits by T = {T}"
     assert len([r for r in part.refits if r["bar"] <= T]) == len(done)
     assert _settled(full, T, p.d_min) == _settled(part, T, p.d_min), f"episodes by T = {T}"
-    bound = T + 2 - p.d_min - p.refractory
-    final = [[s for s in run.nulls if s["end"] <= bound] for run in (full, part)]
-    assert final[0] == final[1], f"null stretches by T = {T}"
+    assert _final(full.nulls, T, p) == _final(part.nulls, T, p), f"null stretches by T = {T}"
+
+
+def _final(nulls: list[dict[str, Any]], T: int, p: msvol.Params) -> list[dict[str, Any]]:
+    """The null stretches no bar after T can change: those ending by T + 1 - d_min - Q."""
+    return [s for s in nulls if s["end"] <= T + 1 - p.d_min - p.refractory]
 
 
 def _moved(planted: Any, T: int, reach: int | None) -> msvol.Labels:
@@ -119,3 +123,28 @@ def test_refits_repeat_bit_for_bit_without_the_memo(planted: Any) -> None:
     moved = _moved(planted, T, None)
     assert len(moved.p) == len(full.p) and len(moved.refits) == len(full.refits)
     _assert_same_through(full, moved, T, params)
+
+
+def test_the_null_stretch_bound_holds_at_its_edge() -> None:
+    """The review's case (d_min 3, C 4, Q 10): an episode at [10, 14), a two-bar flicker at
+    [60, 62), cut at T = 61. At the cut the flicker is still open, so the truncated run takes it
+    for a pending episode and ends a stretch Q bars before it, at 50; the full run knows it is a
+    flicker and ends that stretch C bars before it, at 56. T + 1 - d_min - Q = 49 leaves the stretch
+    out; the looser bound, 50, compares it and fails a correct labeller."""
+    p = msvol.Params(d_min=3, clean=4, refractory=10)
+    T, n = 61, 100
+    h = np.zeros(n, np.int8)
+    h[10:14] = 1
+    h[60:62] = 1
+    missing = np.zeros(n, bool)
+
+    def stretches(path: np.ndarray) -> list[dict[str, Any]]:
+        found = msvol.episodes(path, missing[: len(path)], p)
+        return msvol.nulls(path, missing[: len(path)], found, p)
+
+    full, part = stretches(h), stretches(h[: T + 1])
+    assert [(s["start"], s["end"]) for s in full] == [(24, 56), (66, 90)]
+    assert [(s["start"], s["end"]) for s in part] == [(24, 50)]
+    assert _final(full, T, p) == _final(part, T, p) == []
+    loose = T + 2 - p.d_min - p.refractory
+    assert [s for s in full if s["end"] <= loose] != [s for s in part if s["end"] <= loose]

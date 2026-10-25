@@ -4,7 +4,8 @@
           funding of the UTC days --start..--end (inclusive) for --symbols, into --dest (default
           harness/fixtures/archives/binance, gitignored; relative to the current folder, so run
           it from the repository root). A re-run skips the files already verified. Exit 1 when a
-          file is refused (checksum) or failed (network): run it again for those
+          file is refused (checksum), failed (network: run it again) or unreadable (it matches its
+          checksum but does not parse: kept, recorded, and refused by labels)
   labels  the regime labels of --start..--end from the fetched files (--archive, same default),
           as a run in <data dir>/labels/<run_id>/. Every labeller parameter is an option
           (--d-min, --enter, ...) whose default is the research pass's start value (#29).
@@ -32,6 +33,7 @@ from . import archive, bars, msvol
 ARCHIVE = Path("harness") / "fixtures" / "archives" / "binance"
 CONFIRMATORY = date(2024, 1, 1)  # no label from here on until market-labels-v1 is frozen
 DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
+BAD = ("refused", "failed", "unreadable")  # the fetch statuses that make it exit 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -86,10 +88,11 @@ def _fetch(args: argparse.Namespace) -> int:
         print(
             f"{kind:<12} {symbol:<8} {status['verified']} verified "
             f"({sum(e['fetched'] for e in entries)} fetched), {status['missing']} missing, "
-            f"{status['refused']} refused, {status['failed']} failed; files with "
+            f"{status['refused']} refused, {status['failed']} failed, "
+            f"{status['unreadable']} unreadable; files with "
             + ", ".join(f"{key} {count}" for key, count in flagged.items())
         )
-    bad = {path: e for path, e in done.items() if e["status"] in ("refused", "failed")}
+    bad = {path: e for path, e in done.items() if e["status"] in BAD}
     for path, entry in bad.items():
         why = entry.get("error") or f"sha256 {entry['sha256']}, .CHECKSUM {entry['expected']}"
         print(f"{entry['status']}: {path}: {why}", file=sys.stderr)

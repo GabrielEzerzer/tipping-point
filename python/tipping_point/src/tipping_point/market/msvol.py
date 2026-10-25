@@ -384,7 +384,7 @@ def episodes(h: np.ndarray, missing: np.ndarray, params: Params) -> list[dict[st
     history = max(params.clean, params.refractory)
     found: list[dict[str, Any]] = []
     last_event: int | None = None
-    for a, b in zip(*_runs(h == 1), strict=True):
+    for a, b in zip(*runs(h == 1), strict=True):
         onset, end = int(a), int(b)
         if end - onset < params.d_min:
             kind = "flicker" if end < n else "pending"
@@ -433,12 +433,12 @@ def nulls(
     gaps = np.concatenate([[0], np.cumsum(missing)])
     return [
         {"start": int(a), "end": int(b), "bars": int(b - a), "missing": int(gaps[b] - gaps[a])}
-        for a, b in zip(*_runs(np.cumsum(cover[:n]) == 0), strict=True)
+        for a, b in zip(*runs(np.cumsum(cover[:n]) == 0), strict=True)
     ]
 
 
-def _runs(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The [start, end) bounds of each run of True."""
+def runs(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The [start, end) bounds of each run of True (the archive's gap listing uses it too)."""
     edges = np.flatnonzero(np.diff(np.concatenate([[False], mask, [False]]).astype(np.int8)))
     return edges[0::2], edges[1::2]
 

@@ -63,6 +63,7 @@ def bars(
     rv = np.where(complete & (total(traded) > 0), total(gk), np.nan)
 
     oi = np.full(n, np.nan)
+    # S4: create_time as snapshot or window start matters once the taker-ratio columns are read
     at, step, (metric_off, metric_dups) = _grid(metrics["create_time"], start_ms, BAR_MS, n)
     oi[step] = metrics["sum_open_interest"][at]
 

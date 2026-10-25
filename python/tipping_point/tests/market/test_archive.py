@@ -153,6 +153,34 @@ def test_a_checksum_mismatch_is_refused_and_never_written(
     assert main(["fetch", *span, "--dest", str(tmp_path)]) == 0
 
 
+def test_a_checksum_valid_file_that_does_not_parse_is_kept_as_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = vision(["BTCUSDT"], DAY, 2, seed=6)
+    bad = archive.Source("klines", "BTCUSDT", "2023-01-02")  # the run's first file
+    fake.add(bad, b"1672617600000,16610.4,16611.1,16610.3\n")  # four columns, .CHECKSUM right
+    monkeypatch.setattr(archive, "http_get", fake.get)
+    span = ["--start", "2023-01-02", "--end", "2023-01-03", "--symbols", "BTCUSDT"]
+    assert main(["fetch", *span, "--dest", str(tmp_path)]) == 1
+    assert f"unreadable: {bad.path}" in capsys.readouterr().err
+    files = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["files"]
+    entry, data = files[bad.path], (tmp_path / bad.path).read_bytes()
+    assert entry["status"] == "unreadable" and "12 columns, got 4" in entry["error"]
+    assert (entry["sha256"], entry["bytes"]) == (hashlib.sha256(data).hexdigest(), len(data))
+    assert sorted(e["status"] for e in files.values()) == ["unreadable"] + ["verified"] * 4
+    fake.requests.clear()
+    assert main(["fetch", *span, "--dest", str(tmp_path)]) == 1  # a re-run goes on past it
+    files = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["files"]
+    assert fake.requests == [] and len(files) == 5
+    kept = ("status", "sha256", "bytes", "error")
+    assert [files[bad.path][k] for k in kept] == [entry[k] for k in kept]
+    with pytest.raises(archive.ArchiveError, match="12 columns"):
+        archive.collect(["BTCUSDT"], DAY, DAY + timedelta(days=1), tmp_path)
+    empty = _zip(tmp_path, "e", b",1,1,1,1,1,1,1,1,1,1,0\n")  # a row with no stamp to place it
+    with pytest.raises(archive.ArchiveError, match="1 rows have no open_time"):
+        archive.read("klines", empty)
+
+
 def test_a_file_spoilt_on_disk_is_fetched_again(tmp_path: Path) -> None:
     fake = vision(["BTCUSDT"], DAY, 1, seed=3)
     archive.fetch(["BTCUSDT"], DAY, DAY, tmp_path, fake.get)
