@@ -453,7 +453,9 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   embedding holds of a frame beyond its temperature.
 - **The untrained twin is the null:** a local encoder's pooled readouts inherit Ising scaling with
   random weights, so learning is claimed only as a margin over each run's step-0 twin, which goes
-  through every test.
+  through every test. `tipping_point.ews.margins.paired` judges one: the CI of the mean margin
+  over model seeds (nested with paired data-bootstrap draws) must exclude 0 in the predicted
+  direction, and every seed's margin must carry the predicted sign.
 - **Kaggle:** `notebooks/kaggle_train.py` clones a pinned commit with a read-only token from
   Kaggle Secrets, installs with `--extra cu126`, checks the dataset's hashes, trains one model seed
   per T4 and resumes from the previous version's output.
