@@ -405,9 +405,10 @@ def test_an_unattainable_alarm_target_is_a_nan_row_never_a_censored_one(planted:
     """#97 in the alarm table: with a target no theta reaches (100 false alarms per tau_c), each
     row says unattainable, carries the highest rate any theta gives on the set half (per
     report_per, as the other rates), and leaves theta, both rates and every alarm and censoring
-    field NaN. Before, theta was -inf and every replica read as censored."""
+    field NaN. Before, theta was -inf and every replica read as censored. The rows follow
+    scoring.alarms.indicators, not the dynamic test's (variance and AC1 here)."""
     doc = tomllib.loads(_text(planted.root, "demo", PILOT_RUN))
-    doc["scoring"]["alarms"]["far"] = 100.0
+    doc["scoring"]["alarms"] |= {"far": 100.0, "indicators": ["skewness", "ac"]}
     ind, top, event = doc["indicators"], doc["sensitivity"]["headline"], doc["event"]
     band = (max(event["horizons"]) + event["segment"], min(event["horizons"]))
     inputs = ising.select(*ising.find_runs(planted.root), doc["data"])[16]
@@ -415,7 +416,7 @@ def test_an_unattainable_alarm_target_is_a_nan_row_never_a_censored_one(planted:
     prep = ising.prepare(inputs, "dense", tau_c, ind["thin"], band)
     window, bandwidth = prep.samples(top["window"], tau_c), top["bandwidth"] * tau_c / prep.sweeps
     rows = ising._alarms(doc, prep, 16, tau_c, window, bandwidth)
-    assert [r["indicator"] for r in rows] == ["variance", "ac"]
+    assert [r["indicator"] for r in rows] == ["skewness", "ac"]
     unset = ("theta", "far_set", "far_test", "alarm_eps_median", "alarm_eps_q1", "alarm_eps_q3")
     for r in rows:
         assert r["attainable"] is False and 0.0 < r["far_max"] < 100.0 * r["far_per_taus"], r
