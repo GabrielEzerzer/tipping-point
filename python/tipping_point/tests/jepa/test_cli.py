@@ -29,14 +29,15 @@ def test_train_selects_runs_by_seed_and_records_its_calls(
 
     monkeypatch.setattr(train, "start", capture)
     prereg = tmp_path / "jepa-v1.toml"
-    prereg.write_text('id = "ising-jepa"\nversion = 1\n[data]\nseeds = [1, 2, 3, 4, 5, 6]\n')
+    prereg.write_text('id = "ising-jepa"\nversion = 1\n[data]\nseeds = [1, 2, 17]\n')
     argv = _train_argv(ising, "--train-seeds", "101", "--held-out", "--steps", "100")
     assert main([*argv, "--prereg", str(prereg)]) == 0
     (call,) = calls
     assert call["config"].seed == 7 and call["config"].steps == 100
     assert call["config"].warmup == 5 and call["tag"] == "L16-m7-heldout"
     sources = call["data"].sources
-    assert sources["held_out"] == [2.0, 2.5] and sources["refused_seeds"] == [1, 2, 3, 4, 5, 6]
+    assert sources["held_out"] == [2.0, 2.5]
+    assert sources["refused_seeds"] == [*range(1, 11), 17]  # the JEPA prereg's 17 joins 1-10
     assert [r["run_id"] for r in sources["train"]] == [ising.runs["train"].name]
     assert [r["run_id"] for r in sources["val"]] == [ising.runs["val"].name]
     _, pilot, recorded = call["rest"]

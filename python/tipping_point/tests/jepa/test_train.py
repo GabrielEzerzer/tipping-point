@@ -5,6 +5,7 @@ import dataclasses
 import hashlib
 import json
 import shutil
+import tomllib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -143,7 +144,7 @@ def test_the_manifest_names_its_data_code_seeds_and_pilot(ising: jepa_ising.Isin
     assert record["run_id"] == trained_on.run_id and record["seed"] == 101
     assert record["complete_sha256"] == trained_on.complete_sha256
     assert manifest["data"]["val"][0]["seed"] == 102
-    assert manifest["data"]["refused_seeds"] == [1, 2, 3, 4, 5]
+    assert manifest["data"]["refused_seeds"] == list(range(1, 11))  # v1's 6-10, exploratory 1-5
     assert set(manifest["params"]["seeds"]) == set(train.STREAMS)
     assert train.Config.from_json(manifest["params"]["config"]) == jepa_ising.CONFIG
     record = json.loads(jepa_ising.PILOT.read_text("utf-8"))
@@ -151,7 +152,7 @@ def test_the_manifest_names_its_data_code_seeds_and_pilot(ising: jepa_ising.Isin
         "run_id": "fixtures",
         "sha256": hashlib.sha256(jepa_ising.PILOT.read_bytes()).hexdigest(),
         "kernel_commit": record["kernel_commit"],
-        "L": [16, 32, 64],
+        "L": sorted(int(L) for L in record["per_L"]),  # the sizes the committed record measured
     }
     assert manifest["prereg"] is None
     assert "git_sha" in manifest["producer"] and "dirty" in manifest["producer"]
@@ -172,8 +173,9 @@ def test_records_a_training_names_carry_no_local_path(monkeypatch: pytest.Monkey
         "id": "ising-ews",
         "version": 1,
         "sha256": hashlib.sha256(V1.read_bytes()).hexdigest(),
-        "seeds": [1, 2, 3, 4, 5],
+        "seeds": tomllib.loads(V1.read_text("utf-8"))["data"]["seeds"],
     }
+    assert set(train.prereg_record(V1)["seeds"]) <= data.PREREG_SEEDS  # refused without --prereg
 
 
 def test_trainings_and_latents_take_their_commit_from_the_one_helper(

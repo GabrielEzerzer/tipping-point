@@ -32,7 +32,7 @@ PILOT = DATASET / "ising" / "<pilot run>" / "pilot.json"
 PREVIOUS = Path("/kaggle/input/tipping-point-jepa-output")  # last version's output, if any
 WORK = Path("/kaggle/working")
 CODE, DATA = WORK / "tipping-point", WORK / "data"  # DATA is TP_DATA_DIR
-SIZES, TRAIN_SEEDS, VAL_SEED = [16, 32, 64], [101, 102], 103  # simulator seeds, never 1-5
+SIZES, TRAIN_SEEDS, VAL_SEED = [16, 32, 64], [101, 102], 103  # simulator seeds, never 1-10
 MODEL_SEEDS = [1, 2]  # one per T4
 STEPS, HELD_OUT = 50_000, False  # HELD_OUT: the [2.0, 2.5] ablation
 
