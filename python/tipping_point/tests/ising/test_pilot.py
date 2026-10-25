@@ -72,9 +72,10 @@ def test_tauc_writes_the_record_from_pilot_runs_at_tc(tmp_path: Path) -> None:
 
 
 def test_tauc_refuses_runs_that_cannot_pin_tau_c(tmp_path: Path) -> None:
-    """A pilot that never held exactly Tc, two runs of one size, a run that did not finish, or
-    one too short: each is refused before any record exists. Short means under 300 tau_c, not
-    just the 50 the estimator needs to find a window: ~120 tau_c reads ~8% low and passes that."""
+    """A pilot that never held exactly Tc, two runs of one size, a run that did not finish, one
+    too short, or one naming no kernel or no commit: each is refused before any record exists.
+    Short means under 300 tau_c, not just the 50 the estimator needs to find a window: ~120 tau_c
+    reads ~8% low and passes that."""
     hot = _pilot_run(tmp_path / "hot", 4, T=3.0, sweeps=50)
     short = _pilot_run(tmp_path / "short", 8, sweeps=1500)  # ~120 tau_c, a window and all
     at_tc = _pilot_run(tmp_path / "tc", 4)  # ~900 tau_c: a duplicate is refused as a duplicate
@@ -84,8 +85,12 @@ def test_tauc_refuses_runs_that_cannot_pin_tau_c(tmp_path: Path) -> None:
     manifest = io.read_json(unnamed / "manifest.json")  # no kernel for the record to name
     del manifest["params"]["algorithm"]["kernel_sha256"]
     io.write_json(unnamed / "manifest.json", manifest, replace=True)
+    uncommitted = shutil.copytree(at_tc, tmp_path / "uncommitted" / at_tc.name)  # from a wheel
+    manifest = io.read_json(uncommitted / "manifest.json")  # built outside any checkout (#109)
+    manifest["producer"].update(git_sha=None, dirty=None)
+    io.write_json(uncommitted / "manifest.json", manifest, replace=True)
     cases = {"hot": hot, "short": short, "twice": at_tc, "unfinished": unfinished}
-    cases["unnamed"] = unnamed
+    cases.update(unnamed=unnamed, uncommitted=uncommitted)
     refusals = {}
     for name, run_dir in cases.items():
         argv = ["tauc", str(run_dir), str(at_tc), "--data-dir", str(tmp_path / "out")]
@@ -95,6 +100,7 @@ def test_tauc_refuses_runs_that_cannot_pin_tau_c(tmp_path: Path) -> None:
     assert all(isinstance(message, str) for message in refusals.values())  # exit status 1
     assert "need 300" in str(refusals["short"])
     assert "records no kernel_sha256" in str(refusals["unnamed"])
+    assert "records no commit" in str(refusals["uncommitted"])
     assert not (tmp_path / "out").exists()
 
 

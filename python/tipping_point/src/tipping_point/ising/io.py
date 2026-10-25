@@ -22,8 +22,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
+import tomllib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import IO, Any
@@ -31,6 +33,8 @@ from typing import IO, Any
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from .. import _build_info, _git
 
 TABLES = ("stats", "configs", "balance")
 _KEY = [
@@ -157,20 +161,36 @@ def discard_after(run_dir: Path, step: int, tables: Sequence[str] = TABLES) -> N
 
 
 def code_version() -> dict[str, Any]:
-    """The commit of the running code and whether its checkout had uncommitted edits (both None
-    without git): every manifest's producer.git_sha and producer.dirty. The one copy, since an
-    Ising run, a JEPA training and the EWS result scored from them must agree on "dirty"."""
-    here = Path(__file__).parent
+    """The commit of the running code and whether it had uncommitted edits (both None when nothing
+    names it): every manifest's producer.git_sha and producer.dirty. The one copy, since an Ising
+    run, a JEPA training and the EWS result scored from them must agree on "dirty".
 
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=here, capture_output=True, text=True, check=True
-        ).stdout.strip()
+    Imported from its own source tree in a git checkout that tracks it, that is the checkout's
+    HEAD and status. Otherwise, as installed from a wheel, it is the commit and dirty flag the
+    build stamped into _build_info (#109): None in a build made outside any checkout. A repository
+    that only encloses an installed copy, such as a venv inside another project, is never read."""
+    pyproject = _source_tree(Path(__file__).resolve().parents[1])
+    if pyproject is not None:
+        try:
+            sha, dirty = _git.head(pyproject)
+            return {"git_sha": sha, "dirty": dirty}
+        except (OSError, subprocess.CalledProcessError):
+            pass  # a source tree no repository tracks (an unpacked sdist): its stamp names it
+    return {"git_sha": _build_info.commit, "dirty": _build_info.dirty}
 
+
+def _source_tree(package: Path) -> Path | None:
+    """The pyproject.toml of the source tree the tipping_point directory `package` is imported
+    from (<project>/src/tipping_point, with a <project>/pyproject.toml naming tipping-point), or
+    None for an installed copy (site-packages/tipping_point)."""
+    pyproject = package.parent.parent / "pyproject.toml"
+    if package.parent.name != "src" or not pyproject.is_file():
+        return None
     try:
-        return {"git_sha": git("rev-parse", "HEAD"), "dirty": git("status", "--porcelain") != ""}
-    except (OSError, subprocess.CalledProcessError):
-        return {"git_sha": None, "dirty": None}
+        name = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["name"]
+    except (OSError, ValueError, KeyError, TypeError):  # unreadable, not TOML, or no name
+        return None
+    return pyproject if re.sub(r"[-_.]+", "-", str(name)).lower() == "tipping-point" else None
 
 
 def write_complete(run_dir: Path, last_step: int, checks: dict[str, Any]) -> None:

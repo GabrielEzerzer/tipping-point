@@ -32,3 +32,6 @@ explicit = true
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# hatch_build.py stamps the commit a build comes from into tipping_point/_build_info.py (#109)
+[tool.hatch.build.hooks.custom]

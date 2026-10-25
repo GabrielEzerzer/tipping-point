@@ -7,8 +7,9 @@ L, each holding a block at exactly Tc with a stats row every sweep, and writes
 <data dir>/ising/<run_id>/pilot.json:
 
   {
-    "kernel_commit": "<sha>",   commit the pilot runs came from; "<sha>-dirty" if any of their
-                                trees had uncommitted edits
+    "kernel_commit": "<sha>",   commit the pilot runs came from, read from git or from the stamp
+                                of the wheel they ran from (io.code_version, #109); "<sha>-dirty"
+                                if any of their trees had uncommitted edits
     "kernel_sha256": "<hex>",   sha256 of the kernel source they ran (kernel.py: the sweep and its
                                 acceptance table), as their manifests record it
     "per_L": {                  one entry per size, keyed by str(L):
@@ -81,14 +82,18 @@ def measure(
     run_dir: Path, draws: int = DRAWS, seed: int = 0
 ) -> tuple[int, dict[str, Any], np.ndarray, str, str]:
     """One size from a complete run with a block at exactly Tc: L, its per_L entry, the
-    bootstrap taus of |m|, the run's commit and its kernel's sha256."""
+    bootstrap taus of |m|, the run's commit and its kernel's sha256. A commit stamped into the
+    wheel the run was installed from counts the same as one read from a checkout."""
     if not (run_dir / "complete.json").exists():
         raise ValueError(f"{run_dir.name} is not complete")
     manifest = io.read_json(run_dir / "manifest.json")
     L, producer = manifest["params"]["L"], manifest["producer"]
     kernel = manifest["params"]["algorithm"].get("kernel_sha256")
     if producer["git_sha"] is None:
-        raise ValueError(f"{run_dir.name} records no git commit, so no kernel to name")
+        raise ValueError(
+            f"{run_dir.name} records no commit, so no kernel to name: it ran neither from a git "
+            "checkout nor from a wheel stamped at build time (#109)"
+        )
     if kernel is None:
         raise ValueError(f"{run_dir.name} records no kernel_sha256 (run before #55); re-run it")
     stats = io.read_table(run_dir, "stats")

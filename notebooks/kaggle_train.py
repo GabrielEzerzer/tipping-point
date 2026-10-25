@@ -5,6 +5,9 @@
 # kept in `/kaggle/working`, which saving the version turns into its output. Not executed by the
 # repository's gate; the CUDA checks it relies on are #48's.
 #
+# Its runs record the pinned commit through git, since it installs the checkout itself. A kernel
+# that installs a wheel instead needs one built with the commit stamp (README, #109).
+#
 # Inputs:
 # - a private Kaggle Dataset of simulator runs, laid out as `ising/<run_id>/...` with their
 #   `complete.json`, plus the #50 pilot run's `pilot.json`;

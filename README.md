@@ -223,6 +223,31 @@ uv run python -m tipping_point.ising null --L 16 --epsilon-L 4 --pilot <record>/
 uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
 ```
 
+### Which commit a run records (#109)
+
+Every manifest names the code that wrote it in `producer.git_sha` and `producer.dirty`: Ising
+runs, JEPA trainings and EWS results all take them from `io.code_version()`. Run from the
+checkout, where `uv sync` installs the package editable, they are git's HEAD and whether the tree
+has uncommitted changes, untracked files included. A wheel install sits in no checkout, so runs
+made from a wheel are stamped from the build: the build hook (`python/tipping_point/hatch_build.py`)
+writes `tipping_point/_build_info.py` (`commit`, `dirty`, `kernel_sha256` of `ising/kernel.py`,
+`built_at` in UTC) into every sdist and wheel built from a git checkout, and `code_version` reads
+it. `tauc` takes a stamped commit exactly as it takes one from git. An installed copy never reads
+a repository that only encloses it, such as a venv inside another project. A build made where no
+repository tracks the source records no commit (the build prints a warning), and `tauc` refuses
+its runs. To build a wheel for a GPU machine, check out the commit, keep the tree clean, and run:
+
+```sh
+uv build --package tipping-point --wheel     # -> dist/tipping_point-0.1.0-py3-none-any.whl, stamped
+uv run python harness/wheel_provenance.py --wheel dist/tipping_point-0.1.0-py3-none-any.whl
+```
+
+The second line checks a wheel end to end in throwaway venvs (about three minutes on a laptop
+CPU): its runs must record the stamped commit, inside or outside another repository, and `tauc`
+must accept them. `tauc` also needs every size from one commit and one kernel, so a record over
+new sizes re-runs the old sizes from the same build. #50's pilots predate `kernel_sha256` in any
+case, so #54's re-measure at L = 64 and 128 re-runs L = 16 and 32 as well.
+
 ### The pilot record: tau_c(L)
 
 The time unit of everything downstream (ramp rates, null-run lengths, the EWS scorer's windows) is
