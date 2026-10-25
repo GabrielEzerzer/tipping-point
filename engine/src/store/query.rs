@@ -5,11 +5,9 @@
 
 use std::fs;
 use std::io;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use arrow::record_batch::RecordBatch;
-use duckdb::{Config, Connection, params};
+use duckdb::{Config, Connection};
 
 use super::StoreError;
 use super::frame::{Frame, Kind};
@@ -91,45 +89,6 @@ pub fn for_each_frame(
     Ok(())
 }
 
-/// The time column a table is windowed on, and the order its rows come back in.
-fn shape(table: &str) -> Result<(&'static str, &'static str), StoreError> {
-    Ok(match table {
-        "frames" | "trades" => ("capture_ts_ns", "seq"),
-        "depth_updates" | "snapshots" => ("capture_ts_ns", "seq, side DESC, level_idx"),
-        "book_samples" => ("sample_ts_ns", "sample_ts_ns, venue, symbol"),
-        _ => return Err(StoreError::UnknownTable(table.to_owned())),
-    })
-}
-
-/// The rows of `table` in a time window, across the whole run, as Arrow batches (what Arrow IPC
-/// hands on to the model). `book_samples` is windowed on its sample time and ordered by it;
-/// every other table is windowed on its capture time and comes back in seq order.
-///
-/// # Errors
-/// Returns [`StoreError::UnknownTable`] or `DuckDB` errors.
-pub fn window(
-    conn: &Connection,
-    run_dir: &Path,
-    table: &str,
-    window: Range<i64>,
-) -> Result<Vec<RecordBatch>, StoreError> {
-    let (column, order) = shape(table)?;
-    let files = table_files(run_dir, table)?;
-    if files.is_empty() {
-        return Ok(Vec::new());
-    }
-    let list: Vec<String> = files.iter().map(|path| literal(path)).collect();
-    let sql = format!(
-        "SELECT * FROM read_parquet([{}], union_by_name = true) WHERE {column} >= ? AND {column} < ? ORDER BY {order}",
-        list.join(", ")
-    );
-    let mut statement = conn.prepare(&sql)?;
-    let batches = statement
-        .query_arrow(params![window.start, window.end])?
-        .collect();
-    Ok(batches)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,18 +98,6 @@ mod tests {
         assert_eq!(
             literal(Path::new(r"C:\data\market\it's\frames\x.parquet")),
             "'C:/data/market/it''s/frames/x.parquet'"
-        );
-    }
-
-    #[test]
-    fn only_known_tables_can_be_windowed() {
-        assert!(matches!(
-            shape("frames; DROP TABLE x"),
-            Err(StoreError::UnknownTable(_))
-        ));
-        assert_eq!(
-            shape("book_samples").ok().map(|s| s.0),
-            Some("sample_ts_ns")
         );
     }
 

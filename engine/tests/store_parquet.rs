@@ -1,7 +1,6 @@
 //! Rotation into Parquet, and `DuckDB` over it: the Parquet holds exactly what the log holds, a
-//! rotate can be re-run, survives its own crash and runs one at a time, and window queries and
-//! replays see the rows they should. Two independent implementations meet here: arrow-rs
-//! writes, `DuckDB` reads.
+//! rotate can be re-run, survives its own crash and runs one at a time, and replays see the rows
+//! they should. Two independent implementations meet here: arrow-rs writes, `DuckDB` reads.
 
 mod runs;
 
@@ -10,8 +9,6 @@ use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, Int64Array};
-use arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 use engine::market::live::LiveEvent;
 use engine::market::pipeline::SnapshotPayload;
@@ -19,7 +16,7 @@ use engine::market::sync::BookSync;
 use engine::market::{Scales, Symbol};
 use engine::store::StoreError;
 use engine::store::frame::{Frame, Kind, Meta};
-use engine::store::query::{connect, for_each_frame, table_files, window};
+use engine::store::query::{connect, for_each_frame, table_files};
 use engine::store::replay::{Replay, replay_log, replay_parquet};
 use engine::store::rotate::{LOCK_FILE, rotate};
 use engine::store::segment::{self, LOG_DIR, recover_run};
@@ -69,17 +66,6 @@ fn count(conn: &Connection, run_dir: &Path, table: &str) -> Result<i64, duckdb::
         [],
         |row| row.get(0),
     )
-}
-
-fn int64_column(batches: &[RecordBatch], name: &str) -> Vec<i64> {
-    batches
-        .iter()
-        .flat_map(|batch| {
-            let column = batch.column_by_name(name).expect("the column");
-            let ints = column.as_any().downcast_ref::<Int64Array>().expect("Int64");
-            ints.values().to_vec()
-        })
-        .collect()
 }
 
 fn scales_of(log: &[Frame]) -> BTreeMap<Symbol, Scales> {
@@ -379,37 +365,6 @@ fn an_unclosed_newest_segment_waits_for_recovery() -> Outcome {
         replay_log(&run_dir, None, &mut |_| {})?.report.unclosed,
         None
     );
-    fs::remove_dir_all(&dir)?;
-    Ok(())
-}
-
-#[test]
-fn window_queries_return_the_rows_captured_in_range() -> Outcome {
-    let (dir, run_dir, _) = session("window");
-    rotate(&run_dir)?;
-    let log = log_frames(&run_dir);
-    let conn = connect()?;
-    let range = T0_NS + 400 * MS..T0_NS + 1200 * MS;
-
-    let seqs = int64_column(&window(&conn, &run_dir, "frames", range.clone())?, "seq");
-    let expected: Vec<i64> = log
-        .iter()
-        .filter(|frame| range.contains(&frame.capture_ts_ns))
-        .map(|frame| i64::try_from(frame.seq).expect("a small seq"))
-        .collect();
-    assert!(!expected.is_empty(), "the window holds frames");
-    assert_eq!(seqs, expected);
-
-    let times = int64_column(
-        &window(&conn, &run_dir, "book_samples", range.clone())?,
-        "sample_ts_ns",
-    );
-    assert!(!times.is_empty() && times.iter().all(|t| range.contains(t)));
-    assert!(times.windows(2).all(|pair| pair[0] <= pair[1]));
-    assert!(matches!(
-        window(&conn, &run_dir, "nope", range),
-        Err(StoreError::UnknownTable(_))
-    ));
     fs::remove_dir_all(&dir)?;
     Ok(())
 }

@@ -127,8 +127,6 @@ pub enum StoreError {
     MissingMeta { kind: Kind, seq: u64 },
     #[error("no frames to replay")]
     NoFrames,
-    #[error("{0:?} is not a table (one of frames, depth_updates, trades, snapshots, book_samples)")]
-    UnknownTable(String),
     #[error("seq {got} follows seq {previous}: frames are missing or out of order")]
     SeqGap { previous: u64, got: u64 },
     #[error("{}: segment has no end marker and is not the newest; recover the run first", .0.display())]
