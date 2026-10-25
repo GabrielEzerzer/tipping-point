@@ -37,7 +37,7 @@ direction = "less"
 [[hypotheses]]
 name = "dynamic-fss"
 statement = "Var(|m|) peaks at a fixed scaled temperature on the slow ramp: the eps_L at which each replica's rolling variance of |m| (the headline pipeline's detrend, window and lag) reaches its maximum inside eps_L in [6, -4] does not depend on L."
-prediction = "1/nu = 1 - d log|eps_L_peak| / d log L, fitted on the median peak eps_L per L, with a 95% CI from the hierarchical bootstrap (seeds, then replicas). The dense cadence's 1/nu carries the pre-registered verdict (fss.dynamic.cadence); the matched cadence's is computed and reported as a robustness check, without a verdict. The verdict is read in this order. (1) Inconclusive if 1/nu has no value (the per-L medians lie on both sides of Tc); if at any L more than half of the replicas' peaks are not located (they sit on an edge of the search band, or the band holds no value); or if fewer than 95% of the bootstrap draws give 1/nu a value (draws_used < fss.dynamic.min_draw_share = 0.95: a draw has none when its per-L medians lie on both sides of Tc or it drew no located peak at some L, and a CI on the rest would rest on a sign-selected subset). (2) Otherwise fail if the CI lies wholly outside [0.5, 1.5], or if its half-width is at most 0.5 and either |1/nu - 1| > 0.5 or the CI holds 0. (3) Otherwise pass if |1/nu - 1| <= 0.5, the CI's half-width is at most 0.5 and the CI excludes 0. (4) Otherwise inconclusive: a CI of half-width above 0.5 that does not lie wholly outside [0.5, 1.5]. The test separates two hypotheses, finite-size scaling (1/nu = 1) and an indicator merely monotone in T (1/nu = 0); the tolerance of 0.5 is the midpoint between them. The measured 1/nu, its CI and draws_used are reported either way."
+prediction = "1/nu = 1 - d log|eps_L_peak| / d log L, fitted on the median peak eps_L per L, with a 95% CI from the hierarchical bootstrap (seeds, then replicas). The dense cadence's 1/nu carries the pre-registered verdict (fss.dynamic.cadence); the matched cadence's is computed and reported as a robustness check, without a verdict. The verdict is read in this order. (1) Inconclusive if 1/nu has no value (the per-L medians lie on both sides of Tc, or no peak was located at some L); if at any L more than half of the replicas' peaks are not located (they sit on an edge of the search band, or the band holds no value); or if fewer than 95% of the bootstrap draws give 1/nu a value (draws_used < fss.dynamic.min_draw_share = 0.95: a draw has none when its per-L medians lie on both sides of Tc or it drew no located peak at some L, and a CI on the rest would rest on a sign-selected subset). (2) Otherwise fail if the CI lies wholly outside [0.5, 1.5], or if its half-width is at most 0.5 and either |1/nu - 1| > 0.5 or the CI holds 0. (3) Otherwise pass if |1/nu - 1| <= 0.5, the CI's half-width is at most 0.5 and the CI excludes 0. (4) Otherwise inconclusive: a CI of half-width above 0.5 that does not lie wholly outside [0.5, 1.5]. The test separates two hypotheses, finite-size scaling (1/nu = 1) and an indicator merely monotone in T (1/nu = 0); the tolerance of 0.5 is the midpoint between them. The measured 1/nu, its CI and draws_used are reported either way."
 direction = "match"
 
 [[hypotheses]]
@@ -70,6 +70,14 @@ eps_L = [2.0, 4.0, 6.0]  # >= 5 seeds each, each run about as long as a positive
 [data.staircase]
 kind = "staircase"
 temperature = 2.269231   # grid point Tc + 4.5e-5; plateaus failing `thermalised` are dropped
+# The staircases' dwell (--tau) is read from these seed-6 grid pilots, made on Kaggle at commit
+# 655949a (kernel tp-ising-job-a), 40 points each, none unreliable; run and tau.json sha256:
+#   L = 16  20261025T220933Z-L16-pilot-s6
+#           88d0878b63b6608af7bc03a6c2bf2812f24b50e54ea9af4f77c9a082e0632138
+#   L = 32  20261025T220814Z-L32-pilot-s6
+#           f5adbf804f658eb30cdf44ae2cc218336b8d828a859da292cda88a41ccf1d610
+#   L = 64  20261025T220810Z-L64-pilot-s6
+#           e3239a04e033f2e0f693dedea481a16e1c69271072e4df25fa1c3de30efc93e9
 
 [indicators]
 names = ["variance", "ac", "skewness"]
