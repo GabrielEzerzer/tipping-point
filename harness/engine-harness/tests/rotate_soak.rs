@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use engine::market::Scales;
 use engine::market::decimal::format_units;
 use engine::market::pipeline::SnapshotPayload;
-use engine::market::recording::now_ms;
 use engine::store::frame::{HEADER_LEN, Kind, Meta, TRAILER_LEN};
+use engine::store::now_ns;
 use engine::store::rotate::{TABLES, rotate};
 use engine::store::run::{self, BookSample, Clock, DataSource, MarketParams};
 use engine::store::segment::{self, LOG_DIR};
@@ -341,7 +341,7 @@ fn a_full_segment_rotates_and_its_time_and_memory_are_recorded() -> Outcome {
     });
     let out = repo().join("harness/out");
     fs::create_dir_all(&out)?;
-    let path = out.join(format!("rotate-soak-{}.json", now_ms()));
+    let path = out.join(format!("rotate-soak-{}.json", now_ns() / 1_000_000));
     fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
     println!("{report}");
     println!("written to {}", path.display());

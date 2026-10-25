@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use engine::market::feed::{Feed, Stats};
 use engine::market::live::{LiveEvent, LiveStats, utc_clock};
-use engine::market::recording::now_ms;
 use engine::market::sync::BookSync;
+use engine::store::now_ns;
 use engine::venue::binance::live::{LiveConfig, run_live};
 
 struct Args {
@@ -29,7 +29,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         report_every: Duration::from_hours(1),
         out: Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../out")
-            .join(format!("soak-{}.log", now_ms())),
+            .join(format!("soak-{}.log", now_ns() / 1_000_000)),
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {

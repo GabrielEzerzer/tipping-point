@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -163,14 +162,6 @@ pub enum RecordingError {
     MissingScales,
     #[error("record {0}: only the first record carries the scales")]
     MisplacedScales(u64),
-}
-
-/// Milliseconds since the Unix epoch, for stamping records.
-#[must_use]
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Reads every record of a JSON-lines script.
