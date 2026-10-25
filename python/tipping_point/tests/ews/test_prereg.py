@@ -95,6 +95,15 @@ def test_v1_holds_the_freeze_decisions() -> None:
     assert data["ramps"]["eps_L"] == [12.0, -8.0]
     assert (dyn["statistic"], dyn["indicators"], dyn["search"]) == ("peak", ["variance"], [6, -4])
     assert (dyn["expected_inverse_nu"], dyn["tolerance"]) == (1.0, 0.5)
+    assert (dyn["cadence"], dyn["min_draw_share"]) == ("dense", 0.95)  # fix round 1: R1, R2
+    dynamic_fss = next(h for h in doc["hypotheses"] if h["name"] == "dynamic-fss")["prediction"]
+    for clause in (
+        "robustness check",
+        "half-width is at most 0.5",
+        "draws_used <",
+        "in this order",
+    ):
+        assert clause in dynamic_fss, clause  # R3: the frozen text states the rule the code runs
     alarms = doc["scoring"]["alarms"]
     assert (alarms["indicators"], alarms["far"]) == (["variance", "ac", "skewness"], 0.001)
     assert (alarms["report_per"], alarms["band"], alarms["every"]) == (1000.0, [2, -2], 1.0)
@@ -147,12 +156,33 @@ def test_v1_holds_the_freeze_decisions() -> None:
         (lambda d: d.pop("disclosure"), "disclosure: missing"),
         (lambda d: d["disclosure"].pop("confirmatory"), "disclosure.confirmatory: missing"),
         (lambda d: d["disclosure"].update(links="#26"), "disclosure.links: expected an array"),
+        # fix round 1: one verdict's cadence (R1), the draws it needs (R2), the band (R4)
+        (lambda d: d["fss"]["dynamic"].pop("cadence"), "fss.dynamic.cadence: missing"),
+        (lambda d: d["fss"]["dynamic"].update(cadence="hourly"), "fss.dynamic.cadence: one of"),
+        (lambda d: d["indicators"].update(cadences=["matched"]), "fss.dynamic.cadence: one of"),
+        (lambda d: d["fss"]["dynamic"].pop("min_draw_share"), "min_draw_share: missing"),
+        (lambda d: d["fss"]["dynamic"].update(min_draw_share=0.0), "min_draw_share: a share"),
+        (lambda d: d["fss"]["dynamic"].update(min_draw_share=1.5), "min_draw_share: a share"),
+        (lambda d: d["fss"]["dynamic"].update(min_draw_share="95%"), "expected int or float"),
+        (lambda d: d["data"]["ramps"].update(eps_L=[5.0, -8.0]), "must lie inside data.ramps"),
+        (lambda d: d["data"]["ramps"].update(eps_L=[12.0, -3.0]), "must lie inside data.ramps"),
     ],
 )
 def test_malformed_files_are_named(edit: Any, complaint: str) -> None:
     doc = tomllib.loads(V1.read_text("utf-8"))
     edit(doc)
     assert any(complaint in problem for problem in prereg.problems(doc)), prereg.problems(doc)
+
+
+def test_the_search_band_may_reach_the_ramp_windows_ends() -> None:
+    """R4's boundary: a search band that touches the ramp window's ends lies inside it, and
+    without data.ramps.eps_L any band is accepted."""
+    doc = tomllib.loads(V1.read_text("utf-8"))
+    doc["data"]["ramps"]["eps_L"] = list(doc["fss"]["dynamic"]["search"])
+    assert prereg.problems(doc) == []
+    del doc["data"]["ramps"]["eps_L"]
+    doc["fss"]["dynamic"]["search"] = [20.0, -20.0]
+    assert prereg.problems(doc) == []
 
 
 def test_freeze_binds_the_file_and_results_carry_the_stamp(tmp_path: Path, repo: Path) -> None:

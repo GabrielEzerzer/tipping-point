@@ -97,9 +97,12 @@ tolerance = 0.1
 statistic = "peak"       # each slow-ramp replica's eps_L at its indicator's extremum
 indicators = ["variance"]  # judged; every scored indicator's peaks are reported
 observable = "abs_m"
-search = [6.0, -4.0]     # eps_L band searched, hot edge first; a peak on its edge is not located
+cadence = "dense"        # the cadence whose 1/nu is judged; the others' are robustness checks
+search = [6.0, -4.0]     # eps_L band searched, hot edge first; a peak on its edge is not located;
+                         # it must lie inside data.ramps.eps_L when that is given
 expected_inverse_nu = 1.0
 tolerance = 0.5
+min_draw_share = 0.95    # below this share of bootstrap draws giving 1/nu a value: inconclusive
 
 [sensitivity]
 window = [10.0, 20.0, 40.0]     # tau_c

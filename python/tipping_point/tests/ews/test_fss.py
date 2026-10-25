@@ -1,6 +1,7 @@
 """Finite-size scaling fits and verdicts on data whose exponents are known exactly."""
 
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -45,7 +46,7 @@ def test_fit_exponent_bootstraps_a_ci_that_covers_the_truth() -> None:
     fit = fss.fit_exponent(samples, lambda L, a: float(np.mean(a)), 400, np.random.default_rng(2))
     assert fit.ci[0] < 1.75 < fit.ci[1]
     assert fit.kappa == pytest.approx(1.75, abs=0.02) and fit.ci[1] - fit.ci[0] < 0.1
-    assert set(fit.values) == set(SIZES)
+    assert set(fit.values) == set(SIZES) and (fit.draws, fit.draws_used) == (400, 1.0)
     assert fss.match(fit.kappa, fit.ci, 1.75, 0.1) == fss.PASS
 
 
@@ -116,17 +117,28 @@ def test_peak_convergence_on_scaling_peaks() -> None:
     rng = np.random.default_rng(3)
     samples = {L: [1.5 + 0.1 * rng.standard_normal(16) for _ in range(5)] for L in SIZES}
     samples[16][0][:3] = np.nan  # peaks not located are left out of the median
-    inv_nu, ci = fss.peak_convergence(samples, 300, np.random.default_rng(4))
-    assert inv_nu == pytest.approx(1.0, abs=0.05) and ci[0] < 1.0 < ci[1]
-    assert fss.combine(fss.match(inv_nu, ci, 1.0, 0.1), fss.excludes(ci, 0.0, 0.1)) == fss.PASS
+    fit = fss.peak_convergence(samples, 300, np.random.default_rng(4))
+    assert fit.kappa == pytest.approx(1.0, abs=0.05) and fit.ci[0] < 1.0 < fit.ci[1]
+    assert (fit.draws, fit.draws_used) == (300, 1.0)  # every draw gives 1/nu a value
+    judged = fss.combine(fss.match(fit.kappa, fit.ci, 1.0, 0.1), fss.excludes(fit.ci, 0.0, 0.1))
+    assert judged == fss.PASS
+
+
+def _dynamic_doc(indicators: list[str], min_draw_share: float = 0.95) -> dict[str, Any]:
+    """fss.dynamic and scoring as ising._dynamic reads them, the verdict at the dense cadence."""
+    dynamic = {"indicators": indicators, "cadence": "dense", "expected_inverse_nu": 1.0}
+    dynamic |= {"tolerance": 0.1, "min_draw_share": min_draw_share}
+    return {"fss": {"dynamic": dynamic}, "scoring": {"bootstrap": 200, "ci_level": 0.95}}
 
 
 def test_dynamic_verdicts_on_planted_peak_positions() -> None:
-    """#64, #98: the wiring of ising._dynamic. Peaks planted at one eps_L at every L give
-    1/nu = 1 and pass; at one T (eps_L ~ L, an indicator merely monotone in T) 1/nu = 0 and fail;
-    with more than half of one L's replicas not located (NaN, on the search band's edge) the
-    verdict is inconclusive whatever the rest say, while exactly half is still measured. Only
-    fss.dynamic.indicators are judged: skewness's peaks get no verdict row."""
+    """#64, #98 and the freeze's R1: the wiring of ising._dynamic. Peaks planted at one eps_L at
+    every L give 1/nu = 1 and pass; at one T (eps_L ~ L, an indicator merely monotone in T)
+    1/nu = 0 and fail; with more than half of one L's replicas not located (NaN, on the search
+    band's edge) the verdict is inconclusive whatever the rest say, while exactly half is still
+    measured. Only fss.dynamic.indicators are judged, and only at fss.dynamic.cadence: another
+    cadence's row is computed (here from peaks at one T) and written as a robustness check with
+    no verdict, so a version holds one pre-registered verdict per indicator, not one per cadence."""
     rng = np.random.default_rng(5)
 
     def planted(eps: Callable[[int], float]) -> PerSize:
@@ -140,28 +152,50 @@ def test_dynamic_verdicts_on_planted_peak_positions() -> None:
 
     at_eps = planted(lambda L: 1.3)
     at_T = planted(lambda L: float(fss.scaled_temperature(TC + 0.05, L)))
-    doc = {
-        "fss": {
-            "dynamic": {
-                "indicators": ["variance", "ac"],
-                "expected_inverse_nu": 1.0,
-                "tolerance": 0.1,
-            }
-        },
-        "scoring": {"bootstrap": 200, "ci_level": 0.95},
-    }
-    cases = {("variance", "dense"): at_eps, ("variance", "matched"): at_T}
-    cases |= {("ac", "dense"): lost(at_eps, 16, 40), ("ac", "matched"): lost(at_eps, 16, 41)}
-    cases |= {("skewness", "dense"): at_eps}
+    doc = _dynamic_doc(["scaling", "monotone", "half", "over"])
+    cases = {("scaling", "dense"): at_eps, ("monotone", "dense"): at_T}
+    cases |= {("half", "dense"): lost(at_eps, 16, 40), ("over", "dense"): lost(at_eps, 16, 41)}
+    cases |= {("scaling", "matched"): at_T, ("unjudged", "dense"): at_eps}
     rows = {(r["quantity"], r["cadence"]): r for r in ising._dynamic(doc, cases, rng)}
-    assert ("inverse_nu_skewness", "dense") not in rows and len(rows) == 4
-    scaling, monotone = rows["inverse_nu_variance", "dense"], rows["inverse_nu_variance", "matched"]
-    assert scaling["estimate"] == pytest.approx(1.0, abs=0.02) and scaling["verdict"] == fss.PASS
-    assert monotone["estimate"] == pytest.approx(0.0, abs=0.02) and monotone["verdict"] == fss.FAIL
-    assert rows["inverse_nu_ac", "dense"]["verdict"] == fss.PASS
-    assert rows["inverse_nu_ac", "matched"]["verdict"] == fss.INCONCLUSIVE
+    assert {key: (r["role"], r["verdict"]) for key, r in rows.items()} == {
+        ("inverse_nu_scaling", "dense"): ("dynamic", fss.PASS),
+        ("inverse_nu_monotone", "dense"): ("dynamic", fss.FAIL),
+        ("inverse_nu_half", "dense"): ("dynamic", fss.PASS),
+        ("inverse_nu_over", "dense"): ("dynamic", fss.INCONCLUSIVE),
+        ("inverse_nu_scaling", "matched"): ("dynamic-robustness", ""),
+    }
+    assert rows["inverse_nu_scaling", "dense"]["estimate"] == pytest.approx(1.0, abs=0.02)
+    assert rows["inverse_nu_monotone", "dense"]["estimate"] == pytest.approx(0.0, abs=0.02)
+    robust = rows["inverse_nu_scaling", "matched"]  # computed all the same: 1/nu = 0 at one T
+    assert robust["estimate"] == pytest.approx(0.0, abs=0.02) and robust["hi"] < 0.5
     assert all(r["expected"] == 1.0 and r["tolerance"] == 0.1 for r in rows.values())
-    assert {r["role"] for r in rows.values()} == {"dynamic"}
+
+
+def test_too_few_draws_with_a_value_make_the_verdict_inconclusive() -> None:
+    """The freeze's R2. A draw whose per-L medians lie on both sides of Tc has no 1/nu, and a CI
+    on the rest rests on a sign-selected subset. At L = 16 one seed's four replicas peak at
+    eps_L = +1.3 and the other's two at -1.3. The point median is +1.3, as at every other L
+    (1/nu = 1, and a narrow CI that passes), but a quarter of the draws take the second seed
+    twice, put the median at -1.3, and have no 1/nu. draws_used, near 0.75, is written to the
+    row beside the draw count; below fss.dynamic.min_draw_share = 0.95 the verdict is
+    inconclusive, while at a share of 0.5 the same draws pass."""
+    rng = np.random.default_rng(7)
+    noise = lambda k: 0.01 * rng.standard_normal(k)  # noqa: E731
+    split = {L: [1.3 + noise(4), (-1.3 if L == 16 else 1.3) + noise(2)] for L in SIZES}
+    rows = {
+        share: ising._dynamic(
+            _dynamic_doc(["variance"], share),
+            {("variance", "dense"): split},
+            np.random.default_rng(8),
+        )[0]
+        for share in (0.95, 0.5)
+    }
+    strict, loose = rows[0.95], rows[0.5]
+    assert strict["draws"] == 200 and strict["draws_used"] == pytest.approx(0.75, abs=0.1)
+    assert strict["estimate"] == pytest.approx(1.0, abs=0.02)  # its point medians on one side
+    assert strict["verdict"] == fss.INCONCLUSIVE and loose["verdict"] == fss.PASS
+    same = ("lo", "hi", "draws_used")  # the same draws: only the share it is held to differs
+    assert [loose[k] for k in same] == [strict[k] for k in same]
 
 
 @pytest.mark.parametrize(

@@ -884,29 +884,39 @@ def _fss_row(quantity: str, cadence: str, role: str, fit: fss.Exponent, judged: 
         "lo": fit.ci[0],
         "hi": fit.ci[1],
         "corrected": fit.kappa_corrected,
+        "draws": fit.draws,  # on every row: a Parquet table keeps only its first row's columns
+        "draws_used": fit.draws_used,
         **judged,
     }
 
 
 def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> list[Row]:
-    """1/nu from the median peak eps_L over L, per fss.dynamic indicator and cadence. A peak on
-    the search band's edge was not located and is left out; where more than half of an L's
-    replicas were not located, the verdict is inconclusive."""
+    """1/nu from the median peak eps_L over L, per fss.dynamic indicator and cadence. Only
+    fss.dynamic.cadence carries the pre-registered verdict (role dynamic); another cadence's row
+    is a robustness check (role dynamic-robustness, no verdict). A peak on the search band's edge
+    was not located and is left out. The verdict, in this order: inconclusive when 1/nu has no
+    value, when more than half of an L's replicas were not located, or when fewer than
+    fss.dynamic.min_draw_share of the bootstrap draws give 1/nu a value (the CI would rest on a
+    sign-selected subset); otherwise fss.match and fss.excludes, combined."""
     dyn, sc = doc["fss"]["dynamic"], doc["scoring"]
     expected, tolerance = float(dyn["expected_inverse_nu"]), float(dyn["tolerance"])
     rows = []
     for (name, cadence), samples in peaks.items():
         if name not in dyn["indicators"]:
             continue  # reported in the peaks table, never judged
-        inv_nu, ci = fss.peak_convergence(samples, int(sc["bootstrap"]), rng, float(sc["ci_level"]))
-        verdict = fss.combine(
-            fss.match(inv_nu, ci, expected, tolerance), fss.excludes(ci, 0.0, tolerance)
-        )
-        if max(np.mean(np.isnan(np.concatenate(g))) for g in samples.values()) > 0.5:
+        fit = fss.peak_convergence(samples, int(sc["bootstrap"]), rng, float(sc["ci_level"]))
+        judged = cadence == dyn["cadence"]
+        lost = max(np.mean(np.isnan(np.concatenate(g))) for g in samples.values())
+        if not judged:
+            verdict = ""  # a robustness check, never a verdict
+        elif not np.isfinite(fit.kappa) or lost > 0.5 or fit.draws_used < dyn["min_draw_share"]:
             verdict = fss.INCONCLUSIVE  # unmeasured: neither a pass nor a fail
-        fit = fss.Exponent(inv_nu, ci, float("nan"), {})
-        judged = {"expected": expected, "tolerance": tolerance, "verdict": verdict}
-        rows.append(_fss_row(f"inverse_nu_{name}", cadence, "dynamic", fit, judged))
+        else:
+            match = fss.match(fit.kappa, fit.ci, expected, tolerance)
+            verdict = fss.combine(match, fss.excludes(fit.ci, 0.0, tolerance))
+        row = {"expected": expected, "tolerance": tolerance, "verdict": verdict}
+        role = "dynamic" if judged else "dynamic-robustness"
+        rows.append(_fss_row(f"inverse_nu_{name}", cadence, role, fit, row))
     return rows
 
 

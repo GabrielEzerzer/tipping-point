@@ -61,6 +61,8 @@ class Exponent:
     ci: tuple[float, float]
     kappa_corrected: float  # with a 1/L term: the finite-size robustness check (NaN below 3 sizes)
     values: dict[int, float]  # I(L) from all the data
+    draws: int = 0  # bootstrap resamples drawn for ci
+    draws_used: float = float("nan")  # the share of them with a finite exponent, ci's basis
 
 
 def fit_exponent(
@@ -80,11 +82,14 @@ def fit_exponent(
             for L in sizes
         ]
     )
+    kappas = power_law(sizes, draws)
     return Exponent(
         kappa=float(power_law(sizes, point)),
-        ci=percentile_interval(power_law(sizes, draws), level),
+        ci=percentile_interval(kappas, level),
         kappa_corrected=float(power_law(sizes, point, correction=True)),
         values=values,
+        draws=n,
+        draws_used=float(np.mean(np.isfinite(kappas))),
     )
 
 
@@ -115,15 +120,25 @@ def inverse_nu(L: Sequence[int], eps: np.ndarray) -> np.ndarray:
 
 def peak_convergence(
     samples: Mapping[int, Grouped], n: int, rng: np.random.Generator, level: float = 0.95
-) -> tuple[float, tuple[float, float]]:
+) -> Exponent:
     """1/nu from the median peak eps_L at each L (peaks not located are NaN and left out), with a
-    CI from bootstrapping seeds, then replicas, at each L; a draw whose medians lie on both sides
-    of Tc has no 1/nu and is left out of the CI."""
+    CI from bootstrapping seeds, then replicas, at each L. A draw whose medians lie on both sides
+    of Tc, or that drew no located peak at some L, has no 1/nu: the CI rests on the other draws,
+    and draws_used is their share."""
     sizes = sorted(samples)
     median = lambda eps: float(np.nanmedian(eps)) if np.isfinite(eps).any() else np.nan  # noqa: E731
     point = np.array([median(np.concatenate(samples[L])) for L in sizes])
-    draws = np.stack([hierarchical_bootstrap(median, [samples[L]], n, rng) for L in sizes])
-    return float(inverse_nu(sizes, point)), percentile_interval(inverse_nu(sizes, draws), level)
+    draws = inverse_nu(
+        sizes, np.stack([hierarchical_bootstrap(median, [samples[L]], n, rng) for L in sizes])
+    )
+    return Exponent(
+        kappa=float(inverse_nu(sizes, point)),
+        ci=percentile_interval(draws, level),
+        kappa_corrected=float("nan"),
+        values={},
+        draws=n,
+        draws_used=float(np.mean(np.isfinite(draws))),
+    )
 
 
 def _width(ci: tuple[float, float]) -> float:

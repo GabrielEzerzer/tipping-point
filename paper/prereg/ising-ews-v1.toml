@@ -37,7 +37,7 @@ direction = "less"
 [[hypotheses]]
 name = "dynamic-fss"
 statement = "Var(|m|) peaks at a fixed scaled temperature on the slow ramp: the eps_L at which each replica's rolling variance of |m| (the headline pipeline's detrend, window and lag) reaches its maximum inside eps_L in [6, -4] does not depend on L."
-prediction = "1/nu = 1 - d log|eps_L_peak| / d log L, fitted on the median peak eps_L per L with a CI from the hierarchical bootstrap, lies within 0.5 of 1 and its CI excludes 0. The test separates two hypotheses, finite-size scaling (1/nu = 1) and an indicator merely monotone in T (1/nu = 0), and 0.5 is the midpoint between them. Inconclusive when more than half of an L's replicas peak on an edge of the search band, where the peak was not located. The measured 1/nu and its CI are reported either way."
+prediction = "1/nu = 1 - d log|eps_L_peak| / d log L, fitted on the median peak eps_L per L, with a 95% CI from the hierarchical bootstrap (seeds, then replicas). The dense cadence's 1/nu carries the pre-registered verdict (fss.dynamic.cadence); the matched cadence's is computed and reported as a robustness check, without a verdict. The verdict is read in this order. (1) Inconclusive if 1/nu has no value (the per-L medians lie on both sides of Tc); if at any L more than half of the replicas' peaks are not located (they sit on an edge of the search band, or the band holds no value); or if fewer than 95% of the bootstrap draws give 1/nu a value (draws_used < fss.dynamic.min_draw_share = 0.95: a draw has none when its per-L medians lie on both sides of Tc or it drew no located peak at some L, and a CI on the rest would rest on a sign-selected subset). (2) Otherwise fail if the CI lies wholly outside [0.5, 1.5], or if its half-width is at most 0.5 and either |1/nu - 1| > 0.5 or the CI holds 0. (3) Otherwise pass if |1/nu - 1| <= 0.5, the CI's half-width is at most 0.5 and the CI excludes 0. (4) Otherwise inconclusive: a CI of half-width above 0.5 that does not lie wholly outside [0.5, 1.5]. The test separates two hypotheses, finite-size scaling (1/nu = 1) and an indicator merely monotone in T (1/nu = 0); the tolerance of 0.5 is the midpoint between them. The measured 1/nu, its CI and draws_used are reported either way."
 direction = "match"
 
 [[hypotheses]]
@@ -138,9 +138,11 @@ tolerance = 0.1          # its own: the value it took from fss.dynamic before th
 statistic = "peak"       # each slow-ramp replica's eps_L at its indicator's extremum (#98)
 indicators = ["variance"]  # AC1 and skewness peaks are reported in the peaks table, not judged
 observable = "abs_m"
+cadence = "dense"        # the verdict's; the matched cadence's row is a robustness check
 search = [6.0, -4.0]     # the eps_L band the extremum is sought in
 expected_inverse_nu = 1.0
 tolerance = 0.5          # midway between FSS (1/nu = 1) and monotone in T (1/nu = 0)
+min_draw_share = 0.95    # fewer draws giving 1/nu a value: inconclusive, the CI sign-selected
 
 [sensitivity]
 window = [10.0, 20.0, 40.0]

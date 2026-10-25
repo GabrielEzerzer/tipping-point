@@ -126,9 +126,11 @@ _SCHEMA: dict[str, Any] = {
             "statistic": str,
             "indicators": [str],
             "observable": str,
+            "cadence": str,
             "search": [_NUMBER],
             "expected_inverse_nu": _NUMBER,
             "tolerance": _NUMBER,
+            "min_draw_share": _NUMBER,
         },
     },
     "disclosure": {"exploratory": str, "decisions": str, "confirmatory": str, "links": [str]},
@@ -211,12 +213,13 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     if (data["ramps"]["kind"], data["nulls"]["kind"]) != ("ramp", "fixed"):
         found.append("data: ramps are kind 'ramp' and nulls kind 'fixed'")
     window = data["ramps"].get("eps_L")  # optional: without it, any window is scored
-    if window is not None and not (
+    window_ok = (
         isinstance(window, list)
         and len(window) == 2
         and all(isinstance(e, _NUMBER) and not isinstance(e, bool) for e in window)
         and window[0] > window[1]
-    ):
+    )
+    if window is not None and not window_ok:
         found.append("data.ramps.eps_L: [start, end] in eps_L, start above end (a cooling ramp)")
     if data["tau_c"]["source"] != "pilot":
         found.append("data.tau_c.source: 'pilot', tau_c as measured per L (never fitted)")
@@ -236,8 +239,19 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         found.append("fss.dynamic.indicators: must be scored indicators")
     if dyn["observable"] not in ind["observables"]:
         found.append("fss.dynamic.observable: must be a scored observable")
-    if len(dyn["search"]) != 2 or dyn["search"][0] <= dyn["search"][1]:
+    if dyn["cadence"] not in ind["cadences"]:
+        found.append("fss.dynamic.cadence: one of indicators.cadences, the verdict's cadence")
+    if not 0 < dyn["min_draw_share"] <= 1:
+        found.append("fss.dynamic.min_draw_share: a share of the bootstrap draws, in (0, 1]")
+    search = dyn["search"]
+    if len(search) != 2 or search[0] <= search[1]:
         found.append("fss.dynamic.search: [from eps_L, to eps_L], the hot edge first")
+    elif (
+        window_ok
+        and isinstance(window, list)  # window_ok says so; pyright needs it said here
+        and not (window[0] >= search[0] and window[1] <= search[1])
+    ):
+        found.append("fss.dynamic.search: must lie inside data.ramps.eps_L, the window ramps run")
     if not set(doc["scoring"]["alarms"]["indicators"]) <= set(ind["names"]):
         found.append("scoring.alarms.indicators: must be scored indicators")
     sens = doc["sensitivity"]

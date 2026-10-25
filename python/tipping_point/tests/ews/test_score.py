@@ -126,9 +126,11 @@ tolerance = 0.1
 statistic = "peak"
 indicators = ["variance", "ac"]
 observable = "abs_m"
+cadence = "dense"
 search = [6.0, -4.0]
 expected_inverse_nu = 1.0
 tolerance = 0.1
+min_draw_share = 0.95
 
 [sensitivity]
 window = [8.0]
@@ -295,13 +297,19 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     assert fss["skewness_abs_m"]["estimate"] == pytest.approx(0.0, abs=0.2)
     assert fss["one_minus_ac1"]["verdict"] == "pass"  # a planted memory growing with L
     assert fss["tau_int_abs_m"]["verdict"] == ""  # descriptive: reported, never judged
-    dynamic = [r for r in rows if r["role"] == "dynamic"]
-    assert {(r["quantity"], r["cadence"]) for r in dynamic} == {
-        (f"inverse_nu_{i}", c) for i in ("variance", "ac") for c in ("dense", "matched")
-    }
+    dynamic = [r for r in rows if r["role"].startswith("dynamic")]
+    assert {(r["quantity"], r["cadence"], r["role"]) for r in dynamic} == {
+        (f"inverse_nu_{i}", c, "dynamic" if c == "dense" else "dynamic-robustness")
+        for i in ("variance", "ac")
+        for c in ("dense", "matched")
+    }  # one verdict per indicator, at fss.dynamic.cadence; matched is a robustness check
     # the planted spread and memory stop growing at Tc, so the peaks fall anywhere below it, at
     # no one eps_L: two seeds of 8 replicas leave the CI wide around 1, never a pass or a fail
-    assert all(r["lo"] < 1.0 < r["hi"] and r["verdict"] == "inconclusive" for r in dynamic)
+    for r in dynamic:
+        assert r["lo"] < 1.0 < r["hi"] and r["draws"] == 50 and 0.0 < r["draws_used"] <= 1.0, r
+        assert r["verdict"] == ("inconclusive" if r["role"] == "dynamic" else ""), r
+    static = [r for r in rows if not r["role"].startswith("dynamic")]  # written on every row
+    assert all(r["draws"] == 50 and 0.0 < r["draws_used"] <= 1.0 for r in static), static
     peaks = pq.read_table(run_dir / "peaks" / f"{0:020d}.parquet").to_pylist()
     assert {(r["indicator"], r["cadence"], r["L"]) for r in peaks} == {
         (i, c, L)

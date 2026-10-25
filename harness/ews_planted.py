@@ -245,8 +245,10 @@ def pilot(root: Path, per_L: dict[int, float] | None = None) -> Path:
 #            eps_L = -4.15), so their extremum sits on the band's edge and is not located. Over
 #            half of one L unlocated makes the verdict inconclusive, while the located peaks
 #            alone give 1/nu = 1 and would pass: the edge rule, read at any one L, decides it.
-#            Were every peak on an edge, 1/nu would have no value and the verdict would be
-#            inconclusive with or without the rule.
+#            (With three replicas a seed, ~9% of the bootstrap draws take no located peak at
+#            L = 32 and give 1/nu no value, so fss.dynamic.min_draw_share does too.) Were every
+#            peak on an edge, 1/nu would have no value and the verdict would be inconclusive
+#            with or without the rule.
 
 V1_SIZES, V1_SEEDS, V1_REPLICAS = (16, 32, 64), (6, 7), 3
 V1_TAU_C = {16: 1.0, 32: 1.5, 64: 2.0}  # sweeps: a different number of samples per tau_c at each L

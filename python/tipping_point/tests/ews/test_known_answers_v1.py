@@ -82,6 +82,8 @@ CONTRACT: dict[str, Any] = {  # what the planted answers assume of the frozen pr
     "fss.dynamic.search": list(V1_SEARCH),
     "fss.dynamic.expected_inverse_nu": 1.0,
     "fss.dynamic.tolerance": 0.5,
+    "fss.dynamic.cadence": "dense",
+    "fss.dynamic.min_draw_share": 0.95,
     "scoring.alarms.indicators": ["variance", "ac", "skewness"],
 }
 HEADLINE = CONTRACT["sensitivity.headline"]
@@ -205,13 +207,17 @@ def edge_scored(v1: dict[str, V1], frozen_v1: dict[str, Any]) -> ising.Evaluatio
     return _evaluate(v1["edge"].root, _prereg(v1["edge"], {"scoring.alarms.far": UNATTAINABLE}))
 
 
-def _dynamic(evaluation: ising.Evaluation) -> list[dict[str, Any]]:
-    """The dynamic test's rows: inverse_nu_variance, one per cadence."""
-    rows = [r for r in evaluation.tables["fss"] if r["role"] == "dynamic"]
-    assert sorted((r["quantity"], r["cadence"]) for r in rows) == [
-        ("inverse_nu_variance", c) for c in CADENCES
+def _dynamic(evaluation: ising.Evaluation) -> dict[str, dict[str, Any]]:
+    """The dynamic test's rows by cadence: inverse_nu_variance at each, the verdict at
+    fss.dynamic.cadence (dense) alone; the matched row is a robustness check, with none."""
+    rows = [r for r in evaluation.tables["fss"] if r["role"].startswith("dynamic")]
+    assert sorted((r["quantity"], r["cadence"], r["role"]) for r in rows) == [
+        ("inverse_nu_variance", "dense", "dynamic"),
+        ("inverse_nu_variance", "matched", "dynamic-robustness"),
     ], rows
-    return rows
+    by_cadence = {r["cadence"]: r for r in rows}
+    assert by_cadence["matched"]["verdict"] == "", rows
+    return by_cadence
 
 
 def _peaks(evaluation: ising.Evaluation) -> dict[tuple[str, int], dict[str, Any]]:
@@ -366,12 +372,14 @@ def test_runs_name_the_commit_they_were_stamped_with(v1: dict[str, V1], tmp_path
 
 def test_fss_passes_with_a_ci_that_holds_1_and_excludes_0(fss_scored: ising.Evaluation) -> None:
     """A peak at one eps_L at every size: 1/nu = 1 (planted exactly; the lag is the same eps_L
-    at every L), the CI narrow enough to judge, holding 1 and excluding 0, so the verdict is a
-    pass at both cadences."""
-    for row in _dynamic(fss_scored):
-        assert row["verdict"] == "pass", row
+    at every L), the CI narrow enough to judge, holding 1 and excluding 0, and every bootstrap
+    draw giving 1/nu a value, so the dense verdict is a pass; the matched robustness row meets
+    the same clauses, without a verdict of its own."""
+    rows = _dynamic(fss_scored)
+    assert rows["dense"]["verdict"] == "pass", rows
+    for row in rows.values():
         assert row["lo"] <= 1.0 <= row["hi"] and row["lo"] > 0.0, row
-        assert abs(row["estimate"] - 1.0) <= 0.15, row
+        assert abs(row["estimate"] - 1.0) <= 0.15 and row["draws_used"] == 1.0, row
 
 
 @pytest.mark.usefixtures("frozen_v1")
@@ -394,28 +402,34 @@ def test_each_L_peaks_at_the_planted_eps_L_less_the_window_lag(
 def test_fixed_T_fails_with_inverse_nu_near_0(fixed_T_scored: ising.Evaluation) -> None:
     """A peak at one temperature: eps_L_peak grows as L, 1/nu near 0. With the same lag in eps_L
     at every L the planted answer is 1 - d log(0.8 L/16 - LAG) / d log L = -0.16; the CI lies
-    below 1 - 0.5, under the whole tolerance band, so the verdict is a fail at both cadences."""
+    below 1 - 0.5, under the whole tolerance band, so the dense verdict is a fail, and the
+    matched robustness row finds the same, without a verdict."""
     sizes = np.log(V1_SIZES)
     peaks = np.log([v1_peak("fixed_T", L) - LAG for L in V1_SIZES])
     expected = 1.0 - np.polyfit(sizes, peaks, 1)[0]
-    for row in _dynamic(fixed_T_scored):
-        assert row["verdict"] == "fail", row
+    rows = _dynamic(fixed_T_scored)
+    assert rows["dense"]["verdict"] == "fail", rows
+    for row in rows.values():
         assert abs(row["estimate"] - expected) <= 0.15 and row["hi"] < 0.5, (expected, row)
 
 
 def test_edge_is_inconclusive_by_the_edge_rule_at_one_L(edge_scored: ising.Evaluation) -> None:
     """Two of each seed's three replicas at L = 32 peak on the search band's edge and are not
-    located (edge_fraction 2/3 there, 0 at the other sizes), so the verdict is inconclusive at
-    both cadences. Every other clause of the rule passes: the located peaks give 1/nu near 1 with
-    a CI narrow enough to judge and above 0. A rule that missed the edges, or averaged them over
-    the sizes (2/9), would call this a pass."""
+    located (edge_fraction 2/3 there, 0 at the other sizes), so the dense verdict is
+    inconclusive; the matched robustness row carries none. The located peaks give 1/nu near 1
+    with a CI narrow enough to judge and above 0, at both cadences. With three replicas a seed,
+    about 9% of the bootstrap draws take no located peak at L = 32 and give 1/nu no value, so
+    draws_used also falls under fss.dynamic.min_draw_share (fix round 1, R2) and that rule alone
+    would make the verdict inconclusive too: the edge rule's isolated check, where it alone
+    decides, is test_fss's test_dynamic_verdicts_on_planted_peak_positions."""
     located = v1_peak("edge", EDGE_L, V1_REPLICAS - 1) - LAG  # the third replica's, at every L
     for (cadence, L), row in _peaks(edge_scored).items():
         unlocated = EDGE_REPLICAS / V1_REPLICAS if L == EDGE_L else 0.0
         assert row["edge_fraction"] == pytest.approx(unlocated), (cadence, L, row)
         assert abs(row["peak_eps_median"] - located) <= TOLERANCE, (cadence, L, row)
-    for row in _dynamic(edge_scored):
-        assert row["verdict"] == "inconclusive", row
+    rows = _dynamic(edge_scored)
+    assert rows["dense"]["verdict"] == "inconclusive", rows
+    for row in rows.values():
         assert abs(row["estimate"] - 1.0) <= 0.5, row
         assert (row["hi"] - row["lo"]) / 2 <= 0.5 and row["lo"] > 0.0, row
 
@@ -424,7 +438,8 @@ def test_every_indicator_is_tabled_and_only_variance_is_judged(
     fss_scored: ising.Evaluation, frozen_v1: dict[str, Any]
 ) -> None:
     """AC1 and skewness peaks are reported, one row per indicator, cadence and L, never judged:
-    the only dynamic rows are variance's."""
+    the only dynamic rows are variance's, one verdict at the dense cadence and a matched
+    robustness row."""
     names = frozen_v1["indicators"]["names"]
     cells = sorted((r["indicator"], r["cadence"], r["L"]) for r in fss_scored.tables["peaks"])
     assert cells == sorted((i, c, L) for i in names for c in CADENCES for L in V1_SIZES)
