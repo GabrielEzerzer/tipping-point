@@ -9,7 +9,7 @@ import pytest
 from tipping_point.ising import exact, gates, io, pilot, protocol
 from tipping_point.ising.__main__ import _number, _taus, main
 
-PILOT = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #50's pilot record
+PILOT = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #54's record, v1's tau_c
 # The engine's run-name rule as a literal: store::run::run_id's tag charset (ASCII letters,
 # digits, '-' and '_'; engine/src/store/run.rs), which api::table::safe applies to the whole run
 # id, at most 128 characters, before any read (engine/src/api/table.rs).
@@ -239,9 +239,10 @@ def test_ramp_and_null_refuse_a_stale_record_unless_allowed(
 
 def test_null_run_refuses_a_size_the_record_did_not_measure(tmp_path: Path) -> None:
     """Catches a null run's length resting on the fit's extrapolation, which its manifest could
-    not tell from a measurement: the record has no L = 128, so the run is refused, none started."""
-    argv = ["null", "--L", "128", "--epsilon-L", "4", "--pilot", str(PILOT)]
-    with pytest.raises(SystemExit, match="L = 128"):
+    not tell from a measurement: the record has no L = 8, so the run is refused, none started."""
+    assert "8" not in pilot.read(PILOT)["per_L"]
+    argv = ["null", "--L", "8", "--epsilon-L", "4", "--pilot", str(PILOT)]
+    with pytest.raises(SystemExit, match="L = 8"):
         main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"])
     assert not (tmp_path / "ising").exists()
 

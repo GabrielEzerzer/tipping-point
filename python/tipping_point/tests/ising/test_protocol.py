@@ -2,10 +2,13 @@
 
 import itertools
 import random
+from pathlib import Path
 
 import pytest
-from tipping_point.ising import exact, protocol
+from tipping_point.ising import exact, pilot, protocol
 from tipping_point.ising.protocol import Burst, Fixed, Ramp, Staircase
+
+FIXTURE = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #54's record
 
 
 def _answers(schedule: protocol.Schedule, steps: list[int]) -> list[tuple]:
@@ -147,16 +150,18 @@ def test_ramp_saves_evenly_in_epsilon_l_inside_the_band() -> None:
 
 def test_rate_for_puts_every_size_at_the_same_point_of_its_tau_c() -> None:
     """x = tau_c(L) / (sweeps per unit epsilon_L) at every L, so the window |epsilon_L| < 1 takes
-    2/x tau_c: 100 at x = 0.02 and 1 at x = 2. #56: the tau_c given is the one used, so a
-    measured tau_c off the fit's line (#50's record, below) sets that size's rate, not the line.
+    2/x tau_c: 100 at x = 0.02 and 1 at x = 2. #56: the tau_c given is the one used, so each
+    size's measured tau_c (the committed record's), off the fit's line, sets that size's rate.
     Catches a rate that ignores tau_c's scale (pre-#50, the fixed kernel's 2.5x slower tau made
     every ramp 2.5x faster than its x said) or reads L into it twice."""
-    for L, tau_c in ((16, 52.1), (32, 231.5), (64, 875.4), (128, 3690.0)):
+    per_L = pilot.read(FIXTURE)["per_L"]
+    for L, tau_c in ((int(L), entry["tau_c"]) for L, entry in per_L.items()):
         for x in (0.02, 2.0):
             per_epsilon_L = protocol.rate_for(L, x, tau_c) * exact.TC / L
             assert per_epsilon_L == pytest.approx(tau_c / x, rel=0.01)
-    slower = protocol.rate_for(64, 0.02, 2.5 * 875.4)
-    assert slower == pytest.approx(2.5 * protocol.rate_for(64, 0.02, 875.4), rel=1e-6)
+    tau_64 = per_L["64"]["tau_c"]
+    slower = protocol.rate_for(64, 0.02, 2.5 * tau_64)
+    assert slower == pytest.approx(2.5 * protocol.rate_for(64, 0.02, tau_64), rel=1e-6)
 
 
 def test_the_pre_50_x_values_are_x_times_a() -> None:

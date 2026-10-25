@@ -1,12 +1,14 @@
 # Pre-registration: the classic early-warning baselines on the 2D Ising model (#26: research
 # pass 2026-10-22, owner's calls 1-6; freeze decisions 2026-10-25, #26 comment 6402030372).
-# Not frozen: before the freeze, fill data.tau_c from the #54 record (L = 16, 32 and 64 at 64
-# replicas and L = 128 at 32, one commit and one kernel). L = 128 is decided out of v1 (decision
-# 5), so trials.budget stays 972; the surrogate test is recalibrated on real fixed-T nulls
-# (4.4-5.6% false positives at alpha = 0.05, #28). Units: time in tau_c(L) = tau_int(|m|) at Tc
-# on the frozen kernel, as measured per L in the record; its fitted z and any tau_c extrapolated
-# to an unmeasured L are never pre-registered on (#50 review); temperature in
-# eps_L = L (T - Tc) / Tc; lags in samples of the cadence.
+# data.tau_c is the #54 record: L = 16, 32 and 64 at 64 replicas and L = 128 at 32, from one
+# commit and one kernel, the kernel.py this version runs. The record is committed byte for byte
+# as python/tipping_point/tests/fixtures/ising_pilot.json, the same sha256, so anyone can check
+# it. L = 128 is decided out of v1 (decision 5): the record measures it, v1 never reads it, and
+# trials.budget stays 972. The surrogate test is recalibrated on real fixed-T nulls (4.4-5.6%
+# false positives at alpha = 0.05, #28). Units: time in tau_c(L) = tau_int(|m|) at Tc on the
+# frozen kernel, as measured per L in the record; its fitted z and any tau_c extrapolated to an
+# unmeasured L are never pre-registered on (#50 review); temperature in eps_L = L (T - Tc) / Tc;
+# lags in samples of the cadence.
 
 id = "ising-ews"
 version = 1
@@ -53,8 +55,8 @@ exclusions = []
 
 [data.tau_c]
 source = "pilot"         # measured per L; never the fit's z or an extrapolated tau_c
-pilot_run = "TBD"        # the #54 record: <data dir>/ising/<run>/pilot.json, frozen kernel
-pilot_sha256 = "TBD"
+pilot_run = "20261025T194846Z-tauc-L16-32-64-128"  # <data dir>/ising/<run>/pilot.json (#54)
+pilot_sha256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698"
 
 [data.ramps]
 kind = "ramp"

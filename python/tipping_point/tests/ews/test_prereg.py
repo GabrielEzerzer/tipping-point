@@ -17,14 +17,12 @@ from tipping_point.ising import io, protocol, run
 REPO = Path(__file__).resolve().parents[4]
 V1 = REPO / "paper" / "prereg" / "ising-ews-v1.toml"
 TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE.toml"
-PILOT_SHA = "ab" * 32
+FIXTURE = REPO / "python" / "tipping_point" / "tests" / "fixtures" / "ising_pilot.json"
 
 
 def _ready(text: str, prereg_id: str = "demo") -> str:
-    """v1 with its pilot pinned and a new id: a file that may be frozen."""
-    text = text.replace('id = "ising-ews"', f'id = "{prereg_id}"', 1)
-    text = text.replace('pilot_run = "TBD"', 'pilot_run = "20261023T000000Z-L16-pilot-s1"', 1)
-    return text.replace('pilot_sha256 = "TBD"', f'pilot_sha256 = "{PILOT_SHA}"', 1)
+    """v1 under a new id: a file that may be frozen."""
+    return text.replace('id = "ising-ews"', f'id = "{prereg_id}"', 1)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -49,16 +47,15 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_committed_files_validate_and_v1_waits_only_for_its_pilot() -> None:
-    """The template and v1 parse with every key the scorer reads. v1 cannot be frozen yet, and
-    the only things missing are the #50 pilot record's run and hash."""
+def test_committed_files_validate_and_v1_may_be_frozen() -> None:
+    """The template and v1 parse with every key the scorer reads. v1 passes the freeze's strict
+    check, nothing left as a placeholder now that its pilot record is pinned; the template does
+    not. A fourth size would need a budget to match."""
     for path in (TEMPLATE, V1):
         prereg.load(path)
-    v1 = prereg.load(V1)
-    missing = prereg.problems(v1.doc, strict=True)
-    assert missing and all(m.startswith("data.tau_c.pilot_") for m in missing), missing
-    assert not prereg.problems(tomllib.loads(_ready(V1.read_text("utf-8"))), strict=True)
-    grown = tomllib.loads(_ready(V1.read_text("utf-8")))
+    assert prereg.problems(prereg.load(V1).doc, strict=True) == []
+    assert any("placeholder" in p for p in prereg.problems(prereg.load(TEMPLATE).doc, strict=True))
+    grown = tomllib.loads(V1.read_text("utf-8"))
     grown["data"]["L"].append(128)  # a fourth size without a budget to match
     assert any("trials.budget" in p for p in prereg.problems(grown, strict=True))
 
@@ -88,9 +85,12 @@ def test_v1_holds_the_freeze_decisions() -> None:
     """#26 comment 6402030372: new seeds and replicas, ramps over one eps_L window, the
     dynamic test on Var(|m|) peak positions at 0.5, alarms as a reported table at 1 per 1000
     tau_c, every judged static entry with its own tolerance (1 - AC1 keeps the 0.1 it took from
-    the dynamic test), h = 2 at every L, and the disclosure of what was seen before."""
+    the dynamic test), h = 2 at every L, the disclosure of what was seen before, and #54's
+    tau_c record pinned: the sha256 of the committed fixture, so anyone can check it."""
     doc = prereg.load(V1).doc
     data, dyn = doc["data"], doc["fss"]["dynamic"]
+    assert data["tau_c"]["pilot_run"] == "20261025T194846Z-tauc-L16-32-64-128"
+    assert data["tau_c"]["pilot_sha256"] == hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
     assert (data["L"], data["seeds"], data["replicas"]) == ([16, 32, 64], [6, 7, 8, 9, 10], 64)
     assert data["ramps"]["eps_L"] == [12.0, -8.0]
     assert (dyn["statistic"], dyn["indicators"], dyn["search"]) == ("peak", ["variance"], [6, -4])
@@ -222,8 +222,8 @@ def test_freeze_refuses_what_it_should(repo: Path) -> None:
     )
     with pytest.raises(prereg.PreregError, match="not committed"):
         prereg.freeze(repo, "demo")  # the latest version is the one frozen
-    unready = V1.read_text("utf-8").replace('id = "ising-ews"', 'id = "raw"').encode()
-    (repo / "paper" / "prereg" / "raw-v1.toml").write_bytes(unready)
+    unready = _ready(V1.read_text("utf-8"), "raw").replace('pilot_run = "', 'pilot_run = "TBD', 1)
+    (repo / "paper" / "prereg" / "raw-v1.toml").write_bytes(unready.encode())
     with pytest.raises(prereg.PreregError, match="placeholder"):
         prereg.freeze(repo, "raw")
     with pytest.raises(prereg.PreregError, match="no paper/prereg"):

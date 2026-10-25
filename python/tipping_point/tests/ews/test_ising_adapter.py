@@ -247,19 +247,24 @@ def test_a_staircase_without_the_fss_plateau_is_an_error(tmp_path: Path) -> None
         ising._static(doc, {16: inputs}, rng)
 
 
-def test_the_pilot_record_from_50_reads(tmp_path: Path) -> None:
-    """The committed copy of #50's measured record (fixtures/ising_pilot.json): the contract the
-    scorer reads tau_c through."""
+def test_the_record_v1_pins_is_the_committed_fixture_and_reads(tmp_path: Path) -> None:
+    """#54's record, committed byte for byte as fixtures/ising_pilot.json: v1's data.tau_c pins
+    its sha256, and in a folder named as v1's pilot_run it reads through the contract the scorer
+    reads tau_c by, current (it measured the running kernel), each size's tau_c and interval as
+    recorded, every v1 size among them."""
     fixture = Path(__file__).resolve().parents[1] / "fixtures" / "ising_pilot.json"
-    folder = tmp_path / "ising" / "measured"
+    v1 = tomllib.loads(V1.read_text("utf-8"))["data"]
+    pinned = v1["tau_c"]
+    assert hashlib.sha256(fixture.read_bytes()).hexdigest() == pinned["pilot_sha256"]
+    folder = tmp_path / "ising" / pinned["pilot_run"]
     folder.mkdir(parents=True)
     (folder / "pilot.json").write_bytes(fixture.read_bytes())
-    digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
-    record = ising.read_pilot(tmp_path, "measured", digest)
-    assert sorted(record.tau_c) == [16, 32, 64]
-    assert record.tau(16) == pytest.approx(52.1, abs=0.05)
-    assert record.tau(64) == pytest.approx(875.4, abs=0.05)
-    assert len(record.kernel_commit.split("-")[0]) == 40
+    record = ising.read_pilot(tmp_path, pinned["pilot_run"], pinned["pilot_sha256"])
+    per_L = json.loads(fixture.read_text("utf-8"))["per_L"]
+    assert record.tau_c == {int(L): entry["tau_c"] for L, entry in per_L.items()}
+    assert record.tau_c_ci == {int(L): entry["tau_c_ci"] for L, entry in per_L.items()}
+    assert set(v1["L"]) < set(record.tau_c)  # L = 128 too, which v1 leaves out
+    assert record.stale is None and len(record.kernel_commit.split("-")[0]) == 40
 
 
 def test_a_doubled_slot_is_an_error_until_one_run_is_excluded(planted: Any, tmp_path: Path) -> None:

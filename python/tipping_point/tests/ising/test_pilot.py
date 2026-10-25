@@ -118,23 +118,23 @@ def test_pilot_refuses_to_start_when_no_commit_names_the_code(
 
 
 def test_the_committed_record_reads_and_extrapolates() -> None:
-    """The fixture is the record #50's pilot wrote (CPU, seed 1, the fixed kernel) plus that
-    kernel's sha256, the shape #26's scorer reads: a measured size comes from per_L, any other
-    from A L^z. It reads as current, since kernel.py is byte for byte the one it measured."""
+    """The fixture is #54's record byte for byte (seed 1, the frozen kernel), the one ising-ews-v1
+    pins, in the shape #26's scorer reads: a measured size comes from per_L, any other from
+    A L^z. It reads as current, since kernel.py is byte for byte the one it measured."""
     measured = json.loads(FIXTURE.read_text(encoding="utf-8"))["kernel_sha256"]
     assert measured == pilot.kernel_sha256(), (
         "kernel.py changed since the pilot measured it, so every tau_c is stale: re-run the "
         "pilot and tauc (README), then refresh this fixture and the README table from the record"
     )
     record = pilot.read(FIXTURE)
-    assert list(record["per_L"]) == ["16", "32", "64"]
+    assert list(record["per_L"]) == ["16", "32", "64", "128"]
     A, z = record["fit"]["A"], record["fit"]["z"]
     for L, entry in record["per_L"].items():
         assert pilot.tau_c(record, int(L)) == entry["tau_c"]
         assert entry["tau_c"] == pytest.approx(A * int(L) ** z, rel=0.1)  # the fit runs close by
         assert entry["n_over_tau"] == pytest.approx(entry["sweeps"] / entry["tau_c"])
         assert entry["tau_c_ci"][0] < entry["tau_c"] < entry["tau_c_ci"][1]
-    assert pilot.tau_c(record, 128) == pytest.approx(A * 128**z)
+    assert pilot.tau_c(record, 256) == pytest.approx(A * 256**z)  # a size it did not measure
 
 
 @pytest.mark.parametrize(
