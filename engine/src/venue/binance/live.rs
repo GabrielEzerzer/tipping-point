@@ -117,12 +117,12 @@ pub enum LiveError {
 /// after a clean end.
 ///
 /// # Errors
-/// Returns an error when the REST client cannot be built, the scales cannot be fetched, or the
-/// recording cannot be created or written.
+/// Returns an error when the REST client cannot be built, the scales cannot be fetched or the
+/// venue does not list a symbol, or the recording cannot be created or written.
 pub async fn run_live(config: LiveConfig, mut observer: impl Observer) -> Result<(), LiveError> {
     install_crypto_provider();
     let rest = Rest::new()?;
-    let scales = rest.fetch_scales(&config.symbols).await?;
+    let scales = starting_scales(&rest, &config.symbols).await?;
     let venue = Venue::BinanceUsdm;
     let mut log = match &config.record {
         Some(recording) => {
@@ -272,25 +272,49 @@ fn fetch_at(
     at
 }
 
+/// The scales of every one of `symbols`, to start a feed at: refused when the venue does not list
+/// one, as a feed starts with every symbol it was asked for or not at all (#104).
+async fn starting_scales(
+    rest: &Rest,
+    symbols: &[Symbol],
+) -> Result<BTreeMap<Symbol, Scales>, RestError> {
+    let scales = rest.fetch_scales(symbols).await?;
+    match symbols.iter().find(|symbol| !scales.contains_key(*symbol)) {
+        Some(missing) => Err(RestError::MissingSymbol(missing.clone())),
+        None => Ok(scales),
+    }
+}
+
 /// Raises, for each of `symbols`, [`LiveEvent::ScalesChanged`] when the fetch found other scales
-/// than its feed reads it at, or [`LiveEvent::ScalesCheckFailed`] when the fetch failed, so a
-/// check that could not be made never reads as unchanged scales (#100). Said, not applied: a run
-/// keeps one set of scales (#45).
+/// than its feed reads it at, or [`LiveEvent::ScalesCheckFailed`] when the fetch failed or did not
+/// list the symbol, so a check that could not be made never reads as unchanged scales (#100), and
+/// a symbol the venue dropped fails its own check alone (#104). Said, not applied: a run keeps one
+/// set of scales (#45).
 fn say_what_scales_show(
     feed: &Feed,
     symbols: &[Symbol],
     fetched: &Result<BTreeMap<Symbol, Scales>, RestError>,
     observer: &mut impl Observer,
 ) {
-    let failed = fetched.as_ref().err().map(ToString::to_string);
     for symbol in symbols {
-        if let Some(error) = &failed {
-            observer.event(LiveEvent::ScalesCheckFailed { symbol, error });
-        } else if let (Ok(scales), Some(was)) = (fetched, feed.scales(symbol))
-            && let Some(&now) = scales.get(symbol)
-            && now != was
-        {
-            observer.event(LiveEvent::ScalesChanged { symbol, was, now });
+        let found = match fetched {
+            Ok(scales) => scales
+                .get(symbol)
+                .copied()
+                .ok_or_else(|| RestError::MissingSymbol(symbol.clone()).to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+        match (found, feed.scales(symbol)) {
+            (Err(error), _) => {
+                observer.event(LiveEvent::ScalesCheckFailed {
+                    symbol,
+                    error: &error,
+                });
+            }
+            (Ok(now), Some(was)) if now != was => {
+                observer.event(LiveEvent::ScalesChanged { symbol, was, now });
+            }
+            (Ok(_), _) => {}
         }
     }
 }
@@ -526,6 +550,55 @@ mod tests {
             "only BTCUSDT changed: {}",
             said[2]
         );
+        Ok(())
+    }
+
+    /// A symbol the venue no longer lists fails only its own scales check: another symbol due a
+    /// check with it still hears that its tick changed, where both were told the exchange info had
+    /// no such symbol, every ten minutes (#104). A feed asked for that symbol is still refused at
+    /// the start, and one asked for listed symbols is not.
+    #[tokio::test]
+    async fn a_symbol_the_venue_no_longer_lists_fails_only_its_own_scales_check()
+    -> Result<(), Box<dyn std::error::Error>> {
+        install_crypto_provider();
+        // Counted from one, so the stand-in refuses no download.
+        let rest = Rest::at(&exchange_info_stand_in(Arc::new(AtomicUsize::new(1))).await?)?;
+        let scale = |price_decimals| Scales {
+            price_decimals,
+            qty_decimals: 3,
+        };
+        let feed = Feed::new(
+            Venue::BinanceUsdm,
+            BTreeMap::from([
+                ("BTCUSDT".to_owned(), scale(1)),
+                ("SOLUSDT".to_owned(), scale(2)),
+            ]),
+        );
+        let symbols = ["BTCUSDT".to_owned(), "SOLUSDT".to_owned()];
+        let fetched = rest.fetch_scales(&symbols).await;
+        let mut said = Vec::new();
+        let mut observer = |event: LiveEvent<'_>| said.push(format!("{event:?}"));
+        say_what_scales_show(&feed, &symbols, &fetched, &mut observer);
+        assert_eq!(said.len(), 2, "{said:#?}");
+        assert!(
+            said[0].starts_with("ScalesChanged { symbol: \"BTCUSDT\""),
+            "{said:#?}"
+        );
+        assert!(
+            said[1].starts_with("ScalesCheckFailed { symbol: \"SOLUSDT\"")
+                && said[1].contains("has no symbol"),
+            "{said:#?}"
+        );
+        let found: Option<Vec<&Symbol>> = fetched.as_ref().ok().map(|s| s.keys().collect());
+        assert_eq!(found, Some(vec![&symbols[0]]), "the symbols it found");
+
+        let refused = starting_scales(&rest, &symbols).await;
+        assert!(
+            matches!(&refused, Err(RestError::MissingSymbol(s)) if s == "SOLUSDT"),
+            "{refused:?}"
+        );
+        let listed = ["BTCUSDT".to_owned(), "ETHUSDT".to_owned()];
+        assert_eq!(starting_scales(&rest, &listed).await?.len(), 2);
         Ok(())
     }
 

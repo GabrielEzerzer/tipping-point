@@ -78,10 +78,12 @@ impl Rest {
         })
     }
 
-    /// Reads tick and lot sizes for the given symbols from `/fapi/v1/exchangeInfo`.
+    /// Reads tick and lot sizes from `/fapi/v1/exchangeInfo` for those of `symbols` it lists. A
+    /// symbol it does not list is left out, for the caller to judge: one delisted symbol must not
+    /// fail the others' check (#104).
     ///
     /// # Errors
-    /// Returns an error when the call fails or a symbol or its filters are missing.
+    /// Returns an error when the call fails or a listed symbol's filters are missing.
     pub async fn fetch_scales(
         &self,
         symbols: &[Symbol],
@@ -92,12 +94,9 @@ impl Rest {
         })?;
         let mut scales = BTreeMap::new();
         for symbol in symbols {
-            let entry = info
-                .symbols
-                .iter()
-                .find(|s| &s.symbol == symbol)
-                .ok_or_else(|| RestError::MissingSymbol(symbol.clone()))?;
-            scales.insert(symbol.clone(), scales_of(entry)?);
+            if let Some(entry) = info.symbols.iter().find(|s| &s.symbol == symbol) {
+                scales.insert(symbol.clone(), scales_of(entry)?);
+            }
         }
         Ok(scales)
     }
