@@ -74,7 +74,10 @@ proptest! {
     fn a_frame_decodes_to_what_was_encoded(frame in any_frame()) {
         let bytes = frame.encode()?;
         prop_assert_eq!(bytes.len(), frame.encoded_len());
-        prop_assert_eq!(Frame::decode(&bytes)?, (frame, bytes.len()));
+        let (head, body) = bytes.split_first_chunk::<HEADER_LEN>().expect("a whole header");
+        let header = Header::parse(head)?;
+        prop_assert_eq!(HEADER_LEN + header.body_len(), bytes.len());
+        prop_assert_eq!(header.finish(head, body.to_vec())?, frame);
     }
 
     /// Any length over the limit is refused from the header alone, before anything is read or

@@ -262,31 +262,6 @@ impl Frame {
         out.extend_from_slice(&crc.to_le_bytes());
         Ok(out)
     }
-
-    /// Decodes the frame at the start of `bytes` and returns it with the number of bytes it
-    /// took. Nothing is allocated for a length over the limit or past the end of `bytes`.
-    ///
-    /// # Errors
-    /// Returns why the bytes are not a valid frame.
-    pub fn decode(bytes: &[u8]) -> Result<(Self, usize), FrameError> {
-        let available = bytes.len() as u64;
-        let Some(head) = bytes.first_chunk::<HEADER_LEN>() else {
-            return Err(FrameError::Truncated {
-                needed: HEADER_LEN as u64,
-                available,
-            });
-        };
-        let header = Header::parse(head)?;
-        let total = HEADER_LEN + header.body_len();
-        if bytes.len() < total {
-            return Err(FrameError::Truncated {
-                needed: total as u64,
-                available,
-            });
-        }
-        let frame = header.finish(head, bytes[HEADER_LEN..total].to_vec())?;
-        Ok((frame, total))
-    }
 }
 
 /// A Meta frame's payload. Every segment starts with one, so any segment can be read alone.
@@ -370,16 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_reverses_encode_and_reports_the_length() -> Result<(), FrameError> {
-        let original = frame(Kind::Depth, "{\"e\":\"depthUpdate\"}");
-        let mut bytes = original.encode()?;
-        let len = bytes.len();
-        bytes.extend_from_slice(b"next frame");
-        assert_eq!(Frame::decode(&bytes)?, (original, len));
-        Ok(())
-    }
-
-    #[test]
     fn every_kind_has_a_distinct_code() {
         for code in 0..=u8::MAX {
             if let Some(kind) = Kind::from_code(code) {
@@ -395,7 +360,10 @@ mod tests {
         let with = |at: usize, value: u8| {
             let mut bytes = good.clone();
             bytes[at] = value;
-            Frame::decode(&bytes).err()
+            let (head, body) = bytes.split_first_chunk::<HEADER_LEN>()?;
+            Header::parse(head)
+                .and_then(|header| header.finish(head, body.to_vec()))
+                .err()
         };
         assert_eq!(
             with(0, 0xFE),
@@ -412,25 +380,11 @@ mod tests {
     fn an_oversized_length_is_refused_before_reading_the_payload() -> Result<(), FrameError> {
         let mut bytes = frame(Kind::Meta, "{}").encode()?;
         bytes[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+        let head = bytes.first_chunk::<HEADER_LEN>().expect("a whole header");
         assert_eq!(
-            Frame::decode(&bytes).err(),
+            Header::parse(head).err(),
             Some(FrameError::TooLong(u64::from(u32::MAX)))
         );
-        Ok(())
-    }
-
-    #[test]
-    fn a_short_buffer_is_truncated_not_a_panic() -> Result<(), FrameError> {
-        let bytes = frame(Kind::Meta, "{\"a\":1}").encode()?;
-        for cut in 0..bytes.len() {
-            assert!(
-                matches!(
-                    Frame::decode(&bytes[..cut]),
-                    Err(FrameError::Truncated { .. })
-                ),
-                "cut at {cut}"
-            );
-        }
         Ok(())
     }
 
