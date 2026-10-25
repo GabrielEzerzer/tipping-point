@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 harness/out/
+# build output: a stray dist/ would make the next build stamp itself dirty (#109)
+dist/
 .worktrees/
 
 # raw Binance recordings stay local: the repo goes public and republishing book data is a licensing risk (#4)

@@ -76,13 +76,14 @@ def _probe(site: Path, cwd: Path, *argv: str) -> dict[str, str | bool | None]:
 
 
 def _foreign_repository(path: Path) -> str:
-    """A scratch git repository with one commit of its own; returns its HEAD."""
+    """A scratch git repository of another project, its pyproject.toml committed; returns its
+    HEAD."""
     path.mkdir(parents=True)
     _git(path, "init", "-q")
     _git(path, "config", "user.name", "Test")
     _git(path, "config", "user.email", "test@example.com")
-    (path / "README").write_text("another project\n", encoding="utf-8")
-    _git(path, "add", "README")
+    (path / "pyproject.toml").write_text('[project]\nname = "other-project"\n', encoding="utf-8")
+    _git(path, "add", "pyproject.toml")
     _git(path, "commit", "-q", "-m", "another project")
     return _git(path, "rev-parse", "HEAD")
 
@@ -149,22 +150,25 @@ def test_an_installed_wheel_outside_any_checkout_runs_under_its_stamp(
 
 
 @needs_uv
-@pytest.mark.parametrize("layout", ["venv", "unpacked sdist"])
+@pytest.mark.parametrize("layout", ["venv", "unpacked sdist", "src of another project"])
 @pytest.mark.parametrize("stamped", [True, False], ids=["stamped", "placeholder"])
 def test_a_copy_inside_another_repository_never_reports_that_repository(
     wheel: Path, tmp_path: Path, layout: str, stamped: bool
 ) -> None:
     """Old behaviour: git found the enclosing repository and recorded its commit. A venv's
-    copy, or a source tree no repository tracks (an sdist unpacked inside another project),
-    records its own stamp, or nothing when its build was not stamped."""
+    copy, a source tree no repository tracks (an sdist unpacked inside another project), or a
+    copy at src/tipping_point under another project's committed pyproject.toml records its own
+    stamp, or nothing when its build was not stamped."""
     foreign = tmp_path / "other-project"
     foreign_head = _foreign_repository(foreign)
     if layout == "venv":
         site = _install(wheel, foreign / ".venv" / "Lib" / "site-packages")
-    else:
+    elif layout == "unpacked sdist":
         tree = foreign / "vendor" / "tipping_point-0.1.0"
         site = _install(wheel, tree / "src")
         shutil.copy(PROJECT / "pyproject.toml", tree / "pyproject.toml")
+    else:  # git tracks the pyproject.toml above src/: only the name in it rules this tree out
+        site = _install(wheel, foreign / "src")
     if not stamped:
         shutil.copy(Path(_build_info.__file__), site / STAMP)
     package = site / "tipping_point"
@@ -174,6 +178,30 @@ def test_a_copy_inside_another_repository_never_reports_that_repository(
     assert version == {"git_sha": stamp["commit"], "dirty": stamp["dirty"]}
     assert version["git_sha"] != foreign_head
     assert (version["git_sha"] is None) == (not stamped)
+
+
+@needs_uv
+def test_an_exported_git_dir_never_redirects_the_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A git hook, or a shell, that exports GIT_DIR points every git command at that repository
+    whatever folder it runs in: before, the build stamped the other repository's HEAD (its
+    committed pyproject.toml passed the ls-files check) and a checkout's runs recorded it too.
+    Both must name this checkout's HEAD and status."""
+    head = _git(PROJECT, "rev-parse", "HEAD")
+    dirty = _git(PROJECT, "status", "--porcelain") != ""
+    other = tmp_path / "other-project"
+    other_head = _foreign_repository(other)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    checkout = io.code_version()
+    _build(tmp_path / "dist", "--wheel")
+    (built,) = (tmp_path / "dist").glob("*.whl")
+    with zipfile.ZipFile(built) as archive:
+        stamp = _stamp(archive.read(STAMP).decode())
+    expected = {"git_sha": head, "dirty": dirty}
+    stamped = {"git_sha": stamp["commit"], "dirty": stamp["dirty"]}
+    assert {"checkout": checkout, "build": stamped} == {"checkout": expected, "build": expected}
+    assert head != other_head
 
 
 def test_imported_from_its_checkout_it_reads_git_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
