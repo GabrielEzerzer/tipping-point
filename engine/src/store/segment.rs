@@ -174,12 +174,6 @@ impl SegmentReader {
         self.next_seq
     }
 
-    /// The segment's path.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Reads the frame at the current offset. The outer error is I/O, the inner one says why
     /// the bytes are not a frame.
     fn read_one(&mut self) -> io::Result<Result<(Frame, u64), FrameError>> {

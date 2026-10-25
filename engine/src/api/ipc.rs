@@ -125,12 +125,6 @@ impl Encoder {
         Ok((Self { writer, schema }, header))
     }
 
-    /// The schema every batch must have.
-    #[must_use]
-    pub fn schema(&self) -> &SchemaRef {
-        &self.schema
-    }
-
     /// One batch's message. The batch takes the stream's schema (its fields must match).
     ///
     /// # Errors

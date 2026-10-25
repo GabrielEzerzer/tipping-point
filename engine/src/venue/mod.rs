@@ -18,7 +18,6 @@ use crate::market::decimal::DecimalError;
 use crate::market::feed::Trade;
 use crate::market::sync::{DepthUpdate, Snapshot};
 use crate::market::{Scales, Symbol};
-use crate::store::ms_to_ns;
 
 /// An exchange market the engine reads. Its id names it in run tags, manifests, tables and
 /// messages.
@@ -217,12 +216,6 @@ impl RawDepth {
                 prev_last_update_id: None,
             },
         }
-    }
-
-    /// The exchange time of the frame, in nanoseconds since the epoch.
-    #[must_use]
-    pub fn event_time_ns(&self) -> i64 {
-        ms_to_ns(self.ids().event_time_ms)
     }
 }
 
