@@ -679,6 +679,66 @@ async fn a_subscription_after_the_feed_ended_is_answered_ended() -> Outcome {
     Ok(())
 }
 
+/// A subscription sent in the same breath as the hello, to a feed that already ended, hears
+/// `ended` first: it was answered `live` for one send before `ended` came (#102).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscription_sent_with_the_hello_to_an_ended_feed_hears_ended_first() -> Outcome {
+    let dir = scratch("api-ended-at-once");
+    let server = started_server(&dir, HubConfig::default()).await?;
+    server.hub.end();
+    let ended = json!({"t": "source", "mode": "ended"});
+    let mut eager = ws_connect(server.addr).await?;
+    send_json(&mut eager, &json!({"t": "hello", "v": PROTOCOL})).await?;
+    send_json(
+        &mut eager,
+        &json!({"t": "sub", "topics": ["book", "trades"]}),
+    )
+    .await?;
+    assert_eq!(next_json(&mut eager, WAIT).await?["t"], "welcome");
+    assert_eq!(next_json(&mut eager, WAIT).await?, ended, "first");
+    let answer = next_json(&mut eager, WAIT).await?;
+    assert_eq!(answer, ended, "the subscription's answer");
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+/// A lossless client that connects after the feed ended is told so, and so are its subscription
+/// and a pause. Its feed's `Ordered::End` went out before it subscribed, so it heard nothing of
+/// the end: its `sub` was answered `live` and a pause closed it with 4000 (#102).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lossless_client_after_the_feed_ended_is_told_it_ended() -> Outcome {
+    let dir = scratch("api-lossless-after-end");
+    let hub = Hub::new(HubConfig {
+        lossless: true,
+        ..HubConfig::default()
+    });
+    let feed = VenueSource {
+        scales: BTreeMap::new(),
+        run: None,
+    };
+    assert!(hub.start(Venue::BinanceUsdm, feed));
+    hub.end();
+    let server = Server::start(hub, ApiConfig::new(dir.clone())).await?;
+    let ended = json!({"t": "source", "mode": "ended"});
+    let mut late = ws_connect(server.addr).await?;
+    hello(&mut late).await?;
+    send_json(
+        &mut late,
+        &json!({"t": "sub", "topics": ["book", "status"]}),
+    )
+    .await?;
+    assert_eq!(next_json(&mut late, WAIT).await?, ended, "on connecting");
+    let answer = next_json(&mut late, WAIT).await?;
+    assert_eq!(answer, ended, "the subscription's answer");
+    send_json(&mut late, &json!({"t": "pause"})).await?;
+    let answer = next_json(&mut late, WAIT).await?;
+    assert_eq!(answer, ended, "a pause, not a 4000 close");
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
 /// A foreign `Origin` is refused, the WebSocket upgrade included, and so is a `Host` that names
 /// another server (DNS rebinding) and a page's plain GET from another site, which carries no
 /// `Origin`; the allowed origins and a client without `Origin` get in.

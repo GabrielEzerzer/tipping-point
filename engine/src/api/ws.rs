@@ -282,6 +282,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             config.book_sample.every_ns,
         );
         self.queue(&ServerMessage::Welcome(&welcome));
+        // A feed that ended before this client came: it is told so before anything it sent is
+        // answered, and stays ended (#102). A lossless client would not hear it at all, as its
+        // `Ordered::End` went out before it subscribed. A feed that ends after this is caught at
+        // the next send, or at `Ordered::End`.
+        if hub.has_ended() {
+            self.mode = Mode::Ended(None);
+            self.queue_ended();
+        }
         for text in early {
             self.on_text(&text).await?;
         }
