@@ -21,7 +21,7 @@ data.nulls, scoring.alarms) and changes what the planted data require (seeds, re
 tau_c record), plus, to score in seconds, 40 bootstrap draws and settings no assertion here
 reads: the sensitivity grid cut to its headline cell, |m| the only observable, horizon 0 alone,
 one surrogate per test, and alarm scores every 50 tau_c instead of every one. As frozen, a mode
-takes minutes to score (the alarm s(t) alone is ~180,000 Kendall scores).
+takes minutes to score: the alarm s(t) alone is ~100,000 Kendall scores of 300 tau_c each.
 
 The generator's own checks read its output only; the rest need the freeze's scorer.
 """
@@ -61,7 +61,7 @@ from ews_planted import (
 )
 from tipping_point.ews import indicators, ising
 from tipping_point.ews.__main__ import main
-from tipping_point.ising import io
+from tipping_point.ising import io, protocol
 from tipping_point.ising import pilot as tauc
 from tipping_point.ising.exact import TC
 
@@ -304,8 +304,9 @@ def test_the_headline_rolling_variance_peaks_half_a_window_after_the_spread(
 def test_v1_ramps_are_laid_out_as_the_ramp_command_lays_them_out(v1: dict[str, V1]) -> None:
     """Each ramp's manifest as `ramp --x 0.02 --eps-start 12 --eps-end -8` writes it under the
     freeze: the eps_L window with T0 and T1 set from it, a rate of 50 tau_c per unit eps_L from
-    the tau_c the record measured at that L, rate_source "measured", and the record's stamp; its
-    bath cools from eps_L = 12 to -8."""
+    the tau_c the record measured at that L, rate_source "measured", and the record's stamp, in a
+    schedule protocol rebuilds as it was (what a resumed run reads); its bath cools from
+    eps_L = 12 to -8."""
     data = v1["fss"]
     stamp = tauc.stamp(data.pilot, io.read_json(data.pilot))
     for L in V1_SIZES:
@@ -323,6 +324,7 @@ def test_v1_ramps_are_laid_out_as_the_ramp_command_lays_them_out(v1: dict[str, V
             assert ramp["T1"] == pytest.approx(TC * (1 + V1_EPS_L[1] / L))
             per_eps_L = ramp["rate"] * TC / L / V1_TAU_C[L]  # tau_c of cooling per unit eps_L
             assert per_eps_L == pytest.approx(1 / V1_X, rel=0.005), (L, ramp["rate"])
+            assert protocol.from_json(params["schedule"]).to_json() == params["schedule"]
             eps, _ = _ramp(run_dir)
             assert (eps[0], eps[-1]) == pytest.approx(V1_EPS_L)
 
@@ -449,13 +451,14 @@ def test_an_unattainable_alarm_target_says_so_in_every_row(
 def test_the_frozen_alarm_target_is_attainable_on_the_planted_nulls(
     fss_scored: ising.Evaluation, frozen_v1: dict[str, Any]
 ) -> None:
-    """The control for the unattainable target: at the frozen 1 per 1000 tau_c the same nulls
-    reach the target, so every row has a finite theta and a far_max at or above the target."""
+    """The control for the unattainable target: at the frozen 1 per 1000 tau_c some theta alarms
+    more often than the target on the same nulls, so every row has a finite theta and a far_max
+    above the target (one that only meets it is unattainable)."""
     alarms = frozen_v1["scoring"]["alarms"]
     target = alarms["far"] * alarms["report_per"]
     for row in fss_scored.tables["alarms"]:
         assert row["attainable"] is True and np.isfinite(row["theta"]), row
-        assert row["far_max"] >= target, row
+        assert row["far_max"] > target, row
 
 
 def test_a_ramp_over_another_eps_L_window_is_refused(

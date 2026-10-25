@@ -332,19 +332,11 @@ def v1_ramp(L: int, eps_L: tuple[float, float] = V1_EPS_L) -> protocol.Ramp:
     """The v1 slow ramp at L, as `ramp --x 0.02 --eps-start 12 --eps-end -8` lays it out: held at
     T0 = Tc (1 + eps_L[0] / L), then cooled to T1 = Tc (1 + eps_L[1] / L) at x = 0.02 of the tau_c
     the record measured at L (#56), tau_c L / (x Tc) sweeps per unit T, its params recording the
-    window, that the rate came from a measurement, and the record's fit. Until protocol takes the
-    measured tau_c (the freeze's #56 change), rate_for reads it as A = tau_c with z = 0, the same
-    rate, and the two records are added to the params protocol writes."""
-    T0, T1 = (TC * (1.0 + e / L) for e in eps_L)
+    record's fit, that the rate came from a measurement, and the window."""
+    T0, T1 = (TC * (1 + e / L) for e in eps_L)
     A, z = _fit()
-    old: tuple[float, ...] = (
-        () if "tau_c" in inspect.signature(protocol.rate_for).parameters else (0.0,)
-    )
-    rate = protocol.rate_for(L, V1_X, V1_TAU_C[L], *old)
-    records: dict[str, Any] = {"rate_source": "measured", "eps_L": [float(e) for e in eps_L]}
-    takes = inspect.signature(protocol.Ramp).parameters
-    schedule = protocol.Ramp(
-        rate,
+    return protocol.Ramp(
+        protocol.rate_for(L, V1_X, V1_TAU_C[L]),
         L,
         T0=T0,
         T1=T1,
@@ -353,10 +345,9 @@ def v1_ramp(L: int, eps_L: tuple[float, float] = V1_EPS_L) -> protocol.Ramp:
         x=V1_X,
         A=A,
         z=z,
-        **{key: value for key, value in records.items() if key in takes},
+        rate_source="measured",
+        eps_L=eps_L,
     )
-    schedule.params.update({key: value for key, value in records.items() if key not in takes})
-    return schedule
 
 
 def v1_nulls(L: int) -> protocol.Fixed:
