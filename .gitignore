@@ -13,3 +13,11 @@ dist/
 harness/fixtures/recorded/
 # so do downloaded archive days (#23): the import tests read any found here
 harness/fixtures/archives/
+
+# credentials never enter the repo: it is public from 2026-10-25
+.env
+.env.*
+kaggle.json
+access_token
+*.pem
+*.key
