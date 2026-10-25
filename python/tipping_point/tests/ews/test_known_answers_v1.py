@@ -1,27 +1,40 @@
 """Known answers for the ising-ews v1 freeze (#97, #98; decisions: #26, comment 6402030372).
 
-harness/ews_planted.py's v1 dataset plants, at L = 16, 32 and 64 (two seeds of three replicas),
-a spread of |m| along the slow ramps that peaks
-  fss      at eps_L = 0.8 at every L: the dynamic test passes, 1/nu = 1
-  fixed_T  at one temperature, eps_L = 0.8, 1.6 and 3.2: it fails, 1/nu near 0
-  edge     as fss, but at L = 32 two replicas in three peak past the search band's cold edge:
-           inconclusive, although the located peaks alone would pass
+harness/ews_planted.py's v1 dataset plants, at L = 16, 32 and 64 (two seeds of two replicas, six
+at the edge mode's L = 32), slow ramps whose mean |m| rises through Tc and whose spread of |m|
+peaks
+  fss      at eps_L 0.8 at every L: the dynamic test passes, 1/nu = 1
+  fixed_T  at one temperature, eps_L 0.8, 1.6 and 3.2: it fails, 1/nu near 0
+  nu065    drifting so that 1/nu = 0.65: a pass 0.15 inside the tolerance of 0.5, which any
+           tolerance under ~0.3 fails
+  nu035    drifting so that 1/nu = 0.35: a fail 0.15 outside it, which any tolerance over ~0.7
+           passes
+  edge     as fss, but at L = 32 four of each seed's six replicas peak past the search band's
+           cold edge: inconclusive by the edge rule alone, the located peaks passing every other
+           clause
 and the scorer, ising.evaluate, must find those answers under a copy of the v1 prereg.
 
 The lag. The rolling indicator at sample t describes the headline window of 20 tau_c ending at t.
 The ramp spends 1/x = 50 tau_c per unit eps_L, so the window spans 20 x = 0.4 eps_L and follows
 the spread at its middle, 0.2 eps_L back: the indicator peaks 0.2 eps_L below the spread it
 measures, later on the cooling ramp. Each L's median peak must sit within 0.08 eps_L (4 tau_c of
-ramp) of the planted eps_L less that lag. Single replicas scatter by 0.02-0.04 eps_L (sd), and the
-window's middle sits up to 0.01 eps_L short of 0.2 at one sample per tau_c (L = 16).
+ramp) of the planted eps_L less that lag.
 
-The prereg copy keeps every setting the dynamic test and the alarm table read as frozen (the
-headline window and bandwidth, thin, lag, detrend and direction, fss.dynamic, data.ramps,
-data.nulls, scoring.alarms) and changes what the planted data require (seeds, replicas, the
-tau_c record), plus, to score in seconds, 40 bootstrap draws and settings no assertion here
-reads: the sensitivity grid cut to its headline cell, |m| the only observable, horizon 0 alone,
-one surrogate per test, and alarm scores every 50 tau_c instead of every one. As frozen, a mode
-takes minutes to score: the alarm s(t) alone is ~100,000 Kendall scores of 300 tau_c each.
+The cadences. tau_c is 12, 16 and 24 sweeps, so the dense cadence keeps a sample every 1.2, 1.6
+and 2.4 sweeps and the matched one bursts of 8 frames every 21, 29 and 43 sweeps: a window
+counted in sweeps or frames instead of samples, or a matched density turned over, moves the
+peaks. The mean's rise, steepest at Tc, is what the detrend removes; without it the rolling
+variance peaks at the rise, eps_L -0.2 as read.
+
+The prereg copy keeps every setting the dynamic test reads as frozen (the headline window and
+bandwidth, thin, lag, detrend and direction, fss.dynamic, data.ramps, data.nulls) and changes what
+the planted data require (seeds, replicas, the tau_c record), plus, to score in seconds, 40
+bootstrap draws and settings the dynamic test does not read: the sensitivity grid cut to its
+headline cell, |m| the only observable, horizon 0 alone, one surrogate per test, and alarm scores
+every 200 tau_c instead of every one. The alarm tests read that last one: one score per null path
+puts far_max at 5 per 1000 tau_c whatever the data, so the attainable control checks the flag,
+not the rate. As frozen, a mode takes minutes to score: the alarm s(t) alone is ~100,000 Kendall
+scores of 300 tau_c each.
 
 The generator's own checks read its output only; the rest need the freeze's scorer.
 """
@@ -39,12 +52,15 @@ from typing import Any
 import numpy as np
 import pytest
 from ews_planted import (
+    DRIFT,
     EDGE_L,
     EDGE_REPLICAS,
+    EDGE_SEED_REPLICAS,
     MODES,
     SPREAD,
     V1,
     V1_EPS_L,
+    V1_LAG,
     V1_NULL_EPS,
     V1_PILOT_RUN,
     V1_REPLICAS,
@@ -57,8 +73,10 @@ from ews_planted import (
     restamp_pilot,
     v1_copy,
     v1_dataset,
+    v1_mean,
     v1_peak,
     v1_ramp_run,
+    v1_replicas,
 )
 from tipping_point.ews import indicators, ising
 from tipping_point.ews.__main__ import main
@@ -90,7 +108,7 @@ HEADLINE = CONTRACT["sensitivity.headline"]
 LAG = HEADLINE["window"] * V1_X / 2  # eps_L the indicator's peak trails the spread's: 0.2
 TOLERANCE = 0.08  # eps_L between an L's median peak and the planted eps_L less LAG
 UNATTAINABLE = 2.0  # false alarms per tau_c: s(t) is scored at most once per tau_c
-STAMP = "deadbeef" * 5  # the commit fixed_T's and edge's runs say made them
+STAMP = "deadbeef" * 5  # the commit every mode's runs but fss's say made them
 
 
 # ---------------------------------------------------------------- the planted data and the prereg
@@ -98,14 +116,15 @@ STAMP = "deadbeef" * 5  # the commit fixed_T's and edge's runs say made them
 
 @pytest.fixture(scope="module")
 def v1(tmp_path_factory: pytest.TempPathFactory) -> dict[str, V1]:
-    """One data dir per mode. fixed_T and edge share fss's record, null runs and staircases, and
-    say STAMP made them from a clean tree, which only the stamping test reads: an unfrozen prereg
+    """One data dir per mode. The others share fss's record, null runs and staircases, and say
+    STAMP made them from a clean tree, which only the stamping test reads: an unfrozen prereg
     scores any commit."""
     root = tmp_path_factory.mktemp("ews-v1")
     fss = v1_dataset(root / "fss", "fss")
     return {"fss": fss} | {
         mode: v1_dataset(root / mode, mode, git_sha=STAMP, dirty=False, shared=fss)
-        for mode in ("fixed_T", "edge")
+        for mode in MODES
+        if mode != "fss"
     }
 
 
@@ -159,7 +178,7 @@ def _prereg(data: V1, changes: dict[str, Any] | None = None) -> str:
         "indicators.observables": ["abs_m"],
         "event.horizons": [0.0],
         "scoring.surrogates.n": 1,
-        "scoring.alarms.every": 50.0,
+        "scoring.alarms.every": 200.0,
     } | (changes or {})
     edited = _edit(text, settings)
     for name, value in settings.items():
@@ -207,6 +226,16 @@ def edge_scored(v1: dict[str, V1], frozen_v1: dict[str, Any]) -> ising.Evaluatio
     return _evaluate(v1["edge"].root, _prereg(v1["edge"], {"scoring.alarms.far": UNATTAINABLE}))
 
 
+@pytest.fixture(scope="module")
+def nu065_scored(v1: dict[str, V1], frozen_v1: dict[str, Any]) -> ising.Evaluation:
+    return _evaluate(v1["nu065"].root, _prereg(v1["nu065"]))
+
+
+@pytest.fixture(scope="module")
+def nu035_scored(v1: dict[str, V1], frozen_v1: dict[str, Any]) -> ising.Evaluation:
+    return _evaluate(v1["nu035"].root, _prereg(v1["nu035"]))
+
+
 def _dynamic(evaluation: ising.Evaluation) -> dict[str, dict[str, Any]]:
     """The dynamic test's rows by cadence: inverse_nu_variance at each, the verdict at
     fss.dynamic.cadence (dense) alone; the matched row is a robustness check, with none."""
@@ -232,8 +261,7 @@ def _peaks(evaluation: ising.Evaluation) -> dict[tuple[str, int], dict[str, Any]
 
 def _ramp(run_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     """A ramp run's bath eps_L at every step, and |m| (replicas, steps), read with the simulator's
-    io from its stats rows: one per sweep at these sizes, which is also all the dense cadence
-    keeps (one sample per max(1 sweep, 0.1 tau_c))."""
+    io from its stats rows, one per sweep (the dense cadence keeps one per 0.1 tau_c of them)."""
     params = io.read_json(run_dir / "manifest.json")["params"]
     L, replicas = params["L"], params["replicas"]
     stats = io.read_table(run_dir, "stats")
@@ -247,11 +275,12 @@ def _ramp(run_dir: Path) -> tuple[np.ndarray, np.ndarray]:
 
 @pytest.mark.parametrize("mode", MODES)
 def test_the_planted_spread_peaks_where_it_was_planted(v1: dict[str, V1], mode: str) -> None:
-    """The planted answer, from the generated |m| and nothing else: pooled over seeds, each group
-    of replicas with one planted peak has its largest spread, in bins of 0.1 eps_L across the
-    search band, within a bin of that peak (of the band's cold edge for a peak past it), and
-    there the planted sd. A generator that put the peak elsewhere, or let the rounding to whole
-    spins flatten it, would leave the scorer tests below checking the wrong answer."""
+    """The planted answer, from the generated |m| and nothing else: about the planted mean, each
+    group of replicas with one planted peak, pooled over seeds, has its largest spread, in bins
+    of 0.1 eps_L across the search band, within a bin of that peak (of the band's cold edge for
+    a peak past it), and there the planted sd. A generator that put the peak elsewhere, or let
+    the rounding to whole spins flatten it, would leave the scorer tests checking the wrong
+    answer."""
     top, bottom = V1_SEARCH
     edges = np.linspace(top, bottom, 101)
     centres = (edges[:-1] + edges[1:]) / 2
@@ -261,7 +290,7 @@ def test_the_planted_spread_peaks_where_it_was_planted(v1: dict[str, V1], mode: 
         for seed in V1_SEEDS:
             eps, abs_m = _ramp(v1[mode].runs["ramp", L, seed])
             for replica, row in enumerate(abs_m):
-                groups.setdefault(v1_peak(mode, L, replica), []).append(row - 0.5)
+                groups.setdefault(v1_peak(mode, L, replica), []).append(row - v1_mean(eps))
         for planted, rows in groups.items():
             deviation = np.stack(rows)
             spread = np.array(
@@ -275,8 +304,9 @@ def test_the_planted_spread_peaks_where_it_was_planted(v1: dict[str, V1], mode: 
             assert abs(centres[k] - min(max(planted, bottom), top)) <= 0.1, where
             if bottom < planted < top:
                 assert spread[k] == pytest.approx(SPREAD[1], rel=0.1), where
-            else:  # the spread only rises through the band, to several times the background
-                assert spread[k] > 3 * SPREAD[0] and spread[0] < 1.5 * SPREAD[0], where
+            else:  # from the background at the band's far end, the spread rises to its edge
+                far = spread[0] if planted < bottom else spread[-1]
+                assert spread[k] > 1.4 * SPREAD[0] and far < 1.2 * SPREAD[0], where
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -284,28 +314,72 @@ def test_the_headline_rolling_variance_peaks_half_a_window_after_the_spread(
     v1: dict[str, V1], mode: str
 ) -> None:
     """What the scorer tests expect of the headline pipeline, checked on the generated |m| with
-    its own pieces (Gaussian detrend over 10 tau_c, rolling variance over 20 tau_c) and the
-    freeze's rule for a peak: the extremum inside the search band, not located when it is the
-    band's first or last sample. At every L the median located peak sits within TOLERANCE of the
-    planted eps_L less LAG, and none is unlocated but EDGE_REPLICAS of each seed's V1_REPLICAS at
-    the edge mode's EDGE_L."""
-    top, bottom = V1_SEARCH
+    its own pieces (Gaussian detrend over 10 tau_c, rolling variance over 20 tau_c, on every
+    sweep) and the freeze's rule for a peak: the extremum inside the search band, not located when
+    it is the band's first or last sample. At every L the median located peak sits within
+    TOLERANCE of the planted eps_L less LAG, the lag the generator plants its drifts against,
+    and none is unlocated but EDGE_REPLICAS of each seed's EDGE_SEED_REPLICAS at the edge mode's
+    EDGE_L."""
+    assert pytest.approx(V1_LAG) == LAG
     for L in V1_SIZES:
-        tau, peaks, planted = V1_TAU_C[L], [], []
-        for seed in V1_SEEDS:
-            eps, abs_m = _ramp(v1[mode].runs["ramp", L, seed])
-            residuals = indicators.gaussian_detrend(abs_m, HEADLINE["bandwidth"] * tau)
-            values = indicators.rolling_variance(residuals, round(HEADLINE["window"] * tau))
-            inside = np.flatnonzero((eps <= top) & (eps >= bottom))
-            k = np.argmax(values[:, inside], axis=1)
-            located = (k > 0) & (k < len(inside) - 1)
-            peaks += list(np.where(located, eps[inside][k], np.nan))
-            planted += [v1_peak(mode, L, replica) for replica in range(V1_REPLICAS)]
-        unlocated = EDGE_REPLICAS / V1_REPLICAS if (mode, L) == ("edge", EDGE_L) else 0.0
-        assert np.mean(np.isnan(peaks)) == unlocated, (mode, L, peaks)
-        (inside_band,) = {p for p in planted if bottom < p < top}
+        peaks, planted = _peaks_by_hand(v1[mode], mode, L, detrend=True)
+        share = EDGE_REPLICAS / EDGE_SEED_REPLICAS if (mode, L) == ("edge", EDGE_L) else 0.0
+        assert np.mean(np.isnan(peaks)) == share, (mode, L, peaks)
         median = float(np.nanmedian(peaks))
-        assert abs(median - (inside_band - LAG)) <= TOLERANCE, (mode, L, median, inside_band)
+        assert abs(median - (planted - LAG)) <= TOLERANCE, (mode, L, median, planted)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_without_the_detrend_the_rolling_variance_peaks_at_the_mean_rise(
+    v1: dict[str, V1], mode: str
+) -> None:
+    """The planted mean |m| rises through Tc steeply enough that the rolling variance of |m|
+    without the detrend peaks at the rise (eps_L 0, read at -LAG) at every L and for every
+    replica, edge replicas included: at least 0.8 eps_L from every planted answer, so a scorer
+    that skips the detrend misses them all."""
+    for L in V1_SIZES:
+        peaks, planted = _peaks_by_hand(v1[mode], mode, L, detrend=False)
+        assert np.all(np.abs(peaks + LAG) <= TOLERANCE), (mode, L, peaks)
+        assert planted >= 0.8, (mode, L, planted)  # read at planted - LAG, the rise at -LAG
+
+
+def _plain_rolling_variance(x: np.ndarray, window: int) -> np.ndarray:
+    """Each trailing window's sample variance from running sums of a row-centred x, NaN for the
+    first window - 1: what indicators.rolling_variance gives, less its two-pass recompute of every
+    window whose level dwarfs its spread, as in an undetrended |m|, where it takes seconds. Only
+    the argmax is read, which rounding at 1e-14 cannot move."""
+    y = x - x.mean(axis=-1, keepdims=True)
+    s1, s2 = (np.pad(np.cumsum(v, axis=-1), [(0, 0), (1, 0)]) for v in (y, y * y))
+    sums, squares = s1[:, window:] - s1[:, :-window], s2[:, window:] - s2[:, :-window]
+    out = np.full(x.shape, np.nan)
+    out[:, window - 1 :] = (squares - sums * sums / window) / (window - 1)
+    return out
+
+
+def _peaks_by_hand(data: V1, mode: str, L: int, detrend: bool) -> tuple[np.ndarray, float]:
+    """Each replica's peak at L under the freeze's rule (NaN on the search band's edge) from the
+    headline rolling variance of every sweep's |m|, with or without the Gaussian detrend; and
+    the planted peak of the replicas whose peak lies inside the band."""
+    top, bottom = V1_SEARCH
+    tau, peaks = V1_TAU_C[L], []
+    window = round(HEADLINE["window"] * tau)
+    for seed in V1_SEEDS:
+        eps, abs_m = _ramp(data.runs["ramp", L, seed])
+        if detrend:
+            residuals = indicators.gaussian_detrend(abs_m, HEADLINE["bandwidth"] * tau)
+            values = indicators.rolling_variance(residuals, window)
+        else:
+            values = _plain_rolling_variance(abs_m, window)
+        inside = np.flatnonzero((eps <= top) & (eps >= bottom))
+        k = np.argmax(values[:, inside], axis=1)
+        located = (k > 0) & (k < len(inside) - 1)
+        peaks += list(np.where(located, eps[inside][k], np.nan))
+    (planted,) = {
+        p
+        for replica in range(v1_replicas(mode, L))
+        if bottom < (p := v1_peak(mode, L, replica)) < top
+    }
+    return np.array(peaks), planted
 
 
 def test_v1_ramps_are_laid_out_as_the_ramp_command_lays_them_out(v1: dict[str, V1]) -> None:
@@ -348,11 +422,8 @@ def test_runs_name_the_commit_they_were_stamped_with(v1: dict[str, V1], tmp_path
     """Every run of a dataset, copied ones included, says the commit and dirty flag it was given
     where the simulator writes them (producer.git_sha and producer.dirty); restamp rewrites those
     two fields and nothing else."""
-    for mode, made in (
-        ("fss", (None, None)),
-        ("fixed_T", (STAMP, False)),
-        ("edge", (STAMP, False)),
-    ):
+    for mode in MODES:
+        made = (None, None) if mode == "fss" else (STAMP, False)
         for run_dir in v1[mode].runs.values():
             producer = io.read_json(run_dir / "manifest.json")["producer"]
             assert (producer["git_sha"], producer["dirty"]) == made, run_dir
@@ -370,33 +441,54 @@ def test_runs_name_the_commit_they_were_stamped_with(v1: dict[str, V1], tmp_path
 # ---------------------------------------------------------------- the freeze's scorer on them
 
 
-def test_fss_passes_with_a_ci_that_holds_1_and_excludes_0(fss_scored: ising.Evaluation) -> None:
+def test_fss_passes_with_a_ci_that_excludes_0(fss_scored: ising.Evaluation) -> None:
     """A peak at one eps_L at every size: 1/nu = 1 (planted exactly; the lag is the same eps_L
-    at every L), the CI narrow enough to judge, holding 1 and excluding 0, and every bootstrap
-    draw giving 1/nu a value, so the dense verdict is a pass; the matched robustness row meets
-    the same clauses, without a verdict of its own."""
+    at every L), within 0.15, the CI above 0 and every bootstrap draw giving 1/nu a value, so the
+    dense verdict is a pass; the matched robustness row meets the same clauses, without a verdict
+    of its own. (Whether the CI holds 1 exactly is left to chance: it spans ~0.02.)"""
     rows = _dynamic(fss_scored)
     assert rows["dense"]["verdict"] == "pass", rows
     for row in rows.values():
-        assert row["lo"] <= 1.0 <= row["hi"] and row["lo"] > 0.0, row
-        assert abs(row["estimate"] - 1.0) <= 0.15 and row["draws_used"] == 1.0, row
+        assert abs(row["estimate"] - 1.0) <= 0.15 and row["lo"] > 0.0, row
+        assert row["draws_used"] == 1.0, row
 
 
 @pytest.mark.usefixtures("frozen_v1")
-@pytest.mark.parametrize("mode", ["fss", "fixed_T"])
+@pytest.mark.parametrize("mode", ["fss", "fixed_T", "nu065", "nu035"])
 def test_each_L_peaks_at_the_planted_eps_L_less_the_window_lag(
     mode: str, request: pytest.FixtureRequest
 ) -> None:
     """The peaks table's variance rows: at every L and cadence the median peak sits within
-    TOLERANCE of the planted eps_L less LAG, no replica is on an edge, all six count, and the
+    TOLERANCE of the planted eps_L less LAG, no replica is on an edge, all count, and the
     quartiles bracket the median. A peak read at the window's start or middle instead of its end
-    is 0.4 or 0.2 eps_L off; a window counted in samples instead of tau_c, 0.1 eps_L at L = 64."""
+    is 0.4 or 0.2 eps_L off; a window counted in sweeps instead of samples, 0.12-0.28 eps_L
+    (dense, L = 32 and 64) and more at the matched cadence; no detrend, 0.8 eps_L or more."""
     evaluation: ising.Evaluation = request.getfixturevalue(f"{mode}_scored")
     for (cadence, L), row in _peaks(evaluation).items():
         expected = v1_peak(mode, L) - LAG
         assert abs(row["peak_eps_median"] - expected) <= TOLERANCE, (cadence, L, row)
-        assert row["edge_fraction"] == 0.0 and row["n"] == len(V1_SEEDS) * V1_REPLICAS, row
+        assert row["edge_fraction"] == 0.0, row
+        assert row["n"] == len(V1_SEEDS) * v1_replicas(mode, L), row
         assert row["peak_eps_q1"] <= row["peak_eps_median"] <= row["peak_eps_q3"], row
+
+
+@pytest.mark.usefixtures("frozen_v1")
+@pytest.mark.parametrize(("mode", "verdict"), [("nu065", "pass"), ("nu035", "fail")])
+def test_the_verdict_turns_on_the_tolerance_of_0_5(
+    mode: str, verdict: str, request: pytest.FixtureRequest
+) -> None:
+    """Peaks read at 0.6 (L/16)^drift: 1/nu = 1 - drift, 0.65 for nu065 and 0.35 for nu035, 0.15
+    inside and outside the tolerance of 0.5. Each CI is narrow (half-width under 0.1) and above
+    0, with every bootstrap draw giving 1/nu a value, so nothing but the tolerance decides: nu065
+    passes, though any tolerance under ~0.3 would fail it, and nu035 fails, though any over ~0.7
+    would pass it. The matched robustness row finds the same 1/nu."""
+    expected = 1.0 - DRIFT[mode]
+    rows = _dynamic(request.getfixturevalue(f"{mode}_scored"))
+    assert rows["dense"]["verdict"] == verdict, rows
+    for row in rows.values():
+        assert abs(row["estimate"] - expected) <= 0.1, row
+        assert (row["hi"] - row["lo"]) / 2 < 0.1 and row["lo"] > 0.0, row
+        assert row["draws_used"] == 1.0, row
 
 
 def test_fixed_T_fails_with_inverse_nu_near_0(fixed_T_scored: ising.Evaluation) -> None:
@@ -414,24 +506,25 @@ def test_fixed_T_fails_with_inverse_nu_near_0(fixed_T_scored: ising.Evaluation) 
 
 
 def test_edge_is_inconclusive_by_the_edge_rule_at_one_L(edge_scored: ising.Evaluation) -> None:
-    """Two of each seed's three replicas at L = 32 peak on the search band's edge and are not
-    located (edge_fraction 2/3 there, 0 at the other sizes), so the dense verdict is
-    inconclusive; the matched robustness row carries none. The located peaks give 1/nu near 1
-    with a CI narrow enough to judge and above 0, at both cadences. With three replicas a seed,
-    about 9% of the bootstrap draws take no located peak at L = 32 and give 1/nu no value, so
-    draws_used also falls under fss.dynamic.min_draw_share (fix round 1, R2) and that rule alone
-    would make the verdict inconclusive too: the edge rule's isolated check, where it alone
-    decides, is test_fss's test_dynamic_verdicts_on_planted_peak_positions."""
-    located = v1_peak("edge", EDGE_L, V1_REPLICAS - 1) - LAG  # the third replica's, at every L
+    """Four of each seed's six replicas at L = 32 peak on an edge of the search band, two on each,
+    and are not located (edge_fraction 2/3 there, 7/12 had one strayed, 0 at the other sizes), so
+    the dense verdict is inconclusive; the matched robustness row carries none. Every other clause
+    of the rule passes, at both cadences: the located peaks give 1/nu near 1 with a narrow CI
+    above 0, and at least 95% of the bootstrap draws give 1/nu a value (each seed keeps two
+    located peaks at L = 32, so under 1% of draws take none). The edge rule alone decides:
+    without it, with the edges pooled over the sizes (8 of 24), or with one edge read (4 of 12),
+    this is a pass, or a 1/nu thrown off by peaks found at the band's other edge."""
+    located = v1_peak("edge", EDGE_L, EDGE_REPLICAS) - LAG  # the fifth replica's, at every L
     for (cadence, L), row in _peaks(edge_scored).items():
-        unlocated = EDGE_REPLICAS / V1_REPLICAS if L == EDGE_L else 0.0
+        unlocated = EDGE_REPLICAS / EDGE_SEED_REPLICAS if L == EDGE_L else 0.0
         assert row["edge_fraction"] == pytest.approx(unlocated), (cadence, L, row)
+        assert row["n"] == len(V1_SEEDS) * v1_replicas("edge", L), (cadence, L, row)
         assert abs(row["peak_eps_median"] - located) <= TOLERANCE, (cadence, L, row)
     rows = _dynamic(edge_scored)
     assert rows["dense"]["verdict"] == "inconclusive", rows
     for row in rows.values():
-        assert abs(row["estimate"] - 1.0) <= 0.5, row
-        assert (row["hi"] - row["lo"]) / 2 <= 0.5 and row["lo"] > 0.0, row
+        assert abs(row["estimate"] - 1.0) <= 0.15 and row["lo"] > 0.0, row
+        assert (row["hi"] - row["lo"]) / 2 < 0.1 and row["draws_used"] >= 0.95, row
 
 
 def test_every_indicator_is_tabled_and_only_variance_is_judged(
@@ -469,7 +562,9 @@ def test_the_frozen_alarm_target_is_attainable_on_the_planted_nulls(
 ) -> None:
     """The control for the unattainable target: at the frozen 1 per 1000 tau_c some theta alarms
     more often than the target on the same nulls, so every row has a finite theta and a far_max
-    above the target (one that only meets it is unattainable)."""
+    above the target (one that only meets it is unattainable). With alarm scores every 200 tau_c
+    each null path has one score, so far_max is 5 per 1000 tau_c whatever the data: this checks
+    the attainable flag and theta, not the rate."""
     alarms = frozen_v1["scoring"]["alarms"]
     target = alarms["far"] * alarms["report_per"]
     for row in fss_scored.tables["alarms"]:
@@ -526,7 +621,13 @@ def frozen_copy(
 
 @pytest.mark.parametrize(
     ("kind", "fault"),
-    [("ramp", "another commit"), ("qs", "a dirty tree"), ("null", "no pilot record")],
+    [
+        ("ramp", "another commit"),
+        ("null", "no commit"),
+        ("qs", "a dirty tree"),
+        ("null", "no pilot record"),
+        ("ramp", "another pilot record"),
+    ],
 )
 def test_a_frozen_prereg_refuses_a_run_its_commit_and_record_did_not_make(
     frozen_copy: tuple[Path, V1, str],
@@ -536,20 +637,28 @@ def test_a_frozen_prereg_refuses_a_run_its_commit_and_record_did_not_make(
 ) -> None:
     """Under a frozen prereg ews score takes only runs its tag's commit made from a clean tree
     (#26 decision 6), and only ramps and null runs made against the pilot record it pins (#26 K).
-    One run from another commit, from a dirty tree, or naming no record, as the exploratory null
-    runs do, and nothing is scored or logged: the error names that run and no other."""
+    One run from another commit or from none (as runs made before the freeze), from a dirty tree,
+    or naming no record (as the exploratory null runs do) or another one, and nothing is scored or
+    logged: the error names that run and no other."""
     path, copy, commit = frozen_copy
     run_dir = copy.runs[kind, 32, V1_SEEDS[0]]
     pilot = io.read_json(run_dir / "manifest.json")["params"].get("pilot")
-    if fault == "no pilot record":
-        restamp_pilot(run_dir, None)
+    made = {
+        "another commit": ("f" * 40, False),
+        "no commit": (None, None),
+        "a dirty tree": (commit, True),
+    }
+    if fault in made:
+        restamp(run_dir, *made[fault])
     else:
-        restamp(run_dir, *(("f" * 40, False) if fault == "another commit" else (commit, True)))
+        restamp_pilot(
+            run_dir, None if fault == "no pilot record" else {**pilot, "sha256": "e" * 64}
+        )
     try:
         assert main(["score", "--prereg", str(path), "--data-dir", str(copy.root)]) == 1
     finally:
         restamp(run_dir, commit, False)
-        if fault == "no pilot record":
+        if fault not in made:
             restamp_pilot(run_dir, pilot)
     err = capsys.readouterr().err
     assert {r.name for r in copy.runs.values() if r.name in err} == {run_dir.name}, err

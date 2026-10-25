@@ -236,40 +236,55 @@ def pilot(root: Path, per_L: dict[int, float] | None = None) -> Path:
 #
 # The freeze's scoring (#97, #98; decisions: https://github.com/GabrielEzerzer/tipping-point/
 # issues/26#issuecomment-6402030372) on answers planted in advance. Each mode is a data dir of its
-# own at L = 16, 32 and 64, whose slow ramps carry a spread of |m| that peaks
-#   fss      at eps_L = 0.8 at every L: finite-size scaling, 1/nu = 1
-#   fixed_T  at one temperature, Tc (1 + 0.8/16), so at eps_L = 0.8, 1.6 and 3.2: an indicator
-#            merely monotone in T, 1/nu = 0
-#   edge     as in fss, except that at L = 32 two of each seed's three replicas carry a spread
-#            that rises through the whole search band [6, -4] (it peaks past the cold edge, at
-#            eps_L = -4.15), so their extremum sits on the band's edge and is not located. Over
-#            half of one L unlocated makes the verdict inconclusive, while the located peaks
-#            alone give 1/nu = 1 and would pass: the edge rule, read at any one L, decides it.
-#            (With three replicas a seed, ~9% of the bootstrap draws take no located peak at
-#            L = 32 and give 1/nu no value, so fss.dynamic.min_draw_share does too.) Were every
-#            peak on an edge, 1/nu would have no value and the verdict would be inconclusive
-#            with or without the rule.
+# own at L = 16, 32 and 64, whose slow ramps carry a mean |m| that rises through Tc and a spread
+# of |m| that peaks where the mode puts it. The headline window, 20 tau_c or 0.4 eps_L of ramp,
+# reads the spread V1_LAG = 0.2 eps_L late, so a spread planted at eps_L e peaks at e - 0.2 to
+# the scorer:
+#   fss      planted at 0.8 at every L, read at 0.6: finite-size scaling, 1/nu = 1
+#   fixed_T  at one temperature, Tc (1 + 0.8/16): planted at 0.8, 1.6 and 3.2, an indicator
+#            merely monotone in T, read as 1/nu = -0.16
+#   nu065    read at 0.6 (L/16)^0.35: 1/nu = 0.65, a pass 0.15 inside the tolerance of 0.5
+#   nu035    read at 0.6 (L/16)^0.65: 1/nu = 0.35, a fail 0.15 outside it
+#   edge     as fss, but at L = 32 each seed has six replicas, and four carry a spread that only
+#            rises or only falls through the whole search band [6, -4], two peaking past its cold
+#            edge (at -4.15) and two past its hot one (at 6.3, read at 6.1): their extremum sits on
+#            an edge of the band and is not located, 8 of 12 (7 of 12 if one strays). Over half
+#            of one L unlocated makes the verdict inconclusive, while the located peaks alone give
+#            1/nu = 1, with fewer than 1% of the bootstrap draws short of a located peak at
+#            L = 32, and would pass: the edge rule alone decides it, and it must read both edges.
+# The mean's rise, 0.25 to 0.75 and steepest at Tc, is what the scorer's detrend removes: read
+# without it, the rolling variance peaks at the rise (eps_L -0.2 as read) in every mode.
 
-V1_SIZES, V1_SEEDS, V1_REPLICAS = (16, 32, 64), (6, 7), 3
-V1_TAU_C = {16: 1.0, 32: 1.5, 64: 2.0}  # sweeps: a different number of samples per tau_c at each L
+V1_SIZES, V1_SEEDS, V1_REPLICAS = (16, 32, 64), (6, 7), 2
+V1_TAU_C = {16: 12.0, 32: 16.0, 64: 24.0}  # sweeps: dense samples 1.2-2.4 sweeps apart, bursts of
+#   8 frames every 21-43 sweeps (in the real v1 data, 5-104 and 12-233 sweeps per sample)
 V1_PILOT_RUN = "20261025T000000Z-tauc-L16-32-64"
 V1_X = 0.02  # the slow ramp: 1/x = 50 measured tau_c per unit eps_L at every L
 V1_EPS_L = (12.0, -8.0)  # every ramp's scaled window: T0 = Tc (1 + 12/L), T1 = Tc (1 - 8/L)
 V1_NULL_EPS = (2.0, 4.0, 6.0)
 V1_SEARCH = (6.0, -4.0)  # where the dynamic test looks for each replica's peak
+V1_LAG = 0.2  # eps_L the headline window (20 tau_c at 50 tau_c per eps_L) reads the spread late
 V1_PRE = V1_HOLD = 40  # sweeps held at T0 before the ramp and at T1 after it
 V1_NULL_TAU = 400  # measured tau_c per null block: a scored slice of up to 340 tau_c, and s(t)
-MODES = ("fss", "fixed_T", "edge")
-PEAK = 0.8  # eps_L of the spread's peak (fixed_T: at L = 16)
+MODES = ("fss", "fixed_T", "edge", "nu065", "nu035")
+PEAK = 0.8  # eps_L of the spread's peak (fixed_T, nu065, nu035: at L = 16)
 WIDTH = 0.15  # its half width at half height in eps_L, under the 0.4 eps_L headline window
-EDGE_L, EDGE_REPLICAS = 32, 2  # edge: the size, and how many of each seed's replicas peak past
-EDGE_PEAK = -4.15  # the band's cold edge, and where
-SPREAD = (0.02, 0.12)  # sd of |m|: the background, and at the peak
-_STREAMS = {"null": 1, "qs": 2, "fss": 3, "fixed_T": 4, "edge": 5}
+DRIFT = {"nu065": 0.35, "nu035": 0.65}  # the read peak drifts as L^drift: 1/nu = 1 - drift
+EDGE_L, EDGE_SEED_REPLICAS = 32, 6  # edge: the size, and its replicas a seed there
+EDGE_PEAKS = (-4.15, -4.15, 6.3, 6.3)  # where the first of them peak, past the band's two edges
+EDGE_REPLICAS = len(EDGE_PEAKS)
+SPREAD = (0.012, 0.04)  # sd of |m|: the background, and at the peak
+MEAN, MEAN_WIDTH = (0.25, 0.75), 0.3  # mean |m| above and below Tc; the logistic's eps_L scale
+_STREAMS = {"null": 1, "qs": 2, "fss": 3, "fixed_T": 4, "edge": 5, "nu065": 6, "nu035": 7}
 
 
 def _past_the_band(mode: str, L: int, replica: int) -> bool:
     return mode == "edge" and L == EDGE_L and replica < EDGE_REPLICAS
+
+
+def v1_replicas(mode: str, L: int) -> int:
+    """Replicas a seed in a mode's ramp at L: EDGE_SEED_REPLICAS at the edge mode's EDGE_L."""
+    return EDGE_SEED_REPLICAS if (mode, L) == ("edge", EDGE_L) else V1_REPLICAS
 
 
 def v1_peak(mode: str, L: int, replica: int = 0) -> float:
@@ -277,8 +292,19 @@ def v1_peak(mode: str, L: int, replica: int = 0) -> float:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
     if _past_the_band(mode, L, replica):
-        return EDGE_PEAK
-    return PEAK * L / V1_SIZES[0] if mode == "fixed_T" else PEAK
+        return EDGE_PEAKS[replica]
+    if mode == "fixed_T":
+        return PEAK * L / V1_SIZES[0]
+    if mode in DRIFT:
+        return (PEAK - V1_LAG) * (L / V1_SIZES[0]) ** DRIFT[mode] + V1_LAG
+    return PEAK
+
+
+def v1_mean(eps_L: np.ndarray | float) -> np.ndarray:
+    """The planted mean |m| at eps_L: a logistic rise from MEAN[0] above Tc to MEAN[1] below it,
+    steepest at Tc, its slope 0.42 per eps_L there; the same in every mode and in the nulls."""
+    low, high = MEAN
+    return low + (high - low) / (1.0 + np.exp(np.asarray(eps_L, dtype=np.float64) / MEAN_WIDTH))
 
 
 def v1_spread(mode: str, L: int, eps_L: np.ndarray | float, replica: int = 0) -> np.ndarray:
@@ -291,18 +317,19 @@ def v1_spread(mode: str, L: int, eps_L: np.ndarray | float, replica: int = 0) ->
 
 
 def _two_point(L: int, sigma: Callable[[np.ndarray], np.ndarray]) -> Values:
-    """|m| = 0.5 + sigma(eps_L) s, with s = +-1 drawn every sweep: two-point fluctuations, whose
-    squares are sigma^2 exactly, so the spread is planted with the least sampling noise and a few
-    replicas pin where it peaks. A dither of one step of |m| (2 / L^2) before the rounding to
-    whole spins keeps the realised spread smooth in eps_L instead of a staircase. e per site is
-    plain noise."""
+    """|m| = v1_mean(eps_L) + sigma(eps_L) s, with s = +-1 drawn every sweep: two-point
+    fluctuations, whose squares are sigma^2 exactly, so the spread is planted with the least
+    sampling noise and a few replicas pin where it peaks. A dither of one step of |m| (2 / L^2)
+    before the rounding to whole spins keeps the realised spread smooth in eps_L instead of a
+    staircase. e per site is plain noise."""
 
     def values(
         steps: np.ndarray, temps: np.ndarray, rng: np.random.Generator
     ) -> tuple[np.ndarray, np.ndarray]:
+        eps = L * (temps - TC) / TC
         sign = rng.choice(np.array([-1.0, 1.0]), size=temps.shape)
         dither = rng.uniform(-1.0, 1.0, size=temps.shape) / L**2
-        abs_m = 0.5 + sigma(L * (temps - TC) / TC) * sign + dither
+        abs_m = v1_mean(eps) + sigma(eps) * sign + dither
         return abs_m, -1.4 + 0.02 * rng.standard_normal(temps.shape)
 
     return values
@@ -319,7 +346,8 @@ def peak_values(mode: str, L: int) -> Values:
 
 
 def background_values(L: int) -> Values:
-    """A v1 null block's |m|: the same fluctuations, stationary at the background spread."""
+    """A v1 null block's |m|: the same fluctuations at the background spread, stationary at the
+    mean of its eps_L."""
     return _two_point(L, lambda eps: np.full(eps.shape, SPREAD[0]))
 
 
@@ -406,7 +434,8 @@ def v1_ramp_run(
     git_sha: str | None = None,
     dirty: bool | None = None,
 ) -> Path:
-    """One v1 ramp run in root, stamped with root's v1 record; eps_L sets its window."""
+    """One v1 ramp run in root, stamped with root's v1 record, with v1_replicas(mode, L)
+    replicas; eps_L sets its window."""
     window = "" if tuple(eps_L) == V1_EPS_L else "-e{:g}to{:g}".format(*eps_L).replace(".", "p")
     return write_run(
         root,
@@ -416,7 +445,7 @@ def v1_ramp_run(
         seed,
         peak_values(mode, L),
         pilot=_stamp(root),
-        replicas=V1_REPLICAS,
+        replicas=v1_replicas(mode, L),
         rng=np.random.default_rng([seed, L, _STREAMS[mode]]),
         git_sha=git_sha,
         dirty=dirty,
