@@ -26,6 +26,7 @@ use engine::store::segment::{self, LOG_DIR};
 use engine::store::writer::{Entry, LogConfig, LogWriter};
 use engine::venue::Venue;
 use engine_harness::api::repo;
+use engine_harness::skipped;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde_json::json;
 
@@ -276,7 +277,10 @@ fn parquet_rows(path: &Path) -> Result<i64, Box<dyn Error>> {
 #[test]
 fn a_full_segment_rotates_and_its_time_and_memory_are_recorded() -> Outcome {
     if std::env::var_os("TP_ROTATE_SOAK").is_none() {
-        println!("skipped: set TP_ROTATE_SOAK to rotate a full synthetic segment (minutes, GiBs)");
+        // A line the gate counts, where a println was kept from it by libtest's capture (#103).
+        skipped(
+            "the rotate soak did not run: set TP_ROTATE_SOAK to rotate a full synthetic segment",
+        );
         return Ok(());
     }
     let megabytes: u64 = match std::env::var("TP_ROTATE_SOAK_MB") {
