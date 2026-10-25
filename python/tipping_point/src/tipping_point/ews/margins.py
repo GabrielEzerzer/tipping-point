@@ -7,11 +7,17 @@ gives the paired margin
     delta_s = Q(trained_s) - Q(twin_s)
 
 The CI is a percentile bootstrap of the mean delta over model seeds. Given data-bootstrap draws of
-Q, it is nested: each resampled seed also contributes one of its draws, picked at random, so the
-CI holds the data's uncertainty within a seed beside the spread between seeds. The draws must be
-paired: draw b of the trained checkpoint and draw b of its twin come from one resample of the
-data (the caller draws both from one RNG seed per quantity), so their difference is the model's
-alone.
+Q, it is nested: each replicate resamples the seeds and takes one data resample, draw column b,
+for all of them, so the CI holds the data's uncertainty beside the spread between seeds. Column b
+must be the same resample of the data for every checkpoint of the quantity, trained and twin
+alike (the caller draws them all from one RNG seed per quantity): every checkpoint is scored on
+the same frames, so the data's noise is common to the seeds and never averages out over them,
+and within a column the trained-twin difference is the model's alone.
+
+With five seeds the percentile interval covers the mean margin only about 83% of the time even
+without data noise (the mean of five draws is t-distributed with four degrees of freedom). That
+is inherent to five seeds, which is why the verdict also asks every seed's margin to carry the
+predicted sign.
 
 The verdict passes when the CI excludes 0 in the predicted direction and the sign test holds:
 every seed's margin carries the predicted sign. Otherwise it follows fss.excludes: fail when the
@@ -43,8 +49,10 @@ def paired(
     level: float = 0.95,
 ) -> dict[str, Any]:
     """One row for Q: trained and twin (seeds,), seed s at index s in both, with optional draws
-    (seeds, draws), aligned. direction is the predicted sign of the margin, "greater" (trained
-    above twin) or "less"; tolerance, in Q's units, is the band fss.excludes judges a CI by."""
+    (seeds, draws), aligned: column b of both arrays must be one resample of the data, the same
+    for every checkpoint of the quantity, trained and twin alike. direction is the predicted sign
+    of the margin, "greater" (trained above twin) or "less"; tolerance, in Q's units, is the band
+    fss.excludes judges a CI by."""
     q1, q0 = np.asarray(trained, dtype=np.float64), np.asarray(twin, dtype=np.float64)
     if q1.ndim != 1 or q1.shape != q0.shape or len(q1) < 2:
         raise ValueError(
@@ -68,7 +76,8 @@ def paired(
                 f"got shapes {d1.shape} and {d0.shape}"
             )
         draws = d1.shape[1]
-        means = (d1 - d0)[picks, rng.integers(0, draws, (n, seeds))].mean(1)
+        # one data resample per replicate, shared by its seeds: they were all scored on one dataset
+        means = (d1 - d0)[picks, rng.integers(0, draws, (n, 1))].mean(1)
     # an undefined seed leaves the mean undefined, rather than resampled away
     lo, hi = percentile_interval(means, level) if np.isfinite(delta).all() else (np.nan, np.nan)
     low, high = np.sort(oriented(np.array([lo, hi]), direction))  # turned: the prediction is up

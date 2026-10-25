@@ -1,5 +1,6 @@
 """Paired margins of a trained checkpoint over its twin, on planted per-seed quantities: the
-nested bootstrap's CI, the sign test, the verdicts, and the refusal of misaligned draws."""
+nested bootstrap's CI and its coverage, the sign test, the verdicts, and the refusal of
+misaligned draws."""
 
 import numpy as np
 import pytest
@@ -8,26 +9,35 @@ from tipping_point.ews import fss, margins
 SEEDS, DRAWS = 5, 400
 
 
-def _paired_draws(
-    trained: np.ndarray, twin: np.ndarray, shared: float, own: float, rng: np.random.Generator
+def _draws(
+    trained: np.ndarray,
+    twin: np.ndarray,
+    rng: np.random.Generator,
+    common: float = 0.0,
+    apart: float = 0.0,
+    own: float = 0.0,
+    columns: int = DRAWS,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Data-bootstrap draws around each seed's point: one resample moves the trained checkpoint
-    and its twin alike (`shared`), and each a little on its own (`own`)."""
-    common = rng.normal(0.0, shared, (SEEDS, DRAWS))
+    """Data-bootstrap draws as margins.paired takes them, column b one resample of the data for
+    every checkpoint: it moves them all alike by `common` (which cancels in the margin), every
+    trained checkpoint against its twin by `apart` (the data's noise in the margin, the same for
+    all seeds), and each checkpoint a little on its own by `own`."""
+    shock, split = rng.normal(0.0, common, columns), rng.normal(0.0, apart, columns)
+    seeds = len(trained)
     return (
-        trained[:, None] + common + rng.normal(0.0, own, (SEEDS, DRAWS)),
-        twin[:, None] + common + rng.normal(0.0, own, (SEEDS, DRAWS)),
+        trained[:, None] + shock + split + rng.normal(0.0, own, (seeds, columns)),
+        twin[:, None] + shock + rng.normal(0.0, own, (seeds, columns)),
     )
 
 
 def test_a_planted_margin_passes() -> None:
     """Every seed gains 0.5 over its twin, though the seeds' levels differ by more than that and
-    each resample moves both checkpoints by twice as much again. Paired draw by draw, the shared
-    part cancels and the CI excludes 0; drawn unpaired, it would span 0."""
+    each data resample moves every checkpoint by twice as much again. Paired draw by draw, the
+    resample's shift cancels and the CI excludes 0; against another resample, it spans 0."""
     rng = np.random.default_rng(1)
     twin = rng.normal(1.0, 0.6, SEEDS)
     trained = twin + 0.5 + rng.normal(0.0, 0.05, SEEDS)
-    draws = _paired_draws(trained, twin, shared=1.0, own=0.05, rng=rng)
+    draws = _draws(trained, twin, rng, common=1.0, own=0.05)
     row = margins.paired(trained, twin, "greater", 0.1, np.random.default_rng(2), *draws)
     assert row["margins"] == pytest.approx((trained - twin).tolist())
     assert row["margin"] == pytest.approx(float(np.mean(trained - twin)))
@@ -45,8 +55,9 @@ def test_a_planted_margin_passes() -> None:
 
 def test_no_margin_covers_zero_and_does_not_pass() -> None:
     """Margins scattered around 0: the CI holds 0 and seeds disagree in sign, so the verdict is
-    fail; with draws too wide to resolve a small margin that every seed shows, the CI holds 0 and
-    is wider than the tolerance band, so it is inconclusive (fss.excludes)."""
+    fail; with the data's noise in the margin too wide to resolve a small margin that every seed
+    shows, the CI holds 0 and is wider than the tolerance band, so it is inconclusive
+    (fss.excludes)."""
     twin = np.random.default_rng(3).normal(1.0, 0.3, SEEDS)
     trained = twin + np.array([0.2, -0.15, 0.1, -0.25, 0.05])
     row = margins.paired(trained, twin, "greater", 0.05, np.random.default_rng(4))
@@ -54,7 +65,7 @@ def test_no_margin_covers_zero_and_does_not_pass() -> None:
     assert row["sign_test"] == fss.FAIL and row["verdict"] == fss.FAIL
     small = twin + 0.02
     rng = np.random.default_rng(5)
-    draws = _paired_draws(small, twin, shared=0.0, own=1.0, rng=rng)
+    draws = _draws(small, twin, rng, apart=1.0)
     row = margins.paired(small, twin, "greater", 0.05, rng, *draws)
     assert row["lo"] < 0 < row["hi"] and (row["hi"] - row["lo"]) / 2 > 0.05
     assert row["sign_test"] == fss.PASS and row["verdict"] == fss.INCONCLUSIVE
@@ -95,20 +106,38 @@ def test_the_direction_is_the_predicted_sign() -> None:
         margins.paired(trained, twin, "up", 0.1, np.random.default_rng(10))
 
 
-def test_the_nested_bootstrap_takes_one_data_draw_per_resampled_seed() -> None:
-    """Every seed has margin exactly 1, so seeds alone give a CI of zero width; data draws with
-    sd 1 around it make the mean of five resampled seeds' draws spread with sd 1/sqrt(5), a 95%
-    half-width of 1.96/sqrt(5) = 0.88. Averaging each seed's draws instead would shrink it by
-    sqrt(DRAWS) = 20; ignoring them, to nothing."""
+def test_the_nested_bootstrap_shares_one_data_resample_across_its_seeds() -> None:
+    """Every seed's margin is exactly 1, so the seeds alone give a CI of zero width. One shared
+    data resample moves all five margins by N(0, 1), and so their mean by as much: the 95%
+    half-width is 1.96. A data resample drawn per resampled seed, as the first version did,
+    averages that shared noise down to 1.96 / sqrt(5) = 0.88; ignoring the draws, to nothing."""
     twin = np.random.default_rng(11).normal(1.0, 0.3, SEEDS)
     trained = twin + 1.0
     alone = margins.paired(trained, twin, "greater", 0.1, np.random.default_rng(12))
     assert alone["lo"] == pytest.approx(1.0) and alone["hi"] == pytest.approx(1.0)
     rng = np.random.default_rng(13)
-    draws = _paired_draws(trained, twin, shared=0.0, own=np.sqrt(0.5), rng=rng)  # sd 1 apart
+    draws = _draws(trained, twin, rng, apart=1.0, columns=4_000)
     nested = margins.paired(trained, twin, "greater", 0.1, rng, *draws, n=4_000)
-    half = (nested["hi"] - nested["lo"]) / 2
-    assert half == pytest.approx(1.96 / np.sqrt(SEEDS), rel=0.1)
+    assert (nested["hi"] - nested["lo"]) / 2 == pytest.approx(1.96, rel=0.1)
+
+
+def test_the_ci_covers_the_true_margin_at_its_level_under_shared_data_noise() -> None:
+    """400 planted experiments: five model seeds whose true margins scatter by 0.1 around 0.5,
+    all scored on one dataset whose noise moves every seed's margin alike (sd 1), resampled 400
+    times. The 95% CI covers 0.5 in about 94% of them; a data resample drawn per resampled seed,
+    as the first version did, divided the shared noise by sqrt(5) and covered about 63%. Seed
+    noise alone caps the coverage near 0.83: the mean of five seeds is t-distributed with four
+    degrees of freedom, inherent to the design, which is why the verdict adds the sign test."""
+    rng = np.random.default_rng(14)
+    trials, covered = 400, 0
+    for _ in range(trials):
+        twin = rng.normal(1.0, 0.3, SEEDS)
+        observed = 0.5 + rng.normal(0.0, 0.1, SEEDS) + rng.normal(0.0, 1.0)  # seeds, then data
+        trained = twin + observed
+        draws = _draws(trained, twin, rng, apart=1.0, own=0.05)
+        row = margins.paired(trained, twin, "greater", 0.1, rng, *draws)
+        covered += row["lo"] <= 0.5 <= row["hi"]
+    assert 0.9 <= covered / trials <= 0.99, covered / trials
 
 
 @pytest.mark.parametrize(
