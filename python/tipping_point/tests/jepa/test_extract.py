@@ -4,17 +4,20 @@ naming the checkpoint by sha256, written once and resumable."""
 
 import dataclasses
 import hashlib
+import json
 import shutil
 from pathlib import Path
 
 import jepa_ising
 import numpy as np
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import torch
 from tipping_point.ews import ising as ews_ising
 from tipping_point.ising import io
 from tipping_point.jepa import data, extract, train
+from tipping_point.jepa.__main__ import main
 from tipping_point.jepa.data import DataError
 from tipping_point.jepa.lattice import canonical
 from tipping_point.jepa.monitor import Floors
@@ -59,7 +62,8 @@ def test_the_manifest_names_the_checkpoint_and_the_dataset_by_sha256(
     assert dataset["run_id"] == ising.runs["ramp"].name
     assert dataset["complete_sha256"] == _sha256(ising.runs["ramp"] / "complete.json")
     assert manifest["params"]["pca"]["components"] == 8
-    assert train.verify(ramp_latents) == []
+    assert manifest["params"]["selection"]["rule"] == "all"
+    assert train.verify(ramp_latents) == [] and extract.verify(ramp_latents) == []
 
 
 def test_a_checkpoint_outside_the_data_dir_is_named_by_its_sha256(
@@ -70,9 +74,8 @@ def test_a_checkpoint_outside_the_data_dir_is_named_by_its_sha256(
     sha256, run id and step alone; inside the data dir, by its path relative to it."""
     elsewhere = shutil.copytree(ising.training, tmp_path / "downloads" / ising.training.name)
     ckpt = train.load_model(elsewhere / train.FINAL)
-    manifest = extract._manifest(
-        tmp_path / "out", ews_ising.open_run(ising.runs["ramp"]), ckpt, torch.device("cpu")
-    )
+    run, rule = ews_ising.open_run(ising.runs["ramp"]), extract.selection("all")
+    manifest = extract._manifest(tmp_path / "out", run, ckpt, torch.device("cpu"), rule)
     assert manifest["params"]["checkpoint"] == {
         "path": None,
         "sha256": _sha256(ising.training / train.FINAL),
@@ -195,3 +198,143 @@ def test_a_latents_table_is_written_once_and_resumes_after_an_interruption(
     extract.extract(final, scored, "cpu")
     assert io.read_json(out / "complete.json")["files"] == straight
     assert not list(out.glob("*.tmp"))
+
+
+# ---------------------------------------------------------------- subsampled tables
+
+
+def _copy(run: Path, root: Path) -> Path:
+    """A simulator run copied to root/ising/ without the latents other tests wrote beside it."""
+    return shutil.copytree(run, root / "ising" / run.name, ignore=shutil.ignore_patterns("latents"))
+
+
+def _bursts(table: pa.Table) -> dict[float, list[int]]:
+    """The bursts a table holds, per temperature."""
+    pairs = zip(table["temperature"].to_pylist(), table["burst"].to_pylist(), strict=True)
+    found: dict[float, set[int]] = {}
+    for T, burst in pairs:
+        found.setdefault(T, set()).add(burst)
+    return {T: sorted(b) for T, b in sorted(found.items())}
+
+
+@pytest.mark.parametrize(
+    ("rule", "bursts"),
+    [
+        ("tc-plus", {1.5: [8], 2.269231: [4, 5, 6, 7], 3.5: [0]}),
+        ("tc-only", {2.269231: [4, 5, 6, 7]}),
+    ],
+)
+def test_a_subsampled_table_is_the_full_tables_selected_rows(
+    tmp_path: Path,
+    ising: jepa_ising.Ising,
+    capsys: pytest.CaptureFixture[str],
+    rule: str,
+    bursts: dict[float, list[int]],
+) -> None:
+    """Catches a rule keeping the wrong rows, or keeping the right ones with other values: on the
+    scored staircase (bursts 0-3 at T = 3.5, 4-7 at Tc, 8-11 at 1.5), the table `extract
+    --select` writes is the full table's rows that the rule keeps, row for row, keys and
+    readouts alike. Of the run's four configs chunks the first holds no Tc frame and the last
+    only burst 11; each still gets its chunk, empty where the rule keeps nothing."""
+    final = ising.training / train.FINAL
+    whole = _copy(ising.runs["scored"], tmp_path / "all")
+    full = extract.read(whole, extract.extract(final, whole, "cpu").name)
+    run = _copy(ising.runs["scored"], tmp_path / rule)
+    assert main(["extract", str(final), str(run), "--device", "cpu", "--select", rule]) == 0
+    out = Path(capsys.readouterr().out.strip())
+    table = extract.read(run, out.name)
+    configs = io.read_table(run, "configs")
+    expected = full.filter(extract.kept("staircase", configs, extract.selection(rule)))
+    assert table.num_rows == 32 * sum(map(len, bursts.values()))  # 8 frames x 4 replicas a burst
+    assert _bursts(table) == bursts
+    assert table.equals(expected)
+    chunks = [pq.read_metadata(p).num_rows for p in sorted(out.glob("*.parquet"))]
+    assert len(chunks) == len(io.chunks(run, "configs")) == 4 and chunks[-1] == 0
+    params = io.read_json(out / "manifest.json")["params"]
+    assert params["selection"] == {"rule": rule, "tc_plateau": 2.269231, "every": 8}
+    assert io.read_json(out / "complete.json")["rows"] == {"latents": table.num_rows}
+    assert main(["verify", str(out)]) == 0
+    assert capsys.readouterr().out.strip() == f"{out}: ok"
+
+
+def test_ramps_and_null_runs_are_extracted_whole_under_any_rule(
+    tmp_path: Path, ising: jepa_ising.Ising
+) -> None:
+    """Catches the Tc rule reaching runs it does not govern: the ramp crosses T = 2.269231, so a
+    rule applied there would keep a few of its frames, not all of them."""
+    for role in ("ramp", "null"):
+        run = _copy(ising.runs[role], tmp_path)
+        out = extract.extract(ising.training / train.TWIN, run, "cpu", select="tc-only")
+        keys = list(extract.KEY)
+        latents = extract.read(run, out.name).select(keys)
+        assert latents.equals(io.read_table(run, "configs").select(keys)), role
+        assert extract.verify(out) == [], role
+
+
+def test_verify_refuses_a_latents_table_whose_rows_are_not_its_rules(
+    tmp_path: Path, ising: jepa_ising.Ising, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Catches a table whose files all hash right but whose rows are wrong: complete.json is
+    rewritten after every edit, so only the row check can see a row dropped, a row of a burst the
+    rule drops, a chunk gone, a miscount, or a dataset run that changed underneath."""
+    run = _copy(ising.runs["scored"], tmp_path)
+    out = extract.extract(ising.training / train.TWIN, run, "cpu", select="tc-plus")
+    chunk = sorted(out.glob("*.parquet"))[1]  # bursts 4, 5 and 6 of the Tc plateau: 96 rows
+    original = pq.read_table(chunk)
+
+    def rewrite(table: pa.Table | None, path: Path = chunk) -> list[str]:
+        path.unlink()
+        if table is not None:
+            pq.write_table(table, path, compression="zstd")
+        (out / "complete.json").unlink()
+        extract._complete(out)
+        assert train.verify(out) == []  # every file hashes as complete.json says
+        return extract.verify(out)
+
+    assert rewrite(original.slice(1)) == [
+        f"{chunk.name}: 95 rows, not exactly the 96 configs rows the tc-plus selection keeps"
+    ]
+    assert main(["verify", str(out)]) == 1
+    assert f"{out}: {chunk.name}: 95 rows" in capsys.readouterr().out
+    configs = pq.read_table(run / "configs" / chunk.name, columns=list(extract.KEY))
+    dropped = configs.filter(configs["burst"].to_numpy() == 3).slice(0, 1)  # T = 3.5, not kept
+    readouts_ = original.slice(0, 1).columns[len(extract.KEY) :]
+    extra = pa.Table.from_arrays([*dropped.columns, *readouts_], schema=original.schema)
+    assert rewrite(pa.concat_tables([original, extra])) == [
+        f"{chunk.name}: 97 rows, not exactly the 96 configs rows the tc-plus selection keeps"
+    ]
+    assert main(["verify", str(out)]) == 1
+    assert rewrite(original) == []
+    empty = sorted(out.glob("*.parquet"))[-1]  # burst 11: tc-plus keeps none of it
+    assert rewrite(None, empty) == [f"missing chunk {empty.name}"]
+    record = io.read_json(out / "complete.json")
+    record["rows"]["latents"] += 1
+    (out / "complete.json").write_text(json.dumps(record), encoding="utf-8")
+    assert extract.verify(out)[-1] == "complete.json counts 193 rows, the chunks hold 192"
+    (run / "complete.json").write_bytes((run / "complete.json").read_bytes() + b"\n")
+    assert extract.verify(out) == [
+        f"{run.name}: complete.json differs from the one this table was read from"
+    ]
+    assert extract.verify(ising.training) == extract.verify(run) == []  # not latents tables
+
+
+def test_extract_refuses_a_rule_it_cannot_apply(tmp_path: Path, ising: jepa_ising.Ising) -> None:
+    """Catches a subsampled table that silently lacks the plateau it exists for, and a resumed
+    extraction mixing two rules in one folder; nothing is written for either."""
+    twin = ising.training / train.TWIN
+    with pytest.raises(ValueError, match="selection must be one of"):
+        extract.extract(twin, ising.runs["scored"], "cpu", select="tc")
+    run = _copy(ising.runs["scored"], tmp_path / "no-tc")
+    manifest = io.read_json(run / "manifest.json")
+    manifest["params"]["schedule"]["params"]["temperatures"] = [3.5, 2.3, 1.5]
+    (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    for rule in ("tc-plus", "tc-only"):
+        with pytest.raises(DataError, match=r"no plateau at T = 2\.269231 for tc-"):
+            extract.extract(twin, run, "cpu", select=rule)
+    assert not (run / extract.LATENTS).exists()
+    run = _copy(ising.runs["scored"], tmp_path / "resumed")
+    out = extract.extract(twin, run, "cpu", select="tc-only")
+    (out / "complete.json").unlink()  # as if interrupted
+    with pytest.raises(DataError, match="begun from another checkpoint, dataset or selection"):
+        extract.extract(twin, run, "cpu")
+    assert not (out / "complete.json").exists()

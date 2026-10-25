@@ -421,7 +421,7 @@ pre-registered seeds 1-5, ramps and null runs are refused.
 uv run python -m tipping_point.jepa train --L 16 32 64 --train-seeds 101 102 --val-seed 103 \
     --seed 1 --pilot <pilot run>/pilot.json [--held-out] [--prereg paper/prereg/<id>.toml]
 uv run python -m tipping_point.jepa resume <training>                # after a killed session
-uv run python -m tipping_point.jepa extract <training>/final.pt <simulator run>
+uv run python -m tipping_point.jepa extract <training>/final.pt <simulator run> [--select tc-plus]
 uv run python -m tipping_point.jepa probe <training> --fit <val run> --test <scored run>
 uv run python -m tipping_point.jepa verify <training> <run>/latents/<set> ...
 uv run python -m tipping_point.jepa budget --quota 30                # GPU hours per ISO week
@@ -442,7 +442,11 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   `<simulator run>/latents/<training>-step<step>/`: one row per `configs` row, keyed and ordered
   like `configs` (step, replica, temperature, segment, burst, frame), with `surprise` (the delta = 0
   prediction error over two fixed evaluation masks) and `pc_1`..`pc_8`, float32. Its manifest names
-  the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it.
+  the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it. `--select`
+  subsamples staircases: `tc-plus` keeps the T = 2.269231 plateau whole and one burst in 8 (by
+  burst index) at every other plateau, `tc-only` that plateau alone, for ablation checkpoints;
+  ramps and null runs are always read whole. The manifest records the rule, and `verify` checks
+  that the table holds exactly the rows it keeps.
 - **The untrained twin is the null:** a local encoder's pooled readouts inherit Ising scaling with
   random weights, so learning is claimed only as a margin over each run's step-0 twin, which goes
   through every test.

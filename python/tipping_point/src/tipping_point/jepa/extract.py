@@ -1,16 +1,24 @@
-"""The latents table: a frozen checkpoint's readouts of every saved frame of a simulator run,
+"""The latents table: a frozen checkpoint's readouts of the saved frames of a simulator run,
 stored beside the frames they come from. It is #28's input: the scorer reads it as it reads
 configs, never touching spins or the model again.
 
 <data dir>/ising/<run_id>/latents/<jepa run_id>-step<step:07d>/
-  manifest.json              written once at the start: the checkpoint and the dataset run, hashed
-  <first_step:020>.parquet   one chunk per configs chunk, the same rows in the same order
+  manifest.json              written once at the start: the checkpoint and the dataset run, hashed,
+                             and the selection rule
+  <first_step:020>.parquet   one chunk per configs chunk: the rows the rule keeps, in the same order
+                             (a chunk it keeps none of is written empty)
   complete.json              rows and every file's sha256; absent = running or crashed
 
 A dataset run holds one folder per checkpoint (model seeds, their untrained twins, ablations).
-Rows follow #22, one per configs row, keyed exactly like configs, in its (step, replica) order:
+Rows follow #22, one per configs row the selection keeps, keyed exactly like configs, in its
+(step, replica) order:
   step i64 | replica u16 | temperature f64 | segment i32 | burst i32 | frame i8 |
   surprise f32 | pc_1 f32 ... pc_8 f32
+Selections, by staircase rows (ramps and null runs are always read whole):
+  all       every row, the default
+  tc-plus   the plateau at T = 2.269231 whole, and one burst in 8 (burst index a multiple of 8) at
+            every other plateau
+  tc-only   that plateau alone, for ablation checkpoints
 surprise  delta = 0: the squared error per channel of the predicted LayerNorm'd target features
           at the hidden cells, averaged over the checkpoint's two fixed evaluation masks
 pc_k      the frame embedding (target-encoder features averaged over cells) on the checkpoint's
@@ -50,6 +58,31 @@ from .train import (
 
 LATENTS = "latents"
 KEY = ("step", "replica", "temperature", "segment", "burst", "frame")
+SELECTIONS = ("all", "tc-plus", "tc-only")
+TC_PLATEAU = 2.269231  # the grid point Tc + 4.5e-5, the plateau static FSS reads
+EVERY = 8  # tc-plus keeps one burst in EVERY at the other plateaus
+
+
+def selection(rule: str) -> dict[str, Any]:
+    """A selection rule as the manifest records it, and as `kept` and `verify` read it back."""
+    if rule not in SELECTIONS:
+        raise ValueError(f"selection must be one of {SELECTIONS}, got {rule!r}")
+    return {"rule": rule, "tc_plateau": TC_PLATEAU, "every": EVERY}
+
+
+def _at_plateau(temperature: np.ndarray, rule: dict[str, Any]) -> np.ndarray:
+    return np.isclose(temperature, rule["tc_plateau"], rtol=1e-6, atol=1e-6)
+
+
+def kept(kind: str, rows: pa.Table, rule: dict[str, Any]) -> np.ndarray:
+    """Which configs rows (temperature and burst columns) of a run of `kind` a selection keeps."""
+    temperature = rows["temperature"].to_numpy()
+    if rule["rule"] == "all" or kind != "staircase":
+        return np.ones(len(temperature), dtype=bool)
+    plateau = _at_plateau(temperature, rule)
+    if rule["rule"] == "tc-only":
+        return plateau
+    return plateau | (rows["burst"].to_numpy() % rule["every"] == 0)
 
 
 def schema(L: int, components: int) -> pa.Schema:
@@ -85,7 +118,9 @@ def _refusal(checkpoint: Path, digest: str) -> str | None:
     return None
 
 
-def _manifest(out: Path, run: Run, ckpt: Checkpoint, device: torch.device) -> dict[str, Any]:
+def _manifest(
+    out: Path, run: Run, ckpt: Checkpoint, device: torch.device, rule: dict[str, Any]
+) -> dict[str, Any]:
     assert ckpt.pca is not None
     root = run.path.parents[1]
     try:
@@ -128,20 +163,30 @@ def _manifest(out: Path, run: Run, ckpt: Checkpoint, device: torch.device) -> di
                 "hidden_share": hidden.flatten(1).float().mean(1).tolist(),
             },
             "readout": {"canonical": "per frame", "precision": "float32", "delta": 0},
+            "selection": rule,
         },
         "env": {"device": device.type, "gpu": gpu_name(device), "torch": torch.__version__},
     }
 
 
 def extract(
-    checkpoint: Path, dataset_run: Path, device: str | None = None, sites: int = 65_536
+    checkpoint: Path,
+    dataset_run: Path,
+    device: str | None = None,
+    sites: int = 65_536,
+    select: str = "all",
 ) -> Path:
-    """Write a checkpoint's latents table for a complete simulator run; returns its folder. A
-    trained checkpoint needs its training's complete.json to vouch for it (#89); the untrained
-    twin is the null whatever became of its training."""
+    """Write a checkpoint's latents table for a complete simulator run, of the rows the `select`
+    rule keeps; returns its folder. A trained checkpoint needs its training's complete.json to
+    vouch for it (#89); the untrained twin is the null whatever became of its training."""
+    rule = selection(select)
     dev = torch.device(device or default_device())
     deterministic(dev)
     run = open_run(Path(dataset_run))
+    if run.kind == "staircase" and select != "all":
+        grid = np.array(run.schedule["params"]["temperatures"], dtype=np.float64)
+        if not _at_plateau(grid, rule).any():
+            raise DataError(f"{run.run_id} has no plateau at T = {TC_PLATEAU} for {select} to keep")
     ckpt = load_model(checkpoint, dev)
     pca = ckpt.pca
     if pca is None:
@@ -158,38 +203,43 @@ def extract(
     out = folder(run.path, ckpt.run_id, ckpt.step)
     if (out / "complete.json").exists():
         raise DataError(f"{out} is complete: a latents table is written once")
-    if (out / "manifest.json").exists():  # interrupted: same checkpoint, same data, or nothing
+    if (out / "manifest.json").exists():  # interrupted: same checkpoint, data and rule, or nothing
         prior = io.read_json(out / "manifest.json")["params"]
         same = (
             prior["checkpoint"]["sha256"] == ckpt.sha256
             and prior["dataset"]["complete_sha256"] == run.complete_sha256
+            and _recorded(prior) == rule
         )
         if not same:
-            raise DataError(f"{out} was begun from another checkpoint or dataset")
+            raise DataError(f"{out} was begun from another checkpoint, dataset or selection")
         for path in out.glob("*.tmp"):
             path.unlink()
     else:  # chunks only ever follow the manifest, so a folder without one holds nothing yet
         out.mkdir(parents=True, exist_ok=True)
-        io.write_json(out / "manifest.json", _manifest(out, run, ckpt, dev))
+        io.write_json(out / "manifest.json", _manifest(out, run, ckpt, dev, rule))
     hidden, keep = (m.to(dev) for m in evaluation_masks(ckpt.config, run.L))
     table_schema = schema(run.L, len(pca.components))
     for path in chunks:
         if (out / path.name).exists():
             continue
         table = pq.read_table(path, columns=[*KEY, "spins"])
-        packed = torch.from_numpy(packed_spins(table["spins"], run.L).copy())
-        surprise, pcs = [], []
-        for chunk in batches(packed, run.L, sites):
-            spins = canonical(unpack(chunk.to(dev), run.L), 2)
-            embedding, score = readouts(ckpt.model, spins, hidden, keep)
-            assert score is not None
-            pcs.append(pca.project(embedding.cpu()).to(torch.float32))
-            surprise.append(score.cpu())
-        values = np.concatenate([torch.cat(surprise).numpy()[:, None], torch.cat(pcs).numpy()], 1)
-        columns = [table[name] for name in KEY] + [
-            pa.array(values[:, k], type=pa.float32()) for k in range(values.shape[1])
-        ]
-        latents = pa.Table.from_arrays(columns, schema=table_schema)
+        table = table.filter(kept(run.kind, table, rule))
+        latents = table_schema.empty_table()  # kept nothing: the empty chunk still marks it done
+        if table.num_rows:
+            packed = torch.from_numpy(packed_spins(table["spins"], run.L).copy())
+            surprise, pcs = [], []
+            for chunk in batches(packed, run.L, sites):
+                spins = canonical(unpack(chunk.to(dev), run.L), 2)
+                embedding, score = readouts(ckpt.model, spins, hidden, keep)
+                assert score is not None
+                pcs.append(pca.project(embedding.cpu()).to(torch.float32))
+                surprise.append(score.cpu())
+            surprises = torch.cat(surprise).numpy()[:, None]
+            values = np.concatenate([surprises, torch.cat(pcs).numpy()], 1)
+            columns = [table[name] for name in KEY] + [
+                pa.array(values[:, k], type=pa.float32()) for k in range(values.shape[1])
+            ]
+            latents = pa.Table.from_arrays(columns, schema=table_schema)
         io.write_file(
             out / path.name, lambda f, t=latents: pq.write_table(t, f, compression="zstd")
         )
@@ -202,6 +252,48 @@ def _complete(out: Path) -> None:
     rows = sum(pq.read_metadata(out / name).num_rows for name in files if name.endswith(".parquet"))
     record = {"ended_ns": time.time_ns(), "rows": {LATENTS: rows}, "clean": True, "files": files}
     io.write_json(out / "complete.json", record)
+
+
+def _recorded(params: dict[str, Any]) -> dict[str, Any]:
+    """The selection a manifest records; one written before selections existed kept every row."""
+    return params.get("selection") or selection("all")
+
+
+def verify(out: Path) -> list[str]:
+    """Problems with the rows of a finished latents table, read against its dataset run: each
+    chunk must hold exactly the configs rows its manifest's selection keeps, keyed and ordered
+    like configs, and complete.json must count them. Empty for a table that checks out, and for
+    any folder that is not a latents table."""
+    out = Path(out)
+    manifest = io.read_json(out / "manifest.json") if (out / "manifest.json").is_file() else {}
+    if LATENTS not in manifest.get("tables", []):
+        return []
+    params = manifest["params"]
+    run = open_run(out.parents[1])
+    if run.complete_sha256 != params["dataset"]["complete_sha256"]:
+        return [f"{run.run_id}: complete.json differs from the one this table was read from"]
+    rule = _recorded(params)
+    problems, total = [], 0
+    names = {p.name for p in out.glob("*.parquet")}
+    for path in io.chunks(run.path, "configs"):
+        if path.name not in names:
+            problems.append(f"missing chunk {path.name}")
+            continue
+        names.discard(path.name)
+        configs = pq.read_table(path, columns=list(KEY))
+        expected = configs.filter(kept(run.kind, configs, rule))
+        found = pq.read_table(out / path.name, columns=list(KEY))
+        total += found.num_rows
+        if not found.equals(expected):
+            problems.append(
+                f"{path.name}: {found.num_rows} rows, not exactly the {expected.num_rows} configs "
+                f"rows the {rule['rule']} selection keeps"
+            )
+    problems += [f"chunk {name} has no configs chunk" for name in sorted(names)]
+    counted = io.read_json(out / "complete.json")["rows"][LATENTS]
+    if counted != total:
+        problems.append(f"complete.json counts {counted} rows, the chunks hold {total}")
+    return problems
 
 
 def available(dataset_run: Path) -> list[str]:

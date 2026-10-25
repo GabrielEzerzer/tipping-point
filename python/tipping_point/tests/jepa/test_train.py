@@ -186,7 +186,11 @@ def test_trainings_and_latents_take_their_commit_from_the_one_helper(
     training = io.read_json(train.start(SHORT, small, tmp_path, "d", "cpu") / "manifest.json")
     ckpt = train.load_model(ising.training / train.FINAL)
     latents = extract._manifest(
-        tmp_path / "l", open_run(ising.runs["ramp"]), ckpt, torch.device("cpu")
+        tmp_path / "l",
+        open_run(ising.runs["ramp"]),
+        ckpt,
+        torch.device("cpu"),
+        extract.selection("all"),
     )
     for producer in (training["producer"], latents["producer"]):
         assert {key: producer[key] for key in planted} == planted, producer

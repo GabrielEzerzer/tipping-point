@@ -4,7 +4,9 @@ values: real spins, real Parquet, real manifests), and a small model trained on 
 At L = 16 with 4 replicas, each staircase holds three plateaus (3.5, Tc + 4.5e-5 inside the
 held-out band, and 1.5) of four bursts each; seeds 101 and 102 train and validate, seed 1 is a
 pre-registered seed (scored, never trained on), and a ramp and a fixed (null) run complete the set
-of kinds training must refuse. Everything runs on the CPU in seconds.
+of kinds training must refuse. Runs flush every 250 sweeps, so a staircase's configs come in four
+chunks as a long run's come in many: the first holds no frame of the Tc plateau, the last only
+burst 11. Everything runs on the CPU in seconds.
 """
 
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ from tipping_point.jepa.lattice import ModelSpec
 FIXTURES = Path(__file__).resolve().parents[1] / "python" / "tipping_point" / "tests" / "fixtures"
 PILOT = FIXTURES / "ising_pilot.json"
 L, REPLICAS = 16, 4
+FLUSH = 250  # sweeps per chunk
 PLATEAUS = (3.5, 2.269231, 1.5)
 CONFIG = train.Config(
     steps=8,
@@ -51,7 +54,13 @@ def build(root: Path) -> Ising:
         "null": (103, protocol.Fixed((2.5,), therm=50, sweeps=100, saves=2)),
     }
     runs = {
-        role: run.start(run.Spec(L=L, replicas=REPLICAS, seed=seed), schedule, root, role, "cpu")
+        role: run.start(
+            run.Spec(L=L, replicas=REPLICAS, seed=seed, checkpoint_every=FLUSH),
+            schedule,
+            root,
+            role,
+            "cpu",
+        )
         for role, (seed, schedule) in plans.items()
     }
     dataset = data.load(root, [runs["train"].name], [runs["val"].name])

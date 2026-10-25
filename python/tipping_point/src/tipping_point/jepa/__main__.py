@@ -5,11 +5,13 @@
            --val-seed 103 --seed 1 --pilot <pilot.json> [--held-out] [--prereg <toml>]
   resume   continue a training from its checkpoint, after a crash or a killed session
   extract  a checkpoint's latents table for a simulator run (surprise, pc_1..pc_8 per frame),
-           written to <run>/latents/<training>-step<step>/
+           written to <run>/latents/<training>-step<step>/; --select tc-plus or tc-only keeps
+           a staircase's Tc plateau (plus one burst in 8 elsewhere, or alone)
   probe    ridge probes of |m|, energy and L^2 Var(|m|) from a training's frozen embeddings,
            trained and untrained (step 0) side by side
   verify   check finished directories (trainings, latents tables, simulator runs) against their
-           complete.json; exit 1 on any problem
+           complete.json, and a latents table's rows against its selection; exit 1 on any
+           problem
   budget   GPU hours per ISO week from <data dir>/jepa/gpu_hours.jsonl against a weekly quota
 
 Trainings land in <data dir>/jepa/<run_id>/; the data dir is --data-dir, else the engine's own
@@ -78,6 +80,14 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("checkpoint", type=Path, help="final.pt or ckpt/step_0000000.pt")
     p.add_argument("dataset_run", type=Path, help="a complete simulator run folder")
     p.add_argument("--sites", type=int, default=65_536, help="sites per readout batch")
+    p.add_argument(
+        "--select",
+        choices=extract.SELECTIONS,
+        default="all",
+        help=f"staircase rows: tc-plus keeps the T = {extract.TC_PLATEAU} plateau and one burst "
+        f"in {extract.EVERY} elsewhere, tc-only that plateau alone; ramps and null runs are "
+        "always whole (default: all)",
+    )
     p.set_defaults(command=_extract)
 
     p = sub.add_parser("probe", parents=[device], help="ridge probes, trained beside untrained")
@@ -89,7 +99,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--json", type=Path, help="also write the rows here")
     p.set_defaults(command=_probe)
 
-    p = sub.add_parser("verify", help="check finished directories against complete.json")
+    p = sub.add_parser(
+        "verify", help="check finished directories against complete.json, latents rows too"
+    )
     p.add_argument("dirs", type=Path, nargs="+")
     p.set_defaults(command=_verify)
 
@@ -134,7 +146,7 @@ def _resume(args: argparse.Namespace) -> int:
 
 
 def _extract(args: argparse.Namespace) -> int:
-    print(extract.extract(args.checkpoint, args.dataset_run, args.device, args.sites))
+    print(extract.extract(args.checkpoint, args.dataset_run, args.device, args.sites, args.select))
     return 0
 
 
@@ -159,7 +171,7 @@ def _probe(args: argparse.Namespace) -> int:
 def _verify(args: argparse.Namespace) -> int:
     bad = 0
     for path in args.dirs:
-        problems = train.verify(path)
+        problems = train.verify(path) or extract.verify(path)
         bad += bool(problems)
         print(f"{path}: {'ok' if not problems else '; '.join(problems)}")
     return 1 if bad else 0
