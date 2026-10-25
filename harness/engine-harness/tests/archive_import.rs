@@ -27,6 +27,7 @@ use engine::store::run::{self, Clock, Complete, DataSource, Manifest};
 use engine::venue::Venue;
 use engine::venue::archive::ArchiveName;
 use engine_harness::api::repo;
+use engine_harness::skipped;
 use engine_harness::transcript::Transcript;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -534,15 +535,16 @@ async fn an_archive_imports_exactly_as_its_records_fed_live() -> Outcome {
 /// its rows matching its records, and passes its integrity checks. A day is hundreds of megabytes
 /// and minutes to import, so this runs only with `TP_ARCHIVE_DAYS` set, as `TP_CRASH_ROUNDS`
 /// lengthens the crash test: `TP_ARCHIVE_DAYS=1 cargo test --release -p engine-harness --test
-/// archive_import local_archive_days`. Skips, and says so, otherwise or when there are none.
+/// archive_import local_archive_days`. Otherwise, or with none there, it skips on a `SKIPPED:` line
+/// the gate counts, where a println was kept from it by libtest's capture (#103).
 #[test]
 fn local_archive_days_import_cleanly() -> Outcome {
     let dir = repo().join("harness/fixtures/archives");
     if std::env::var_os("TP_ARCHIVE_DAYS").is_none() {
-        println!(
-            "skipped: set TP_ARCHIVE_DAYS to import the archive days in {}",
+        skipped(&format!(
+            "local archive days not imported: set TP_ARCHIVE_DAYS to import those in {}",
             dir.display()
-        );
+        ));
         return Ok(());
     }
     let mut found: Vec<PathBuf> = match fs::read_dir(&dir) {
@@ -559,7 +561,10 @@ fn local_archive_days_import_cleanly() -> Outcome {
     };
     found.sort();
     if found.is_empty() {
-        println!("skipped: no archive days in {}", dir.display());
+        skipped(&format!(
+            "local archive days not imported: none in {}",
+            dir.display()
+        ));
         return Ok(());
     }
     let data = scratch("import-local");
