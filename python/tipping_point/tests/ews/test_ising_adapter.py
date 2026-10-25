@@ -152,6 +152,54 @@ def test_select_fills_each_slot_exactly_once(planted: Any) -> None:
         ising.select(complete, incomplete, other)
 
 
+def test_a_ramp_over_another_eps_window_or_x_is_refused(planted: Any) -> None:
+    """#26 decision 4: with data.ramps.eps_L, a ramp at the prereg's x must have cooled over that
+    window. The planted ramps run from T = 3.5 to 1.5, eps_L 8.678 to -5.424 at L = 16: refused
+    against [12, -8], naming the run and both windows, and read against their own window. A ramp
+    at another x is another experiment (the fast ramp, at the same L and seed): it fills no slot,
+    and the error for the slot left empty names it and its x."""
+    complete, incomplete = ising.find_runs(planted.root)
+    v1_window = {"kind": "ramp", "x": 0.02, "eps_L": [12.0, -8.0]}
+    with pytest.raises(
+        ising.IsingDataError, match=r"L16-ramp-s1: .*8\.678.*-5\.42.*\[12\.0, -8\.0"
+    ):
+        ising.select(complete, incomplete, _data(ramps=v1_window))
+    own = [float(fss.scaled_temperature(T, 16)) for T in (3.5, 1.5)]
+    chosen = ising.select(complete, incomplete, _data(L=[16], ramps=v1_window | {"eps_L": own}))
+    assert [r.seed for r in chosen[16].ramps] == [1, 2]
+    fast = {"kind": "ramp", "x": 0.3}
+    with pytest.raises(
+        ising.IsingDataError, match=r"another x than 0\.3: .*L16-ramp-s1 \(x = 0\.02\)"
+    ):
+        ising.select(complete, incomplete, _data(ramps=fast))
+
+
+def test_scored_runs_must_come_from_the_freeze_tags_commit(tmp_path: Path) -> None:
+    """#26 decision 6 as a check: under a frozen prereg a scored run must name the commit the
+    freeze tag points at, from a clean tree. One that does is accepted; one from another commit,
+    a dirty tree, or naming no commit (a wheel built outside a checkout, or a planted run) is
+    refused, the message naming it, its git_sha and the tag's commit, and never the good run."""
+
+    def made(name: str, git_sha: str | None, dirty: bool | None) -> ising.Run:
+        manifest = {"run_id": name, "producer": {"git_sha": git_sha, "dirty": dirty}}
+        return ising.Run(tmp_path / name, manifest, {}, "")
+
+    tagged = "a" * 40
+    good = made("accepted-run", tagged, False)
+    ising._same_commit([good], tagged)
+    for bad in (
+        made("other", "b" * 40, False),
+        made("dirty", tagged, True),
+        made("bare", None, None),
+    ):
+        with pytest.raises(ising.IsingDataError) as refused:
+            ising._same_commit([good, bad], tagged)
+        message = str(refused.value)
+        git_sha = bad.manifest["producer"]["git_sha"]
+        assert f"{bad.run_id} (git_sha {git_sha}" in message and tagged in message, message
+        assert "accepted-run" not in message
+
+
 def test_a_null_block_that_failed_its_check_is_dropped_and_counted(tmp_path: Path) -> None:
     """Null runs are read as equilibrium, so a block whose thermalised check failed (#50 writes
     the check for null runs too) is left out of scoring and reported, not silently used."""

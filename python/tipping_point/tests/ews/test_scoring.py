@@ -78,12 +78,37 @@ def test_threshold_at_far_is_the_lowest_safe_threshold() -> None:
     s = rng.standard_normal((20, 60)).cumsum(axis=1) / 10
     s[3, 10:15] = np.nan
     duration, far = 1200.0, 0.02
-    theta = scoring.threshold_at_far(s, far, duration)
+    found = scoring.threshold_at_far(s, far, duration)
+    theta = found.theta
     candidates = np.unique(s[~np.isnan(s)])
     rate = {c: scoring.false_alarm_rate(s, c, duration) for c in candidates}
     assert all(rate[c] <= far for c in candidates if c >= theta)
     below = candidates[candidates < theta]
     assert len(below) and rate[below.max()] > far
+    assert found.attainable and found.far_max == pytest.approx(max(rate.values()))
+
+
+def test_an_unattainable_false_alarm_target_is_said_so_never_minus_inf() -> None:
+    """#97: on the real L = 16 nulls no theta gave as many false alarms as the target, and the
+    threshold silently became -inf, below every score, so every ramp replica counted as already
+    alarming and was reported censored. Brute force over every candidate: when the highest rate
+    any theta gives is under the target, or exactly at it (the rule would still pick -inf), the
+    answer says unattainable, theta is NaN and far_max is that highest rate; half an alarm less
+    budget and the target sets a finite theta. (A duration of 2^10 keeps rate * duration exact.)"""
+    rng = np.random.default_rng(4)
+    s = rng.standard_normal((20, 60)).cumsum(axis=1) / 10
+    duration = 1024.0
+    candidates = np.unique(s)
+    most = max(scoring.false_alarm_rate(s, c, duration) for c in [-np.inf, *candidates])
+    for far in (2 * most, most):
+        found = scoring.threshold_at_far(s, far, duration)
+        assert not found.attainable and np.isnan(found.theta), far
+        assert found.far_max == pytest.approx(most)
+    just_under = scoring.threshold_at_far(s, most - 0.5 / duration, duration)
+    assert just_under.attainable and np.isfinite(just_under.theta)
+    assert just_under.far_max == pytest.approx(most)
+    empty = scoring.threshold_at_far(np.full((3, 5), np.nan), 0.01, duration)
+    assert not empty.attainable and np.isnan(empty.theta) and empty.far_max == 0.0
 
 
 def test_first_alarm_is_a_rise_and_late_starters_are_censored() -> None:

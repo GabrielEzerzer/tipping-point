@@ -1,11 +1,12 @@
-# Pre-registration: the classic early-warning baselines on the 2D Ising model (#26, research
-# pass 2026-10-22, owner's calls 1-6 taken as recommended). Not frozen: before the freeze, fill
-# data.tau_c from the #50 pilot record, decide on L = 128 (#19: budget permitting; its tau_c must
-# be in the pilot record), set trials.budget to match, and recalibrate the surrogate test on real
-# fixed-T segments (#28 pre-flight). Units: time in tau_c(L) = tau_int(|m|) at Tc on the fixed
-# kernel, as measured per L in the record; its fitted z and any tau_c extrapolated to an
-# unmeasured L are never pre-registered on (#50 review); temperature in eps_L = L (T - Tc) / Tc;
-# lags in samples of the cadence.
+# Pre-registration: the classic early-warning baselines on the 2D Ising model (#26: research
+# pass 2026-10-22, owner's calls 1-6; freeze decisions 2026-10-25, #26 comment 6402030372).
+# Not frozen: before the freeze, fill data.tau_c from the #54 record (L = 16, 32 and 64 at 64
+# replicas and L = 128 at 32, one commit and one kernel). L = 128 is decided out of v1 (decision
+# 5), so trials.budget stays 972; the surrogate test is recalibrated on real fixed-T nulls
+# (4.4-5.6% false positives at alpha = 0.05, #28). Units: time in tau_c(L) = tau_int(|m|) at Tc
+# on the frozen kernel, as measured per L in the record; its fitted z and any tau_c extrapolated
+# to an unmeasured L are never pre-registered on (#50 review); temperature in
+# eps_L = L (T - Tc) / Tc; lags in samples of the cadence.
 
 id = "ising-ews"
 version = 1
@@ -33,8 +34,8 @@ direction = "less"
 
 [[hypotheses]]
 name = "dynamic-fss"
-statement = "The classic alarms come at a fixed scaled temperature: the first-alarm eps_L of Var(|m|) and AC1(|m|) does not depend on L."
-prediction = "1/nu fitted from the median alarm eps_L over L lies within 0.1 of 1 and its CI excludes 0 (an indicator merely monotone in T gives 1/nu = 0)."
+statement = "Var(|m|) peaks at a fixed scaled temperature on the slow ramp: the eps_L at which each replica's rolling variance of |m| (the headline pipeline's detrend, window and lag) reaches its maximum inside eps_L in [6, -4] does not depend on L."
+prediction = "1/nu = 1 - d log|eps_L_peak| / d log L, fitted on the median peak eps_L per L with a CI from the hierarchical bootstrap, lies within 0.5 of 1 and its CI excludes 0. The test separates two hypotheses, finite-size scaling (1/nu = 1) and an indicator merely monotone in T (1/nu = 0), and 0.5 is the midpoint between them. Inconclusive when more than half of an L's replicas peak on an edge of the search band, where the peak was not located. The measured 1/nu and its CI are reported either way."
 direction = "match"
 
 [[hypotheses]]
@@ -46,18 +47,19 @@ direction = "less"
 [data]
 domain = "ising"
 L = [16, 32, 64]
-seeds = [1, 2, 3, 4, 5]
-replicas = 16
+seeds = [6, 7, 8, 9, 10]   # used by no earlier run; seeds 1-5 are the exploratory pilot (disclosure)
+replicas = 64              # the GPU loop is launch-bound: 64 replicas cost what 16 did (#48)
 exclusions = []
 
 [data.tau_c]
 source = "pilot"         # measured per L; never the fit's z or an extrapolated tau_c
-pilot_run = "TBD"        # the #50 pilot run: <data dir>/ising/<run>/pilot.json, fixed kernel
+pilot_run = "TBD"        # the #54 record: <data dir>/ising/<run>/pilot.json, frozen kernel
 pilot_sha256 = "TBD"
 
 [data.ramps]
 kind = "ramp"
-x = 0.02                 # the slow ramp, r = A L^(z+1) / (x Tc) after #50's recalibration
+x = 0.02                 # the slow ramp, r = tau_c(L) L / (x Tc) with tau_c(L) as measured (#56)
+eps_L = [12.0, -8.0]     # every ramp cools from eps_L = 12 to -8 after its equilibration
 
 [data.nulls]
 kind = "fixed"
@@ -96,7 +98,8 @@ n = 999
 cells = "headline"
 
 [scoring.alarms]
-far = 0.01               # theta: 1 false alarm per 100 tau_c on one half of the null runs
+indicators = ["variance", "ac", "skewness"]  # a reported table that no hypothesis reads (#97)
+far = 0.001              # theta: 1 false alarm per 1000 tau_c on one half of the null runs
 report_per = 1000.0      # false alarms per 1000 tau_c on the other half
 band = [2.0, -2.0]       # first alarm sought from eps_L = 2 down to -2; none is a miss
 every = 1.0
@@ -127,12 +130,15 @@ expected = 2.17
 [[fss.static]]
 quantity = "one_minus_ac1"
 role = "reference"       # lag one sweep from burst pairs; the measured kappa is the reference
+tolerance = 0.1          # its own: the value it took from fss.dynamic before the freeze
 
 [fss.dynamic]
-indicators = ["variance", "ac"]
+statistic = "peak"       # each slow-ramp replica's eps_L at its indicator's extremum (#98)
+indicators = ["variance"]  # AC1 and skewness peaks are reported in the peaks table, not judged
 observable = "abs_m"
+search = [6.0, -4.0]     # the eps_L band the extremum is sought in
 expected_inverse_nu = 1.0
-tolerance = 0.1
+tolerance = 0.5          # midway between FSS (1/nu = 1) and monotone in T (1/nu = 0)
 
 [sensitivity]
 window = [10.0, 20.0, 40.0]
@@ -142,6 +148,17 @@ headline = { window = 20.0, bandwidth = 10.0 }
 [trials]
 budget = 972             # 3 indicators x 2 observables x 2 cadences x 3 L x 3 h x 9 cells
 counted = "One trial per AUC evaluation of an (indicator, observable, cadence, L, h, window, bandwidth) cell, sensitivity cells included; every score run appends its cells to ews/trials.jsonl in the data dir."
+
+[disclosure]
+exploratory = "Before the freeze, the seeds 1-5 datasets at L = 16 and 32 were scored exploratorily: AUC, surrogate tests, alarms, peak positions and the static exponents."
+decisions = "The freeze decisions were made with those results in view: the peak-position statistic of dynamic-fss, its search band and tolerance, the alarm target, the ramp rate from measured tau_c, the eps_L window of the ramps, and the seeds and replicas."
+confirmatory = "v1 scores only runs generated after the freeze tag, from the tagged commit, on seeds 6-10, which no earlier run used; the scorer refuses a run whose manifest names another commit or a dirty tree. The seeds 1-5 datasets are never scored under v1."
+links = [
+    "https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6402030372",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6387307847",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6390788147",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6393467391",
+]
 
 [deviations]
 policy = "Any change after the freeze is a new version with a reason, frozen before it is scored; results scored under v1 stay bound to v1 and are reported."

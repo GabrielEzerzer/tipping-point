@@ -7,7 +7,7 @@ surrogate_test          each series' score against N surrogates of its own resid
 alarms                  an alarm is s(t) rising above theta: s(t) > theta after s(t - 1) <= theta
 false_alarm_rate        alarms per unit of time on null series
 threshold_at_far        the lowest theta whose false-alarm rate, and every higher theta's, stays
-                        within a target
+                        within a target; unattainable when no theta alarms that often (#97)
 first_alarm, lead_times when each series first rises above theta inside a stretch (a series
                         already above it as the stretch opens is censored), and how early
 hierarchical_bootstrap  resample seeds, then replicas within each chosen seed
@@ -16,6 +16,7 @@ hierarchical_bootstrap  resample seeds, then replicas within each chosen seed
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
@@ -110,21 +111,35 @@ def false_alarm_rate(scores: np.ndarray, theta: float, duration: float) -> float
     return float(alarms(scores, theta).sum() / duration)
 
 
-def threshold_at_far(scores: np.ndarray, far: float, duration: float) -> float:
+@dataclass(frozen=True)
+class Threshold:
+    """threshold_at_far's answer: theta, NaN when the target is unattainable, and the highest
+    false-alarm rate any theta gives, per unit time."""
+
+    theta: float
+    attainable: bool
+    far_max: float
+
+
+def threshold_at_far(scores: np.ndarray, far: float, duration: float) -> Threshold:
     """The lowest theta at which the null series alarm at most `far` times per unit time, at that
     theta and at every theta above it. A step from a to b > a alarms for theta in [a, b), so the
-    alarm count is #{a <= theta} - #{b <= theta}, a step function read at its breakpoints."""
+    alarm count is #{a <= theta} - #{b <= theta}, a step function read at its breakpoints. When
+    no theta alarms more often than `far`, the target sets no threshold: the rule would pick the
+    -inf below every score, so the answer is unattainable, theta NaN."""
     previous, current = _steps(scores)
     rising = previous < current  # False wherever the current score is missing
     previous, current = np.sort(previous[rising]), np.sort(current[rising])
     candidates = np.unique(np.concatenate([previous, current]))
-    if len(candidates) == 0:
-        return float("-inf")
     count = np.searchsorted(previous, candidates, "right") - np.searchsorted(
         current, candidates, "right"
     )
     worst_above = np.maximum.accumulate(count[::-1])[::-1]
-    return float(candidates[np.argmax(worst_above <= far * duration)])
+    most = int(count.max(initial=0))
+    if most <= far * duration:
+        return Threshold(float("nan"), False, most / duration)
+    theta = float(candidates[np.argmax(worst_above <= far * duration)])
+    return Threshold(theta, True, most / duration)
 
 
 def first_alarm(

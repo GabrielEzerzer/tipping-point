@@ -67,7 +67,7 @@ def test_v1_holds_the_research_pass_protocol() -> None:
     """The numbers the brief fixes (#26 sections 2-4, #50's relabelled ramps)."""
     doc = prereg.load(V1).doc
     assert (doc["id"], doc["version"]) == ("ising-ews", 1)
-    assert doc["data"]["ramps"] == {"kind": "ramp", "x": 0.02}
+    assert {k: doc["data"]["ramps"][k] for k in ("kind", "x")} == {"kind": "ramp", "x": 0.02}
     assert doc["data"]["nulls"]["kind"] == "fixed" and doc["data"]["nulls"]["eps_L"] == [2, 4, 6]
     assert doc["data"]["tau_c"]["source"] == "pilot"  # never numbers in the file
     assert doc["event"]["horizons"] == [0, 1, 2] and doc["event"]["segment"] == 6
@@ -82,6 +82,36 @@ def test_v1_holds_the_research_pass_protocol() -> None:
     assert static["one_minus_ac1"]["role"] == "reference"  # AC1 against its measured kappa, not z
     assert doc["scoring"]["surrogates"]["n"] == 999 and doc["scoring"]["bootstrap"] == 2000
     assert doc["trials"]["budget"] == prereg.cells(doc) == 972
+
+
+def test_v1_holds_the_freeze_decisions() -> None:
+    """#26 comment 6402030372: new seeds and replicas, ramps over one eps_L window, the
+    dynamic test on Var(|m|) peak positions at 0.5, alarms as a reported table at 1 per 1000
+    tau_c, every judged static entry with its own tolerance (1 - AC1 keeps the 0.1 it took from
+    the dynamic test), h = 2 at every L, and the disclosure of what was seen before."""
+    doc = prereg.load(V1).doc
+    data, dyn = doc["data"], doc["fss"]["dynamic"]
+    assert (data["L"], data["seeds"], data["replicas"]) == ([16, 32, 64], [6, 7, 8, 9, 10], 64)
+    assert data["ramps"]["eps_L"] == [12.0, -8.0]
+    assert (dyn["statistic"], dyn["indicators"], dyn["search"]) == ("peak", ["variance"], [6, -4])
+    assert (dyn["expected_inverse_nu"], dyn["tolerance"]) == (1.0, 0.5)
+    alarms = doc["scoring"]["alarms"]
+    assert (alarms["indicators"], alarms["far"]) == (["variance", "ac", "skewness"], 0.001)
+    assert (alarms["report_per"], alarms["band"], alarms["every"]) == (1000.0, [2, -2], 1.0)
+    tolerance = {row["quantity"]: row.get("tolerance") for row in doc["fss"]["static"]}
+    assert tolerance == {
+        "l2_var_abs_m": 0.1,
+        "mean_abs_m": 0.02,
+        "skewness_abs_m": 0.1,
+        "tau_int_abs_m": None,  # descriptive: never judged
+        "one_minus_ac1": 0.1,
+    }
+    assert doc["event"]["horizons"] == [0, 1, 2]  # h = 2 is legal at L = 16 now
+    shown = doc["disclosure"]
+    assert "seeds 1-5" in shown["exploratory"] and "L = 16 and 32" in shown["exploratory"]
+    assert "in view" in shown["decisions"] and "after the freeze tag" in shown["confirmatory"]
+    comments = {link.rsplit("-", 1)[1] for link in shown["links"]}
+    assert comments == {"6402030372", "6387307847", "6390788147", "6393467391"}
 
 
 @pytest.mark.parametrize(
@@ -100,6 +130,23 @@ def test_v1_holds_the_research_pass_protocol() -> None:
         (lambda d: d["indicators"].update(detrend="none"), "ar1 needs detrending"),
         (lambda d: d["indicators"]["direction"].pop("skewness"), "indicators.direction.skewness"),
         (lambda d: d["scoring"]["surrogates"].update(primary="fourier"), "surrogates.primary"),
+        # the freeze's keys (#26 comment 6402030372)
+        (lambda d: d["fss"]["static"][4].pop("tolerance"), "a reference needs its own tolerance"),
+        (lambda d: d["fss"]["dynamic"].pop("statistic"), "fss.dynamic.statistic: missing"),
+        (lambda d: d["fss"]["dynamic"].update(statistic="alarm"), "fss.dynamic.statistic: one of"),
+        (lambda d: d["fss"]["dynamic"].pop("search"), "fss.dynamic.search: missing"),
+        (lambda d: d["fss"]["dynamic"].update(search=[-4.0, 6.0]), "the hot edge first"),
+        (lambda d: d["fss"]["dynamic"].update(search=[6.0]), "fss.dynamic.search: [from"),
+        (lambda d: d["fss"]["dynamic"].update(search=["6", "-4"]), "search[0]: expected int"),
+        (lambda d: d["scoring"]["alarms"].pop("indicators"), "scoring.alarms.indicators: missing"),
+        (lambda d: d["scoring"]["alarms"].update(indicators=["kurtosis"]), "must be scored"),
+        (lambda d: d["data"]["ramps"].update(eps_L=[-8.0, 12.0]), "start above end"),
+        (lambda d: d["data"]["ramps"].update(eps_L=[12.0]), "data.ramps.eps_L: [start, end]"),
+        (lambda d: d["data"]["ramps"].update(eps_L=[True, False]), "data.ramps.eps_L"),
+        (lambda d: d["data"]["ramps"].update(eps_L="12, -8"), "data.ramps.eps_L"),
+        (lambda d: d.pop("disclosure"), "disclosure: missing"),
+        (lambda d: d["disclosure"].pop("confirmatory"), "disclosure.confirmatory: missing"),
+        (lambda d: d["disclosure"].update(links="#26"), "disclosure.links: expected an array"),
     ],
 )
 def test_malformed_files_are_named(edit: Any, complaint: str) -> None:
