@@ -546,19 +546,21 @@ def evaluate(
     alarms and peak positions at the headline cell, and static and dynamic finite-size scaling.
     It computes only: writing results and logging trials are the caller's. A stale pilot record
     is refused unless allow_stale. With `commit`, the commit a frozen prereg's tag points at,
-    every scored run must have been made by that commit from a clean tree; without it (an
-    unfrozen prereg, exploratory use) any commit is scored."""
+    every scored run must have been made by that commit from a clean tree, and every scored ramp
+    and null run against the pilot record the prereg pins. Without it (an unfrozen prereg,
+    exploratory use) neither is asked: the exploratory L = 16 null runs name no record."""
     data = doc["data"]
     pinned = data["tau_c"]["pilot_sha256"]
-    pilot = read_pilot(
-        data_dir, data["tau_c"]["pilot_run"], pinned if len(pinned) == 64 else None, allow_stale
-    )
+    pinned = pinned if len(pinned) == 64 else None
+    pilot = read_pilot(data_dir, data["tau_c"]["pilot_run"], pinned, allow_stale)
     if pilot.stale:
         say(f"warning: {pilot.path}: {pilot.stale}; scored anyway (--allow-stale-pilot)")
     chosen = select(*find_runs(data_dir), data)
     scored = list({run.run_id: run for i in chosen.values() for run in i.runs()}.values())
     if commit is not None:
         _same_commit(scored, commit)
+        if pinned is not None:  # always, once frozen: the freeze refuses an unpinned record
+            _same_record(chosen, pinned)
     tables: dict[str, list[Row]] = {"auc": [], "surrogates": [], "alarms": [], "peaks": []}
     peaks: Peaks = {}
     for L, inputs in chosen.items():
@@ -570,6 +572,23 @@ def evaluate(
     null_blocks = [block for i in chosen.values() for block in i.dropped]
     dropped = {"null_blocks": null_blocks, "plateaus": plateaus_dropped}
     return Evaluation(tables, scored, pilot, dropped)
+
+
+def _same_record(chosen: dict[int, Inputs], pinned: str) -> None:
+    """Refuse a scored ramp or null run made against another pilot record than the one the
+    prereg pins, or naming none (#26 K): its rate or length was set by another tau_c clock.
+    Staircases are exempt: their dwell comes from a grid pilot's tau.json (--tau), no record."""
+    runs = {r.run_id: r for i in chosen.values() for r in [*i.ramps, *(run for run, _ in i.nulls)]}
+    foreign = [
+        f"{r.run_id} (pilot sha256 {sha})"
+        for r in runs.values()
+        if (sha := (r.params.get("pilot") or {}).get("sha256")) != pinned
+    ]
+    if foreign:
+        raise IsingDataError(
+            f"ramp and null runs not made against the pilot record the prereg pins, sha256 "
+            f"{pinned}: {foreign}"
+        )
 
 
 def _same_commit(runs: Sequence[Run], commit: str) -> None:
