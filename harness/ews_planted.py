@@ -501,3 +501,12 @@ def restamp(run_dir: Path, git_sha: str | None, dirty: bool | None) -> None:
     manifest = io.read_json(run_dir / "manifest.json")
     manifest["producer"] |= {"git_sha": git_sha, "dirty": dirty}
     io.write_json(run_dir / "manifest.json", manifest, replace=True)
+
+
+def restamp_pilot(run_dir: Path, stamp: dict[str, Any] | None) -> None:
+    """Change the pilot record a planted ramp or null run says it was made against
+    (params.pilot, as pilot.stamp writes it; None, as the simulator writes for a run made
+    against no record). As with restamp, the run stays complete."""
+    manifest = io.read_json(run_dir / "manifest.json")
+    manifest["params"]["pilot"] = stamp
+    io.write_json(run_dir / "manifest.json", manifest, replace=True)

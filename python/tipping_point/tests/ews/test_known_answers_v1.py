@@ -54,6 +54,7 @@ from ews_planted import (
     V1_TAU_C,
     V1_X,
     restamp,
+    restamp_pilot,
     v1_copy,
     v1_dataset,
     v1_peak,
@@ -508,23 +509,33 @@ def frozen_copy(
     return path, copy, commit
 
 
-@pytest.mark.parametrize(("kind", "fault"), [("ramp", "another commit"), ("qs", "a dirty tree")])
-def test_a_frozen_prereg_refuses_a_run_from_another_commit_or_a_dirty_tree(
+@pytest.mark.parametrize(
+    ("kind", "fault"),
+    [("ramp", "another commit"), ("qs", "a dirty tree"), ("null", "no pilot record")],
+)
+def test_a_frozen_prereg_refuses_a_run_its_commit_and_record_did_not_make(
     frozen_copy: tuple[Path, V1, str],
     capsys: pytest.CaptureFixture[str],
     kind: str,
     fault: str,
 ) -> None:
     """Under a frozen prereg ews score takes only runs its tag's commit made from a clean tree
-    (#26 decision 6). One run from another commit, or from a dirty tree, and nothing is scored or
-    logged: the error names that run and no other, the rest being the tag's own."""
+    (#26 decision 6), and only ramps and null runs made against the pilot record it pins (#26 K).
+    One run from another commit, from a dirty tree, or naming no record, as the exploratory null
+    runs do, and nothing is scored or logged: the error names that run and no other."""
     path, copy, commit = frozen_copy
     run_dir = copy.runs[kind, 32, V1_SEEDS[0]]
-    restamp(run_dir, *(("f" * 40, False) if fault == "another commit" else (commit, True)))
+    pilot = io.read_json(run_dir / "manifest.json")["params"].get("pilot")
+    if fault == "no pilot record":
+        restamp_pilot(run_dir, None)
+    else:
+        restamp(run_dir, *(("f" * 40, False) if fault == "another commit" else (commit, True)))
     try:
         assert main(["score", "--prereg", str(path), "--data-dir", str(copy.root)]) == 1
     finally:
         restamp(run_dir, commit, False)
+        if fault == "no pilot record":
+            restamp_pilot(run_dir, pilot)
     err = capsys.readouterr().err
     assert {r.name for r in copy.runs.values() if r.name in err} == {run_dir.name}, err
     assert not (copy.root / "ews").exists()  # no result folder, no trials logged
