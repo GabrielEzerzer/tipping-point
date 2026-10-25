@@ -61,6 +61,10 @@ _QUANTILES = (0.025, 0.975)  # 95% intervals
 _ENTRY_KEYS = ("tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas", "sweeps", "seed")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 KERNEL = Path(__file__).with_name("kernel.py")  # the dynamics tau_c measures
+NO_COMMIT = (  # why measure refuses a run that names no commit; `pilot` says so before it starts
+    "records no commit, so no kernel to name: the code came neither from a git checkout nor "
+    "from a wheel stamped at build time (#109)"
+)
 
 
 def kernel_sha256() -> str:
@@ -90,10 +94,7 @@ def measure(
     L, producer = manifest["params"]["L"], manifest["producer"]
     kernel = manifest["params"]["algorithm"].get("kernel_sha256")
     if producer["git_sha"] is None:
-        raise ValueError(
-            f"{run_dir.name} records no commit, so no kernel to name: it ran neither from a git "
-            "checkout nor from a wheel stamped at build time (#109)"
-        )
+        raise ValueError(f"{run_dir.name} {NO_COMMIT}")
     if kernel is None:
         raise ValueError(f"{run_dir.name} records no kernel_sha256 (run before #55); re-run it")
     stats = io.read_table(run_dir, "stats")

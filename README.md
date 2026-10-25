@@ -234,8 +234,10 @@ writes `tipping_point/_build_info.py` (`commit`, `dirty`, `kernel_sha256` of `is
 `built_at` in UTC) into every sdist and wheel built from a git checkout, and `code_version` reads
 it. `tauc` takes a stamped commit exactly as it takes one from git. An installed copy never reads
 a repository that only encloses it, such as a venv inside another project. A build made where no
-repository tracks the source records no commit (the build prints a warning), and `tauc` refuses
-its runs. To build a wheel for a GPU machine, check out the commit, keep the tree clean, and run:
+repository tracks the source records no commit, and `tauc` refuses its runs. The hook warns when it
+makes one, but `pip` and `uv pip install` hide build output, so `pilot` refuses to start from such
+an install rather than leave the refusal to `tauc`, hours later. To build a wheel for a GPU
+machine, check out the commit, keep the tree clean, and run:
 
 ```sh
 uv build --package tipping-point --wheel     # -> dist/tipping_point-0.1.0-py3-none-any.whl, stamped

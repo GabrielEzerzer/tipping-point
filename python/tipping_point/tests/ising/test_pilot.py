@@ -104,6 +104,19 @@ def test_tauc_refuses_runs_that_cannot_pin_tau_c(tmp_path: Path) -> None:
     assert not (tmp_path / "out").exists()
 
 
+def test_pilot_refuses_to_start_when_no_commit_names_the_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wheel built outside any checkout records no commit (#109), and pip hides the build's
+    warning: pilot refuses before its first sweep, with tauc's reason, instead of leaving tauc
+    to refuse the runs hours later."""
+    monkeypatch.setattr(io, "code_version", lambda: {"git_sha": None, "dirty": None})
+    argv = ["pilot", "--L", "4", "--T", repr(exact.TC), "--sweeps", "10", "--device", "cpu"]
+    with pytest.raises(SystemExit, match="records no commit"):
+        main([*argv, "--data-dir", str(tmp_path)])
+    assert not (tmp_path / "ising").exists()
+
+
 def test_the_committed_record_reads_and_extrapolates() -> None:
     """The fixture is the record #50's pilot wrote (CPU, seed 1, the fixed kernel) plus that
     kernel's sha256, the shape #26's scorer reads: a measured size comes from per_L, any other

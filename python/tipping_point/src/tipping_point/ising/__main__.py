@@ -202,6 +202,8 @@ def _null(args: argparse.Namespace) -> int:
 
 
 def _pilot(args: argparse.Namespace) -> int:
+    if io.code_version()["git_sha"] is None:  # now, not at tauc hours later (pip hides the warning)
+        raise SystemExit(f"this install {pilot.NO_COMMIT}; tauc would refuse every pilot run")
     schedule = protocol.Fixed(args.T or protocol.GRID, args.therm, args.sweeps)
     clock = time.perf_counter()
     run_dir = run.start(
