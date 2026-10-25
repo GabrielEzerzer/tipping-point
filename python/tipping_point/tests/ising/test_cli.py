@@ -55,8 +55,10 @@ def test_validate_cli_passes_and_writes_its_verdicts(tmp_path: Path) -> None:
 
 
 def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
-    """--x picks r from L and the pilot record's A L^z; the tag and the manifest record x, the
-    fit it was read against, and r, and the manifest names the record (#55)."""
+    """--x picks r from L and the pilot record; the record measured no L = 4, so its tau_c comes
+    from the fit A L^z and the manifest says so (#56). The tag and the manifest record x, the fit,
+    the source and r; without --eps-start and --eps-end the ramp keeps 3.5 -> 1.5 and records no
+    eps_L window; and the manifest names the record (#55)."""
     argv = ["ramp", "--L", "4", "--x", "2", "--pilot", str(PILOT), "--replicas", "2"]
     argv += ["--pre", "10", "--hold", "10", "--data-dir", str(tmp_path), "--device", "cpu"]
     assert main(argv) == 0
@@ -67,7 +69,9 @@ def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
     record = pilot.read(PILOT)
     fit = record["fit"]
     assert (params["x"], params["A"], params["z"]) == (2.0, fit["A"], fit["z"])
-    assert params["rate"] == protocol.rate_for(4, 2.0, fit["A"], fit["z"])
+    assert params["rate"] == protocol.rate_for(4, 2.0, fit["A"] * 4 ** fit["z"])
+    assert params["rate_source"] == "fit"
+    assert (params["T0"], params["T1"], params["eps_L"]) == (3.5, 1.5, None)
     assert manifest["pilot"] == {
         "run_id": PILOT.parent.name,  # a run id, never a local path
         "sha256": hashlib.sha256(PILOT.read_bytes()).hexdigest(),
@@ -76,6 +80,55 @@ def test_ramp_cli_from_a_kibble_zurek_point(tmp_path: Path) -> None:
         "stale": False,
     }
     assert manifest["algorithm"]["kernel_sha256"] == pilot.kernel_sha256()
+
+
+def test_ramp_cli_reads_the_measured_tau_c_and_sets_its_window_in_eps_l(tmp_path: Path) -> None:
+    """#56: at a size the record measured, r comes from that tau_c, r = tau_c(L) L / (x Tc), and
+    the manifest says measured. #26 decision 4: --eps-start 12 --eps-end -8 sets
+    T0 = Tc (1 + 12/L) and T1 = Tc (1 - 8/L), which the manifest records beside the window; the
+    run starts at T0, ends at T1, and fills the slow-ramp slot of a prereg giving that window
+    (the scorer's check, #26 F), never one giving another."""
+    from tipping_point.ews import ising
+
+    argv = ["ramp", "--L", "16", "--x", "2", "--pilot", str(PILOT), "--replicas", "2"]
+    argv += ["--eps-start", "12", "--eps-end", "-8", "--pre", "10", "--hold", "10"]
+    assert main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"]) == 0
+    run_dir = _only_run(tmp_path)
+    params = io.read_json(run_dir / "manifest.json")["params"]["schedule"]["params"]
+    tau_c = pilot.read(PILOT)["per_L"]["16"]["tau_c"]
+    assert params["rate"] == round(tau_c * 16 / (2.0 * exact.TC)) == protocol.rate_for(16, 2, tau_c)
+    assert params["rate_source"] == "measured" and params["eps_L"] == [12.0, -8.0]
+    assert params["T0"] == exact.TC * (1 + 12 / 16) and params["T1"] == exact.TC * (1 - 8 / 16)
+    temperatures = io.read_table(run_dir, "stats")["temperature"].to_numpy()
+    assert temperatures[0] == params["T0"] and temperatures[-1] == params["T1"]
+    run = ising.open_run(run_dir)
+    data = {"L": [16], "seeds": [1], "ramps": {"kind": "ramp", "x": 2.0, "eps_L": [12.0, -8.0]}}
+    assert ising._slots(run, data) == [("ramp", 1)]
+    with pytest.raises(ising.IsingDataError, match="eps_L = 12 to -8"):
+        ising._slots(run, data | {"ramps": {"kind": "ramp", "x": 2.0, "eps_L": [10.0, -8.0]}})
+
+
+@pytest.mark.parametrize(
+    ("window", "complaint"),
+    [
+        (["--eps-start", "12"], "go together"),
+        (["--eps-end", "-8"], "go together"),
+        (["--eps-start", "-8", "--eps-end", "12"], "-L < --eps-end < --eps-start"),
+        (
+            ["--eps-start", "12", "--eps-end", "-4"],
+            "-L < --eps-end < --eps-start",
+        ),  # T1 = 0 at L = 4
+    ],
+)
+def test_ramp_window_must_be_a_cooling_window_in_eps_l(
+    tmp_path: Path, window: list[str], complaint: str
+) -> None:
+    """Catches a half-set window (one end in eps_L, the other the old 3.5 or 1.5 in T), a
+    heating ramp, or a bath at or below T = 0: refused before any run starts."""
+    argv = ["ramp", "--L", "4", "--rate", "50", "--replicas", "2", *window]
+    with pytest.raises(SystemExit, match=complaint):
+        main([*argv, "--data-dir", str(tmp_path), "--device", "cpu"])
+    assert not (tmp_path / "ising").exists()
 
 
 def test_every_run_id_the_cli_makes_opens_through_the_engine(
