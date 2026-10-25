@@ -36,8 +36,9 @@ commit cannot decide it, since it moves with every merge whether the kernel chan
 which records whether it was.
 
 Subtracting each series' mean pulls the windowed estimate about 10 / (N / tau) low (2c over
-N / tau, c = 5), so a size is recorded only from N >= 300 tau_c: at most ~3% short. The record's
-L = 64 entry (343 tau_c) reads ~3% low and L = 16 (960 tau_c) ~1%; test_autocorr pins both.
+N / tau, c = 5), so a size is recorded only from N >= 300 tau_c: at most ~3% short. The committed
+record's shortest entry, L = 64 (383 tau_c), reads ~3% low and its longest, L = 16 (939 tau_c),
+~1%; test_autocorr pins both.
 """
 
 from __future__ import annotations

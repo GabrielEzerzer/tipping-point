@@ -57,7 +57,7 @@ _CONFIGS = (
     "energy",
 )
 Row = dict[str, Any]
-Alarms = dict[tuple[str, str], dict[int, tuple[list[np.ndarray], float]]]  # per-L alarm eps_L
+Peaks = dict[tuple[str, str], dict[int, list[np.ndarray]]]  # per-L, per-seed peak eps_L
 
 
 class IsingDataError(RuntimeError):
@@ -340,13 +340,26 @@ def _thermalised(run: Run, temperature: float) -> bool | None:
 
 def _slots(run: Run, data: dict[str, Any]) -> list[tuple[Any, ...]]:
     """The prereg slots a run fills: ("ramp", seed), ("staircase", seed) or
-    ("null", seed, eps_L) with its block."""
+    ("null", seed, eps_L) with its block. A ramp at another x is another experiment (the fast
+    ramp) and fills none; one at the prereg's x whose eps_L window is not data.ramps.eps_L, when
+    the prereg gives one, is refused."""
     if run.L not in data["L"] or run.seed not in data["seeds"]:
         return []
     params = run.schedule.get("params", {})
     if run.kind == data["ramps"]["kind"]:
         x = params.get("x")
-        return [("ramp", run.seed)] if x is not None and _close(x, data["ramps"]["x"]) else []
+        if x is None or not _close(x, data["ramps"]["x"]):
+            return []
+        window = data["ramps"].get("eps_L")
+        if window is not None:
+            ran = [float(run.eps(params[end])) for end in ("T0", "T1")]
+            if not all(map(_close, ran, map(float, window))):
+                raise IsingDataError(
+                    f"{run.run_id}: its ramp runs from eps_L = {ran[0]:g} to {ran[1]:g}, but the "
+                    f"prereg's data.ramps.eps_L is {window}; refused (exclude it, or regenerate "
+                    "it with ramp --eps-start and --eps-end)"
+                )
+        return [("ramp", run.seed)]
     if run.kind == data["staircase"]["kind"]:
         return [("staircase", run.seed)]
     if run.kind == data["nulls"]["kind"]:
@@ -389,7 +402,15 @@ def select(
             k: [r.run_id for r, _ in v] for k, v in filled.items() if k[0] == L and len(v) > 1
         }
         if missing:
-            raise IsingDataError(f"no complete run for {missing}")
+            other_x = [
+                f"{r.run_id} (x = {r.schedule.get('params', {}).get('x')})"
+                for r in runs
+                if r.run_id not in excluded
+                and r.kind == data["ramps"]["kind"]
+                and (r.L, "ramp", r.seed) in missing
+            ]
+            elsewhere = f"; ramps there at another x than {data['ramps']['x']}: {other_x}"
+            raise IsingDataError(f"no complete run for {missing}" + (elsewhere if other_x else ""))
         if doubled:
             raise IsingDataError(f"more than one run for {doubled}; exclude the extras")
         short = [
@@ -507,7 +528,7 @@ def positives(
 
 @dataclass
 class Evaluation:
-    tables: dict[str, list[Row]]  # auc, surrogates, alarms, fss
+    tables: dict[str, list[Row]]  # auc, surrogates, alarms, peaks, fss
     inputs: list[Run]
     pilot: Pilot
     dropped: dict[str, list[str] | int]  # failed null blocks, and how many plateaus were dropped
@@ -519,11 +540,14 @@ def evaluate(
     rng: np.random.Generator,
     say: Callable[[str], None] = print,
     allow_stale: bool = False,
+    commit: str | None = None,
 ) -> Evaluation:
-    """Score a pre-registration's Ising experiment: the AUC of every cell, the surrogate tests and
-    alarms at the headline cell, and static and dynamic finite-size scaling. It computes only:
-    writing results and logging trials are the caller's. A stale pilot record is refused unless
-    allow_stale."""
+    """Score a pre-registration's Ising experiment: the AUC of every cell, the surrogate tests,
+    alarms and peak positions at the headline cell, and static and dynamic finite-size scaling.
+    It computes only: writing results and logging trials are the caller's. A stale pilot record
+    is refused unless allow_stale. With `commit`, the commit a frozen prereg's tag points at,
+    every scored run must have been made by that commit from a clean tree; without it (an
+    unfrozen prereg, exploratory use) any commit is scored."""
     data = doc["data"]
     pinned = data["tau_c"]["pilot_sha256"]
     pilot = read_pilot(
@@ -532,18 +556,36 @@ def evaluate(
     if pilot.stale:
         say(f"warning: {pilot.path}: {pilot.stale}; scored anyway (--allow-stale-pilot)")
     chosen = select(*find_runs(data_dir), data)
-    tables: dict[str, list[Row]] = {"auc": [], "surrogates": [], "alarms": []}
-    alarm_eps: Alarms = {}
+    scored = list({run.run_id: run for i in chosen.values() for run in i.runs()}.values())
+    if commit is not None:
+        _same_commit(scored, commit)
+    tables: dict[str, list[Row]] = {"auc": [], "surrogates": [], "alarms": [], "peaks": []}
+    peaks: Peaks = {}
     for L, inputs in chosen.items():
         for cadence in doc["indicators"]["cadences"]:
-            prep = _cells(doc, L, inputs, cadence, pilot.tau(L), tables, alarm_eps, rng)
+            prep = _cells(doc, L, inputs, cadence, pilot.tau(L), tables, peaks, rng)
             say(f"L = {L}, {cadence}: {prep.sweeps:g} sweeps per sample, tau_c = {pilot.tau(L):g}")
     static, plateaus_dropped = _static(doc, chosen, rng)
-    tables["fss"] = static + _dynamic(doc, alarm_eps, rng)
-    inputs = list({run.run_id: run for i in chosen.values() for run in i.runs()}.values())
+    tables["fss"] = static + _dynamic(doc, peaks, rng)
     null_blocks = [block for i in chosen.values() for block in i.dropped]
     dropped = {"null_blocks": null_blocks, "plateaus": plateaus_dropped}
-    return Evaluation(tables, inputs, pilot, dropped)
+    return Evaluation(tables, scored, pilot, dropped)
+
+
+def _same_commit(runs: Sequence[Run], commit: str) -> None:
+    """Refuse a scored run that the frozen commit did not make from a clean tree (#26 decision
+    6: a version scores only runs generated after its freeze, from the tagged commit)."""
+    foreign = [
+        f"{r.run_id} (git_sha {producer.get('git_sha')}, dirty {producer.get('dirty')})"
+        for r in runs
+        if (producer := r.manifest.get("producer", {})).get("git_sha") != commit
+        or producer.get("dirty") is not False
+    ]
+    if foreign:
+        raise IsingDataError(
+            f"runs not made by the freeze tag's commit {commit} from a clean tree: {foreign}; "
+            "a frozen prereg scores only runs generated from its tagged commit"
+        )
 
 
 def _cells(
@@ -553,12 +595,13 @@ def _cells(
     cadence: str,
     tau_c: float,
     tables: dict[str, list[Row]],
-    alarm_eps: Alarms,
+    peaks: Peaks,
     rng: np.random.Generator,
 ) -> Prepared:
-    """Every sensitivity cell of one L and cadence: AUC rows, plus surrogate and alarm rows at the
-    headline cell. The null rows depend on h only through the span, which is mostly the same at
-    every h, so they are scored and surrogate-tested once per pipeline and reused (#70)."""
+    """Every sensitivity cell of one L and cadence: AUC rows, plus surrogate, alarm and peak rows
+    at the headline cell, whose peak positions also go to `peaks` for the dynamic test. The null
+    rows depend on h only through the span, which is mostly the same at every h, so they are
+    scored and surrogate-tested once per pipeline and reused (#70)."""
     ind, sens, sc = doc["indicators"], doc["sensitivity"], doc["scoring"]
     segment = float(doc["event"]["segment"])
     horizons = [float(h) for h in doc["event"]["horizons"]]
@@ -612,10 +655,11 @@ def _cells(
                             rows = _surrogate_rows(cell, p_pos, null_pvalues[key], sc)
                             tables["surrogates"] += rows
             if top:
-                rows, eps = _alarms(doc, prep, L, tau_c, window, bandwidth)
-                tables["alarms"] += rows
-                for key, found in eps.items():
-                    alarm_eps.setdefault(key, {})[L] = found
+                tables["alarms"] += _alarms(doc, prep, L, tau_c, window, bandwidth)
+                rows, found = _peaks(doc, prep, L, window, bandwidth)
+                tables["peaks"] += rows
+                for key, groups in found.items():
+                    peaks.setdefault(key, {})[L] = groups
     return prep
 
 
@@ -683,21 +727,23 @@ def _alarms(
     tau_c: float,
     window: int,
     bandwidth: float | None,
-) -> tuple[list[Row], dict[tuple[str, str], tuple[list[np.ndarray], float]]]:
-    """theta from the null blocks of half the seeds at the target false-alarm rate per tau_c,
-    the rate on the other half, and the eps_L at which each ramp replica's s(t) first rises above
-    theta inside the band (NaN: a miss, or censored: above theta already as the band opens, so
-    its alarm came before the band and is not measured here). s(t) runs every `every` tau_c over
-    each whole series, each score seeing only its past."""
-    a, dyn = doc["scoring"]["alarms"], doc["fss"]["dynamic"]
-    observable, per = dyn["observable"], float(a["report_per"])
+) -> list[Row]:
+    """A descriptive row per scoring.alarms indicator (#97): theta from the null blocks of half
+    the seeds at the target false-alarm rate per tau_c, the rate on the other half, and the eps_L
+    at which each ramp replica's s(t) first rises above theta inside the band (NaN: a miss, or
+    censored: above theta already as the band opens, so its alarm came before the band and is not
+    measured here). When no theta alarms as often as the target, the row says unattainable and
+    every field that needs a theta is NaN. s(t) runs every `every` tau_c over each whole series,
+    each score seeing only its past."""
+    a = doc["scoring"]["alarms"]
+    observable, per = doc["fss"]["dynamic"]["observable"], float(a["report_per"])
     every = max(1, round(float(a["every"]) * tau_c / prep.sweeps))
     taus_per_score = every * prep.sweeps / tau_c
     lowest = min(float(h) for h in doc["event"]["horizons"])
     _, length = positives(prep, observable, lowest, float(doc["event"]["segment"]), window)
     band_top, band_bottom = (float(v) for v in a["band"])
-    rows, eps_out = [], {}
-    for name in dyn["indicators"]:
+    rows = []
+    for name in a["indicators"]:
         pipe = Pipeline(name, window, length, bandwidth, int(doc["indicators"]["lag"]))
         direction = doc["indicators"]["direction"][name]  # a falling indicator alarms on -s(t)
         seeds = sorted({run.seed for run, _ in prep.nulls})
@@ -709,7 +755,30 @@ def _alarms(
             raise IsingDataError(f"L = {L}: alarms need null runs from two seeds, one per half")
         train, test = (_ragged(h) for h in halves)
         duration = tuple(sum(b.size for b in h) * taus_per_score for h in halves)
-        theta = scoring.threshold_at_far(train, float(a["far"]), duration[0])
+        found = scoring.threshold_at_far(train, float(a["far"]), duration[0])
+        theta, nan = found.theta, float("nan")
+        row = {
+            "indicator": name,
+            "observable": observable,
+            "cadence": prep.cadence,
+            "L": L,
+            "direction": direction,
+            "theta": theta,
+            "attainable": found.attainable,
+            "far_max": found.far_max * per,
+            "far_set": nan,
+            "far_test": nan,
+            "far_per_taus": per,
+            "alarm_eps_median": nan,
+            "alarm_eps_q1": nan,
+            "alarm_eps_q3": nan,
+            "censored": nan,
+            "miss_rate": nan,
+            "n": sum(len(s.replicas) for _, s in prep.ramps),
+        }
+        rows.append(row)
+        if not found.attainable:
+            continue
         groups, censored = [], []
         for run, s in prep.ramps:
             times, scores = trailing_score(s.observable(observable), pipe, every)
@@ -723,10 +792,45 @@ def _alarms(
             groups.append(alarm)
             censored.append(late)
         alarm, late = np.concatenate(groups), np.concatenate(censored)
-        eps_out[(name, prep.cadence)] = (groups, float(np.mean(late)))
         hit = alarm[np.isfinite(alarm)]
         measured = ~late
-        q1, median, q3 = np.quantile(hit, [0.25, 0.5, 0.75]) if len(hit) else (np.nan,) * 3
+        q1, median, q3 = np.quantile(hit, [0.25, 0.5, 0.75]) if len(hit) else (nan,) * 3
+        row |= {
+            "far_set": scoring.false_alarm_rate(train, theta, duration[0]) * per,
+            "far_test": scoring.false_alarm_rate(test, theta, duration[1]) * per,
+            "alarm_eps_median": float(median),
+            "alarm_eps_q1": float(q1),
+            "alarm_eps_q3": float(q3),
+            "censored": float(np.mean(late)),
+            "miss_rate": float(np.mean(~np.isfinite(alarm[measured]))) if measured.any() else nan,
+        }
+    return rows
+
+
+def _peaks(
+    doc: dict[str, Any], prep: Prepared, L: int, window: int, bandwidth: float | None
+) -> tuple[list[Row], dict[tuple[str, str], list[np.ndarray]]]:
+    """Where each slow-ramp replica's indicator peaks (#98), for every scored indicator: the
+    headline pipeline's detrend, window and lag along the whole ramp, and the eps_L of its
+    extremum in the indicator's expected direction inside fss.dynamic.search (NaN on the band's
+    edge: not located). A descriptive row per indicator; the per-seed positions go to the
+    dynamic test."""
+    dyn, ind = doc["fss"]["dynamic"], doc["indicators"]
+    observable = dyn["observable"]
+    band = (float(dyn["search"][0]), float(dyn["search"][1]))
+    rows, found = [], {}
+    for name in ind["names"]:
+        pipe = Pipeline(name, window, 2, bandwidth, int(ind["lag"]))  # rolling ignores length
+        direction = ind["direction"][name]
+        groups = []
+        for run, s in prep.ramps:
+            ramp_segment(s, run, *band)  # refuses a ramp that does not cross the whole band
+            values = pipe.rolling(s.observable(observable))
+            groups.append(fss.peak_position(values, run.eps(s.temperature), band, direction))
+        peak = np.concatenate(groups)
+        located = peak[np.isfinite(peak)]
+        q1, median, q3 = np.quantile(located, [0.25, 0.5, 0.75]) if len(located) else [np.nan] * 3
+        found[(name, prep.cadence)] = groups
         rows.append(
             {
                 "indicator": name,
@@ -734,21 +838,14 @@ def _alarms(
                 "cadence": prep.cadence,
                 "L": L,
                 "direction": direction,
-                "theta": theta,
-                "far_set": scoring.false_alarm_rate(train, theta, duration[0]) * per,
-                "far_test": scoring.false_alarm_rate(test, theta, duration[1]) * per,
-                "far_per_taus": per,
-                "alarm_eps_median": float(median),
-                "alarm_eps_q1": float(q1),
-                "alarm_eps_q3": float(q3),
-                "censored": float(np.mean(late)),
-                "miss_rate": float(np.mean(~np.isfinite(alarm[measured])))
-                if measured.any()
-                else float("nan"),
-                "n": len(alarm),
+                "peak_eps_median": float(median),
+                "peak_eps_q1": float(q1),
+                "peak_eps_q3": float(q3),
+                "n": len(peak),
+                "edge_fraction": float(np.mean(np.isnan(peak))),
             }
         )
-    return rows, eps_out
+    return rows, found
 
 
 def _ragged(blocks: list[np.ndarray]) -> np.ndarray:
@@ -772,22 +869,21 @@ def _fss_row(quantity: str, cadence: str, role: str, fit: fss.Exponent, judged: 
     }
 
 
-def _dynamic(doc: dict[str, Any], alarm_eps: Alarms, rng: np.random.Generator) -> list[Row]:
-    """1/nu from the median alarm eps_L over L, per indicator and cadence. Censored and missed
-    replicas carry no alarm eps_L; where more than half of an L's replicas were censored, the
-    alarm position was not measured there and the verdict is inconclusive."""
+def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> list[Row]:
+    """1/nu from the median peak eps_L over L, per fss.dynamic indicator and cadence. A peak on
+    the search band's edge was not located and is left out; where more than half of an L's
+    replicas were not located, the verdict is inconclusive."""
     dyn, sc = doc["fss"]["dynamic"], doc["scoring"]
     expected, tolerance = float(dyn["expected_inverse_nu"]), float(dyn["tolerance"])
     rows = []
-    for (name, cadence), per_size in alarm_eps.items():
-        samples = {L: groups for L, (groups, _) in per_size.items()}
-        inv_nu, ci = fss.alarm_convergence(
-            samples, int(sc["bootstrap"]), rng, float(sc["ci_level"])
-        )
+    for (name, cadence), samples in peaks.items():
+        if name not in dyn["indicators"]:
+            continue  # reported in the peaks table, never judged
+        inv_nu, ci = fss.peak_convergence(samples, int(sc["bootstrap"]), rng, float(sc["ci_level"]))
         verdict = fss.combine(
             fss.match(inv_nu, ci, expected, tolerance), fss.excludes(ci, 0.0, tolerance)
         )
-        if max(late for _, late in per_size.values()) > 0.5:
+        if max(np.mean(np.isnan(np.concatenate(g))) for g in samples.values()) > 0.5:
             verdict = fss.INCONCLUSIVE  # unmeasured: neither a pass nor a fail
         fit = fss.Exponent(inv_nu, ci, float("nan"), {})
         judged = {"expected": expected, "tolerance": tolerance, "verdict": verdict}
@@ -829,7 +925,7 @@ def _static(
     """Exponents at the staircase plateau nearest Tc, one row per fss.static entry: the measured
     rows feed the moments and tau_int, bursts of frames one sweep apart feed 1 - AC1."""
     T = float(doc["data"]["staircase"]["temperature"])
-    sc, default_tolerance = doc["scoring"], float(doc["fss"]["dynamic"]["tolerance"])
+    sc = doc["scoring"]
     dense: dict[int, list[np.ndarray]] = {L: [] for L in chosen}
     bursts: dict[int, list[np.ndarray]] = {L: [] for L in chosen}
     strides: dict[int, int] = {}
@@ -867,7 +963,7 @@ def _static(
 
         fit = fss.fit_exponent(samples, statistic, int(sc["bootstrap"]), rng, float(sc["ci_level"]))
         expected = float(spec.get("expected", np.nan))
-        tolerance = float(spec.get("tolerance", default_tolerance))
+        tolerance = float(spec.get("tolerance", np.nan))  # validation: judged roles state one
         cadence = "matched" if quantity == "one_minus_ac1" else "dense"
         judged = {
             "expected": expected,

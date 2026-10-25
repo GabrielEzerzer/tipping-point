@@ -3,8 +3,9 @@ values: real spins, real Parquet, real manifests), and a small model trained on 
 
 At L = 16 with 4 replicas, each staircase holds three plateaus (3.5, Tc + 4.5e-5 inside the
 held-out band, and 1.5) of four bursts each; seeds 101 and 102 train and validate, seed 1 is a
-pre-registered seed (scored, never trained on), and a ramp and a fixed (null) run complete the set
-of kinds training must refuse. Everything runs on the CPU in seconds.
+scored seed (refused, never trained on), and a ramp and a fixed (null) run complete the set of
+kinds training must refuse. Everything runs on the CPU in seconds. PILOT is the committed pilot
+record, #54's.
 """
 
 from dataclasses import dataclass

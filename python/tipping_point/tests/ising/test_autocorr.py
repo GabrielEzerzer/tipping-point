@@ -4,10 +4,17 @@ AR(1), x_t = phi x_(t-1) + noise, has rho(t) = phi^t, so tau = 1 + 2 sum phi^t
 = (1 + phi) / (1 - phi): 199 at phi = 0.99. White noise has tau = 1.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy.signal import lfilter
 from tipping_point.ising import autocorr
+
+RECORD = json.loads(  # #54's record, the committed fixture: the geometries its tau_c come from
+    (Path(__file__).parents[1] / "fixtures" / "ising_pilot.json").read_text(encoding="utf-8")
+)["per_L"]
 
 
 def _ar1(phi: float, replicas: int, n: int, seed: int) -> np.ndarray:
@@ -76,17 +83,18 @@ def test_short_series_are_flagged_unreliable() -> None:
 
 
 @pytest.mark.parametrize(
-    ("replicas", "n_over_tau", "datasets", "band"),
-    [(16, 343, 64, (0.93, 1.0)), (64, 960, 16, (0.97, 1.01))],  # the record's L = 64 and L = 16
+    ("L", "datasets", "band"),
+    [("64", 16, (0.93, 1.0)), ("16", 16, (0.97, 1.01))],  # the record's shortest and longest
 )
 def test_the_window_reads_10_over_n_over_tau_short_at_the_records_geometries(
-    replicas: int, n_over_tau: int, datasets: int, band: tuple[float, float]
+    L: str, datasets: int, band: tuple[float, float]
 ) -> None:
     """Pins the bias the pilot record carries. Subtracting each series' mean pulls the c = 5
-    windowed tau ~10 / (N / tau) low: 2.9% at the L = 64 run's 16 replicas x 343 tau, 1.0% at
-    L = 16's 64 x 960 tau. AR(1) with tau = 9, averaged over independent datasets of the record's
-    shape so the noise sits well inside the band (measured 0.976 and 0.988)."""
-    n = round(n_over_tau * 9)
+    windowed tau ~10 / (N / tau) low: 2.6% at the record's shortest entry, L = 64's 64 replicas
+    x 383 tau, 1.1% at its longest, L = 16's 64 x 939 tau. AR(1) with tau = 9, averaged over
+    independent datasets of the entry's shape so the noise sits well inside the band."""
+    replicas, n = RECORD[L]["replicas"], round(RECORD[L]["n_over_tau"] * 9)
+    assert min(e["n_over_tau"] for e in RECORD.values()) == RECORD["64"]["n_over_tau"]
     ratios = [autocorr.estimate(_ar1(0.8, replicas, n, seed)).tau / 9 for seed in range(datasets)]
     assert band[0] <= np.mean(ratios) <= band[1]
 

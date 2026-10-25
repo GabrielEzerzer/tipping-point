@@ -17,14 +17,12 @@ from tipping_point.ising import io, protocol, run
 REPO = Path(__file__).resolve().parents[4]
 V1 = REPO / "paper" / "prereg" / "ising-ews-v1.toml"
 TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE.toml"
-PILOT_SHA = "ab" * 32
+FIXTURE = REPO / "python" / "tipping_point" / "tests" / "fixtures" / "ising_pilot.json"
 
 
 def _ready(text: str, prereg_id: str = "demo") -> str:
-    """v1 with its pilot pinned and a new id: a file that may be frozen."""
-    text = text.replace('id = "ising-ews"', f'id = "{prereg_id}"', 1)
-    text = text.replace('pilot_run = "TBD"', 'pilot_run = "20261023T000000Z-L16-pilot-s1"', 1)
-    return text.replace('pilot_sha256 = "TBD"', f'pilot_sha256 = "{PILOT_SHA}"', 1)
+    """v1 under a new id: a file that may be frozen."""
+    return text.replace('id = "ising-ews"', f'id = "{prereg_id}"', 1)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -49,16 +47,15 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_committed_files_validate_and_v1_waits_only_for_its_pilot() -> None:
-    """The template and v1 parse with every key the scorer reads. v1 cannot be frozen yet, and
-    the only things missing are the #50 pilot record's run and hash."""
+def test_committed_files_validate_and_v1_may_be_frozen() -> None:
+    """The template and v1 parse with every key the scorer reads. v1 passes the freeze's strict
+    check, nothing left as a placeholder now that its pilot record is pinned; the template does
+    not. A fourth size would need a budget to match."""
     for path in (TEMPLATE, V1):
         prereg.load(path)
-    v1 = prereg.load(V1)
-    missing = prereg.problems(v1.doc, strict=True)
-    assert missing and all(m.startswith("data.tau_c.pilot_") for m in missing), missing
-    assert not prereg.problems(tomllib.loads(_ready(V1.read_text("utf-8"))), strict=True)
-    grown = tomllib.loads(_ready(V1.read_text("utf-8")))
+    assert prereg.problems(prereg.load(V1).doc, strict=True) == []
+    assert any("placeholder" in p for p in prereg.problems(prereg.load(TEMPLATE).doc, strict=True))
+    grown = tomllib.loads(V1.read_text("utf-8"))
     grown["data"]["L"].append(128)  # a fourth size without a budget to match
     assert any("trials.budget" in p for p in prereg.problems(grown, strict=True))
 
@@ -67,7 +64,7 @@ def test_v1_holds_the_research_pass_protocol() -> None:
     """The numbers the brief fixes (#26 sections 2-4, #50's relabelled ramps)."""
     doc = prereg.load(V1).doc
     assert (doc["id"], doc["version"]) == ("ising-ews", 1)
-    assert doc["data"]["ramps"] == {"kind": "ramp", "x": 0.02}
+    assert {k: doc["data"]["ramps"][k] for k in ("kind", "x")} == {"kind": "ramp", "x": 0.02}
     assert doc["data"]["nulls"]["kind"] == "fixed" and doc["data"]["nulls"]["eps_L"] == [2, 4, 6]
     assert doc["data"]["tau_c"]["source"] == "pilot"  # never numbers in the file
     assert doc["event"]["horizons"] == [0, 1, 2] and doc["event"]["segment"] == 6
@@ -82,6 +79,39 @@ def test_v1_holds_the_research_pass_protocol() -> None:
     assert static["one_minus_ac1"]["role"] == "reference"  # AC1 against its measured kappa, not z
     assert doc["scoring"]["surrogates"]["n"] == 999 and doc["scoring"]["bootstrap"] == 2000
     assert doc["trials"]["budget"] == prereg.cells(doc) == 972
+
+
+def test_v1_holds_the_freeze_decisions() -> None:
+    """#26 comment 6402030372: new seeds and replicas, ramps over one eps_L window, the
+    dynamic test on Var(|m|) peak positions at 0.5, alarms as a reported table at 1 per 1000
+    tau_c, every judged static entry with its own tolerance (1 - AC1 keeps the 0.1 it took from
+    the dynamic test), h = 2 at every L, the disclosure of what was seen before, and #54's
+    tau_c record pinned: the sha256 of the committed fixture, so anyone can check it."""
+    doc = prereg.load(V1).doc
+    data, dyn = doc["data"], doc["fss"]["dynamic"]
+    assert data["tau_c"]["pilot_run"] == "20261025T194846Z-tauc-L16-32-64-128"
+    assert data["tau_c"]["pilot_sha256"] == hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    assert (data["L"], data["seeds"], data["replicas"]) == ([16, 32, 64], [6, 7, 8, 9, 10], 64)
+    assert data["ramps"]["eps_L"] == [12.0, -8.0]
+    assert (dyn["statistic"], dyn["indicators"], dyn["search"]) == ("peak", ["variance"], [6, -4])
+    assert (dyn["expected_inverse_nu"], dyn["tolerance"]) == (1.0, 0.5)
+    alarms = doc["scoring"]["alarms"]
+    assert (alarms["indicators"], alarms["far"]) == (["variance", "ac", "skewness"], 0.001)
+    assert (alarms["report_per"], alarms["band"], alarms["every"]) == (1000.0, [2, -2], 1.0)
+    tolerance = {row["quantity"]: row.get("tolerance") for row in doc["fss"]["static"]}
+    assert tolerance == {
+        "l2_var_abs_m": 0.1,
+        "mean_abs_m": 0.02,
+        "skewness_abs_m": 0.1,
+        "tau_int_abs_m": None,  # descriptive: never judged
+        "one_minus_ac1": 0.1,
+    }
+    assert doc["event"]["horizons"] == [0, 1, 2]  # h = 2 is legal at L = 16 now
+    shown = doc["disclosure"]
+    assert "seeds 1-5" in shown["exploratory"] and "L = 16 and 32" in shown["exploratory"]
+    assert "in view" in shown["decisions"] and "after the freeze tag" in shown["confirmatory"]
+    comments = {link.rsplit("-", 1)[1] for link in shown["links"]}
+    assert comments == {"6402030372", "6387307847", "6390788147", "6393467391"}
 
 
 @pytest.mark.parametrize(
@@ -100,6 +130,23 @@ def test_v1_holds_the_research_pass_protocol() -> None:
         (lambda d: d["indicators"].update(detrend="none"), "ar1 needs detrending"),
         (lambda d: d["indicators"]["direction"].pop("skewness"), "indicators.direction.skewness"),
         (lambda d: d["scoring"]["surrogates"].update(primary="fourier"), "surrogates.primary"),
+        # the freeze's keys (#26 comment 6402030372)
+        (lambda d: d["fss"]["static"][4].pop("tolerance"), "a reference needs its own tolerance"),
+        (lambda d: d["fss"]["dynamic"].pop("statistic"), "fss.dynamic.statistic: missing"),
+        (lambda d: d["fss"]["dynamic"].update(statistic="alarm"), "fss.dynamic.statistic: one of"),
+        (lambda d: d["fss"]["dynamic"].pop("search"), "fss.dynamic.search: missing"),
+        (lambda d: d["fss"]["dynamic"].update(search=[-4.0, 6.0]), "the hot edge first"),
+        (lambda d: d["fss"]["dynamic"].update(search=[6.0]), "fss.dynamic.search: [from"),
+        (lambda d: d["fss"]["dynamic"].update(search=["6", "-4"]), "search[0]: expected int"),
+        (lambda d: d["scoring"]["alarms"].pop("indicators"), "scoring.alarms.indicators: missing"),
+        (lambda d: d["scoring"]["alarms"].update(indicators=["kurtosis"]), "must be scored"),
+        (lambda d: d["data"]["ramps"].update(eps_L=[-8.0, 12.0]), "start above end"),
+        (lambda d: d["data"]["ramps"].update(eps_L=[12.0]), "data.ramps.eps_L: [start, end]"),
+        (lambda d: d["data"]["ramps"].update(eps_L=[True, False]), "data.ramps.eps_L"),
+        (lambda d: d["data"]["ramps"].update(eps_L="12, -8"), "data.ramps.eps_L"),
+        (lambda d: d.pop("disclosure"), "disclosure: missing"),
+        (lambda d: d["disclosure"].pop("confirmatory"), "disclosure.confirmatory: missing"),
+        (lambda d: d["disclosure"].update(links="#26"), "disclosure.links: expected an array"),
     ],
 )
 def test_malformed_files_are_named(edit: Any, complaint: str) -> None:
@@ -175,8 +222,8 @@ def test_freeze_refuses_what_it_should(repo: Path) -> None:
     )
     with pytest.raises(prereg.PreregError, match="not committed"):
         prereg.freeze(repo, "demo")  # the latest version is the one frozen
-    unready = V1.read_text("utf-8").replace('id = "ising-ews"', 'id = "raw"').encode()
-    (repo / "paper" / "prereg" / "raw-v1.toml").write_bytes(unready)
+    unready = _ready(V1.read_text("utf-8"), "raw").replace('pilot_run = "', 'pilot_run = "TBD', 1)
+    (repo / "paper" / "prereg" / "raw-v1.toml").write_bytes(unready.encode())
     with pytest.raises(prereg.PreregError, match="placeholder"):
         prereg.freeze(repo, "raw")
     with pytest.raises(prereg.PreregError, match="no paper/prereg"):

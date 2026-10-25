@@ -2,10 +2,13 @@
 
 import itertools
 import random
+from pathlib import Path
 
 import pytest
-from tipping_point.ising import exact, protocol
+from tipping_point.ising import exact, pilot, protocol
 from tipping_point.ising.protocol import Burst, Fixed, Ramp, Staircase
+
+FIXTURE = Path(__file__).parents[1] / "fixtures" / "ising_pilot.json"  # #54's record
 
 
 def _answers(schedule: protocol.Schedule, steps: list[int]) -> list[tuple]:
@@ -134,7 +137,7 @@ def test_ramp_saves_evenly_in_epsilon_l_inside_the_band() -> None:
     inside the band must match across L, and the manifest must say where they went."""
     per_unit = {}
     for L in (16, 128):
-        r = Ramp(rate=protocol.rate_for(L, 0.02, 0.13, 2.2), L=L)
+        r = Ramp(rate=protocol.rate_for(L, 0.02, 0.13 * L**2.2), L=L)
         inside = [s for s in _starts(r) if _in_band(r, L, s)]
         hot_edge = min(10.0, L * (r.T0 - exact.TC) / exact.TC)  # L = 16's band starts above T0
         per_unit[L] = len(inside) / (hot_edge + 5)
@@ -145,25 +148,48 @@ def test_ramp_saves_evenly_in_epsilon_l_inside_the_band() -> None:
     assert per_unit[128] == pytest.approx(protocol.BAND_PER_EPSILON_L, abs=1)
 
 
-def test_rate_for_puts_every_size_at_the_same_point_of_the_true_tau() -> None:
+def test_rate_for_puts_every_size_at_the_same_point_of_its_tau_c() -> None:
     """x = tau_c(L) / (sweeps per unit epsilon_L) at every L, so the window |epsilon_L| < 1 takes
-    2/x tau_c: 100 at x = 0.02 and 1 at x = 2. Catches a rate that ignores A (pre-#50, the fixed
-    kernel's 2.5x slower tau made every ramp 2.5x faster than its x said) or uses another z."""
-    A, z = 0.13, 2.2
-    for L in (16, 32, 64, 128):
+    2/x tau_c: 100 at x = 0.02 and 1 at x = 2. #56: the tau_c given is the one used, so each
+    size's measured tau_c (the committed record's), off the fit's line, sets that size's rate.
+    Catches a rate that ignores tau_c's scale (pre-#50, the fixed kernel's 2.5x slower tau made
+    every ramp 2.5x faster than its x said) or reads L into it twice."""
+    per_L = pilot.read(FIXTURE)["per_L"]
+    for L, tau_c in ((int(L), entry["tau_c"]) for L, entry in per_L.items()):
         for x in (0.02, 2.0):
-            per_epsilon_L = protocol.rate_for(L, x, A, z) * exact.TC / L
-            assert per_epsilon_L == pytest.approx(A * L**z / x, rel=0.01)
-    slower = protocol.rate_for(64, 0.02, 2.5 * A, z)
-    assert slower == pytest.approx(2.5 * protocol.rate_for(64, 0.02, A, z), rel=1e-6)
+            per_epsilon_L = protocol.rate_for(L, x, tau_c) * exact.TC / L
+            assert per_epsilon_L == pytest.approx(tau_c / x, rel=0.01)
+    tau_64 = per_L["64"]["tau_c"]
+    slower = protocol.rate_for(64, 0.02, 2.5 * tau_64)
+    assert slower == pytest.approx(2.5 * protocol.rate_for(64, 0.02, tau_64), rel=1e-6)
 
 
 def test_the_pre_50_x_values_are_x_times_a() -> None:
-    """The old rate L^3.17 / (x Tc) is this rate at x A with z = 2.17: on the pre-#47 kernel
-    (A = 0.052) the nominal 0.3 and 30 were 0.016 and 1.6."""
+    """The old rate L^3.17 / (x Tc) is this rate at x A for tau_c = A L^2.17: on the pre-#47
+    kernel (A = 0.052) the nominal 0.3 and 30 were 0.016 and 1.6."""
     for x_old in (0.3, 30.0):
         old = 32**3.17 / (x_old * exact.TC)
-        assert protocol.rate_for(32, x_old * 0.052, 0.052, 2.17) == pytest.approx(old, rel=1e-3)
+        rate = protocol.rate_for(32, x_old * 0.052, 0.052 * 32**2.17)
+        assert rate == pytest.approx(old, rel=1e-3)
+
+
+def test_a_ramp_records_its_eps_window_and_rate_source_and_old_ones_rebuild() -> None:
+    """#56 and #26 decision 4: the manifest says whether the rate came from a measured tau_c or
+    the fit, and which eps_L window T0 and T1 were set from; both are records only, so the
+    schedule is the one T0, T1 and rate give, and a resumed run rebuilds it. A manifest from
+    before the fields existed still rebuilds, the same schedule."""
+    T0, T1 = (exact.TC * (1 + e / 16) for e in (12.0, -8.0))
+    r = Ramp(rate=200, L=16, T0=T0, T1=T1, pre=10, hold=10, rate_source="measured", eps_L=(12, -8))
+    params = r.to_json()["params"]
+    assert (params["rate_source"], params["eps_L"]) == ("measured", [12, -8])
+    plain = Ramp(rate=200, L=16, T0=T0, T1=T1, pre=10, hold=10)
+    assert plain.to_json()["params"]["eps_L"] is None and plain.frames == r.frames
+    assert plain.to_json()["params"]["rate_source"] is None
+    _assert_pure(r)
+    legacy = plain.to_json()
+    for key in ("rate_source", "eps_L"):
+        del legacy["params"][key]
+    assert protocol.from_json(legacy).frames == r.frames
 
 
 def test_null_runs_hold_epsilon_l_for_700_tau_c_at_the_slow_ramps_cadence() -> None:
