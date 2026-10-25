@@ -200,6 +200,34 @@ def test_scored_runs_must_come_from_the_freeze_tags_commit(tmp_path: Path) -> No
         assert "accepted-run" not in message
 
 
+def test_scored_ramps_and_nulls_must_name_the_pinned_pilot_record(
+    planted: Any, tmp_path: Path
+) -> None:
+    """#26 K: under a frozen prereg every scored ramp and null run must have been made against
+    the pilot record data.tau_c pins, whose tau_c set the ramp's rate and the null's length.
+    The planted ramps and nulls name a record with sha256 0...0: accepted when that is the pin,
+    refused against another, the message naming each run, its sha256 and the pinned one, never
+    a staircase (it took --tau, no record). A ramp naming no record is refused too, while
+    selection alone, the exploratory path, still takes it."""
+    named = "0" * 64  # what the planted stamps carry
+    chosen = ising.select(*ising.find_runs(planted.root), _data())
+    ising._same_record(chosen, named)
+    with pytest.raises(ising.IsingDataError) as refused:
+        ising._same_record(chosen, "f" * 64)
+    message = str(refused.value)
+    assert f"L16-ramp-s1 (pilot sha256 {named})" in message and "f" * 64 in message
+    assert "L32-null-s2" in message and "-qs-" not in message
+    stamp = {"run_id": "pilot", "sha256": named, "stale": False}
+    write_run(tmp_path, "L16-ramp-s1", ramp(16), 16, 1, ramp_values(16))  # names no record
+    write_run(tmp_path, "L16-null-s1", nulls(16, 500), 16, 1, ramp_values(16), pilot=stamp)
+    write_run(tmp_path, "L16-qs-s1", staircase(), 16, 1, plateau_values(16))
+    bare = ising.select(*ising.find_runs(tmp_path), _data(L=[16], seeds=[1]))
+    with pytest.raises(ising.IsingDataError) as refused:
+        ising._same_record(bare, named)
+    message = str(refused.value)
+    assert "L16-ramp-s1 (pilot sha256 None)" in message and "L16-null-s1" not in message
+
+
 def test_a_null_block_that_failed_its_check_is_dropped_and_counted(tmp_path: Path) -> None:
     """Null runs are read as equilibrium, so a block whose thermalised check failed (#50 writes
     the check for null runs too) is left out of scoring and reported, not silently used."""

@@ -193,12 +193,16 @@ def _score(path: Path, data_dir: Path, *extra: str) -> int:
     return main(argv)
 
 
-def _made_by(data_dir: Path, commit: str) -> None:
-    """Stamp every run in a copy of the planted data as made by `commit` from a clean tree, as
-    runs generated from a freeze tag's commit are; the planted ones name no commit."""
+def _made_by(data_dir: Path, commit: str, record: str | None = None) -> None:
+    """Stamp every run in a copy of the planted data as made by `commit` from a clean tree, and
+    with `record`, every ramp and null run as made against the pilot record of that sha256, as
+    runs generated from a freeze tag's commit are; the planted ones name no commit, and a record
+    of sha256 0...0."""
     for path in (data_dir / "ising").glob("*/manifest.json"):
         manifest = json.loads(path.read_text("utf-8"))
         manifest["producer"] |= {"git_sha": commit, "dirty": False}
+        if record is not None and manifest["params"].get("pilot"):  # staircases name none
+            manifest["params"]["pilot"]["sha256"] = record
         path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
@@ -211,8 +215,9 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     predates kernel_sha256, so like any record that cannot be matched to the running kernel it is
     refused (#55: an old tau_c clock scored without a trace), and with --allow-stale-pilot it
     scores and the result says stale. A frozen prereg scores only runs its tagged commit made
-    from a clean tree (#26 decision 6): the planted runs name none and are refused, nothing
-    scored or logged, until they carry the tag's commit. #64: the alarm, surrogate and dynamic
+    from a clean tree (#26 decision 6), and ramps and nulls made against the pilot record it
+    pins (#26 K): the planted runs name no commit, then another record, and are refused, nothing
+    scored or logged, until they carry both. #64: the alarm, surrogate and dynamic
     rows are held to the planted answers, not only counted: a slip in their wiring (the
     false-alarm budget per sample instead of per tau_c, the threshold set on the wrong half,
     censoring off) puts wrong numbers in the pre-registered results while every row still exists.
@@ -229,9 +234,15 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     tagged = _git(repo, "rev-parse", "prereg/demo-v1^{commit}")
     refused = capsys.readouterr().err
     assert f"commit {tagged}" in refused and "L16-ramp-s1 (git_sha None" in refused, refused
+    _made_by(data_dir, tagged)  # the right commit, but made against another pilot record
+    assert _score(paths["demo"], data_dir, "--allow-stale-pilot") == 1
+    pinned = prereg.load(paths["demo"]).doc["data"]["tau_c"]["pilot_sha256"]
+    refused = capsys.readouterr().err
+    assert f"sha256 {pinned}" in refused and f"L16-null-s1 (pilot sha256 {'0' * 64})" in refused
+    assert "-qs-" not in refused  # a staircase takes --tau, not a record
     assert prereg.trials(data_dir, prereg.load(paths["demo"])) == 0  # nothing scored or logged
     assert not (data_dir / "ews").exists()
-    _made_by(data_dir, tagged)
+    _made_by(data_dir, tagged, record=pinned)
     assert _score(paths["demo"], data_dir, "--allow-stale-pilot") == 0
     (run_dir,) = (data_dir / "ews").glob("*-demo-v1")
     manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
@@ -247,7 +258,8 @@ def test_score_writes_stamped_results_and_logs_every_cell(
         digest = hashlib.sha256((run_folder / "complete.json").read_bytes()).hexdigest()
         assert inputs[run_folder.name]["complete_sha256"] == digest
         # each ramp and null names the pilot record it was made with (#55); staircases none
-        assert inputs[run_folder.name]["pilot"] == planted.stamps.get(tag)
+        stamp = planted.stamps.get(tag)
+        assert inputs[run_folder.name]["pilot"] == (stamp and stamp | {"sha256": pinned})
     auc = pq.read_table(run_dir / "auc" / f"{0:020d}.parquet").to_pylist()
     assert len(auc) == prereg.cells(demo.doc) == 48
     rise = {(r["cadence"], r["L"], r["h"]): r["auc"] for r in auc if r["indicator"] == "variance"}
