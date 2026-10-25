@@ -218,7 +218,7 @@ uv run python -m tipping_point.ising validate                        # Gates A-C
 uv run python -m tipping_point.ising pilot --L 16 --sweeps 50000      # tau_int per T -> tau.json
 uv run python -m tipping_point.ising tauc <pilot run> ...             # tau_c(L) at Tc -> pilot.json
 uv run python -m tipping_point.ising staircase --L 16 --tau <pilot run>/tau.json
-uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <record>/pilot.json  # x: 0.02 slow, 2 fast
+uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <record>/pilot.json --eps-start 12 --eps-end -8  # x: 0.02 slow, 2 fast
 uv run python -m tipping_point.ising null --L 16 --epsilon-L 4 --pilot <record>/pilot.json --seed 1   # epsilon_L 2, 4, 6; seeds 1-5
 uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
 ```
@@ -308,11 +308,16 @@ along domain walls (#50).
   thermalised for max(500, 20 tau) sweeps and measured for max(2000, 100 tau), with tau from a
   `pilot` run's tau.json at that temperature. The plateau nearest Tc costs 1,043 + 5,211 sweeps
   at L = 16.
-- **Ramps**, the dynamic arm: linear cooling from 3.5 to 1.5 at r = A L^(z+1) / (x Tc) sweeps per
-  unit T, A and z from the pilot record, so x = tau_c(L) / (sweeps per unit of epsilon_L =
-  L (T - Tc) / Tc) at every L. The slow ramp, x = 0.02, spends 50 tau_c per unit epsilon_L and
+- **Ramps**, the dynamic arm: linear cooling at r = tau_c(L) L / (x Tc) sweeps per unit T, so
+  x = tau_c(L) / (sweeps per unit of epsilon_L = L (T - Tc) / Tc) at every L. tau_c(L) is the
+  pilot record's measurement at L; the fit A L^z stands in only for a size it did not measure,
+  and the manifest's `params.schedule.params.rate_source` says which (`measured` or `fit`, #56).
+  The ramp runs from 3.5 to 1.5, or over an epsilon_L window: `--eps-start 12 --eps-end -8` sets
+  T0 = Tc (1 + 12/L) and T1 = Tc (1 - 8/L), the window ising-ews-v1 scores at every L, and the
+  manifest records it as `eps_L`. The slow ramp, x = 0.02, spends 50 tau_c per unit epsilon_L and
   crosses the critical window |epsilon_L| < 1 in 100 tau_c; the fast one, x = 2, crosses it in one
-  tau_c, the Kibble-Zurek regime. Sweeps with this record (tau_c at L = 128 from the fit):
+  tau_c, the Kibble-Zurek regime. Sweeps from 3.5 to 1.5 with this record's fit (L = 128
+  extrapolated):
 
   | | L = 16 | L = 32 | L = 64 | L = 128 |
   |---|---|---|---|---|
@@ -347,8 +352,9 @@ the scoring protocol (AUC, alarms, lead times, hierarchical bootstrap) and finit
 verdicts, on numpy alone. The definitions are ewstools 2.1.3's, pinned by a golden fixture that
 `python/tipping_point/tests/fixtures/make_ews_golden.py` regenerates in an isolated environment.
 Experiments are pre-registered in `paper/prereg/<id>-v<k>.toml` (start from `TEMPLATE.toml`) and
-frozen as git tags; the scorer refuses an unfrozen or edited file, and reads tau_c(L) from a pilot
-run's `pilot.json`, never from the pre-registration.
+frozen as git tags; the scorer refuses an unfrozen or edited file, reads tau_c(L) from a pilot
+run's `pilot.json`, never from the pre-registration, and scores only runs whose manifest names the
+commit the freeze tag points at, from a clean tree.
 
 ```sh
 uv run python -m tipping_point.ews prereg freeze ising-ews           # tags prereg/ising-ews-v<k>
