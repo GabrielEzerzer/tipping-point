@@ -4,10 +4,13 @@ only verified or unpublished files reach the labeller. Synthetic files served by
 (harness/market_planted.py); no network."""
 
 import hashlib
+import io
 import json
 import re
 import subprocess
 import urllib.error
+import zipfile
+import zlib
 from datetime import date, timedelta
 from http.client import HTTPMessage
 from pathlib import Path
@@ -15,7 +18,7 @@ from typing import Any
 
 import numpy as np
 import pytest
-from market_planted import funding_csv, kline_csv, metrics_csv, vision, zipped
+from market_planted import checksum, funding_csv, kline_csv, metrics_csv, vision, zipped
 from tipping_point.market import archive
 from tipping_point.market.__main__ import main
 
@@ -179,6 +182,22 @@ def test_a_checksum_valid_file_that_does_not_parse_is_kept_as_unreadable(
     empty = _zip(tmp_path, "e", b",1,1,1,1,1,1,1,1,1,1,0\n")  # a row with no stamp to place it
     with pytest.raises(archive.ArchiveError, match="1 rows have no open_time"):
         archive.read("klines", empty)
+
+
+def test_a_checksum_valid_zip_with_a_corrupt_deflate_stream_is_unreadable(tmp_path: Path) -> None:
+    fake = vision(["BTCUSDT"], DAY, 1, seed=7)
+    bad = archive.Source("metrics", "BTCUSDT", "2023-01-02")  # the second of the run's three
+    good = fake.files[bad.url]
+    start = 30 + int.from_bytes(good[26:28], "little") + int.from_bytes(good[28:30], "little")
+    spoilt = good[:start] + b"\xff" * 20 + good[start + 20 :]  # block type 11: never valid
+    with zipfile.ZipFile(io.BytesIO(spoilt)) as bundle, pytest.raises(zlib.error):
+        bundle.read(bundle.namelist()[0])
+    fake.files[bad.url] = spoilt
+    fake.files[bad.url + ".CHECKSUM"] = checksum(bad.name, spoilt)
+    done = archive.fetch(["BTCUSDT"], DAY, DAY, tmp_path, fake.get)
+    assert done[bad.path]["status"] == "unreadable" and "Error -3" in done[bad.path]["error"]
+    assert [e["status"] for e in done.values()] == ["verified", "unreadable", "verified"]
+    assert json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))["files"] == done
 
 
 def test_a_file_spoilt_on_disk_is_fetched_again(tmp_path: Path) -> None:

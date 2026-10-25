@@ -31,6 +31,7 @@ import re
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -178,7 +179,7 @@ def read(kind: str, path: Path) -> tuple[Columns, bool]:
                 timestamp_parsers=["%Y-%m-%d %H:%M:%S"],
             ),
         )
-    except (zipfile.BadZipFile, pa.ArrowInvalid, KeyError) as error:
+    except (zipfile.BadZipFile, zlib.error, EOFError, pa.ArrowInvalid, KeyError) as error:
         raise ArchiveError(f"{path}: {error}") from error
     stamp = columns[0]
     if table[stamp].null_count:
