@@ -654,6 +654,31 @@ async fn a_subscription_sent_before_the_welcome_is_answered_after_it() -> Outcom
     Ok(())
 }
 
+/// A client that connects after the live feed ended is told so, and its subscription is answered
+/// the same, where it was answered `live` though nothing was (#102): the connection stays ended
+/// until `replay` or `live`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subscription_after_the_feed_ended_is_answered_ended() -> Outcome {
+    let dir = scratch("api-after-end");
+    let server = started_server(&dir, HubConfig::default()).await?;
+    server
+        .hub
+        .publish_status(Venue::BinanceUsdm, VenueStatus::default());
+    server.hub.end();
+    let ended = json!({"t": "source", "mode": "ended"});
+    let mut late = ws_connect(server.addr).await?;
+    hello(&mut late).await?;
+    assert_eq!(next_json(&mut late, WAIT).await?, ended, "on connecting");
+    let sub = json!({"t": "sub", "topics": ["book", "trades", "status"]});
+    send_json(&mut late, &sub).await?;
+    let answer = next_json(&mut late, WAIT).await?;
+    assert_eq!(answer, ended, "the subscription's answer");
+    assert_eq!(next_json(&mut late, WAIT).await?["t"], "status");
+    server.stop().await;
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
 /// A foreign `Origin` is refused, the WebSocket upgrade included, and so is a `Host` that names
 /// another server (DNS rebinding) and a page's plain GET from another site, which carries no
 /// `Origin`; the allowed origins and a client without `Origin` get in.
@@ -1089,16 +1114,29 @@ async fn the_status_goes_out_every_second_unchanged() -> Outcome {
     let server = started_server(&dir, HubConfig::default()).await?;
     let hub = Arc::clone(&server.hub);
     hub.publish_status(Venue::BinanceUsdm, VenueStatus::default());
-    // The status as subscribed, perhaps the heartbeat's first tick right behind it, then one a
-    // second: n of them span n - 3 seconds at least, so none came in a burst on a change.
+    // The status as subscribed, then one a second after the last: n of them span n - 2 seconds at
+    // least, so none came in a burst on a change.
     let periodic = |times: &[tokio::time::Instant]| {
-        let seconds = u64::try_from(times.len().saturating_sub(3)).unwrap_or(0);
+        let seconds = u64::try_from(times.len().saturating_sub(2)).unwrap_or(0);
         times[times.len() - 1] - times[0] >= Duration::from_secs(seconds)
     };
 
-    let mut quiet = subscribed(server.addr, "status").await?;
+    // Subscribed in the same breath as its hello, so the subscription is answered before the
+    // heartbeat first ticks, and that tick sent the same status again 16 ms later (#102): now none
+    // comes within half a second of another.
+    let mut quiet = ws_connect(server.addr).await?;
+    send_json(&mut quiet, &json!({"t": "hello", "v": PROTOCOL})).await?;
+    send_json(&mut quiet, &json!({"t": "sub", "topics": ["status"]})).await?;
+    assert_eq!(next_json(&mut quiet, WAIT).await?["t"], "welcome");
+    let answer = next_json(&mut quiet, WAIT).await?;
+    assert_eq!(answer, json!({"t": "source", "mode": "live"}));
     let times = status_times(&mut quiet, 4, WITHIN).await?;
     assert!(periodic(&times), "quiet: {times:?}");
+    let apart = |w: &[tokio::time::Instant]| w[1] - w[0] >= Duration::from_millis(500);
+    assert!(
+        times.windows(2).all(apart),
+        "quiet, back to back: {times:?}"
+    );
 
     let publishing = Arc::new(AtomicBool::new(true));
     let publisher = std::thread::spawn({

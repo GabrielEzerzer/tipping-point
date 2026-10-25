@@ -24,7 +24,7 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, watch};
-use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until, timeout};
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval, sleep_until, timeout};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
@@ -46,7 +46,7 @@ use crate::venue::Venue;
 const MAX_MESSAGE: usize = 64 * 1024;
 /// A connection sends at most this often.
 const FLUSH_EVERY: Duration = Duration::from_millis(16);
-/// Status goes out this often even unchanged, so the app sees the engine is alive.
+/// Status goes out at least this often, unchanged if need be, so the app sees the engine is alive.
 const HEARTBEAT: Duration = Duration::from_secs(1);
 /// A client gets this long to say hello.
 const HELLO_WITHIN: Duration = Duration::from_secs(10);
@@ -191,7 +191,6 @@ struct Connection<S> {
     /// The newest book instant sent, per venue.
     last_book: BTreeMap<Venue, i64>,
     status_due: bool,
-    told_ended: bool,
     replay_book: Option<Arc<Sample>>,
     replay_trades: Vec<Arc<TradeMessage>>,
 }
@@ -229,7 +228,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             ising: None,
             last_book: BTreeMap::new(),
             status_due: false,
-            told_ended: false,
             replay_book: None,
             replay_trades: Vec::new(),
         }
@@ -336,7 +334,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 }
             }
             sleep_until(next_flush).await;
-            self.collect()?;
+            self.collect(&mut heartbeat)?;
             if !self.outbox.is_empty() {
                 self.flush().await?;
                 next_flush = Instant::now() + FLUSH_EVERY;
@@ -730,8 +728,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         }
     }
 
-    /// Moves what changed since the last send into the outbox, newest values only.
-    fn collect(&mut self) -> Result<(), Closing> {
+    /// Moves what changed since the last send into the outbox, newest values only. A status sent
+    /// starts the `heartbeat`'s second again.
+    fn collect(&mut self, heartbeat: &mut Interval) -> Result<(), Closing> {
         match &self.mode {
             Mode::Live => self.collect_live(),
             Mode::Replay { paused: false, .. } => self.queue_replayed(),
@@ -744,6 +743,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 && self.sub.has(Topic::Status)
             {
                 self.queue(&ServerMessage::Status(&status));
+                // Unchanged, it goes again a second from now, not on this one's heels: a client
+                // subscribing at once got its status twice, 16 ms apart, the second from the
+                // heartbeat's first tick (#102).
+                heartbeat.reset();
             }
         }
         self.collect_latest(Topic::Meters);
@@ -810,9 +813,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             self.queue_gap(Topic::Trades, lost);
             self.queue_trades(&fresh);
         }
-        if ended && !self.told_ended {
-            self.told_ended = true;
-            self.queue_source("ended");
+        if ended {
+            // Ended as a lossless connection is at `Ordered::End`, so a `sub` after this is
+            // answered `ended`, not `live` (#102).
+            self.mode = Mode::Ended(None);
+            self.queue_ended();
         }
     }
 
