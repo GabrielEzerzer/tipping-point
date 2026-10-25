@@ -421,7 +421,7 @@ pre-registered seeds 1-5, ramps and null runs are refused.
 uv run python -m tipping_point.jepa train --L 16 32 64 --train-seeds 101 102 --val-seed 103 \
     --seed 1 --pilot <pilot run>/pilot.json [--held-out] [--prereg paper/prereg/<id>.toml]
 uv run python -m tipping_point.jepa resume <training>                # after a killed session
-uv run python -m tipping_point.jepa extract <training>/final.pt <simulator run>
+uv run python -m tipping_point.jepa extract <training>/final.pt <simulator run> [--select tc-plus]
 uv run python -m tipping_point.jepa probe <training> --fit <val run> --test <scored run>
 uv run python -m tipping_point.jepa verify <training> <run>/latents/<set> ...
 uv run python -m tipping_point.jepa budget --quota 30                # GPU hours per ISO week
@@ -442,10 +442,21 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   `<simulator run>/latents/<training>-step<step>/`: one row per `configs` row, keyed and ordered
   like `configs` (step, replica, temperature, segment, burst, frame), with `surprise` (the delta = 0
   prediction error over two fixed evaluation masks) and `pc_1`..`pc_8`, float32. Its manifest names
-  the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it.
+  the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it. `--select`
+  subsamples staircases: `tc-plus` keeps the T = 2.269231 plateau whole and one burst in 8 (by
+  burst index) at every other plateau, and refuses a staircase whose plateaus save a number of
+  bursts 8 does not divide; `tc-only` keeps that plateau alone, for ablation checkpoints;
+  ramps and null runs are always read whole. The manifest records the rule, and `verify` checks
+  that the table holds exactly the rows it keeps.
+- **Probes** read |m|, the energy and L^2 (|m| - <|m|>_T)^2 from frozen embeddings by ridge
+  regression, each beside two control tasks: an i.i.d. Gaussian target (R^2 near 0) and the target
+  shuffled among the frames of each plateau. Selectivity, R^2 minus the shuffle's, is what the
+  embedding holds of a frame beyond its temperature.
 - **The untrained twin is the null:** a local encoder's pooled readouts inherit Ising scaling with
   random weights, so learning is claimed only as a margin over each run's step-0 twin, which goes
-  through every test.
+  through every test. `tipping_point.ews.margins.paired` judges one: the CI of the mean margin
+  over model seeds (nested with paired data-bootstrap draws) must exclude 0 in the predicted
+  direction, and every seed's margin must carry the predicted sign.
 - **Kaggle:** `notebooks/kaggle_train.py` clones a pinned commit with a read-only token from
   Kaggle Secrets, installs with `--extra cu126`, checks the dataset's hashes, trains one model seed
   per T4 and resumes from the previous version's output.
