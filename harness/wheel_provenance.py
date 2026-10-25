@@ -165,6 +165,7 @@ def _stamp(wheel: Path) -> dict[str, Any]:
 
 def _venv(path: Path, wheel: Path, requirements: Path) -> Path:
     """A venv holding the locked CPU dependencies and the wheel, installed from the uv cache."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     _uv("venv", str(path), "--python", sys.executable, "--quiet", cwd=path.parent)
     python = path / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     indexes = tomllib.loads((PROJECT / "pyproject.toml").read_text(encoding="utf-8"))

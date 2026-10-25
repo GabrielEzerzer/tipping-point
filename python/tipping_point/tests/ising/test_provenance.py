@@ -113,7 +113,7 @@ def test_a_wheel_built_from_the_checkout_is_stamped_with_its_commit(wheel: Path)
 @needs_uv
 def test_the_sdist_carries_its_stamp_into_the_wheel_built_from_it(tmp_path: Path) -> None:
     """Plain `uv build` makes the sdist here, then the wheel from the sdist in a folder no
-    repository tracks: that wheel ships the sdist's stamp, neither lost nor re-stamped."""
+    repository tracks: that wheel ships the sdist's stamp, not the placeholder."""
     _build(tmp_path)
     (sdist,) = tmp_path.glob("*.tar.gz")
     (built,) = tmp_path.glob("*.whl")
@@ -125,7 +125,7 @@ def test_the_sdist_carries_its_stamp_into_the_wheel_built_from_it(tmp_path: Path
     with zipfile.ZipFile(built) as archive:
         in_wheel = _stamp(archive.read(STAMP).decode())
     assert in_sdist["commit"] == _git(PROJECT, "rev-parse", "HEAD")
-    assert in_wheel == in_sdist  # built_at included: carried, not stamped again
+    assert in_wheel == in_sdist  # carried through whole, built_at included
 
 
 @needs_uv
