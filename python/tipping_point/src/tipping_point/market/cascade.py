@@ -1,37 +1,38 @@
 """The liquidation-cascade proxy and its pooled list (#29 S4; research pass section 3).
 
 The span's liquidations are not freely available, so a cascade is read from a symbol's 5-minute
-bars (bars.py). For the window of W bars ending at bar k, with OI the open interest in contracts
-(its USDT value falls whenever the price does) and P the close:
+bars (bars.py). A window is the 30 minutes, W = 6 bars, that close at the start t_k of a bar k. Over
+that one window, with OI the open interest in contracts (its USDT value falls whenever the price
+does) and P the price:
 
-  oi_change      ln(OI_k / OI_k-W)
-  price_change   ln(P_k / P_k-W)
-  volume         V, the volume of bars k-W+1..k
+  oi_change      ln(OI(t_k) / OI(t_k - 30 min)), the oi of bars k and k-W
+  price_change   ln(P(t_k) / P(t_k - 30 min)), the close of bars k-1 and k-W-1
+  volume         V, the volume of bars k-W..k-1
   flow           F = (2 taker_buy - V) / V over those bars, in [-1, 1]
-  volume_median  the median V of the windows ending in the `trailing_days` before bar k-W+1, so
-                 never the window itself
+  volume_median  the median V of the windows closing in the `trailing_days` before this one opens,
+                 so never the window itself
 
 A long cascade has oi_change <= -a, price_change <= -b, F <= -c and V >= v x volume_median. A short
 squeeze has the same fall in open interest with price_change >= b and F >= c. Open interest falling
 while price and aggressive flow move together is what separates forced deleveraging from positions
 being opened.
 
-OI_k is bars.py's column, the row stamped at the start of bar k, and Binance takes that snapshot
-within a minute of its stamp (checked on 2023-07-19..08-18: open-interest changes line up with the
-minutes before their stamp). So as section 3 is written, with `kline_lag` 0, the open-interest
-window ends a bar before the price's. In a sharp V the flow has rolled into the rebound by the time
-the drop shows: on 2023-08-17 that costs ETH its candidate at the start values. `kline_lag` 1 pairs
-stamp k with the klines of the bars before it, so both span the same 30 minutes; the 2023 pilot
-settles which stands. Below, a window's klines end at bar b = k - kline_lag.
+The alignment is fixed by the feed's timing, so it is no parameter: a bar's oi is the snapshot at
+its start and its close the price at its end, which pairs oi[k] with close[k-1]. The evidence, in
+every month of 2023 on both symbols: a change in open interest correlates most with the 1-minute
+returns between its two stamps, not with those of the step after. Pairing oi[k] with close[k] would
+set open interest's window 5 minutes behind the price's, and in a sharp V it misses the fall and
+takes the rebound for a squeeze.
 
-A window that fires is a candidate, known by the close of bar k. Its onset is the first bar of the
-window whose one-bar return, read in the candidate's direction, exceeds the 99th percentile of that
-direction's returns over the bar's own trailing days; if none does, the window's first bar.
+A window that fires is a candidate at bar k, reading that bar's oi and none of its klines. Its onset
+is the first bar of the window whose one-bar return, signed so that the candidate's direction is
+positive, exceeds the 99th percentile of all returns signed the same way over the bar's own trailing
+days; if none does, the window's first bar.
 
-A window touching a missing open-interest step (k-W..k) or a missing bar (b-W..b) is not evaluated
-and is counted, and so is one whose trailing days do not all exist yet or hold no complete window.
-An open interest of zero or below counts as missing: Binance's metrics hold such rows. A bar that
-traded nothing is not missing: it adds no volume and no flow.
+A window touching a missing open-interest step (bars k-W..k) or a missing bar (bars k-W-1..k-1) is
+not evaluated and is counted, and so is one whose trailing days do not all exist yet or hold no
+complete window. An open interest of zero or below counts as missing: Binance's metrics hold such
+rows. A bar that traded nothing is not missing: it adds no volume and no flow.
 
 Candidates of a symbol within `merge_hours` after the earliest of their group merge into it,
 whichever their side, which makes one asset instance with the earliest's onset, side and
@@ -87,7 +88,7 @@ SCHEMA = pa.schema(
         ("symbol", pa.string()),
         ("market_event", pa.int32()),
         ("kind", pa.string()),
-        ("fired_ts_ns", pa.int64()),  # bar k of the earliest candidate
+        ("fired_ts_ns", pa.int64()),  # t_k of the earliest candidate: its window's close
         ("last_fired_ts_ns", pa.int64()),
         ("candidates", pa.int32()),
         ("window_start_ts_ns", pa.int64()),
@@ -104,14 +105,14 @@ SCHEMA = pa.schema(
 class Params:
     """Every number of the rule, at the research pass's start values (#29, section 3). The 2023
     pilot sets a, b, c and v to about 10-15 pooled events a year, then market-labels-v1 freezes
-    them."""
+    them. How open interest lines up with price is not among them: the feed's timing fixes it (see
+    the notes above), so no count of events can choose it."""
 
     a: float = 0.03  # the fall in open interest, as a log ratio
     b: float = 0.025  # the move in price, as a log ratio
     c: float = 0.15  # the flow imbalance
     v: float = 3.0  # the window's volume over the trailing median
     window: int = 6  # W, in bars: 30 minutes
-    kline_lag: int = 0  # 0 as section 3 is written; 1 aligns open interest with price (see above)
     trailing_days: int = 28
     onset_percentile: float = 99.0
     merge_hours: int = 24
@@ -123,7 +124,7 @@ def candidates(
     columns: Mapping[str, np.ndarray], params: Params | None = None, since: int = 0
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """A symbol's candidates in firing order, from the columns of bars.bars, and the counts of its
-    windows, all for windows ending at bar `since` or later. Earlier bars are only history: the
+    windows, all for windows closing at bar `since` or later. Earlier bars are only history: the
     rule says nothing about them."""
     p = params or Params()
     ts, close, volume = columns["ts_ns"], columns["close"], columns["volume"]
@@ -143,11 +144,11 @@ def candidates(
     def touching(missing: np.ndarray) -> Any:
         return sliding_window_view(missing, w + 1).any(axis=1)
 
-    summed = total(volume)  # by bar; every array from k on holds one value per window
+    summed = total(volume)  # by last bar; every array from k on holds one value per window
     with np.errstate(divide="ignore", invalid="ignore"):
         flows = (2 * total(taker) - summed) / summed
-    k = np.arange(w + p.kline_lag, n)
-    b = k - p.kline_lag
+    k = np.arange(w + 1, n)
+    b = k - 1  # the window's last bar, which closes as bar k's oi is stamped
     oi_change, price_change = np.log(oi[k] / oi[k - w]), np.log(close[b] / close[b - w])
     flow = flows[b]
     observed = np.concatenate([[0], np.cumsum(~np.isnan(summed))])
@@ -254,7 +255,7 @@ def recall(
 ) -> list[dict[str, Any]]:
     """Whether the rule fires inside each documented event's own days, from the archive at `root`:
     one row per event, `recalled` None when no symbol's days could be read. Each read starts a day
-    more than the trailing days early and ends with the event, and only windows ending inside the
+    more than the trailing days early and ends with the event, and only windows closing inside the
     event are asked for, so nothing else in the confirmatory span comes out or is even computed."""
     if not environ.get(SWITCH):
         raise PermissionError(f"recall reads confirmatory days: it runs only with {SWITCH} set")
@@ -318,7 +319,7 @@ def liquidations(
     first_ts, last_ts = int(ts.min()), int(ts.max())
     checked = []
     for row in rows:
-        end = row["fired_ts_ns"] + (1 - p.kline_lag) * msvol.BAR_NS
+        end = row["fired_ts_ns"]
         start = end - p.window * msvol.BAR_NS
         if first_ts <= start and end <= last_ts:
             inside = (symbol == row["symbol"]) & (start <= ts) & (ts < end)

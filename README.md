@@ -219,11 +219,13 @@ hour count as one market event with two asset instances; both counts are reporte
 with each instance's onset and the bounds of its L2 window 12 hours either side, lands as the table
 `cascades` of a run in `<data dir>/labels/<run_id>/`. `a`, `b`, `c` and `v` are options at their
 start values (3 %, 2.5 %, 0.15, 3) until the 2023 pilot sets them, and days from 2024-01-01 are
-refused as the labels' are. The pilot also settles `--kline-lag`: Binance stamps open interest at
-the snapshot's own instant, so a bar's row holds the value at its start, and `--kline-lag 1` pairs
-it with the klines before it so both span the same 30 minutes. A `liquidations` table in a market
-run (#90) is read when there is one; until then the run says `liquidations: not recorded`. The
-first 28 days only fill the trailing medians, so this span lists 2023 alone:
+refused as the labels' are. How open interest lines up with price is not an option, because the
+feed's timing fixes it: a bar's row holds the open interest at its start and its close the price at
+its end, so each stamp pairs with the klines before it and all the legs span the same 30 minutes (in
+every month of 2023, on both symbols, a change in open interest correlates most with the 1-minute
+returns between its two stamps). A `liquidations` table in a market run (#90) is read when there is
+one; until then the run says `liquidations: not recorded`. The first 28 days only fill the trailing
+medians, so this span lists 2023 alone:
 
 ```sh
 uv run python -m tipping_point.market.cascade --start 2022-12-04 --end 2023-12-31
@@ -234,7 +236,8 @@ uv run python -m tipping_point.market.cascade --start 2022-12-04 --end 2023-12-3
 documented_cascades_on_real_days` runs the rule over each event found fetched, with the 29 days
 before it; without it the test skips and says so. Five of the six events lie in the confirmatory
 span, so the check gives only what the rule says inside each event's own days and reports recall
-with no floor: nothing is to be tuned on it.
+with no floor: nothing is to be tuned on it. Two more checks read 2023 days if they are fetched, and
+otherwise skip and say so: the metrics stamp's timing, and 2023-08-17 at the start values.
 
 ## Engine API
 
