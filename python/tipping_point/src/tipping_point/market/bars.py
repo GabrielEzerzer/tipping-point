@@ -10,14 +10,17 @@ Bar k of a symbol covers [t_k, t_k + 5 min):
   close            its last minute's close
   volume           base-asset volume
   taker_buy_share  taker-buy volume over volume
-  oi               open interest in contracts (sum_open_interest) stamped t_k
+  oi               open interest in contracts (sum_open_interest), the snapshot stamped t_k: the
+                   value at the bar's start, where close is the price at its end
   funding_rate     the last funding rate settled at or before t_k
 
 A bar short of any of its five minutes is a missing observation: rv, close, volume and the share
 are NaN, and so is rv when no minute traded. Nothing is ever floored. The open-interest and funding
-joins read stamps at or before t_k only, so a bar never sees a later value, whichever end of its
-step Binance's stamp marks. A stamp given twice keeps its first row and rows off the grid are
-dropped; both are counted in the checks.
+joins read stamps at or before t_k only, so a bar never sees a later value. Binance stamps a metrics
+row at the end of its step: open interest is the snapshot at the stamp, and the taker ratio stamped
+t is the klines' over [t - 5 min, t) (2023, checked in S4). So oi[k] goes with close[k-1], and
+cascade.py pairs them so. A stamp given twice keeps its first row and rows off the grid are dropped;
+both are counted in the checks.
 """
 
 from __future__ import annotations
@@ -63,7 +66,6 @@ def bars(
     rv = np.where(complete & (total(traded) > 0), total(gk), np.nan)
 
     oi = np.full(n, np.nan)
-    # S4: create_time as snapshot or window start matters once the taker-ratio columns are read
     at, step, (metric_off, metric_dups) = _grid(metrics["create_time"], start_ms, BAR_MS, n)
     oi[step] = metrics["sum_open_interest"][at]
 
