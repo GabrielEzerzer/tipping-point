@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import runpy
 import shutil
 import subprocess
@@ -68,7 +69,7 @@ def ctx_at(k: ModuleType, root: Path, device: str = "cpu") -> Any:
         poll_s=0.01,
         bench_sweeps=10,
     )
-    for folder in (ctx.input, ctx.out / "ising", ctx.out / "logs"):
+    for folder in (ctx.input, ctx.out / "ising", ctx.out / "logs", ctx.cwd, ctx.helper.parent):
         folder.mkdir(parents=True, exist_ok=True)
     return ctx
 
@@ -397,6 +398,7 @@ def resolution(k: ModuleType, root: Path) -> None:
     except k.RunError as exc:
         check("... and cannot start", "grid-L64 is pending" in str(exc), exc)
     grid.state, grid.run_id = "complete", "20261025T000000Z-L64-pilot-s6"
+    grid.folder = f"ising/{grid.run_id}"
     folder = ctx.out / "ising" / grid.run_id
     folder.mkdir()
     try:
@@ -734,6 +736,356 @@ def kernel_folder(k: ModuleType, root: Path) -> None:
     )
 
 
+TRAINING = "20261026T000000Z-L16-m3"
+STAIRS = ("20261024T133416Z-L16-qs-s11", "20261024T133934Z-L16-qs-s12")
+NULL = "20261023T010039Z-L16-null-e2-s1"
+JEPA_PLAN: dict[str, Any] = {
+    "kernel": "tp-self-test",
+    "datasets": ["gabrielezerzer/tp-data"],
+    "runs": [
+        {
+            "name": "m3",
+            "command": "jepa train",
+            "stage": list(STAIRS),
+            "args": [
+                "--L",
+                16,
+                "--train-seeds",
+                11,
+                "--val-seed",
+                12,
+                "--seed",
+                3,
+                "--pilot",
+                "pilot.json",
+                "--steps",
+                20,
+            ],
+        },
+        {
+            "name": "x-final",
+            "command": "jepa extract",
+            "args": [{"run": "m3", "file": "final.pt"}, {"dataset_run": NULL}],
+        },
+        {
+            "name": "x-twin",
+            "command": "jepa extract",
+            "args": [
+                {"run": "m3", "file": "ckpt/step_0000000.pt"},
+                {"dataset_run": NULL},
+                "--select",
+                "tc-plus",
+            ],
+        },
+    ],
+}
+
+
+def dataset_run(folder: Path, seed: int, payload: bytes = b"rows") -> None:
+    """A simulator run as `jepa verify` reads it: a manifest, one chunk, complete.json."""
+    (folder / "configs").mkdir(parents=True)
+    (folder / "configs" / f"{1:020d}.parquet").write_bytes(payload)
+    manifest = {"producer": {"git_sha": OTHER, "dirty": False}, "params": {"seed": seed}}
+    (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    files = {f"configs/{1:020d}.parquet": hashlib.sha256(b"rows").hexdigest()}
+    done = {"clean": True, "files": files, "checks": {}}
+    (folder / "complete.json").write_text(json.dumps(done), encoding="utf-8")
+
+
+def jepa_entries(k: ModuleType, root: Path) -> None:
+    from tipping_point.jepa import train
+
+    names = (k.TWIN, k.FINAL, k.LEDGER)
+    check(
+        "the checkpoint and ledger names are the library's",
+        names == (train.TWIN.as_posix(), str(train.FINAL), train.LEDGER),
+        names,
+    )
+    check("a plan of jepa entries loads", not refused(k, copy.deepcopy(JEPA_PLAN)))
+
+    def extract_on(target: object, extra: list | None = None) -> str:
+        plan = copy.deepcopy(JEPA_PLAN)
+        plan["runs"] += extra or []
+        plan["runs"][1]["args"][1] = target
+        return refused(k, plan)
+
+    seven = {"dataset_run": "20261101T000000Z-L16-null-e2-s7"}
+    check("refused: jepa extract on a seed 7 dataset run", "seed 7" in extract_on(seven))
+    untagged = {"dataset_run": "20261101T000000Z-train"}
+    check(
+        "refused: jepa extract on a run whose seed it cannot read",
+        "no seed" in extract_on(untagged),
+    )
+    made8 = [{"name": "sim8", "command": "null", "args": ["--L", 16, "--seed", 8]}]
+    plan = copy.deepcopy(JEPA_PLAN)
+    plan["runs"].insert(1, made8[0])
+    plan["runs"][2]["args"][1] = {"run": "sim8"}
+    check("refused: jepa extract on this plan's own seed 8 run", "seed 8" in refused(k, plan))
+    plan["runs"][1]["args"] = ["--L", 16]  # no --seed: the CLI's seed 1
+    check("... and accepted at the CLI's default seed 1", not refused(k, plan), refused(k, plan))
+    for what, change, needle in (
+        ("a stage entry that is no run id", {"stage": ["L16-qs-s11"]}, "stage: a list of run ids"),
+        ("a staged run listed twice", {"stage": [STAIRS[0], STAIRS[0]]}, "listed twice"),
+        ("a command the runner does not run", {"command": "jepa probe"}, "command 'jepa probe'"),
+    ):
+        plan = copy.deepcopy(JEPA_PLAN)
+        plan["runs"][0].update(change)
+        check(f"refused: {what}", needle in refused(k, plan), refused(k, plan))
+    plan = copy.deepcopy(JEPA_PLAN)
+    del plan["datasets"]
+    why = refused(k, plan)
+    check("refused: dataset runs with nowhere to look", "dataset or a kernel source" in why, why)
+    plan = dict(copy.deepcopy(JEPA_PLAN), wheel="no slash")
+    check("refused: a wheel that names no dataset", "wheel 'no slash'" in refused(k, plan))
+
+    errors = k.cli_errors(JEPA_PLAN)
+    check("the jepa CLI itself takes every entry's arguments", errors == [], errors)
+    plan = copy.deepcopy(JEPA_PLAN)
+    plan["runs"][0]["args"] += ["--stepz", 5]
+    errors = k.cli_errors(plan)
+    check("... and catches a misspelt training flag", "unrecognized" in str(errors), errors)
+    plan["runs"][0]["args"] = plan["runs"][0]["args"][:-2]
+    plan["runs"][1]["args"] = plan["runs"][1]["args"][:1]
+    errors = k.cli_errors(plan)
+    check("... and an extraction missing its run", "required" in str(errors), errors)
+
+    ctx = ctx_at(k, root)
+    ctx.py = sys.executable
+    for run_id, seed in ((STAIRS[0], 11), (STAIRS[1], 12), (NULL, 1)):
+        dataset_run(ctx.input / "tp-data" / run_id, seed)
+    session = k.Session(ctx, copy.deepcopy(JEPA_PLAN), {}, COMMIT, TORCH, 2)
+    session.locate_datasets()
+    session.stage()
+    staged = ctx.out / "ising" / STAIRS[0] / "configs" / f"{1:020d}.parquet"
+    check(
+        "every dataset run the plan reads is staged and verified",
+        all((ctx.out / "ising" / r / "complete.json").is_file() for r in (*STAIRS, NULL)),
+    )
+    check("... hard linked when the input shares the filesystem", os.stat(staged).st_nlink >= 2)
+    shutil.rmtree(ctx.out / "ising" / STAIRS[1])
+    (ctx.input / "tp-data" / STAIRS[1] / "configs" / f"{1:020d}.parquet").write_bytes(b"other")
+    try:
+        damaged = k.Session(ctx, copy.deepcopy(JEPA_PLAN), {}, COMMIT, TORCH, 2)
+        damaged.locate_datasets()
+        damaged.stage()
+        check("a damaged input is refused by jepa verify's exit code", False)
+    except k.Refused as exc:
+        check(
+            "a damaged input is refused by jepa verify's exit code",
+            "sha256 differs" in str(exc),
+            exc,
+        )
+
+    m3, final, twin = (session.by_name[n] for n in ("m3", "x-final", "x-twin"))
+    m3.state, m3.folder, m3.run_id = "complete", f"jepa/{TRAINING}", TRAINING
+    (ctx.out / "jepa" / TRAINING / "ckpt").mkdir(parents=True)
+    (ctx.out / "jepa" / TRAINING / "final.pt").write_bytes(b"trained")
+    (ctx.out / "jepa" / TRAINING / k.TWIN).write_bytes(b"untrained")
+    tail, key = session.resolve(final)
+    expected = [str(ctx.out / "jepa" / TRAINING / "final.pt"), str(ctx.out / "ising" / NULL)]
+    check("final.pt and the dataset run resolve to their folders", tail == expected, tail)
+    check(
+        "... named by folder in the key",
+        key[1:] == [f"jepa/{TRAINING}/final.pt", f"dataset/{NULL}"],
+        key,
+    )
+    tail, _ = session.resolve(twin)
+    check(
+        "the step-0 twin resolves too", tail[0] == str(ctx.out / "jepa" / TRAINING / k.TWIN), tail
+    )
+    argv = session.command_line(final, session.resolve(final)[0], None)
+    check(
+        "jepa extract runs with --device and no --data-dir",
+        argv[3:6] == ["-m", "tipping_point.jepa", "extract"] and argv[-2:] == ["--device", "cpu"],
+        argv,
+    )
+    argv = session.command_line(m3, session.resolve(m3)[0], None)
+    check(
+        "jepa train runs with --device and --data-dir",
+        argv[-4:] == ["--device", "cpu", "--data-dir", str(ctx.out)],
+        argv,
+    )
+    argv = session.command_line(m3, [], ctx.out / "jepa" / TRAINING)
+    check(
+        "an unfinished training resumes with jepa resume",
+        argv[4:]
+        == ["tipping_point.jepa", "resume", str(ctx.out / "jepa" / TRAINING), "--device", "cpu"],
+        argv,
+    )
+    argv = session.command_line(
+        final, session.resolve(final)[0], ctx.out / "ising" / NULL / "latents" / "x"
+    )
+    check("an unfinished extraction runs again", "resume" not in argv and "extract" in argv, argv)
+
+    check("no latents table yet", session.latents(final) is None)
+    table = ctx.out / "ising" / NULL / "latents" / f"{TRAINING}-step0000020"
+    table.mkdir(parents=True)
+    digest = hashlib.sha256(b"trained").hexdigest()
+    manifest = {
+        "producer": {"git_sha": COMMIT, "dirty": False},
+        "env": {"torch": TORCH, "device": "cpu"},
+        "params": {"checkpoint": {"sha256": digest}},
+    }
+    (table / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    check(
+        "the latents table is the one naming its checkpoint's sha256",
+        session.latents(final) == table,
+    )
+    check("... not the twin's", session.latents(twin) is None)
+    session.refuse_seeds(final)
+    check("seed 1 may be extracted", True)
+    seven = ctx.out / "ising" / NULL / "manifest.json"
+    seven.write_text(json.dumps({"params": {"seed": 7}}), encoding="utf-8")
+    try:
+        session.refuse_seeds(final)
+        check("seed 7 is refused again from the run's own manifest", False)
+    except k.RunError as exc:
+        check("seed 7 is refused again from the run's own manifest", "seed 7" in str(exc), exc)
+    seven.write_text(json.dumps({"params": {"seed": 1}}), encoding="utf-8")
+
+    session.prior = {
+        "x-final": {"name": "x-final", "folder": f"ising/{NULL}", "key": key},
+        "m3": {"name": "m3", "folder": f"jepa/{TRAINING}", "key": ["jepa train"]},
+    }
+    final.key = key
+    found, how = session.adopt(final)
+    check(
+        "an interrupted extraction is resumed from its table",
+        (found, how) == (table, "resume"),
+        (found, how),
+    )
+    (table / "complete.json").write_text("{}", encoding="utf-8")
+    found, how = session.adopt(final)
+    check("a finished one is reused", how == "reuse", how)
+    made(ctx.out / "jepa" / "20261026T000001Z-L16-m4", done=False, checkpoint=True)
+    session.prior["m3"]["folder"] = "jepa/20261026T000001Z-L16-m4"
+    m3.key = ["jepa train"]
+    found, how = session.adopt(m3)
+    check(
+        "an unfinished training is resumed",
+        how == "resume" and found is not None and found.name.endswith("m4"),
+        how,
+    )
+    m3.folder, m3.run_id = f"jepa/{TRAINING}", TRAINING
+
+    ledger = ctx.out / "jepa" / k.LEDGER
+    lines = [
+        {"run_id": TRAINING, "from_ns": 0, "to_ns": 10 * 10**9, "step": 1000},  # start-up in it
+        {"run_id": TRAINING, "from_ns": 10 * 10**9, "to_ns": 15 * 10**9, "step": 2000},
+        {"run_id": TRAINING, "from_ns": 15 * 10**9, "to_ns": 16 * 10**9, "step": 2000},  # closing
+        {"run_id": "other", "from_ns": 0, "to_ns": 1, "step": 5},
+    ]
+    ledger.write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    (ctx.out / "jepa" / TRAINING / "complete.json").write_text("{}", encoding="utf-8")
+    began = 7 * 10**9
+    manifest["started_ns"] = began  # the table's clock starts once the model is loaded
+    (table / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    done = {"rows": {"latents": 1000}, "ended_ns": began + 5 * 10**8}
+    (table / "complete.json").write_text(json.dumps(done), encoding="utf-8")
+    final.state, final.folder, final.wall_s = "complete", table.relative_to(ctx.out).as_posix(), 2.0
+    final.resumed = False
+    rates = session.measured()
+    check(
+        "a training's rate leaves out start-up and the closing line",
+        rates["train"].get("m3", {}).get("s_per_step") == 0.005,
+        rates,
+    )
+    group = rates["extract"].get("m3 final.pt", {})
+    check(
+        "an extraction's rate is per frame, by checkpoint: the readout by its table's own clock",
+        group.get("readout_us_per_frame") == 500.0 and group.get("us_per_frame") == 2000.0,
+        rates,
+    )
+    text = k.rates_text(rates)
+    check(
+        "STATUS carries both",
+        "0.005 s/step" in text and "500.0 us/frame readout, 2000.0 with start-up" in text,
+        text,
+    )
+    final.resumed = True
+    group = session.measured()["extract"].get("m3 final.pt", {})
+    check(
+        "a table finished across sessions has no readout clock",
+        group.get("readout_us_per_frame") is None,
+        group,
+    )
+
+    (ctx.out / "ising" / STAIRS[0] / "latents").mkdir()
+    session.unstage()  # STAIRS[1] is the damaged copy the refused session left: no latents
+    kept = [(ctx.out / "ising" / r).is_dir() for r in (STAIRS[0], NULL, STAIRS[1])]
+    check(
+        "unstaging keeps the runs that gained latents and drops a plain copy",
+        kept == [True, True, False],
+        kept,
+    )
+
+    prev = root / "carry"
+    pctx = ctx_at(k, prev)
+    out = pctx.input / "tp-self-test" / "out"
+    (out / "ising" / NULL / "latents" / "t").mkdir(parents=True)
+    (out / "jepa" / TRAINING).mkdir(parents=True)
+    (out / "jepa" / k.LEDGER).write_text("{}\n", encoding="utf-8")
+    (out / "ising" / "20261025T000000Z-L64-pilot-s6").mkdir(parents=True)
+    records = [
+        {"name": "x-final", "folder": f"ising/{NULL}/latents/t", "state": "complete"},
+        {"name": "m3", "folder": f"jepa/{TRAINING}", "state": "interrupted"},
+    ]
+    state = {"kernel": "tp-self-test", "updated_utc": "2026-10-26", "runs": records}
+    (out / k.STATE).write_text(json.dumps(state), encoding="utf-8")
+    prior = k.carry_forward(pctx, copy.deepcopy(JEPA_PLAN))
+    check(
+        "a latents table travels in its dataset run; a training and the ledger come too",
+        (pctx.out / "ising" / NULL / "latents" / "t").is_dir()
+        and (pctx.out / "jepa" / TRAINING).is_dir()
+        and (pctx.out / "jepa" / k.LEDGER).is_file()
+        and prior is not None
+        and len(prior["runs"]) == 2,
+        prior,
+    )
+    legacy = {
+        "kernel": "tp-ising-job-a",
+        "updated_utc": "2026-10-26",
+        "runs": [{"name": "grid-L64", "run_id": "20261025T000000Z-L64-pilot-s6"}],
+    }
+    (out / k.STATE).write_text(json.dumps(legacy), encoding="utf-8")
+    prior = k.carry_forward(pctx, job_a())
+    check(
+        "a record from before folders reads as ising/<run id>",
+        prior is not None and prior["runs"][0]["folder"] == "ising/20261025T000000Z-L64-pilot-s6",
+        prior,
+    )
+
+    wctx = ctx_at(k, root / "wheels")
+    frozen = wctx.input / "tipping-point-wheel-v1"
+    frozen.mkdir()
+    (frozen / "tipping_point-0.1.0-py3-none-any.whl").write_bytes(b"PK")
+    (frozen / "COMMIT.txt").write_text(
+        "655949aa79ea32adfc103635d4cfb303ae24b94f\n", encoding="utf-8"
+    )
+    _, info = k.find_wheel(wctx, "gabrielezerzer/tipping-point-wheel-v1")
+    check(
+        "the plan's wheel dataset is the one installed", info["file"].startswith("tipping_point-")
+    )
+    (wctx.input / "tp-data").mkdir()
+    (wctx.input / "tp-data" / "tipping_point-0.2.0-py3-none-any.whl").write_bytes(b"PK")
+    try:
+        k.find_wheel(wctx, "gabrielezerzer/tipping-point-wheel-v1")
+        check("a second wheel anywhere among the inputs is refused", False)
+    except k.Refused as exc:
+        check(
+            "a second wheel anywhere among the inputs is refused", "expected one" in str(exc), exc
+        )
+    plan = dict(copy.deepcopy(JEPA_PLAN), wheel="gabrielezerzer/tipping-point-wheel-v1")
+    k.write_kernel(plan, root / "frozen")
+    meta = json.loads((root / "frozen" / "kernel-metadata.json").read_text(encoding="utf-8"))
+    check(
+        "the kernel attaches the plan's wheel dataset",
+        meta["dataset_sources"]
+        == ["gabrielezerzer/tipping-point-wheel-v1", "gabrielezerzer/tp-data"],
+        meta,
+    )
+
+
 def run_all(k: ModuleType) -> int:
     with tempfile.TemporaryDirectory(prefix="tp-self-test-") as tmp:
         root = Path(tmp)
@@ -748,5 +1100,6 @@ def run_all(k: ModuleType) -> int:
         wheel(k, root / "wheel")
         verification(k, root / "verify")
         kernel_folder(k, root / "kernel")
+        jepa_entries(k, root / "jepa")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1

@@ -1,15 +1,17 @@
-"""Tipping Point: an explicit plan of `ising` runs on Kaggle's GPUs. A Kaggle script kernel.
+"""Tipping Point: an explicit plan of simulator runs and JEPA trainings and extractions on Kaggle's
+GPUs. A Kaggle script kernel.
 
-A plan is plain JSON: an ordered list of runs, each an `ising` subcommand with its arguments.
---write-kernel embeds a plan in a copy of this file and writes kernel-metadata.json beside it, and
-`kaggle kernels push -p <dir>` runs it. The machinery is tp-tauc-l64-l128's (the kernel that ran
-on Kaggle's T4 x2, kept under .wf/kaggle/): the pinned environment from the tipping-point-wheel
+A plan is plain JSON: an ordered list of runs, each an `ising` or `jepa` subcommand with its
+arguments. --write-kernel embeds a plan in a copy of this file and writes kernel-metadata.json
+beside it, and `kaggle kernels push -p <dir>` runs it. The machinery is tp-tauc-l64-l128's (the
+kernel that ran on Kaggle's T4 x2, kept under .wf/kaggle/): the pinned environment from a wheel
 dataset with its COMMIT.txt check, the preflight benchmark, a queue per GPU through
-CUDA_VISIBLE_DEVICES, the stop at 8 h 15 min, checkpoints and `ising resume` across sessions,
-STATUS, and the exit-code policy.
+CUDA_VISIBLE_DEVICES, the stop at 8 h 15 min, checkpoints and resume across sessions, STATUS, and
+the exit-code policy.
 
     {"kernel": "tp-ising-job-a",                  the kernel slug: <owner>/<slug> and its title
      "description": "...",                        optional
+     "wheel": "<owner>/<slug>",                   optional: gabrielezerzer/tipping-point-wheel
      "datasets": ["<owner>/<slug>"],              optional: datasets to attach
      "kernel_sources": ["<owner>/<slug>"],        optional: other kernels' outputs to attach
      "inputs": {"record": {"run": "<run id>", "file": "pilot.json", "sha256": "<hex>"}},
@@ -17,16 +19,25 @@ STATUS, and the exit-code policy.
        {"name": "grid-L64", "command": "pilot", "args": ["--L", 64, "--seed", 6]},
        {"name": "qs-L64-s11", "command": "staircase", "gpu": 1,
         "args": ["--L", 64, "--seed", 11, "--tau", {"run": "grid-L64", "file": "tau.json"}]},
-       {"name": "null-L16-s1", "command": "null",
-        "args": ["--L", 16, "--epsilon-L", 2, "--pilot", {"input": "record"}]}]}
+       {"name": "m1", "command": "jepa train", "gpu": 0, "stage": ["<run id>", ...],
+        "args": ["--L", 16, "--train-seeds", 11, "--val-seed", 16, "--seed", 1,
+                 "--pilot", {"input": "record"}]},
+       {"name": "x1", "command": "jepa extract", "gpu": 1,
+        "args": [{"run": "m1", "file": "final.pt"}, {"dataset_run": "<run id>"}]}]}
 
-- command is pilot, staircase, ramp or null; args holds its flags and values, one item each. The
-  runner adds --device and --data-dir.
+- command is pilot, staircase, ramp, null, jepa train or jepa extract; args holds its flags and
+  values, one item each. The runner adds --device, and --data-dir where the command takes one.
 - {"run": <name>, "file": <path>} is that earlier run's folder plus <path>, resolved when the run
-  starts (run ids are timestamped). The run waits until that one is complete and verified.
+  starts (run ids are timestamped); the run waits until that one is complete and verified. A
+  training's folder holds final.pt and its step-0 twin ckpt/step_0000000.pt.
 - {"input": <name>} is the file an `inputs` entry names, looked up in the attached datasets and
   kernel outputs (in a <run id> folder or a <run id>.zip) and checked against its sha256 before
-  any run starts. A pilot record for --pilot is the use.
+  any run starts: a pilot record for --pilot.
+- {"dataset_run": <run id>} is a simulator run from an attached dataset or kernel output, and
+  "stage" lists runs a training reads (it finds them by L and seed). Before any run starts, each is
+  placed in out/ising/<run id> (inputs are read-only, and an extraction writes inside its run:
+  copied, hard linked on one filesystem, or unpacked) and checked with `jepa verify`. A copy that
+  gains no latents leaves the output at the end. `jepa extract` never reads seeds 6-10.
 - gpu pins a run to one GPU. The others go to whichever GPU is free, longest first, by the CLI's
   own schedule length at the preflight's measured rate.
 
@@ -34,12 +45,14 @@ From the repository root:
 
     uv run --no-sync python notebooks/kaggle_ising_runs.py --write-kernel <plan> <dir> [--resume]
     uv run --no-sync python notebooks/kaggle_ising_runs.py --dry-run <plan> [--only <names>]
+    uv run --no-sync python notebooks/kaggle_ising_runs.py --dry-run-jepa
     uv run --no-sync python notebooks/kaggle_ising_runs.py --self-test
 
 --resume attaches the kernel's own previous output (kernel_sources). Push a version with it after
 a session stopped at the deadline, and that version reuses the finished runs and continues the
-unfinished ones with `ising resume`. Every session first copies the previous output's runs into
-its own, so each version's output holds the whole plan so far.
+unfinished ones (`ising resume`, `jepa resume`, or the same `jepa extract` again, which resumes).
+Every session first copies the previous output's runs and the GPU-hour ledger into its own, so
+each version's output holds the whole plan so far.
 
 --dry-run really executes the plan on the CPU in a temporary folder, with sizes divided by
 --shrink (8: L = 4 and 8 for Job A) and sweep counts by its square. It builds a wheel from HEAD in a
@@ -48,22 +61,28 @@ The first is stopped by a simulated deadline at the first progress line after a 
 second runs with the first's output attached, as Kaggle attaches it. --only keeps the named runs
 and the runs they read: a staircase takes at least 101,000 sweeps whatever its L, since every
 plateau holds 500 + 2,000, so a busy CPU wants one. --input SLUG=DIR attaches a folder as a
-dataset or kernel output.
+dataset or kernel output. JEPA arguments are never shrunk: --dry-run-jepa rehearses a JEPA plan
+instead, on tiny simulator runs it writes (harness/jepa_ising.py's three-plateau staircase): a
+quick simulator run, a short training stopped by the simulated deadline and resumed, then its
+final.pt and step-0 twin extracted.
 
-On Kaggle every run lands in /kaggle/working/out/ising/<run id>/, its output in
-out/logs/<name>.log (`kaggle kernels output` fetches out/). Before any run starts, the wheel must
-have a COMMIT.txt naming a commit not marked dirty, and the installed package must name the same
-clean commit. After each run, the runner checks: exit 0; complete.json present, clean, with every
-check passed; every file complete.json lists intact (`jepa verify`); and a manifest whose git_sha
-is COMMIT.txt's, with dirty false. Runs are judged by exit codes, files and manifests, never by
+On Kaggle simulator runs land in /kaggle/working/out/ising/<run id>/, trainings in
+out/jepa/<run id>/ beside the GPU-hour ledger, latents inside their dataset run's folder, and each
+run's output in out/logs/<name>.log (`kaggle kernels output` fetches out/). Before any run starts,
+the wheel must be the only tipping_point wheel among the inputs, with a COMMIT.txt naming a commit
+not marked dirty, and the installed package must name the same clean commit. After each run, the
+runner checks: exit 0; complete.json present, clean, with every check passed; every file it lists
+intact (`jepa verify`, which also checks a latents table's rows); and a manifest whose git_sha is
+COMMIT.txt's, with dirty false. Runs are judged by exit codes, files and manifests, never by
 output text, because Kaggle's image prints sitecustomize errors from every child process. A
 failed run stops its GPU's queue and blocks the runs that read it; the other queues go on. No run
 starts once /kaggle/working holds 18 GB (Kaggle keeps 20 GB) or past 8 h 15 min.
 
-Status: out/STATUS holds one line (running, complete, incomplete, failed or refused), and
-out/kaggle-ising-runs.json holds every run's state, the plan, the environment and the preflight.
-The kernel exits non-zero only when its output holds no run folder, since a failed version may
-not keep its output.
+Status: out/STATUS holds one line (running, complete, incomplete, failed or refused) with the
+measured rates: seconds per training step after warm-up, from the training's own GPU-hour ledger,
+and microseconds per extracted frame, by checkpoint. out/kaggle-ising-runs.json holds every run's
+state, the rates, the plan, the environment and the preflight. The kernel exits non-zero only
+when its output holds no run folder, since a failed version may not keep its output.
 """
 
 from __future__ import annotations
@@ -73,6 +92,7 @@ import collections
 import contextlib
 import datetime
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -94,6 +114,7 @@ PLAN_JSON: str | None = None  # --write-kernel writes the plan here
 
 OWNER = "gabrielezerzer"
 WHEEL_DATASET = "tipping-point-wheel"
+DEFAULT_WHEEL = f"{OWNER}/{WHEEL_DATASET}"  # training jobs attach the latest wheel
 PYTHON = "3.13"  # the wheel's Requires-Python
 TORCH = "torch==2.14.1+cu126"
 TORCH_INDEX = "https://download.pytorch.org/whl/cu126"
@@ -102,15 +123,20 @@ PINNED = ("numpy==2.5.4", "pyarrow==26.0.0")  # uv.lock's versions
 # is the venv's interpreter, so -I does not skip it: without wrapt every child prints two error
 # lines (tp-tauc-l64-l128's log). Runs never depend on it.
 SITE_NOISE = ("wrapt==1.17.3",)
-COMMANDS = ("pilot", "staircase", "ramp", "null")
+ISING_COMMANDS = ("pilot", "staircase", "ramp", "null")
+COMMANDS = (*ISING_COMMANDS, "jepa train", "jepa extract")
 RUNNER_FLAGS = ("--device", "--data-dir", "-h", "--help")
+NO_EXTRACT_SEEDS = range(6, 11)  # the confirmatory seeds: no latents of them before the freeze
+SEED_TAG = re.compile(r"-s(\d+)$")  # every run tag the CLI writes ends in -s<seed>
+# what tipping_point.jepa.train names (TWIN, FINAL, LEDGER); the self-test holds them to it
+TWIN, FINAL, LEDGER = "ckpt/step_0000000.pt", "final.pt", "gpu_hours.jsonl"
 SESSION_S = 9 * 3600  # Kaggle's session cap
 STOP_S = SESSION_S - 45 * 60  # no run starts, and running ones stop, past this
 HEARTBEAT_S = 600
 LOOP_OVERHEAD = 1.10  # the run loop's schedule logic and Parquet flushes over the bare kernel
 RUN_OVERHEAD_S = 60  # start-up, and a pilot's closing tau.json pass
 BENCH_SWEEPS = 2_000
-NEW_FOLDER_S = 600  # a fresh run makes its folder within this, or it is stopped
+NEW_FOLDER_S = 1800  # a fresh run makes its folder within this (a training loads its data first)
 CAP_BYTES = 18 * 10**9  # Kaggle keeps at most 20 GB of output
 STATE = "kaggle-ising-runs.json"
 PLACEHOLDER = "<pending>"  # an argument still waiting on an earlier run
@@ -122,9 +148,9 @@ SOURCE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RUN_ID = re.compile(r"\d{8}T\d{6}Z-[A-Za-z0-9_-]+")
-PROGRESS = re.compile(
-    r"(?P<run>\d{8}T\d{6}Z-[A-Za-z0-9_-]+): step (?P<step>[\d,]+)/(?P<total>[\d,]+) "
-    r"\((?P<rate>[\d,]+) sweeps/s\)"
+PROGRESS = re.compile(  # a simulator run's line, and a training's (`step 1,000/2,000 loss ...`)
+    r"(?P<run>\d{8}T\d{6}Z-[A-Za-z0-9_-]+): step (?P<step>[\d,]+)/(?P<total>[\d,]+)"
+    r"(?: \((?P<rate>[\d,]+) sweeps/s\))?"
 )
 T0 = time.time()
 
@@ -170,6 +196,7 @@ import torch
 from tipping_point.ising import __main__ as cli
 from tipping_point.ising import io, kernel, run
 from tipping_point.ising.exact import TC
+from tipping_point.jepa import __main__ as jepa_cli
 
 
 def bench(shapes, sweeps, device):
@@ -217,11 +244,11 @@ class _Started(Exception):
 def capture(items):
     """What each `ising <argv>` would run, asked of the CLI itself: run.start is swapped for a stub
     that notes the run's size and length and stops, so nothing is simulated or written. An argv
-    still waiting on an earlier run (partial) is only parsed."""
-    return [_capture(item["argv"], item["partial"]) for item in items]
+    still waiting on an earlier run (partial), and every `jepa` one, is only parsed."""
+    return [_capture(item["argv"], item["partial"], item.get("module")) for item in items]
 
 
-def _capture(argv, partial):
+def _capture(argv, partial, module):
     seen = {}
 
     def stub(spec, schedule, root, tag, device=None, pilot=None):
@@ -232,6 +259,9 @@ def _capture(argv, partial):
     real, run.start = run.start, stub
     try:
         with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+            if module == "jepa":
+                jepa_cli._parser().parse_args(argv)
+                return {}
             if partial:
                 args = cli._parser().parse_args(argv)
                 # shortcut: a waiting run is taken as one block of --replicas, true of staircase,
@@ -394,7 +424,7 @@ def input_problems(name: object, entry: object) -> list[str]:
     return problems
 
 
-def ref_problems(ref: dict, earlier: set[str], inputs: dict) -> list[str]:
+def ref_problems(ref: dict, earlier: dict[str, dict], inputs: dict, sourced: bool) -> list[str]:
     if set(ref) in ({"run"}, {"run", "file"}):
         target = ref["run"]
         problems = []
@@ -407,12 +437,42 @@ def ref_problems(ref: dict, earlier: set[str], inputs: dict) -> list[str]:
         target = ref["input"]
         ok = isinstance(target, str) and target in inputs
         return [] if ok else [f"input {target!r} is not in the plan's inputs"]
-    return [f"reference {ref}: {{'run': <earlier run>, 'file': <path>}} or {{'input': <name>}}"]
+    if set(ref) == {"dataset_run"}:
+        target = ref["dataset_run"]
+        problems = (
+            []
+            if isinstance(target, str) and RUN_ID.fullmatch(target)
+            else [f"dataset_run {target!r} is not a run id"]
+        )
+        if not sourced:
+            problems.append("a dataset_run needs a dataset or a kernel source to be found in")
+        return problems
+    return [
+        f"reference {ref}: {{'run': <earlier run>, 'file': <path>}}, {{'input': <name>}} or "
+        "{'dataset_run': <run id>}"
+    ]
 
 
-def run_problems(run: dict, earlier: set[str], inputs: dict) -> list[str]:
+def extract_seeds(args: list, earlier: dict[str, dict]) -> list[tuple[object, int | None]]:
+    """The seeds of the simulator runs a `jepa extract` reads: a dataset run's from its run id's
+    -s<seed> tag, an earlier simulator run's from its --seed (the CLI's 1 when it gives none)."""
+    found: list[tuple[object, int | None]] = []
+    for arg in args:
+        if not isinstance(arg, dict):
+            continue
+        if "dataset_run" in arg:
+            tag = SEED_TAG.search(str(arg["dataset_run"]))
+            found.append((arg["dataset_run"], int(tag[1]) if tag else None))
+        elif earlier.get(str(arg.get("run")), {}).get("command") in ISING_COMMANDS:
+            given = earlier[arg["run"]]["args"]
+            seed = next((given[i + 1] for i in range(len(given) - 1) if given[i] == "--seed"), 1)
+            found.append((arg["run"], int(seed) if str(seed).isdigit() else None))
+    return found
+
+
+def run_problems(run: dict, earlier: dict[str, dict], inputs: dict, sourced: bool) -> list[str]:
     problems = []
-    unknown = set(run) - {"name", "command", "args", "gpu"}
+    unknown = set(run) - {"name", "command", "args", "gpu", "stage"}
     if unknown:
         problems.append(f"unknown keys {sorted(unknown)}")
     name = run.get("name")
@@ -425,18 +485,33 @@ def run_problems(run: dict, earlier: set[str], inputs: dict) -> list[str]:
     gpu = run.get("gpu")
     if gpu is not None and (isinstance(gpu, bool) or not isinstance(gpu, int) or gpu < 0):
         problems.append(f"gpu {gpu!r}: a GPU index, 0 or more")
+    stage = run.get("stage", [])
+    if not (
+        isinstance(stage, list) and all(isinstance(s, str) and RUN_ID.fullmatch(s) for s in stage)
+    ):
+        problems.append("stage: a list of run ids")
+    elif len(set(stage)) != len(stage):
+        problems.append("stage: a run id listed twice")
+    elif stage and not sourced:
+        problems.append("stage needs a dataset or a kernel source to find the runs in")
     args = run.get("args")
     if not isinstance(args, list):
         return [*problems, "args: a list of flags and values"]
     for arg in args:
         if isinstance(arg, dict):
-            problems += ref_problems(arg, earlier, inputs)
+            problems += ref_problems(arg, earlier, inputs, sourced)
         elif isinstance(arg, bool) or not isinstance(arg, str | int | float):
             problems.append(f"argument {arg!r}: a string, a number or a reference")
         elif isinstance(arg, float) and not math.isfinite(arg):
             problems.append(f"argument {arg!r}: not a finite number")
         elif isinstance(arg, str) and arg.split("=", 1)[0] in RUNNER_FLAGS:
             problems.append(f"argument {arg}: the runner sets it")
+    if run.get("command") == "jepa extract":  # #28: no latents of seeds 6-10 before the freeze
+        for target, seed in extract_seeds(args, earlier):
+            if seed is None:
+                problems.append(f"{target}: no seed to read, and jepa extract never reads 6-10")
+            elif seed in NO_EXTRACT_SEEDS:
+                problems.append(f"{target} has seed {seed}: jepa extract never reads seeds 6-10")
     return problems
 
 
@@ -445,13 +520,16 @@ def load_plan(plan: object) -> dict:
     if not isinstance(plan, dict):
         raise PlanError("a plan is a JSON object")
     problems = []
-    keys = {"kernel", "description", "datasets", "kernel_sources", "inputs", "runs"}
+    keys = {"kernel", "description", "wheel", "datasets", "kernel_sources", "inputs", "runs"}
     if set(plan) - keys:
         problems.append(f"unknown keys {sorted(set(plan) - keys)}")
     if not (isinstance(plan.get("kernel"), str) and SLUG.fullmatch(plan["kernel"])):
         problems.append(f"kernel {plan.get('kernel')!r}: a slug, 5-50 of a-z, 0-9 and '-'")
     if not isinstance(plan.get("description", ""), str):
         problems.append("description: a string")
+    wheel = plan.get("wheel", DEFAULT_WHEEL)
+    if not (isinstance(wheel, str) and SOURCE.fullmatch(wheel)):
+        problems.append(f"wheel {wheel!r}: the '<owner>/<slug>' of a wheel dataset")
     sources = 0
     for key in ("datasets", "kernel_sources"):
         value = plan.get(key, [])
@@ -473,16 +551,16 @@ def load_plan(plan: object) -> dict:
     if not (isinstance(runs, list) and runs):
         problems.append("runs: a non-empty list")
         runs = []
-    earlier: set[str] = set()
+    earlier: dict[str, dict] = {}
     for i, run in enumerate(runs):
         if not isinstance(run, dict):
             problems.append(f"runs[{i}]: an object")
             continue
         name = run.get("name")
         where = f"run {name!r}" if isinstance(name, str) else f"runs[{i}]"
-        problems += [f"{where}: {p}" for p in run_problems(run, earlier, inputs)]
+        problems += [f"{where}: {p}" for p in run_problems(run, earlier, inputs, sources > 0)]
         if isinstance(name, str):
-            earlier.add(name)
+            earlier[name] = run
     if problems:
         raise PlanError("\n".join(problems))
     return plan
@@ -498,10 +576,12 @@ class Run:
     gpu: int | None
     index: int
     deps: list[str]
+    stage: list[str] = field(default_factory=list)  # dataset runs a training reads
     state: str = "pending"  # running, complete, failed, interrupted, blocked, not started
     note: str = ""
-    run_id: str | None = None
-    key: list[str] | None = None  # command and arguments, references as run ids: what reuse matches
+    run_id: str | None = None  # the name of its folder
+    folder: str | None = None  # under out/: ising/<id>, jepa/<id>, ising/<id>/latents/<table>
+    key: list[str] | None = None  # command and arguments, references as folders: what reuse matches
     shape: list[int] | None = None  # [L, lattices]
     total: int | None = None  # sweeps
     step: int = 0
@@ -528,9 +608,34 @@ def make_runs(plan: dict) -> list[Run]:
                 spec.get("gpu"),
                 i,
                 [*dict.fromkeys(refs)],
+                stage=list(spec.get("stage", [])),
             )
         )
     return runs
+
+
+def module_of(command: str) -> tuple[str, str]:
+    """A plan command's CLI module and subcommand: `pilot` is ising's, `jepa train` jepa's."""
+    module, _, sub = command.rpartition(" ")
+    return module or "ising", sub
+
+
+def dataset_runs(runs: list[Run]) -> list[str]:
+    """Every simulator run the plan reads from its inputs: staged and dataset_run ones."""
+    named = [s for r in runs for s in r.stage]
+    named += [
+        a["dataset_run"] for r in runs for a in r.args if isinstance(a, dict) and "dataset_run" in a
+    ]
+    return [*dict.fromkeys(named)]
+
+
+def link_or_copy(src: str, dst: str) -> str:
+    """A hard link where both sit on one filesystem, else a copy."""
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+    return dst
 
 
 def shrink(args: list, factor: int) -> list:
@@ -599,10 +704,6 @@ def child_env(ctx: Ctx) -> dict[str, str]:
     return dict(os.environ, TP_DATA_DIR=str(ctx.out), CUBLAS_WORKSPACE_CONFIG=":4096:8")
 
 
-def ising_argv(py: str, *args: object) -> list[str]:
-    return [py, "-I", "-u", "-m", "tipping_point.ising", *map(str, args)]
-
-
 def run_helper(ctx: Ctx, command: str, env: dict | None = None, **kwargs: Any) -> Any:
     """A helper command in the pinned environment; its result comes back through a file."""
     stamp = f"{command}-{time.time_ns()}-{threading.get_ident()}"
@@ -631,13 +732,15 @@ def find_input(root: Path, slug: str) -> Path:
     raise Refused(f"input {slug!r} is not attached under {root}:\n{listing}")
 
 
-def find_wheel(ctx: Ctx) -> tuple[Path, dict]:
-    """The wheel, and the commit its COMMIT.txt names; refused when that is missing or dirty."""
-    root = find_input(ctx.input, WHEEL_DATASET)
-    wheels = sorted(root.rglob("tipping_point-*.whl"))
-    if len(wheels) != 1:
+def find_wheel(ctx: Ctx, source: str = DEFAULT_WHEEL) -> tuple[Path, dict]:
+    """The wheel of the plan's wheel dataset, and the commit its COMMIT.txt names; refused when
+    that is missing or dirty, or when the inputs hold any other tipping_point wheel."""
+    root = find_input(ctx.input, source.split("/", 1)[1])
+    wheels = sorted(ctx.input.rglob("tipping_point-*.whl"))
+    if len(wheels) != 1 or not wheels[0].is_relative_to(root):
         raise Refused(
-            f"expected one tipping_point wheel in {root}, found {[w.name for w in wheels]}"
+            f"expected one tipping_point wheel among the inputs, in {source}; "
+            f"found {[str(w) for w in wheels]}"
         )
     notes = sorted(root.rglob("COMMIT.txt"))
     if len(notes) != 1:
@@ -762,16 +865,25 @@ def carry_forward(ctx: Ctx, plan: dict) -> dict | None:
     names = {r["name"] for r in plan["runs"]}
     kept = []
     for record in state["runs"]:
-        if not (isinstance(record, dict) and record.get("run_id") and record.get("name") in names):
+        if not (isinstance(record, dict) and record.get("name") in names):
             continue
-        src, dest = path.parent / "ising" / record["run_id"], ctx.out / "ising" / record["run_id"]
+        legacy = f"ising/{record['run_id']}" if record.get("run_id") else None  # before folders
+        folder = record.get("folder") or legacy
+        if not folder:
+            continue
+        top = "/".join(PurePosixPath(folder).parts[:2])  # a latents table travels in its run
+        src, dest = path.parent / top, ctx.out / top
         if not src.is_dir():
             log(f"  {record['name']}: {src} is not in the attached output; skipped")
             continue
         if not dest.exists():
             shutil.copytree(src, dest)
-        kept.append(record)
-        log(f"  {record['name']}: {record['run_id']} ({record.get('state')}) copied in")
+        kept.append(dict(record, folder=folder))
+        log(f"  {record['name']}: {folder} ({record.get('state')}) copied in")
+    ledger = path.parent / "jepa" / LEDGER
+    if ledger.is_file():  # the GPU hours of every session so far
+        (ctx.out / "jepa").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ledger, ctx.out / "jepa" / LEDGER)
     log(f"{path}: {state.get('status')}; {len(kept)} runs carried forward")
     return {"path": str(path), "status": state.get("status"), "runs": kept}
 
@@ -1025,16 +1137,20 @@ class Session:
         self.by_name = {r.name: r for r in self.runs}
         self.env = child_env(ctx)
         self.inputs: dict[str, Path] = {}  # input name -> its checked file
+        self.datasets: dict[str, Path] = {}  # dataset run id -> where the inputs hold it
         self.prior: dict[str, dict] = {r["name"]: r for r in (prior or {}).get("runs", [])}
         for r in self.runs:  # until this session decides, a run keeps the previous one's folder
             if r.name in self.prior:
                 p = self.prior[r.name]
-                r.run_id, r.key, r.step = p["run_id"], p.get("key"), int(p.get("step") or 0)
+                r.folder, r.run_id = p["folder"], PurePosixPath(p["folder"]).name
+                r.key, r.step = p.get("key"), int(p.get("step") or 0)
                 r.wall_s = float(p.get("wall_s") or 0.0)
         self.rates: dict[tuple[int, int], float] = {}
         self.active: dict[str, subprocess.Popen] = {}
         self.active_lock = threading.Lock()  # a start against the deadline's kill sweep
-        self.start_lock = threading.Lock()  # one new run folder appears at a time
+        # one new run folder appears at a time in each place runs start in (an extraction
+        # writes inside its dataset run, found by its checkpoint)
+        self.start_locks = {"ising": threading.Lock(), "jepa": threading.Lock()}
         self.save_lock = threading.Lock()
         self.deadline_hit = False
         self.beat = time.time()
@@ -1050,6 +1166,7 @@ class Session:
     def run(self) -> int:
         log("== inputs")
         self.locate_inputs()
+        self.locate_datasets()
         log("== the plan as the CLI sets it up")
         errors = self.capture(self.runs)
         if errors:
@@ -1061,6 +1178,8 @@ class Session:
             )
         log("== preflight: the bare kernel loop on each run's shape, GPU 0")
         self.preflight()
+        log("== the dataset runs the plan reads, staged in out/ising")
+        self.stage()
         self.save()
         log("== runs")
         try:
@@ -1070,13 +1189,73 @@ class Session:
             log(f"FAILED in the runner: {exc!r}\n{self.summary['runner_error']}")
         return self.finish()
 
+    def roots(self) -> list[Path]:
+        """Where the plan's attached datasets and kernel outputs sit among the inputs."""
+        sources = self.plan.get("datasets", []) + self.plan.get("kernel_sources", [])
+        return [find_input(self.ctx.input, s.split("/", 1)[1]) for s in sources]
+
+    def locate_datasets(self) -> None:
+        """Where the inputs hold each dataset run the plan reads: its folder (as uploaded, or
+        unpacked by Kaggle, possibly still named <run id>.zip) or its <run id>.zip."""
+        wanted = dataset_runs(self.runs)
+        if not wanted:
+            return
+        names = {*wanted, *(f"{w}.zip" for w in wanted)}
+        hits: dict[str, list[Path]] = {}
+        for root in self.roots():  # one walk per root, not one per run
+            for path in root.rglob("*"):
+                if path.name in names:
+                    hits.setdefault(path.name.removesuffix(".zip"), []).append(path)
+        for run_id in wanted:
+            found = sorted(hits.get(run_id, []), key=lambda p: (p.is_file(), str(p)))
+            usable = [p for p in found if p.is_file() or (p / "complete.json").is_file()]
+            if not usable:
+                raise Refused(f"dataset run {run_id} is in none of the attached inputs")
+            self.datasets[run_id] = usable[0]
+        log(f"{len(wanted)} dataset runs found among the attached inputs")
+
+    def stage(self) -> None:
+        """Each dataset run the plan reads, placed in out/ising/<run id>: inputs are read-only,
+        a training finds its runs in its data dir, and an extraction writes inside its run.
+        Copied, hard linked on one filesystem, or unpacked from its zip; then all checked with
+        one `jepa verify`, judged by its exit code. A folder the previous session left (with
+        its latents) stays as it is."""
+        if not self.datasets:
+            log("none")
+            return
+        ising = self.ctx.out / "ising"
+        for run_id, src in self.datasets.items():
+            dest = ising / run_id
+            if dest.exists():
+                continue
+            if src.is_file():
+                unpacked = unzip_run(src, ising)
+                if unpacked is None or unpacked.name != run_id:
+                    raise Refused(f"{src} does not unpack to the run {run_id}")
+            else:
+                shutil.copytree(src, dest, copy_function=link_or_copy)
+        dirs = [ising / run_id for run_id in self.datasets]
+        argv = [self.ctx.py, "-I", "-u", "-m", "tipping_point.jepa", "verify", *dirs]
+        code, lines = stream(argv, env=self.env, cwd=self.ctx.cwd, check=False, prefix="[verify] ")
+        problems = file_problems(code, lines, dirs)
+        if problems:
+            raise Refused("staged dataset runs fail jepa verify: " + "; ".join(problems[:5]))
+        self.summary["staged"] = {run_id: str(src) for run_id, src in self.datasets.items()}
+
+    def unstage(self) -> None:
+        """Staged dataset runs that gained no latents leave the output: plain copies of inputs."""
+        for run_id in self.datasets:
+            dest = self.ctx.out / "ising" / run_id
+            if dest.is_dir() and not (dest / "latents").exists():
+                shutil.rmtree(dest, ignore_errors=True)
+                log(f"unstaged {run_id}: a plain copy of an input")
+
     def locate_inputs(self) -> None:
         entries = self.plan.get("inputs", {})
         if not entries:
             log("none")
             return
-        sources = self.plan.get("datasets", []) + self.plan.get("kernel_sources", [])
-        roots = [find_input(self.ctx.input, s.split("/", 1)[1]) for s in sources]
+        roots = self.roots()
         scratch = self.ctx.tmp / "tp-inputs"
         for name, entry in entries.items():
             found = []
@@ -1098,9 +1277,10 @@ class Session:
         self.summary["inputs"] = {n: str(p) for n, p in self.inputs.items()}
 
     def resolve(self, run: Run, pending_ok: bool = False) -> tuple[list[str], list[str]]:
-        """The run's arguments as the CLI takes them, and its key: references as run ids."""
+        """The run's arguments as the CLI takes them, and its key: references as folders."""
         tail, key = [], [run.command]
-        for arg in shrink(run.args, self.ctx.shrink):
+        args = shrink(run.args, self.ctx.shrink) if run.command in ISING_COMMANDS else run.args
+        for arg in args:
             if not isinstance(arg, dict):
                 tail.append(str(arg))
                 key.append(str(arg))
@@ -1108,15 +1288,26 @@ class Session:
                 entry = self.plan["inputs"][arg["input"]]
                 tail.append(str(self.inputs[arg["input"]]))
                 key.append(f"input/{entry['run']}/{entry['file']}")
-            else:
-                dep = self.by_name[arg["run"]]
-                if dep.state != "complete" or dep.run_id is None:
+            elif "dataset_run" in arg:
+                folder = self.ctx.out / "ising" / arg["dataset_run"]
+                if not folder.is_dir():
                     if not pending_ok:
-                        raise RunError(f"{dep.name} is {dep.state}, not complete")
+                        raise RunError(f"{arg['dataset_run']} is not staged")
                     tail.append(PLACEHOLDER)
                     key.append(PLACEHOLDER)
                     continue
-                rel = f"ising/{dep.run_id}" + (f"/{arg['file']}" if "file" in arg else "")
+                tail.append(str(folder))
+                key.append(f"dataset/{arg['dataset_run']}")
+            else:
+                dep = self.by_name[arg["run"]]
+                if dep.state != "complete" or dep.folder is None:
+                    if not pending_ok:
+                        why = "has no folder" if dep.state == "complete" else f"is {dep.state}"
+                        raise RunError(f"{dep.name} {why}, not complete")
+                    tail.append(PLACEHOLDER)
+                    key.append(PLACEHOLDER)
+                    continue
+                rel = dep.folder + (f"/{arg['file']}" if "file" in arg else "")
                 if not (self.ctx.out / rel).exists():
                     raise RunError(f"{rel} does not exist ({dep.name}'s folder)")
                 tail.append(str(self.ctx.out / rel))
@@ -1126,27 +1317,33 @@ class Session:
     def helper(self, command: str, env: dict | None = None, **kwargs: Any) -> Any:
         return run_helper(self.ctx, command, env or self.env, **kwargs)
 
+    def flags(self, run: Run, data_dir: Path) -> list[str]:
+        """What the runner adds to a command: --device, and --data-dir where it takes one."""
+        data = [] if run.command == "jepa extract" else ["--data-dir", str(data_dir)]
+        return ["--device", self.ctx.device, *data]
+
     def capture(self, runs: list[Run]) -> list[str]:
-        """Each run's size and length as the CLI itself sets it up (the helper's capture); a run
-        still waiting on an earlier one is only parsed. The CLI's refusals, by run."""
+        """Each simulator run's size and length as the CLI itself sets it up (the helper's
+        capture); a run still waiting on an earlier one, and every jepa run, is only parsed.
+        The CLI's refusals, by run."""
         items = []
         for r in runs:
             tail, _ = self.resolve(r, pending_ok=True)
-            scratch = str(self.ctx.tmp / "tp-capture")
-            argv = [r.command, *tail, "--device", self.ctx.device, "--data-dir", scratch]
-            items.append({"argv": argv, "partial": PLACEHOLDER in tail})
+            module, sub = module_of(r.command)
+            argv = [sub, *tail, *self.flags(r, self.ctx.tmp / "tp-capture")]
+            items.append({"argv": argv, "partial": PLACEHOLDER in tail, "module": module})
         errors = []
         for r, got in zip(runs, self.helper("capture", items=items), strict=True):
             if "error" in got:
                 errors.append(f"{r.name}: {got['error']}")
-                continue
-            r.shape, r.total = [got["L"], got["lattices"]], got["total"]
-            r.estimate_s = self.estimate(r)
+            elif "L" in got:
+                r.shape, r.total = [got["L"], got["lattices"]], got["total"]
+                r.estimate_s = self.estimate(r)
         return errors
 
     def capture_ready(self, runs: list[Run]) -> None:
         """Runs whose last dependency just finished: their real length, for the order and log."""
-        waiting = [r for r in runs if r.total is None]
+        waiting = [r for r in runs if r.total is None and r.command in ISING_COMMANDS]
         if not waiting:
             return
         for error in self.capture(waiting):
@@ -1166,6 +1363,9 @@ class Session:
 
     def preflight(self) -> None:
         shapes = sorted({(r.shape[0], r.shape[1]) for r in self.runs if r.shape})
+        if not shapes:
+            log("no simulator run to time: jepa runs report their own rates")
+            return
         gpu0 = dict(self.env, CUDA_VISIBLE_DEVICES="0")
         sweeps, device = self.ctx.bench_sweeps, self.ctx.device
         bench = self.helper(
@@ -1179,6 +1379,8 @@ class Session:
         log(f"budget at the preflight rates ({overheads}):")
         known = 0.0
         for r in self.runs:
+            if r.command not in ISING_COMMANDS:
+                continue
             L, lattices = r.shape or [0, 0]
             head = f"  {r.name:<18} {r.command:<9} L={L:<3} x{lattices:<4}"
             if r.estimate_s is None or r.total is None:
@@ -1206,31 +1408,80 @@ class Session:
 
     def execute(self, gpu: int, run: Run) -> tuple[str, str]:
         """One run on one GPU: reuse the previous session's finished one, continue its unfinished
-        one with `ising resume`, or start it."""
+        one (`ising resume`, `jepa resume`, or the same extraction again), or start it."""
         prefix = f"[gpu{gpu} {run.name}] "
         try:
             tail, run.key = self.resolve(run)
+            if run.command == "jepa extract":
+                self.refuse_seeds(run)
         except RunError as exc:
             return "failed", str(exc)
-        run_dir, how = self.adopt(run)
-        if run_dir is not None and how == "reuse":
-            log(f"{prefix}complete already: {run_dir.name}, from the previous session")
-            return self.verify(run, run_dir, prefix, "reused from the previous session's output")
-        if run_dir is not None:
-            argv = ising_argv(self.ctx.py, "resume", run_dir)
-        else:
-            flags = ["--device", self.ctx.device, "--data-dir", self.ctx.out]
-            argv = ising_argv(self.ctx.py, run.command, *tail, *flags)
-        return self.launch(gpu, run, argv, run_dir, prefix)
+        found, how = self.adopt(run)
+        if found is not None and how == "reuse":
+            where = found.relative_to(self.ctx.out).as_posix()
+            log(f"{prefix}complete already: {where}, from the previous session")
+            return self.verify(run, found, prefix, "reused from the previous session's output")
+        return self.launch(gpu, run, self.command_line(run, tail, found), found, prefix)
+
+    def command_line(self, run: Run, tail: list[str], unfinished: Path | None) -> list[str]:
+        """The child's argv: the command, or the resume of its unfinished folder. An extraction
+        resumes by running again, keeping the chunks it finished."""
+        module, sub = module_of(run.command)
+        base = [self.ctx.py, "-I", "-u", "-m", f"tipping_point.{module}"]
+        if unfinished is not None and run.command != "jepa extract":
+            device = ["--device", self.ctx.device] if module == "jepa" else []
+            return [*base, "resume", str(unfinished), *device]
+        return [*base, sub, *tail, *self.flags(run, self.ctx.out)]
+
+    def extract_paths(self, run: Run) -> tuple[Path, Path]:
+        """The checkpoint an extraction reads and the simulator run it writes in."""
+        ckpt = target = None
+        for arg in run.args:
+            if not isinstance(arg, dict):
+                continue
+            if "dataset_run" in arg:
+                target = self.ctx.out / "ising" / arg["dataset_run"]
+            elif "input" in arg:
+                ckpt = self.inputs[arg["input"]]
+            elif self.by_name[arg["run"]].command in ISING_COMMANDS:
+                target = self.ctx.out / str(self.by_name[arg["run"]].folder)
+            else:
+                ckpt = self.ctx.out / str(self.by_name[arg["run"]].folder) / arg.get("file", "")
+        if ckpt is None or target is None:
+            raise RunError("jepa extract reads a checkpoint and a simulator run: one of each")
+        return ckpt, target
+
+    def latents(self, run: Run) -> Path | None:
+        """An extraction's latents table: the folder in its simulator run whose manifest names
+        its checkpoint by sha256 (a run holds one table per checkpoint), else None."""
+        ckpt, target = self.extract_paths(run)
+        if not ckpt.is_file():
+            return None
+        digest = sha256_file(ckpt)
+        for manifest in sorted((target / "latents").glob("*/manifest.json")):
+            params = (read_json(manifest) or {}).get("params") or {}
+            if (params.get("checkpoint") or {}).get("sha256") == digest:
+                return manifest.parent
+        return None
+
+    def refuse_seeds(self, run: Run) -> None:
+        """#28's hard rule, read again from the simulator run's own manifest: no latents of
+        seeds 6-10 (the confirmatory runs) before the freeze."""
+        _, target = self.extract_paths(run)
+        seed = ((read_json(target / "manifest.json") or {}).get("params") or {}).get("seed")
+        if not isinstance(seed, int) or seed in NO_EXTRACT_SEEDS:
+            raise RunError(f"{target.name} has seed {seed}: jepa extract never reads seeds 6-10")
 
     def adopt(self, run: Run) -> tuple[Path | None, str | None]:
         """The previous session's folder for this run, carried into this output, when it was made
-        from the same arguments by the same commit, torch and device: (folder, reuse or resume)."""
+        from the same arguments by the same commit, torch and device: (folder, reuse or resume).
+        An extraction's is the latents table that names its checkpoint."""
         prior = self.prior.get(run.name)
         if prior is None:
             return None, None
-        folder = self.ctx.out / "ising" / prior["run_id"]
-        manifest = read_json(folder / "manifest.json") or {}
+        extract = run.command == "jepa extract"
+        folder = self.latents(run) if extract else self.ctx.out / prior["folder"]
+        manifest = (read_json(folder / "manifest.json") if folder is not None else None) or {}
         env = manifest.get("env") or {}
         made = [
             (manifest.get("producer") or {}).get("git_sha"),
@@ -1238,21 +1489,27 @@ class Session:
             env.get("device"),
         ]
         here = [self.commit, self.torch, self.ctx.device]
+        state = (
+            "manifest.json" if extract else "checkpoint.pt"
+        )  # what an unfinished one resumes from
         if prior.get("key") != run.key:
             why = "it was made from other arguments"
-        elif not folder.is_dir():
+        elif folder is None or not folder.is_dir():
             why = "its folder is not in this output"
         elif made != here:
             why = f"it was made by commit, torch and device {made}, not {here}"
-        elif not ((folder / "complete.json").is_file() or (folder / "checkpoint.pt").is_file()):
-            why = "it holds neither complete.json nor a checkpoint"
+        elif not ((folder / "complete.json").is_file() or (folder / state).is_file()):
+            why = f"it holds neither complete.json nor {state}"
         else:
             why = None
         if why is not None:
-            log(f"[{run.name}] {prior['run_id']} is not reused: {why}; starting afresh")
-            shutil.rmtree(folder, ignore_errors=True)  # superseded: no place in this output
-            run.run_id, run.step, run.wall_s = None, 0, 0.0
+            log(f"[{run.name}] {prior['folder']} is not reused: {why}; starting afresh")
+            if folder is not None:  # superseded: no place in this output
+                shutil.rmtree(folder, ignore_errors=True)
+            run.folder = run.run_id = None
+            run.step, run.wall_s = 0, 0.0
             return None, None
+        run.folder, run.run_id = folder.relative_to(self.ctx.out).as_posix(), folder.name
         if (folder / "complete.json").is_file():
             run.reused = True
             return folder, "reuse"
@@ -1263,12 +1520,15 @@ class Session:
         self, gpu: int, run: Run, argv: list[str], run_dir: Path | None, prefix: str
     ) -> tuple[str, str]:
         env = dict(self.env, CUDA_VISIBLE_DEVICES=str(gpu))
-        ising = self.ctx.out / "ising"
+        domain = {"jepa train": "jepa", "jepa extract": ""}.get(run.command, "ising")
+        parent = self.ctx.out / domain
         tail: collections.deque[str] = collections.deque(maxlen=60)
         clock = time.time()
-        fresh = run_dir is None
-        with self.start_lock if fresh else contextlib.nullcontext():
-            before = set(os.listdir(ising))
+        fresh = run_dir is None and domain != ""
+        if run.command == "jepa extract" and run_dir is None:  # its run carries partial latents
+            run.folder = self.extract_paths(run)[1].relative_to(self.ctx.out).as_posix()
+        with self.start_locks[domain] if fresh else contextlib.nullcontext():
+            before = set(os.listdir(parent)) if fresh else set()
             with self.active_lock:  # a run never starts after the deadline has stopped the others
                 if self.deadline_hit:
                     return "not started", "session deadline"
@@ -1288,14 +1548,15 @@ class Session:
             pump = threading.Thread(target=self.pump, args=(proc, run, tail, prefix), daemon=True)
             pump.start()
             if fresh:
-                run_dir = self.new_folder(ising, before, proc)
+                run_dir = self.new_folder(parent, before, proc)
                 run.run_id = None if run_dir is None else run_dir.name
+                run.folder = None if run_dir is None else f"{domain}/{run_dir.name}"
                 if run_dir is not None:
                     self.save()
                     # the next start falls in a later second, since a run id names its second
                     time.sleep(1)
         try:
-            if run_dir is None and proc.poll() is None:  # alive, yet no folder after NEW_FOLDER_S
+            if fresh and run_dir is None and proc.poll() is None:  # no folder after NEW_FOLDER_S
                 log(f"{prefix}no run folder after {NEW_FOLDER_S} s; stopping it")
                 proc.kill()
             code = proc.wait()
@@ -1311,17 +1572,17 @@ class Session:
         log(f"{prefix}exit {code} after {time.time() - clock:.0f} s")
         return self.settle(run, run_dir, code, tail, prefix)
 
-    def new_folder(self, ising: Path, before: set[str], proc: subprocess.Popen) -> Path | None:
-        """The folder a fresh run makes: the one new name in out/ising. Starts take turns (the
-        start lock), so it is this run's."""
+    def new_folder(self, parent: Path, before: set[str], proc: subprocess.Popen) -> Path | None:
+        """The folder a fresh run makes: the one new run id in out/ising or out/jepa. Starts there
+        take turns (that place's start lock), so it is this run's."""
         clock = time.time()
         while time.time() - clock < NEW_FOLDER_S:
             exited = proc.poll() is not None
-            new = sorted(n for n in os.listdir(ising) if n not in before and RUN_ID.fullmatch(n))
+            new = sorted(n for n in os.listdir(parent) if n not in before and RUN_ID.fullmatch(n))
             if new:
                 if len(new) > 1:
                     log(f"WARNING: several new run folders {new}; taking the last")
-                return ising / new[-1]
+                return parent / new[-1]
             if exited:
                 return None
             time.sleep(0.2)
@@ -1340,10 +1601,11 @@ class Session:
                     found = PROGRESS.search(line)
                     if found:
                         step, total, rate = (
-                            int(found[k].replace(",", "")) for k in ("step", "total", "rate")
+                            int(found[k].replace(",", "")) if found[k] else None
+                            for k in ("step", "total", "rate")
                         )
-                        run.step, run.total, run.sweeps_per_s = step, total, rate
-                        if rate:
+                        run.step, run.total, run.sweeps_per_s = step or 0, total, rate
+                        if rate and step is not None and total is not None:
                             line += f"   [ETA {(total - step) / rate / 3600:.2f} h]"
                         if self.ctx.interrupt and any(r.state == "complete" for r in self.runs):
                             self.deadline("session deadline, simulated by the dry run")
@@ -1358,15 +1620,23 @@ class Session:
     ) -> tuple[str, str]:
         """The run's state from its exit code and its files, never from its output text."""
         killed = self.deadline_hit and code != 0
+        state = "checkpoint.pt"  # what an unfinished run resumes from
+        if run.command == "jepa extract":  # its table, found by its checkpoint
+            run_dir, state = self.latents(run), "manifest.json"
         if run_dir is not None and (run_dir / "complete.json").is_file() and (code == 0 or killed):
             return self.verify(run, run_dir, prefix)
         if killed:
-            if run_dir is not None and (run_dir / "checkpoint.pt").is_file():
+            if run_dir is not None and (run_dir / state).is_file():
                 return "interrupted", "stopped at the session deadline; resumable"
-            return "not started", "session deadline (stopped before its first checkpoint)"
+            return "not started", "session deadline (stopped before it saved any state)"
         run.output_tail = list(tail)[-40:]
         last = next((line for line in reversed(tail) if line.strip()), "no output")
-        made = "" if run_dir is not None else " before it made a run folder"
+        if run_dir is not None:
+            made = ""
+        elif run.command == "jepa extract":
+            made = " with no finished latents table naming its checkpoint"
+        else:
+            made = " before it made a run folder"
         return "failed", f"exit {code}{made}: {last}"
 
     def verify(self, run: Run, run_dir: Path, prefix: str, note: str = "") -> tuple[str, str]:
@@ -1374,6 +1644,7 @@ class Session:
             # `ising pilot` writes tau.json after complete.json; `ising resume` never does
             log(f"{prefix}no tau.json, as after a resume: writing it as `ising pilot` would")
             self.helper("tau_json", run_dir=str(run_dir), seconds=round(run.wall_s, 1))
+        run.folder, run.run_id = run_dir.relative_to(self.ctx.out).as_posix(), run_dir.name
         problems = verdicts(run_dir, self.commit)
         argv = [self.ctx.py, "-I", "-u", "-m", "tipping_point.jepa", "verify", run_dir]
         code, lines = stream(
@@ -1386,8 +1657,88 @@ class Session:
             return "failed", "checks: " + "; ".join(problems[:3])
         if run.total:
             run.step = run.total
-        log(f"{prefix}complete and verified: {run_dir.name}")
+        done = read_json(run_dir / "complete.json") or {}
+        if run.command == "jepa train" and done.get("stopped_early"):  # extract refuses final.pt
+            collapse = done.get("collapse") or {}
+            early = f"stopped early at step {done.get('last_key')}"
+            note = "; ".join(
+                filter(None, [note, f"{early}, collapsed: {collapse.get('collapsed')}"])
+            )
+        log(f"{prefix}complete and verified: {run.folder}")
         return "complete", note
+
+    def measured(self) -> dict[str, dict]:
+        """The rates the plan's jepa runs measured. A training's seconds per step after warm-up,
+        from its own ledger lines: only lines that continue the one before them in one process,
+        so each session's first line, which holds start-up, data loading and the twin's PCA, is
+        left out (and so is the closing line, which adds no step). An extraction's microseconds
+        per frame (a latents row), by checkpoint: the readout from its table's own clock (the
+        manifest's started_ns, written once the model is loaded, to complete.json's ended_ns;
+        tables finished in one session only), and the whole process, start-up included."""
+        ledger = []
+        path = self.ctx.out / "jepa" / LEDGER
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                with contextlib.suppress(ValueError):
+                    ledger.append(json.loads(line))
+        train: dict[str, dict] = {}
+        extract: dict[str, dict] = {}
+        for r in self.runs:
+            if r.state != "complete" or r.folder is None:
+                continue
+            done = read_json(self.ctx.out / r.folder / "complete.json") or {}
+            if r.command == "jepa train":
+                mine = [x for x in ledger if x.get("run_id") == r.run_id]
+                lines = sorted(mine, key=lambda x: x.get("to_ns", 0))
+                steady = [
+                    (b["to_ns"] - b["from_ns"], b["step"] - a["step"])
+                    for a, b in itertools.pairwise(lines)
+                    if b.get("from_ns") == a.get("to_ns") and b.get("step", 0) > a.get("step", 0)
+                ]
+                if steady:
+                    seconds, steps = sum(t for t, _ in steady) / 1e9, sum(n for _, n in steady)
+                    train[r.name] = {
+                        "s_per_step": round(seconds / steps, 5),
+                        "steps": steps,
+                        "stopped_early": bool(done.get("stopped_early")),
+                    }
+            elif r.command == "jepa extract":
+                ckpt = next((a for a in r.args if isinstance(a, dict) and "file" in a), {})
+                group = extract.setdefault(
+                    f"{ckpt.get('run', '?')} {ckpt.get('file', '')}".strip(),
+                    {
+                        "tables": 0,
+                        "frames": 0,
+                        "seconds": 0.0,
+                        "readout_frames": 0,
+                        "readout_s": 0.0,
+                    },
+                )
+                rows = int((done.get("rows") or {}).get("latents") or 0)
+                group["tables"] += 1
+                group["frames"] += rows
+                group["seconds"] += r.wall_s
+                began = (read_json(self.ctx.out / r.folder / "manifest.json") or {}).get(
+                    "started_ns"
+                )
+                if (
+                    not r.resumed
+                    and isinstance(began, int)
+                    and isinstance(done.get("ended_ns"), int)
+                ):
+                    group["readout_frames"] += rows
+                    group["readout_s"] += (done["ended_ns"] - began) / 1e9
+        for group in extract.values():
+            frames, readout = group["frames"], group["readout_frames"]
+            group["us_per_frame"] = round(1e6 * group["seconds"] / frames, 2) if frames else None
+            group["readout_us_per_frame"] = (
+                round(1e6 * group["readout_s"] / readout, 2) if readout else None
+            )
+            group["seconds"], group["readout_s"] = (
+                round(group["seconds"], 1),
+                round(group["readout_s"], 2),
+            )
+        return {"train": train, "extract": extract}
 
     def deadline(self, reason: str) -> None:
         with self.active_lock:
@@ -1414,10 +1765,14 @@ class Session:
     def save(self, final: bool = False) -> None:
         with self.save_lock:
             status, detail = verdict(self.runs, self.scheduler.stopped, final)
+            rates = self.measured()
+            if rates_text(rates):
+                detail = f"{detail}; {rates_text(rates)}"
             self.summary.update(
                 updated_utc=now_utc(),
                 status=status,
                 status_detail=detail,
+                rates=rates,
                 runs=[asdict(r) for r in self.runs],
             )
             write_text(self.ctx.out / STATE, json.dumps(self.summary, indent=2, default=str))
@@ -1442,10 +1797,31 @@ class Session:
                     proc.kill()
 
 
+def rates_text(rates: dict[str, dict]) -> str:
+    """The measured rates as STATUS gives them."""
+    parts = []
+    for name, t in rates["train"].items():
+        early = ", stopped early" if t["stopped_early"] else ""
+        parts.append(
+            f"{name} {t['s_per_step']:.3f} s/step after warm-up ({t['steps']:,} steps{early})"
+        )
+    for ref, e in rates["extract"].items():
+        if e["us_per_frame"] is None:
+            continue
+        readout = e["readout_us_per_frame"]
+        head = f"{readout:.1f} us/frame readout, " if readout is not None else ""
+        parts.append(
+            f"extract {ref} {head}{e['us_per_frame']:.1f} with start-up "
+            f"({e['tables']} tables, {e['frames']:,} frames)"
+        )
+    return "rates: " + "; ".join(parts) if parts else ""
+
+
 def exit_code(ctx: Ctx) -> int:
     """Non-zero only when the output holds no run folder: a failed version may lose its output."""
-    folder = ctx.out / "ising"
-    return 0 if folder.is_dir() and any(p.is_dir() for p in folder.iterdir()) else 1
+    folders = [ctx.out / "ising", ctx.out / "jepa"]
+    held = any(p.is_dir() for f in folders if f.is_dir() for p in f.iterdir())
+    return 0 if held else 1
 
 
 def refuse(ctx: Ctx, summary: dict, why: str) -> int:
@@ -1458,7 +1834,13 @@ def refuse(ctx: Ctx, summary: dict, why: str) -> int:
 
 
 def kernel_main(ctx: Ctx) -> int:
-    for folder in (ctx.out / "logs", ctx.out / "ising", ctx.cwd, ctx.helper.parent):
+    for folder in (
+        ctx.out / "logs",
+        ctx.out / "ising",
+        ctx.out / "jepa",
+        ctx.cwd,
+        ctx.helper.parent,
+    ):
         folder.mkdir(parents=True, exist_ok=True)
     summary: dict = {"kernel": None, "started_utc": now_utc(), "device": ctx.device}
     session = None
@@ -1473,7 +1855,7 @@ def kernel_main(ctx: Ctx) -> int:
         if prior is not None:  # a refusal from here on still hands the chain on
             summary.update(prior={k: prior[k] for k in ("path", "status")}, runs=prior["runs"])
         log("== wheel and environment")
-        wheel, summary["wheel"] = find_wheel(ctx)
+        wheel, summary["wheel"] = find_wheel(ctx, plan.get("wheel", DEFAULT_WHEEL))
         env = summary["env"] = probe(ctx) if ctx.py else ensure_env(ctx, wheel)
         log(json.dumps(env, indent=2))
         check_env(ctx, env, summary["wheel"]["commit"])
@@ -1489,6 +1871,7 @@ def kernel_main(ctx: Ctx) -> int:
     finally:
         if session is not None:
             session.shutdown()
+            guarded("unstaging the plain copies of inputs", session.unstage)
 
 
 # -- local: the kernel folder, the dry run, the self-test --------------------------------------
@@ -1502,9 +1885,11 @@ def cli_errors(plan: dict) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="tp-capture-") as scratch:
         items = []
         for spec in plan["runs"]:
+            module, sub = module_of(spec["command"])
             args = [PLACEHOLDER if isinstance(a, dict) else str(a) for a in spec["args"]]
-            argv = [spec["command"], *args, "--device", "cpu", "--data-dir", scratch]
-            items.append({"argv": argv, "partial": PLACEHOLDER in args})
+            data = [] if spec["command"] == "jepa extract" else ["--data-dir", scratch]
+            argv = [sub, *args, "--device", "cpu", *data]
+            items.append({"argv": argv, "partial": PLACEHOLDER in args, "module": module})
         results = helper["capture"](items)
     return [
         f"{spec['name']}: {got['error']}"
@@ -1562,7 +1947,7 @@ def write_kernel(plan: dict, dest: Path, resume: bool = False) -> Path:
         "enable_gpu": True,
         "enable_tpu": False,
         "enable_internet": True,
-        "dataset_sources": [f"{OWNER}/{WHEEL_DATASET}", *plan.get("datasets", [])],
+        "dataset_sources": [plan.get("wheel", DEFAULT_WHEEL), *plan.get("datasets", [])],
         "competition_sources": [],
         "kernel_sources": [*plan.get("kernel_sources", []), *own],
         "model_sources": [],
@@ -1614,29 +1999,127 @@ def build_wheel_env(root: Path) -> str:
     return str(wp._venv(root / "env", wheel, requirements))
 
 
+def dry_root(args: argparse.Namespace, prefix: str) -> Path:
+    if args.root is not None and args.root.exists() and any(args.root.iterdir()):
+        raise SystemExit(f"--root {args.root} is not empty: a dry run needs a folder of its own")
+    return (args.root or Path(tempfile.mkdtemp(prefix=prefix))).resolve()
+
+
 def dry_run(args: argparse.Namespace) -> int:
     plan = read_plan(Path(args.dry_run))
     if args.only:
         plan = only(plan, args.only.split(","))
-    if args.root is not None and args.root.exists() and any(args.root.iterdir()):
-        raise SystemExit(f"--root {args.root} is not empty: a dry run needs a folder of its own")
-    root = (args.root or Path(tempfile.mkdtemp(prefix="tp-dry-run-"))).resolve()
+    root = dry_root(args, "tp-dry-run-")
     log(
         f"dry run of {args.dry_run} ({', '.join(r['name'] for r in plan['runs'])}) under {root}: "
         f"L / {args.shrink}, sweep counts / {args.shrink**2}, {args.gpus} queues on the CPU"
     )
     python = build_wheel_env(root)
-    script = write_kernel(plan, root / "kernel", resume=True)
     for spec in args.input:  # what Kaggle would attach: SLUG=DIR
         slug, _, folder = spec.partition("=")
         shutil.copytree(folder, root / "input" / slug)
+    return rehearse(plan, root, python, args.gpus, args.shrink)
+
+
+def dry_run_jepa(args: argparse.Namespace) -> int:
+    root = dry_root(args, "tp-dry-jepa-")
+    log(f"JEPA dry run under {root}: tiny simulator runs, {args.gpus} queues on the CPU")
+    python = build_wheel_env(root)
+    return rehearse(tiny_jepa_plan(root), root, python, args.gpus, 1)
+
+
+def tiny_jepa_plan(root: Path) -> dict:
+    """A JEPA plan over tiny simulator runs written as an attached dataset (harness/jepa_ising.py's
+    staircase: three plateaus of eight bursts at L = 16, four replicas, in seconds on a CPU; a null
+    run beside them), with the repository's copy of the #50 pilot record as a kernel output. A
+    quick simulator run finishes first, so session 1's simulated deadline falls on the training,
+    which session 2 resumes; then its final.pt and its step-0 twin are extracted and verified."""
+    repo = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo / "harness"))
+    import jepa_ising
+    from tipping_point.ising import protocol
+    from tipping_point.ising import run as simulator
+
+    scratch, dataset = root / "tiny-data", root / "input" / "tp-tiny-data"
+    dataset.mkdir(parents=True)
+    made = {}
+    null = protocol.Fixed((2.5,), therm=50, sweeps=400, saves=4)
+    for tag, seed, schedule in (
+        ("L16-qs-s101", 101, jepa_ising.staircase()),
+        ("L16-qs-s102", 102, jepa_ising.staircase()),
+        ("L16-qs-s1", 1, jepa_ising.staircase()),
+        ("L16-null-e2-s1", 1, null),
+    ):
+        spec = simulator.Spec(L=16, replicas=4, seed=seed, checkpoint_every=jepa_ising.FLUSH)
+        folder = simulator.start(spec, schedule, scratch, tag, "cpu")
+        os.replace(folder, dataset / folder.name)
+        made[tag] = folder.name
+    record_id = "20261022T182733Z-tauc-L16-32-64"  # the #50 record the fixture copies
+    record = root / "input" / "tp-tauc-l64-l128" / "out" / "ising" / record_id / "pilot.json"
+    record.parent.mkdir(parents=True)
+    shutil.copyfile(jepa_ising.PILOT, record)
+    train = ["--L", 16, "--train-seeds", 101, "--val-seed", 102, "--seed", 3]
+    train += ["--pilot", {"input": "record"}, "--steps", 40, "--batch-sites", 2048]
+    train += ["--checkpoint-every", 5, "--monitor-every", 5]
+    return load_plan(
+        {
+            "kernel": "tp-jepa-dry-run",
+            "description": "--dry-run-jepa's tiny plan",
+            "datasets": ["local/tp-tiny-data"],
+            "kernel_sources": [f"{OWNER}/tp-tauc-l64-l128"],
+            "inputs": {
+                "record": {"run": record_id, "file": "pilot.json", "sha256": sha256_file(record)}
+            },
+            "runs": [
+                {
+                    "name": "quick",
+                    "command": "pilot",
+                    "gpu": 1,
+                    "args": ["--L", 8, "--T", 2.5, "--replicas", 4, "--therm", 20, "--sweeps", 200],
+                },
+                {
+                    "name": "tiny",
+                    "command": "jepa train",
+                    "gpu": 0,
+                    "stage": [made["L16-qs-s101"], made["L16-qs-s102"]],
+                    "args": train,
+                },
+                {
+                    "name": "x-twin",
+                    "command": "jepa extract",
+                    "gpu": 1,
+                    "args": [
+                        {"run": "tiny", "file": TWIN},
+                        {"dataset_run": made["L16-qs-s1"]},
+                        "--select",
+                        "tc-plus",
+                    ],
+                },
+                {
+                    "name": "x-final",
+                    "command": "jepa extract",
+                    "gpu": 1,
+                    "args": [
+                        {"run": "tiny", "file": FINAL},
+                        {"dataset_run": made["L16-null-e2-s1"]},
+                    ],
+                },
+            ],
+        }
+    )
+
+
+def rehearse(plan: dict, root: Path, python: str, gpus: int, shrink_by: int) -> int:
+    """Two local sessions of the written kernel: the first stopped by a simulated deadline at the
+    first progress line after a run finishes, the second with the first's output attached."""
+    script = write_kernel(plan, root / "kernel", resume=True)
     sessions = []
     for n in (1, 2):
         if n == 2:  # session 1's output, attached as kernel_sources attaches it
             os.replace(root / "working", root / "input" / plan["kernel"])
         log(f"== dry-run session {n}" + (", stopped by a simulated deadline" if n == 1 else ""))
         argv = [sys.executable, script, "--local-session", "--root", root, "--python", python]
-        argv += ["--gpus", args.gpus, "--shrink", args.shrink, *(["--interrupt"] if n == 1 else [])]
+        argv += ["--gpus", gpus, "--shrink", shrink_by, *(["--interrupt"] if n == 1 else [])]
         code = subprocess.run([str(a) for a in argv], check=False).returncode
         sessions.append((code, read_json(root / "working" / "out" / STATE) or {}))
     return dry_run_report(sessions, root)
@@ -1650,17 +2133,16 @@ def dry_run_report(sessions: list[tuple[int, dict]], root: Path) -> int:
         )
         for r in state.get("runs", []):
             how = " (reused)" if r["reused"] else " (resumed)" if r["resumed"] else ""
-            print(
-                f"  {r['name']:<14} {r['state']:<12}{how:<10} {r['run_id'] or '-':<34} {r['note']}"
-            )
+            where = r.get("folder") or "-"
+            print(f"  {r['name']:<14} {r['state']:<12}{how:<10} {where:<44} {r['note']}")
     (_, first), (code, last) = sessions
     runs = {r["name"]: r for r in last.get("runs", [])}
-    folders = {r["name"]: r["run_id"] for r in last.get("runs", [])}
+    folders = {r["name"]: r.get("folder") for r in last.get("runs", [])}
     reads = [
-        f"{r['name']} read ising/{folders[d]}"
+        f"{r['name']} read {folders[d]}"
         for r in last.get("runs", [])
         for d in r["deps"]
-        if any(str(k).startswith(f"ising/{folders[d]}") for k in r["key"] or [])
+        if folders[d] and any(str(k).startswith(str(folders[d])) for k in r["key"] or [])
     ]
     needed = sum(len(r["deps"]) for r in last.get("runs", []))
     stopped = [r["name"] for r in first.get("runs", []) if r["state"] == "interrupted"]
@@ -1718,6 +2200,11 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--dry-run", metavar="PLAN", help="execute PLAN on the CPU in a temporary folder"
     )
+    mode.add_argument(
+        "--dry-run-jepa",
+        action="store_true",
+        help="rehearse a tiny JEPA plan on the CPU: train, resume, extract, verify",
+    )
     mode.add_argument("--self-test", action="store_true", help="check the runner in-process")
     mode.add_argument("--local-session", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -1743,7 +2230,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--python", help=argparse.SUPPRESS)
     parser.add_argument("--interrupt", action="store_true", help=argparse.SUPPRESS)
     args, unknown = parser.parse_known_args(argv)
-    chosen = args.write_kernel or args.dry_run or args.self_test or args.local_session
+    chosen = (
+        args.write_kernel
+        or args.dry_run
+        or args.dry_run_jepa
+        or args.self_test
+        or args.local_session
+    )
     if unknown and chosen:
         parser.error(f"unrecognized arguments: {' '.join(unknown)}")
     try:
@@ -1755,6 +2248,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.dry_run:
             return dry_run(args)
+        if args.dry_run_jepa:
+            return dry_run_jepa(args)
     except PlanError as why:
         print(f"the plan is refused:\n{why}", file=sys.stderr)
         return 2
