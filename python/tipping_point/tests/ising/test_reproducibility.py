@@ -222,10 +222,13 @@ def test_runs_of_one_shape_at_one_seed_do_not_share_noise_however_long_they_run(
     one_shape: dict[str, dict[str, np.ndarray]],
 ) -> None:
     """One field of random numbers moves the uphill flips of every run on it together, even once
-    their lattices have parted. On one stream the null runs' energies correlate at r = 0.23-0.30
-    at this L (0.27-0.33 at L = 32), and a slow ramp's sweep-to-sweep changes against a null run's
-    at 0.25-0.29: the AUC's positives and negatives, driven by one noise realisation. Apart, all
-    are within 0.02 of zero. Signed M shows none of it, either way: it is no check of this."""
+    their lattices have parted. In a single cut-down CPU realisation of this fixture on the old
+    seeding, not the exploratory data (400 sweeps after a 30-sweep hold, 64 replicas, L = 16), the
+    null runs' energies correlate at r about 0.2-0.3, and the fixture's slow ramp against a null
+    run, sweep to sweep, about the same: the AUC's positives and negatives, driven by one noise
+    realisation. So soon after the start that may overstate the stationary coupling, because the
+    level correlation can still carry the shared-start transient. Apart, all are within 0.02 of
+    zero. Signed M shows none of it, either way: it is no check of this."""
     nulls = [one_shape[f"null {eps:g}"]["energy"][HOLD:] for eps in protocol.NULL_EPSILON_L]
     for a, b in itertools.combinations(nulls, 2):
         assert abs(_paired(a, b)) < 0.1

@@ -377,10 +377,16 @@ Runs made before this (the seeds 1-5 datasets, the grid pilots, #54's record) dr
 alone, so two of one shape at one seed shared their start and all their numbers, and two holding
 one temperature, as two ramps do during their equilibration, were bit-identical. The sharing does
 not fade: one field of random numbers moves the uphill flips of every run on it together, even
-after their lattices have parted. Measured replica by replica between null runs at eps_L 2, 4 and
-6, energy correlates at r = 0.22-0.29 at L = 16 and 0.27-0.33 at L = 32, and |m| at 0.02-0.05 and
-0.01-0.03; a slow ramp against a null run, sweep to sweep at L = 16, at 0.28 in energy and 0.06 in
-|m|. With a stream per run, all of these are within noise of zero. Signed M hides the effect.
+after their lattices have parted. In a single cut-down CPU realisation on the old seeding, not the
+exploratory data (null runs at eps_L 2, 4 and 6 at one seed: L = 16, 32 replicas, 6,000 sweeps
+after 1,100; L = 32, 16 replicas, 4,000 sweeps after 4,500), energy correlates replica by replica
+at r about 0.2-0.3 and |m| at about 0.01-0.05; a cooling ramp against a null run, sweep to sweep
+(L = 16, the same lengths), at about 0.3 in energy and about 0.06 in |m|. Those runs were read
+about 20 tau_c after the shared start, so its transient is not in these figures. With a stream per
+run, all of them are within noise of zero. Signed M hides the effect. The coupling does touch one
+earlier check: the surrogate calibration's binomial band (3.1-6.9%) treated its 480 slices as
+independent while the three null runs at each of the five seeds shared a stream, so that pre-flight
+check is somewhat weaker than stated; no freeze call rests on it.
 
 ### The pilot record: tau_c(L)
 

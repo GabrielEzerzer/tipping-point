@@ -141,6 +141,8 @@ def test_v1_says_what_the_file_itself_binds() -> None:
     assert "set the dwell and are never scored" in confirmatory
     assert "derived from its seed and its identity" in confirmatory  # run.stream_key
     assert "took their stream from the seed alone" in confirmatory  # and what that did to them
+    assert not re.search(r"\d\.\d", confirmatory)  # no measured figure beside the exploratory data
+    assert "### Which stream a run draws" in (REPO / "README.md").read_text("utf-8")  # its pointer
     assert "another tau.json or given as a number" in confirmatory  # ising._same_record
     span = doc["event"]["segment"] / doc["data"]["ramps"]["x"]  # tau_c: 6 eps_L x 50 tau_c
     assert {protocol.NULL_TAU_C // (span + w) for w in doc["sensitivity"]["window"]} == {2}
