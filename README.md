@@ -239,6 +239,21 @@ span, so the check gives only what the rule says inside each event's own days an
 with no floor: nothing is to be tuned on it. Two more checks read 2023 days if they are fetched, and
 otherwise skip and say so: the metrics stamp's timing, and 2023-08-17 at the start values.
 
+`market/reports.py` writes two reports on labelled series, each as Parquet tables plus a Markdown
+summary for the issue. The label-count report counts events, episodes, flickers, durations and time
+high per asset and month, clocks the onsets by UTC hour and weekday, and counts onsets that coincide
+across assets, the null hours and the 4-hour slices they hold. The stability report compares the
+as-of labels with an oracle (the final theta, smoothed over the whole sample) and with each declared
+variant and a plain threshold rule, follows theta over the refits with its flagged fits and the
+jumps they make in P, and gives the filter's detection delay. The calendar of CPI, NFP and FOMC
+releases, the cascade candidates and the aggTrades cross-check are optional inputs; a report without
+one says "not supplied". `market/nulls.py` holds the GARCH(1,1)-t simulator, the delay simulation,
+the event-time shift and the circularity floor. The floor simulates 10-second returns, builds
+1-minute OHLC, runs the real bars and labeller, and scores 1-minute close-to-close returns, which
+gives the AUC a clustering process with no critical dynamics produces by construction. Its GARCH
+parameters, pipelines and `scoring.auc` are inputs: the parameters' fit belongs to the 2023 pilot,
+and no module in `market/` may import the feature code (`tests/market/test_circularity.py`).
+
 ## Engine API
 
 `serve` runs the engine as its own process: the live feed plus one HTTP server on 127.0.0.1
