@@ -208,6 +208,34 @@ uv run python -m tipping_point.market fetch --start 2022-07-01 --end 2023-12-31
 uv run python -m tipping_point.market labels --start 2022-07-01 --end 2023-12-31
 ```
 
+The cascade proxy, `market/cascade.py`, reads the same fetched files. No free source holds the
+span's liquidations, so a cascade is inferred per symbol from a trailing 30-minute window: open
+interest in contracts falls by at least `a` (as a log ratio), the price moves at least `b` one way,
+taker flow leans at least `c` the same way, and volume reaches `v` times the median 30-minute
+volume of the trailing 28 days. A long cascade falls and a short squeeze rises; a drop in open
+interest alone fires neither. A window touching a missing open-interest step is not evaluated and
+is counted. Candidates within 24 hours merge into the earliest, and both symbols firing within an
+hour count as one market event with two asset instances; both counts are reported. The pooled list,
+with each instance's onset and the bounds of its L2 window 12 hours either side, lands as the table
+`cascades` of a run in `<data dir>/labels/<run_id>/`. `a`, `b`, `c` and `v` are options at their
+start values (3 %, 2.5 %, 0.15, 3) until the 2023 pilot sets them, and days from 2024-01-01 are
+refused as the labels' are. The pilot also settles `--kline-lag`: Binance stamps open interest at
+the snapshot's own instant, so a bar's row holds the value at its start, and `--kline-lag 1` pairs
+it with the klines before it so both span the same 30 minutes. A `liquidations` table in a market
+run (#90) is read when there is one; until then the run says `liquidations: not recorded`. The
+first 28 days only fill the trailing medians, so this span lists 2023 alone:
+
+```sh
+uv run python -m tipping_point.market.cascade --start 2022-12-04 --end 2023-12-31
+```
+
+`market/documented_cascades.toml` lists documented cascades with their sources. With
+`TP_CASCADE_RECALL` set, `uv run pytest python/tipping_point/tests/market/test_cascade.py -k
+documented_cascades_on_real_days` runs the rule over each event found fetched, with the 29 days
+before it; without it the test skips and says so. Five of the six events lie in the confirmatory
+span, so the check gives only what the rule says inside each event's own days and reports recall
+with no floor: nothing is to be tuned on it.
+
 ## Engine API
 
 `serve` runs the engine as its own process: the live feed plus one HTTP server on 127.0.0.1
