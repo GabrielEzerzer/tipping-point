@@ -70,20 +70,21 @@ def dwell(tau: float, min_therm: int = 500, min_meas: int = 2000) -> tuple[int, 
     return max(min_therm, math.ceil(20 * tau)), max(min_meas, math.ceil(100 * tau))
 
 
-def rate_for(L: int, x: float, A: float, z: float) -> int:
-    """Sweeps per unit T that put size L at the Kibble-Zurek point x of the true tau_c = A L^z
-    (the pilot record's fit; nu = 1):
+def rate_for(L: int, x: float, tau_c: float) -> int:
+    """Sweeps per unit T that put size L at the Kibble-Zurek point x of its tau_c (nu = 1):
 
-        r = A L^(z + 1) / (x Tc),   that is   x = tau_c(L) / (r Tc / L),
+        r = tau_c(L) L / (x Tc),   that is   x = tau_c(L) / (r Tc / L),
 
     tau_c over the sweeps the bath spends per unit of epsilon_L = L (T - Tc) / Tc, the same at
-    every L. The critical window |epsilon_L| < 1 takes 2/x tau_c to cross: the slow ramp, x = 0.02,
-    spends 50 tau_c per unit epsilon_L and ~100 tau_c in the window; the fast one, x = 2, crosses
-    it in ~1 tau_c, the Kibble-Zurek regime #19 asked for. Before #50 the rate was
-    L^3.17 / (x Tc), with no A: its nominal x = 0.3 and 30 are 0.3 A and 30 A here, 0.016 and 1.6
-    on the pre-#47 kernel (A = 0.052).
+    every L. tau_c(L) is the pilot record's measurement at L, its fit A L^z only for a size it did
+    not measure (#56): so x = 0.02 is 50 measured tau_c per unit epsilon_L, where #50's fit gave
+    51.4 / 47.4 / 51.4 at L = 16 / 32 / 64. The critical window |epsilon_L| < 1 takes 2/x tau_c
+    to cross: the slow ramp, x = 0.02, spends ~100 tau_c in it; the fast one, x = 2, crosses it
+    in ~1 tau_c, the Kibble-Zurek regime #19 asked for. Before #50 the rate was L^3.17 / (x Tc),
+    with no A: its nominal x = 0.3 and 30 are 0.3 A and 30 A of the fit's tau_c = A L^2.17 here,
+    0.016 and 1.6 on the pre-#47 kernel (A = 0.052).
     """
-    return max(1, round(A * L ** (z + 1) / (x * TC)))
+    return max(1, round(tau_c * L / (x * TC)))
 
 
 def _bursts(first: int, n: int, saves: int, burst: Burst) -> list[int]:
@@ -113,6 +114,7 @@ class Staircase:
         min_meas: int = 2000,
         saves: int = 200,
         burst: Burst = BURST,
+        tau_sha256: str | None = None,  # the tau.json the taus came from; None: given as a number
     ) -> None:
         if len(taus) != len(temperatures):
             raise ValueError(f"{len(taus)} taus for {len(temperatures)} temperatures")
@@ -124,6 +126,7 @@ class Staircase:
             "min_meas": min_meas,
             "saves": saves,
             "burst": asdict(burst),
+            "tau_sha256": tau_sha256,
         }
         self.temps = tuple(temperatures)
         dwells = [dwell(tau, min_therm, min_meas) for tau in taus]
@@ -195,8 +198,10 @@ class Ramp:
         per_epsilon_L: float = BAND_PER_EPSILON_L,
         burst: Burst = BURST,
         x: float | None = None,  # the Kibble-Zurek point the rate came from, kept for the record
-        A: float | None = None,  # ... and the tau_c = A L^z fit it was computed against
+        A: float | None = None,  # ... the record's tau_c = A L^z fit
         z: float | None = None,
+        rate_source: str | None = None,  # ... "measured" (tau_c at L) or "fit" (A L^z) (#56)
+        eps_L: Sequence[float] | None = None,  # the epsilon_L window T0 and T1 were set from
     ) -> None:
         self.params = {
             "rate": rate,
@@ -212,6 +217,8 @@ class Ramp:
             "x": x,
             "A": A,
             "z": z,
+            "rate_source": rate_source,
+            "eps_L": None if eps_L is None else list(eps_L),
         }
         self.rate, self.T0, self.T1 = rate, T0, T1
         self.t0 = pre  # last step at T0

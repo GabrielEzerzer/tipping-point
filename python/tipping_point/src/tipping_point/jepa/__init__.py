@@ -12,7 +12,8 @@ probes     ridge probes from frozen frame embeddings, trained beside untrained
 Run `python -m tipping_point.jepa --help`. The design is the #27 research pass (2026-10-22) with
 the owner's calls taken as recommended: a per-frame encoder, targets in frame c + delta for
 delta in 0..7 inside a burst, bursts flipped to positive magnetisation, training only on
-dedicated staircase seeds (never the pre-registered 1-5, never ramps or null runs).
+dedicated staircase seeds (never seeds 1-10, which ising-ews-v1 and its exploratory pilot scored,
+never ramps or null runs).
 """
 
 import os

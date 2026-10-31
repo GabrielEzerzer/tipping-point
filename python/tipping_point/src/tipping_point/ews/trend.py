@@ -130,6 +130,11 @@ class Pipeline:
             return x
         return indicators.gaussian_detrend(x, self.bandwidth)
 
+    def rolling(self, x: np.ndarray) -> np.ndarray:
+        """The indicator along each whole row of x, detrended as a score's input is: value t
+        describes the window ending at t (NaN for the first window - 1). `length` plays no part."""
+        return INDICATORS[self.indicator](self.residuals(x), self.window, self.lag)
+
     def trend(self, residuals: np.ndarray) -> np.ndarray:
         """Kendall's tau of the indicator over the last `length` samples of each row."""
         residuals = np.asarray(residuals, dtype=np.float64)

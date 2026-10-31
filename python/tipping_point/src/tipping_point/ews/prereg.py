@@ -41,6 +41,7 @@ DIRECTIONS = {"greater", "less", "two-sided", "match"}
 ROLES = {"positive-control", "descriptive", "reference"}
 QUANTITIES = {"l2_var_abs_m", "mean_abs_m", "skewness_abs_m", "tau_int_abs_m", "one_minus_ac1"}
 SURROGATES = {"phase", "ar1"}
+STATISTICS = {"peak"}  # fss.dynamic.statistic: what the dynamic test reads off each ramp
 _PLACEHOLDER = re.compile(r"TBD|<[a-z][^<>|]*>")  # "TBD", or "<words>" as in TEMPLATE
 _SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -111,17 +112,28 @@ _SCHEMA: dict[str, Any] = {
         "ci_level": _NUMBER,
         "bootstrap": int,
         "surrogates": {"primary": str, "secondary": str, "n": int, "cells": str},
-        "alarms": {"far": _NUMBER, "report_per": _NUMBER, "band": [_NUMBER], "every": _NUMBER},
+        "alarms": {
+            "indicators": [str],
+            "far": _NUMBER,
+            "report_per": _NUMBER,
+            "band": [_NUMBER],
+            "every": _NUMBER,
+        },
     },
     "fss": {
         "static": [{"quantity": str, "role": str}],
         "dynamic": {
+            "statistic": str,
             "indicators": [str],
             "observable": str,
+            "cadence": str,
+            "search": [_NUMBER],
             "expected_inverse_nu": _NUMBER,
             "tolerance": _NUMBER,
+            "min_draw_share": _NUMBER,
         },
     },
+    "disclosure": {"exploratory": str, "decisions": str, "confirmatory": str, "links": [str]},
     "sensitivity": {
         "window": [_NUMBER],
         "bandwidth": [_NUMBER],
@@ -200,6 +212,15 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
             found.append(f"indicators.direction.{name}: 'greater' or 'less', the expected trend")
     if (data["ramps"]["kind"], data["nulls"]["kind"]) != ("ramp", "fixed"):
         found.append("data: ramps are kind 'ramp' and nulls kind 'fixed'")
+    window = data["ramps"].get("eps_L")  # optional: without it, any window is scored
+    window_ok = (
+        isinstance(window, list)
+        and len(window) == 2
+        and all(isinstance(e, _NUMBER) and not isinstance(e, bool) for e in window)
+        and window[0] > window[1]
+    )
+    if window is not None and not window_ok:
+        found.append("data.ramps.eps_L: [start, end] in eps_L, start above end (a cooling ramp)")
     if data["tau_c"]["source"] != "pilot":
         found.append("data.tau_c.source: 'pilot', tau_c as measured per L (never fitted)")
     for i, row in enumerate(fss["static"]):
@@ -209,10 +230,30 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
             )
         if row["role"] == "positive-control" and not {"expected", "tolerance"} <= row.keys():
             found.append(f"fss.static[{i}]: a positive control needs expected and tolerance")
-    if not set(fss["dynamic"]["indicators"]) <= set(ind["names"]):
+        if row["role"] == "reference" and "tolerance" not in row:
+            found.append(f"fss.static[{i}]: a reference needs its own tolerance")
+    dyn = fss["dynamic"]
+    if dyn["statistic"] not in STATISTICS:
+        found.append(f"fss.dynamic.statistic: one of {sorted(STATISTICS)}")
+    if not set(dyn["indicators"]) <= set(ind["names"]):
         found.append("fss.dynamic.indicators: must be scored indicators")
-    if fss["dynamic"]["observable"] not in ind["observables"]:
+    if dyn["observable"] not in ind["observables"]:
         found.append("fss.dynamic.observable: must be a scored observable")
+    if dyn["cadence"] not in ind["cadences"]:
+        found.append("fss.dynamic.cadence: one of indicators.cadences, the verdict's cadence")
+    if not 0 < dyn["min_draw_share"] <= 1:
+        found.append("fss.dynamic.min_draw_share: a share of the bootstrap draws, in (0, 1]")
+    search = dyn["search"]
+    if len(search) != 2 or search[0] <= search[1]:
+        found.append("fss.dynamic.search: [from eps_L, to eps_L], the hot edge first")
+    elif (
+        window_ok
+        and isinstance(window, list)  # window_ok says so; pyright needs it said here
+        and not (window[0] >= search[0] and window[1] <= search[1])
+    ):
+        found.append("fss.dynamic.search: must lie inside data.ramps.eps_L, the window ramps run")
+    if not set(doc["scoring"]["alarms"]["indicators"]) <= set(ind["names"]):
+        found.append("scoring.alarms.indicators: must be scored indicators")
     sens = doc["sensitivity"]
     if (
         sens["headline"]["window"] not in sens["window"]
@@ -240,6 +281,17 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         ]
         if not _SHA256.fullmatch(data["tau_c"]["pilot_sha256"]):
             found.append("data.tau_c.pilot_sha256: the pilot record's sha256 (64 hex digits)")
+        pins = data["staircase"].get("tau_sha256")
+        unpinned = [
+            L
+            for L in data["L"]
+            if not (isinstance(pins, dict) and _SHA256.fullmatch(str(pins.get(str(L)))))
+        ]
+        if unpinned:
+            found.append(
+                "data.staircase.tau_sha256: per L, the sha256 of the tau.json the staircases' "
+                f"dwell is read from (64 hex digits); none for L = {unpinned}"
+            )
         if doc["trials"]["budget"] < cells(doc):
             found.append(f"trials.budget: one scoring run evaluates {cells(doc)} cells")
     return found

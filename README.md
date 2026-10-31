@@ -332,8 +332,8 @@ uv run python -m tipping_point.ising validate                        # Gates A-C
 uv run python -m tipping_point.ising pilot --L 16 --sweeps 50000      # tau_int per T -> tau.json
 uv run python -m tipping_point.ising tauc <pilot run> ...             # tau_c(L) at Tc -> pilot.json
 uv run python -m tipping_point.ising staircase --L 16 --tau <pilot run>/tau.json
-uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <record>/pilot.json  # x: 0.02 slow, 2 fast
-uv run python -m tipping_point.ising null --L 16 --epsilon-L 4 --pilot <record>/pilot.json --seed 1   # epsilon_L 2, 4, 6; seeds 1-5
+uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <record>/pilot.json --eps-start 12 --eps-end -8  # x: 0.02 slow, 2 fast
+uv run python -m tipping_point.ising null --L 16 --epsilon-L 4 --pilot <record>/pilot.json --seed 6   # epsilon_L 2, 4, 6; v1's seeds 6-10
 uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
 ```
 
@@ -362,7 +362,31 @@ The second line checks a wheel end to end in throwaway venvs (about three minute
 CPU): its runs must record the stamped commit, inside or outside another repository, and `tauc`
 must accept them. `tauc` also needs every size from one commit and one kernel, so a record over
 new sizes re-runs the old sizes from the same build. #50's pilots predate `kernel_sha256` in any
-case, so #54's re-measure at L = 64 and 128 re-runs L = 16 and 32 as well.
+case, so #54 re-measured L = 16 and 32 beside 64 and 128.
+
+### Which stream a run draws
+
+A run's generator is seeded from its identity, not its seed alone: `run.stream_key` hashes the
+seed, L, replicas, start and schedule. The manifest holds the result in `params.rng.seed` and names
+the rule in `params.rng.derivation`, so the key can be checked from the manifest alone. Runs at one
+seed therefore draw different numbers, and one run made twice draws the same whatever its tag,
+which only names the folder. `--checkpoint-every` and Gate C's tallies stay out of it: they change
+what is written, not what is drawn.
+
+Runs made before this (the seeds 1-5 datasets, the grid pilots, #54's record) drew from the seed
+alone, so two of one shape at one seed shared their start and all their numbers, and two holding
+one temperature, as two ramps do during their equilibration, were bit-identical. The sharing does
+not fade: one field of random numbers moves the uphill flips of every run on it together, even
+after their lattices have parted. In a single cut-down CPU realisation on the old seeding, not the
+exploratory data (null runs at eps_L 2, 4 and 6 at one seed: L = 16, 32 replicas, 6,000 sweeps
+after 1,100; L = 32, 16 replicas, 4,000 sweeps after 4,500), energy correlates replica by replica
+at r about 0.2-0.3 and |m| at about 0.01-0.05; a cooling ramp against a null run, sweep to sweep
+(L = 16, the same lengths), at about 0.3 in energy and about 0.06 in |m|. Those runs were read
+about 20 tau_c after the shared start, so its transient is not in these figures. With a stream per
+run, all of them are within noise of zero. Signed M hides the effect. The coupling does touch one
+earlier check: the surrogate calibration's binomial band (3.1-6.9%) treated its 480 slices as
+independent while the three null runs at each of the five seeds shared a stream, so that pre-flight
+check is somewhat weaker than stated; no freeze call rests on it.
 
 ### The pilot record: tau_c(L)
 
@@ -393,47 +417,54 @@ commit cannot decide this: it moves with every merge, kernel or not. A record wr
 has no `kernel_sha256` and counts as stale. `--allow-stale-pilot` uses a stale record anyway, with
 a warning. Either way the run's manifest names the record it read as `params.pilot`:
 `{"run_id", "sha256", "kernel_commit", "kernel_sha256", "stale"}`, and EWS results repeat that stamp
-for each input run beside their own record's `kernel_sha256` and `stale` in `params.pilot`. #50's
-record below predates the field, so ramps, nulls and scoring read against the copy in the data
-dir need `--allow-stale-pilot` until the pilot is re-run. Its numbers still stand: `kernel.py` is
-byte for byte the one at 5aac98e.
+for each input run beside their own record's `kernel_sha256` and `stale` in `params.pilot`. The
+record below measured the running kernel, so it reads as current; #50's record, which predates
+the field, needs `--allow-stale-pilot`.
 
-The record on the fixed kernel (#47; commit 5aac98e, CPU, seed 1), copied to
-`python/tipping_point/tests/fixtures/ising_pilot.json` with `kernel_sha256` added (the sha256 of
-`kernel.py` at 5aac98e):
+The record ising-ews-v1 pins (#54: run `20261025T194846Z-tauc-L16-32-64-128`, commit 655949a,
+seed 1), committed byte for byte as `python/tipping_point/tests/fixtures/ising_pilot.json`, sha256
+`7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698`:
 
 | L | replicas x sweeps | tau_c = tau(\|m\|) [95% CI] | binning | tau(e) | N / tau_c |
 |---|---|---|---|---|---|
-| 16 | 64 x 50,000 | 52.1 [50.5, 53.9] | 50.5 | 26.1 | 960 |
-| 32 | 64 x 100,000 | 231.5 [219.9, 244.3] | 223.2 | 92.5 | 432 |
-| 64 | 16 x 300,000 | 875.4 [797.2, 969.3] | 851.2 | 318.9 | 343 |
+| 16 | 64 x 50,000 | 53.3 [51.4, 55.2] | 51.1 | 26.3 | 939 |
+| 32 | 64 x 100,000 | 221.2 [209.9, 232.9] | 216.7 | 94.2 | 452 |
+| 64 | 64 x 400,000 | 1043.5 [994.3, 1102.5] | 988.9 | 346.2 | 383 |
+| 128 | 32 x 2,000,000 | 4619.5 [4246.6, 5006.8] | 4264.2 | 1342.5 | 433 |
 
-Fit: A = 0.190 [0.149, 0.238], z = 2.04 [1.96, 2.11], 95% CIs from a bootstrap over replicas.
-That z sits below the 2.17 of Liu, Polkovnikov and Sandvik's Kibble-Zurek collapse for Metropolis:
-the local slope is 2.15 from L = 16 to 32 but 1.92 from 32 to 64, where 16 replicas leave tau_c
-5% uncertain (bootstrap s.d.). tau_c at L = 128 is an extrapolation, 3,690 [3,240, 4,230]
-sweeps from the fit, to re-measure before the L = 128 runs. The pre-#47
-kernel read 21.3, 85.7 and 376 (A ~ 0.05): its fixed black-then-white order relayed level flips
-along domain walls (#50).
+Fit: A = 0.132 [0.114, 0.152], z = 2.155 [2.113, 2.197], 95% CIs from a bootstrap over replicas.
+The interval holds the 2.17 of Liu, Polkovnikov and Sandvik's Kibble-Zurek collapse for
+Metropolis; the local slopes between consecutive sizes are 2.05, 2.24 and 2.15. v1 reads L = 16,
+32 and 64 only. #50's record on the same kernel (commit 5aac98e, CPU, 16 replicas at L = 64) read
+52.1, 231.5 and 875.4, with z = 2.04 [1.96, 2.11]. The pre-#47 kernel read 21.3, 85.7 and 376
+(A ~ 0.05): its fixed black-then-white order relayed level flips along domain walls (#50).
 
 ### Protocol (#19)
 
 - **Staircase**, the quasi-static arm: the 40-point grid from 3.5 down to 1.5, each plateau
   thermalised for max(500, 20 tau) sweeps and measured for max(2000, 100 tau), with tau from a
-  `pilot` run's tau.json at that temperature. The plateau nearest Tc costs 1,043 + 5,211 sweeps
-  at L = 16.
-- **Ramps**, the dynamic arm: linear cooling from 3.5 to 1.5 at r = A L^(z+1) / (x Tc) sweeps per
-  unit T, A and z from the pilot record, so x = tau_c(L) / (sweeps per unit of epsilon_L =
-  L (T - Tc) / Tc) at every L. The slow ramp, x = 0.02, spends 50 tau_c per unit epsilon_L and
+  `pilot` run's tau.json at that temperature. The manifest records that file's sha256 as
+  `params.schedule.params.tau_sha256`, null when `--tau` is a number. The plateau nearest Tc costs
+  1,043 + 5,211 sweeps at L = 16.
+- **Ramps**, the dynamic arm: linear cooling at r = tau_c(L) L / (x Tc) sweeps per unit T, so
+  x = tau_c(L) / (sweeps per unit of epsilon_L = L (T - Tc) / Tc) at every L. tau_c(L) is the
+  pilot record's measurement at L; the fit A L^z stands in only for a size it did not measure,
+  and the manifest's `params.schedule.params.rate_source` says which (`measured` or `fit`, #56).
+  The ramp runs from 3.5 to 1.5, or over an epsilon_L window: `--eps-start 12 --eps-end -8` sets
+  T0 = Tc (1 + 12/L) and T1 = Tc (1 - 8/L), the window ising-ews-v1 scores at every L, and the
+  manifest records it as `eps_L`. The slow ramp, x = 0.02, spends 50 tau_c per unit epsilon_L and
   crosses the critical window |epsilon_L| < 1 in 100 tau_c; the fast one, x = 2, crosses it in one
-  tau_c, the Kibble-Zurek regime. Sweeps with this record (tau_c at L = 128 from the fit):
+  tau_c, the Kibble-Zurek regime. Sweeps of cooling (equilibration and hold not counted) at the
+  committed record's measured tau_c:
 
   | | L = 16 | L = 32 | L = 64 | L = 128 |
   |---|---|---|---|---|
-  | x = 0.02: critical window | 5,353 | 21,939 | 89,925 | 368,586 |
-  | x = 0.02: whole ramp | 37,742 | 309,390 | 2,536,252 | 20,791,168 |
-  | x = 2: critical window | 54 | 219 | 899 | 3,686 |
-  | x = 2: whole ramp | 378 | 3,094 | 25,362 | 207,912 |
+  | x = 0.02: critical window | 5,326 | 22,120 | 104,351 | 461,954 |
+  | x = 0.02: epsilon_L 12 to -8 | 53,258 | 221,199 | 1,043,507 | 4,619,544 |
+  | x = 0.02: 3.5 to 1.5 | 37,552 | 311,934 | 2,943,102 | 26,057,880 |
+  | x = 2: critical window | 53 | 221 | 1,044 | 4,620 |
+  | x = 2: epsilon_L 12 to -8 | 533 | 2,212 | 10,435 | 46,195 |
+  | x = 2: 3.5 to 1.5 | 376 | 3,120 | 29,432 | 260,578 |
 
   Before #50 the rate was L^3.17 / (x Tc), with no A, at nominal x = 0.3 and 30. Under this
   definition those were x = 0.016 and 1.6 on the pre-#47 kernel (A = 0.052), crossing the window
@@ -449,9 +480,9 @@ along domain walls (#50).
   measurement, two scored slices at x = 0.02 (310-340 tau_c each), with a stats row every
   tau_c / 50 sweeps and bursts at the slow ramp's in-band cadence. The manifest is a `fixed`
   schedule whose params add `epsilon_L` and `tau_c`, and complete.json judges the run
-  thermalised like a staircase plateau. One run is 37,519 sweeps at L = 16, 166,689 at 32 and
-  630,295 at 64; L = 128 is refused until a pilot measures it, since the manifest could not tell
-  a fitted tau_c from a measured one.
+  thermalised like a staircase plateau. With the committed record one run is 38,346 sweeps at
+  L = 16, 159,264 at 32, 751,327 at 64 and 3,326,072 at 128. A size the record did not measure
+  is refused, since the manifest could not tell a fitted tau_c from a measured one.
 
 ## Early-warning signals
 
@@ -461,8 +492,11 @@ the scoring protocol (AUC, alarms, lead times, hierarchical bootstrap) and finit
 verdicts, on numpy alone. The definitions are ewstools 2.1.3's, pinned by a golden fixture that
 `python/tipping_point/tests/fixtures/make_ews_golden.py` regenerates in an isolated environment.
 Experiments are pre-registered in `paper/prereg/<id>-v<k>.toml` (start from `TEMPLATE.toml`) and
-frozen as git tags; the scorer refuses an unfrozen or edited file, and reads tau_c(L) from a pilot
-run's `pilot.json`, never from the pre-registration.
+frozen as git tags; the scorer refuses an unfrozen or edited file, reads tau_c(L) from a pilot
+run's `pilot.json`, never from the pre-registration, and scores only runs whose manifest names the
+commit the freeze tag points at, from a clean tree: ramps and null runs made against the pilot
+record the file pins, and staircases whose dwell was read from the tau.json it pins at that L
+(`data.staircase.tau_sha256`), so a staircase given `--tau` as a number is refused.
 
 ```sh
 uv run python -m tipping_point.ews prereg freeze ising-ews           # tags prereg/ising-ews-v<k>
@@ -484,7 +518,8 @@ LayerNorm'd target features in frame c + delta, delta 0-7 inside a burst; VICReg
 covariance terms on the visible tokens guard against collapse, and a detector with absolute floors
 on feature spread watches for it. Bursts are flipped to positive magnetisation, D4 and rolls are
 augmentations, and training reads staircase plateaus only, of dedicated simulator seeds: the
-pre-registered seeds 1-5, ramps and null runs are refused.
+seeds 1-10 (ising-ews-v1's 6-10 and its exploratory pilot's 1-5), ramps and null runs are
+refused.
 
 ```sh
 uv run python -m tipping_point.jepa train --L 16 32 64 --train-seeds 101 102 --val-seed 103 \

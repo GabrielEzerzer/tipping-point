@@ -5,6 +5,7 @@ logs, and the refusals that keep it honest."""
 import hashlib
 import json
 import math
+import shutil
 import subprocess
 import tomllib
 from collections import Counter
@@ -16,7 +17,7 @@ from typing import Any
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
-from ews_planted import NULL_EPS, PILOT_RUN, PLATEAU
+from ews_planted import NULL_EPS, PILOT_RUN, PLATEAU, tau_source
 from tipping_point.ews import ising, prereg, scoring
 from tipping_point.ews.__main__ import main
 from tipping_point.ews.trend import Pipeline
@@ -58,6 +59,10 @@ eps_L = {eps}
 kind = "staircase"
 temperature = {plateau}
 
+[data.staircase.tau_sha256]
+16 = "{tau_16}"
+32 = "{tau_32}"
+
 [indicators]
 names = ["variance", "ac", "skewness"]
 observables = ["abs_m"]
@@ -87,6 +92,7 @@ n = 19
 cells = "headline"
 
 [scoring.alarms]
+indicators = ["variance", "ac"]
 far = 0.02
 report_per = 100.0
 band = [2.0, -1.0]
@@ -118,12 +124,17 @@ expected = 2.0
 [[fss.static]]
 quantity = "one_minus_ac1"
 role = "reference"
+tolerance = 0.1
 
 [fss.dynamic]
+statistic = "peak"
 indicators = ["variance", "ac"]
 observable = "abs_m"
+cadence = "dense"
+search = [6.0, -4.0]
 expected_inverse_nu = 1.0
 tolerance = 0.1
+min_draw_share = 0.95
 
 [sensitivity]
 window = [8.0]
@@ -133,6 +144,12 @@ headline = {{ window = 8.0, bandwidth = 4.0 }}
 [trials]
 budget = 48
 counted = "one per AUC cell"
+
+[disclosure]
+exploratory = "none"
+decisions = "none"
+confirmatory = "the planted runs"
+links = []
 
 [deviations]
 policy = "a new version"
@@ -152,7 +169,13 @@ def _text(data_dir: Path, prereg_id: str, pilot_run: str) -> str:
     pilot = data_dir / "ising" / PILOT_RUN / "pilot.json"
     digest = hashlib.sha256(pilot.read_bytes()).hexdigest()
     return PREREG.format(
-        id=prereg_id, pilot_run=pilot_run, pilot_sha256=digest, eps=list(NULL_EPS), plateau=PLATEAU
+        id=prereg_id,
+        pilot_run=pilot_run,
+        pilot_sha256=digest,
+        eps=list(NULL_EPS),
+        plateau=PLATEAU,
+        tau_16=tau_source(16),
+        tau_32=tau_source(32),
     )
 
 
@@ -182,25 +205,56 @@ def _score(path: Path, data_dir: Path, *extra: str) -> int:
     return main(argv)
 
 
+def _made_by(data_dir: Path, commit: str, record: str | None = None) -> None:
+    """Stamp every run in a copy of the planted data as made by `commit` from a clean tree, and
+    with `record`, every ramp and null run as made against the pilot record of that sha256, as
+    runs generated from a freeze tag's commit are; the planted ones name no commit, and a record
+    of sha256 0...0."""
+    for path in (data_dir / "ising").glob("*/manifest.json"):
+        manifest = json.loads(path.read_text("utf-8"))
+        manifest["producer"] |= {"git_sha": commit, "dirty": False}
+        if record is not None and manifest["params"].get("pilot"):  # staircases name none
+            manifest["params"]["pilot"]["sha256"] = record
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def test_score_writes_stamped_results_and_logs_every_cell(
     planted: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The whole chain on data whose answers are planted: AUC cells for both cadences, surrogate
-    and alarm rows at the headline cell, static and dynamic FSS, all stamped with the frozen
+    """The whole chain on data whose answers are planted: AUC cells for both cadences, surrogate,
+    alarm and peak rows at the headline cell, static and dynamic FSS, all stamped with the frozen
     prereg and the inputs' completion hashes, one trial logged per cell. The planted pilot record
     predates kernel_sha256, so like any record that cannot be matched to the running kernel it is
     refused (#55: an old tau_c clock scored without a trace), and with --allow-stale-pilot it
-    scores and the result says stale. #64: the alarm, surrogate and dynamic rows are held to the
-    planted answers, not only counted: a slip in their wiring (the false-alarm budget per sample
-    instead of per tau_c, the threshold set on the wrong half, censoring off) puts wrong numbers
-    in the pre-registered results while every row still exists. Skewness, expected to fall, runs
-    the falling path end to end; no skewness trend is planted, so it is detected only by chance."""
-    data_dir = planted.root
-    paths = _repo(tmp_path / "repo", data_dir, demo=PILOT_RUN)
-    assert main(["prereg", "freeze", "demo", "--root", str(tmp_path / "repo")]) == 0
+    scores and the result says stale. A frozen prereg scores only runs its tagged commit made
+    from a clean tree (#26 decision 6), and ramps and nulls made against the pilot record it
+    pins (#26 K): the planted runs name no commit, then another record, and are refused, nothing
+    scored or logged, until they carry both. #64: the alarm, surrogate and dynamic
+    rows are held to the planted answers, not only counted: a slip in their wiring (the
+    false-alarm budget per sample instead of per tau_c, the threshold set on the wrong half,
+    censoring off) puts wrong numbers in the pre-registered results while every row still exists.
+    Skewness, expected to fall, runs the falling path end to end; no skewness trend is planted,
+    so it is detected only by chance."""
+    data_dir = tmp_path / "data"
+    shutil.copytree(planted.root / "ising", data_dir / "ising")
+    repo = tmp_path / "repo"
+    paths = _repo(repo, data_dir, demo=PILOT_RUN)
+    assert main(["prereg", "freeze", "demo", "--root", str(repo)]) == 0
     assert _score(paths["demo"], data_dir) == 1
     assert "records no kernel_sha256" in capsys.readouterr().err
+    assert _score(paths["demo"], data_dir, "--allow-stale-pilot") == 1
+    tagged = _git(repo, "rev-parse", "prereg/demo-v1^{commit}")
+    refused = capsys.readouterr().err
+    assert f"commit {tagged}" in refused and "L16-ramp-s1 (git_sha None" in refused, refused
+    _made_by(data_dir, tagged)  # the right commit, but made against another pilot record
+    assert _score(paths["demo"], data_dir, "--allow-stale-pilot") == 1
+    pinned = prereg.load(paths["demo"]).doc["data"]["tau_c"]["pilot_sha256"]
+    refused = capsys.readouterr().err
+    assert f"sha256 {pinned}" in refused and f"L16-null-s1 (pilot sha256 {'0' * 64})" in refused
+    assert "-qs-" not in refused  # a staircase's dwell comes from a tau.json, not a record
     assert prereg.trials(data_dir, prereg.load(paths["demo"])) == 0  # nothing scored or logged
+    assert not (data_dir / "ews").exists()
+    _made_by(data_dir, tagged, record=pinned)
     assert _score(paths["demo"], data_dir, "--allow-stale-pilot") == 0
     (run_dir,) = (data_dir / "ews").glob("*-demo-v1")
     manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
@@ -216,7 +270,8 @@ def test_score_writes_stamped_results_and_logs_every_cell(
         digest = hashlib.sha256((run_folder / "complete.json").read_bytes()).hexdigest()
         assert inputs[run_folder.name]["complete_sha256"] == digest
         # each ramp and null names the pilot record it was made with (#55); staircases none
-        assert inputs[run_folder.name]["pilot"] == planted.stamps.get(tag)
+        stamp = planted.stamps.get(tag)
+        assert inputs[run_folder.name]["pilot"] == (stamp and stamp | {"sha256": pinned})
     auc = pq.read_table(run_dir / "auc" / f"{0:020d}.parquet").to_pylist()
     assert len(auc) == prereg.cells(demo.doc) == 48
     rise = {(r["cadence"], r["L"], r["h"]): r["auc"] for r in auc if r["indicator"] == "variance"}
@@ -237,6 +292,7 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     }
     for r in alarms:
         assert math.isfinite(r["theta"]), r  # a budget 8 times too loose puts it at -inf
+        assert r["attainable"] is True and r["far_max"] >= r["far_set"], r
         # the rate theta was set at is at most the target of 2 per 100 tau_c, and close to it:
         # 1.90-2.00 planted, 1.39-1.79 when the budget is counted per score instead of per tau_c
         assert 1.8 <= r["far_set"] <= 2.0 + 1e-9 and 0.5 < r["far_test"] < 6, r
@@ -251,13 +307,31 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     assert fss["skewness_abs_m"]["estimate"] == pytest.approx(0.0, abs=0.2)
     assert fss["one_minus_ac1"]["verdict"] == "pass"  # a planted memory growing with L
     assert fss["tau_int_abs_m"]["verdict"] == ""  # descriptive: reported, never judged
-    dynamic = [r for r in rows if r["role"] == "dynamic"]
-    assert {(r["quantity"], r["cadence"]) for r in dynamic} == {
-        (f"inverse_nu_{i}", c) for i in ("variance", "ac") for c in ("dense", "matched")
+    dynamic = [r for r in rows if r["role"].startswith("dynamic")]
+    assert {(r["quantity"], r["cadence"], r["role"]) for r in dynamic} == {
+        (f"inverse_nu_{i}", c, "dynamic" if c == "dense" else "dynamic-robustness")
+        for i in ("variance", "ac")
+        for c in ("dense", "matched")
+    }  # one verdict per indicator, at fss.dynamic.cadence; matched is a robustness check
+    # the planted spread and memory stop growing at Tc, so the peaks fall anywhere below it, at
+    # no one eps_L: two seeds of 8 replicas leave the CI wide around 1, never a pass or a fail
+    for r in dynamic:
+        assert r["lo"] < 1.0 < r["hi"] and r["draws"] == 50 and 0.0 < r["draws_used"] <= 1.0, r
+        assert r["verdict"] == ("inconclusive" if r["role"] == "dynamic" else ""), r
+    static = [r for r in rows if not r["role"].startswith("dynamic")]  # written on every row
+    assert all(r["draws"] == 50 and 0.0 < r["draws_used"] <= 1.0 for r in static), static
+    peaks = pq.read_table(run_dir / "peaks" / f"{0:020d}.parquet").to_pylist()
+    assert {(r["indicator"], r["cadence"], r["L"]) for r in peaks} == {
+        (i, c, L)
+        for i in ("variance", "ac", "skewness")
+        for c in ("dense", "matched")
+        for L in (16, 32)
     }
-    # the planted rise sits at one eps_L at both sizes (1/nu = 1); two seeds of 8 replicas are
-    # too few to pass, so every CI holds 1 and none fails
-    assert all(r["lo"] < 1.0 < r["hi"] and r["verdict"] != "fail" for r in dynamic), dynamic
+    for r in peaks:  # a descriptive row for every scored indicator, judged or not
+        assert r["n"] == 16 and 0.0 <= r["edge_fraction"] <= 0.5, r
+        assert -4.0 <= r["peak_eps_q1"] <= r["peak_eps_median"] <= r["peak_eps_q3"] <= 6.0, r
+        if r["indicator"] == "variance":  # largest, and flat, below Tc: never in the hot half
+            assert r["peak_eps_median"] < 0.0, r
     lines = prereg.trials_path(data_dir).read_text("utf-8").splitlines()
     logged = [json.loads(line) for line in lines]
     assert len(logged) == 48 and {t["result"] for t in logged} == {run_dir.name}
@@ -316,11 +390,16 @@ def test_a_falling_direction_reaches_the_surrogate_test_and_the_alarms(planted: 
     the replicas here, as the rising reading does; dropped from the alarms, none miss."""
     doc = tomllib.loads(_text(planted.root, "demo", PILOT_RUN))
     doc["indicators"] |= {"names": ["variance"], "direction": {"variance": "less"}}
-    doc["fss"]["dynamic"]["indicators"] = ["variance"]
+    doc["scoring"]["alarms"]["indicators"] = ["variance"]
     doc["event"]["horizons"] = [0.0]
     inputs = ising.select(*ising.find_runs(planted.root), doc["data"])[32]
     tau_c = ising.read_pilot(planted.root, PILOT_RUN, allow_stale=True).tau(32)
-    tables: dict[str, list[dict[str, Any]]] = {"auc": [], "surrogates": [], "alarms": []}
+    tables: dict[str, list[dict[str, Any]]] = {
+        "auc": [],
+        "surrogates": [],
+        "alarms": [],
+        "peaks": [],
+    }
     ising._cells(doc, 32, inputs, "dense", tau_c, tables, {}, np.random.default_rng(3))
     assert [(r["surrogate"], r["detected"]) for r in tables["surrogates"]] == [
         ("phase", 0.0),
@@ -347,9 +426,32 @@ def test_the_first_seed_sets_theta_and_the_second_tests_it(planted: Any) -> None
         for r, s in prep.nulls
     ]
     window, bandwidth = prep.samples(top["window"], tau_c), top["bandwidth"] * tau_c / prep.sweeps
-    rows, _ = ising._alarms(doc, replace(prep, nulls=blank), 16, tau_c, window, bandwidth)
+    rows = ising._alarms(doc, replace(prep, nulls=blank), 16, tau_c, window, bandwidth)
     assert [r["indicator"] for r in rows] == ["variance", "ac"]
     assert all(math.isfinite(r["theta"]) and r["far_test"] == 0.0 for r in rows), rows
+
+
+def test_an_unattainable_alarm_target_is_a_nan_row_never_a_censored_one(planted: Any) -> None:
+    """#97 in the alarm table: with a target no theta reaches (100 false alarms per tau_c), each
+    row says unattainable, carries the highest rate any theta gives on the set half (per
+    report_per, as the other rates), and leaves theta, both rates and every alarm and censoring
+    field NaN. Before, theta was -inf and every replica read as censored. The rows follow
+    scoring.alarms.indicators, not the dynamic test's (variance and AC1 here)."""
+    doc = tomllib.loads(_text(planted.root, "demo", PILOT_RUN))
+    doc["scoring"]["alarms"] |= {"far": 100.0, "indicators": ["skewness", "ac"]}
+    ind, top, event = doc["indicators"], doc["sensitivity"]["headline"], doc["event"]
+    band = (max(event["horizons"]) + event["segment"], min(event["horizons"]))
+    inputs = ising.select(*ising.find_runs(planted.root), doc["data"])[16]
+    tau_c = ising.read_pilot(planted.root, PILOT_RUN, allow_stale=True).tau(16)
+    prep = ising.prepare(inputs, "dense", tau_c, ind["thin"], band)
+    window, bandwidth = prep.samples(top["window"], tau_c), top["bandwidth"] * tau_c / prep.sweeps
+    rows = ising._alarms(doc, prep, 16, tau_c, window, bandwidth)
+    assert [r["indicator"] for r in rows] == ["skewness", "ac"]
+    unset = ("theta", "far_set", "far_test", "alarm_eps_median", "alarm_eps_q1", "alarm_eps_q3")
+    for r in rows:
+        assert r["attainable"] is False and 0.0 < r["far_max"] < 100.0 * r["far_per_taus"], r
+        assert all(math.isnan(r[k]) for k in (*unset, "censored", "miss_rate")), r
+        assert r["n"] == 16
 
 
 def test_an_alarm_is_a_rise_inside_the_band_and_one_before_it_is_censored(
@@ -360,9 +462,10 @@ def test_an_alarm_is_a_rise_inside_the_band_and_one_before_it_is_censored(
     that rises above theta between j - 2 and j - 1 was above it as the band opened: censored,
     never an alarm at eps_L ~ 2. One that rises at j, the first score inside, alarms there.
     Reading the entry score one step too early (j - 2) turns the first into an alarm at the
-    band's edge; one step too late (j) censors the second."""
+    band's edge; one step too late (j) censors the second. Either slip moves the row's censored
+    share off one half, or its alarm quartiles off eps_L[j]."""
     doc = tomllib.loads(_text(planted.root, "demo", PILOT_RUN))
-    doc["fss"]["dynamic"]["indicators"] = ["variance"]
+    doc["scoring"]["alarms"]["indicators"] = ["variance"]
     ind, top, event = doc["indicators"], doc["sensitivity"]["headline"], doc["event"]
     band = (max(event["horizons"]) + event["segment"], min(event["horizons"]))
     inputs = ising.select(*ising.find_runs(planted.root), doc["data"])[16]
@@ -379,11 +482,10 @@ def test_an_alarm_is_a_rise_inside_the_band_and_one_before_it_is_censored(
     monkeypatch.setattr(ising, "trailing_score", lambda x, pipe, every=1: designed[id(x)])
     window, bandwidth = prep.samples(top["window"], tau_c), top["bandwidth"] * tau_c / prep.sweeps
     one_ramp = replace(prep, ramps=[(run, ramp)])
-    (row,), found = ising._alarms(doc, one_ramp, 16, tau_c, window, bandwidth)
-    (alarm,), censored = found["variance", "dense"]
-    assert row["theta"] == 0.5 and censored == 0.5
-    assert np.isnan(alarm[0]) and alarm[1] == pytest.approx(eps[j]) and eps[j - 1] > 2.0
-    assert row["alarm_eps_median"] == pytest.approx(eps[j]) and row["miss_rate"] == 0.0
+    (row,) = ising._alarms(doc, one_ramp, 16, tau_c, window, bandwidth)
+    assert row["theta"] == 0.5 and row["censored"] == 0.5 and eps[j - 1] > 2.0
+    hits = (row["alarm_eps_q1"], row["alarm_eps_median"], row["alarm_eps_q3"])
+    assert hits == pytest.approx((eps[j],) * 3) and row["miss_rate"] == 0.0
 
 
 def test_score_refuses_unfrozen_over_budget_and_pilotless(

@@ -19,7 +19,9 @@ from ews_planted import (
     plateau_values,
     ramp,
     ramp_values,
+    restamp_tau,
     staircase,
+    tau_source,
     write_run,
 )
 from tipping_point.ews import fss, ising
@@ -27,6 +29,7 @@ from tipping_point.ising import io, protocol, run
 from tipping_point.ising.exact import TC
 
 V1 = Path(__file__).resolve().parents[4] / "paper" / "prereg" / "ising-ews-v1.toml"
+TAU_PINS = {"16": tau_source(16), "32": tau_source(32)}  # what the planted staircases name
 
 
 def _data(**changes: object) -> dict:
@@ -93,7 +96,9 @@ def test_a_run_without_complete_json_is_refused(tmp_path: Path) -> None:
 
 
 def test_failed_plateaus_are_dropped_and_counted(tmp_path: Path) -> None:
-    folder = write_run(tmp_path, "L16-qs-s1", staircase(), 16, 1, plateau_values(16), failed=(3.0,))
+    folder = write_run(
+        tmp_path, "L16-qs-s1", staircase(16), 16, 1, plateau_values(16), failed=(3.0,)
+    )
     kept, dropped = ising.plateaus(ising.open_run(folder), "dense")
     assert list(kept) == [pytest.approx(PLATEAU)] and dropped == 1
     frames, _ = ising.plateaus(ising.open_run(folder), "matched")
@@ -152,12 +157,117 @@ def test_select_fills_each_slot_exactly_once(planted: Any) -> None:
         ising.select(complete, incomplete, other)
 
 
+def test_a_ramp_over_another_eps_window_or_x_is_refused(planted: Any) -> None:
+    """#26 decision 4: with data.ramps.eps_L, a ramp at the prereg's x must have cooled over that
+    window. The planted ramps run from T = 3.5 to 1.5, eps_L 8.678 to -5.424 at L = 16: refused
+    against [12, -8], naming the run and both windows, and read against their own window. A ramp
+    at another x is another experiment (the fast ramp, at the same L and seed): it fills no slot,
+    and the error for the slot left empty names it and its x."""
+    complete, incomplete = ising.find_runs(planted.root)
+    v1_window = {"kind": "ramp", "x": 0.02, "eps_L": [12.0, -8.0]}
+    with pytest.raises(
+        ising.IsingDataError, match=r"L16-ramp-s1: .*8\.678.*-5\.42.*\[12\.0, -8\.0"
+    ):
+        ising.select(complete, incomplete, _data(ramps=v1_window))
+    own = [float(fss.scaled_temperature(T, 16)) for T in (3.5, 1.5)]
+    chosen = ising.select(complete, incomplete, _data(L=[16], ramps=v1_window | {"eps_L": own}))
+    assert [r.seed for r in chosen[16].ramps] == [1, 2]
+    fast = {"kind": "ramp", "x": 0.3}
+    with pytest.raises(
+        ising.IsingDataError, match=r"another x than 0\.3: .*L16-ramp-s1 \(x = 0\.02\)"
+    ):
+        ising.select(complete, incomplete, _data(ramps=fast))
+
+
+def test_scored_runs_must_come_from_the_freeze_tags_commit(tmp_path: Path) -> None:
+    """#26 decision 6 as a check: under a frozen prereg a scored run must name the commit the
+    freeze tag points at, from a clean tree. One that does is accepted; one from another commit,
+    a dirty tree, or naming no commit (a wheel built outside a checkout, or a planted run) is
+    refused, the message naming it, its git_sha and the tag's commit, and never the good run."""
+
+    def made(name: str, git_sha: str | None, dirty: bool | None) -> ising.Run:
+        manifest = {"run_id": name, "producer": {"git_sha": git_sha, "dirty": dirty}}
+        return ising.Run(tmp_path / name, manifest, {}, "")
+
+    tagged = "a" * 40
+    good = made("accepted-run", tagged, False)
+    ising._same_commit([good], tagged)
+    for bad in (
+        made("other", "b" * 40, False),
+        made("dirty", tagged, True),
+        made("bare", None, None),
+    ):
+        with pytest.raises(ising.IsingDataError) as refused:
+            ising._same_commit([good, bad], tagged)
+        message = str(refused.value)
+        git_sha = bad.manifest["producer"]["git_sha"]
+        assert f"{bad.run_id} (git_sha {git_sha}" in message and tagged in message, message
+        assert "accepted-run" not in message
+
+
+def test_scored_ramps_and_nulls_must_name_the_pinned_pilot_record(
+    planted: Any, tmp_path: Path
+) -> None:
+    """#26 K: under a frozen prereg every scored ramp and null run must have been made against
+    the pilot record data.tau_c pins, whose tau_c set the ramp's rate and the null's length.
+    The planted ramps and nulls name a record with sha256 0...0: accepted when that is the pin,
+    refused against another, the message naming each run, its sha256 and the pinned one, never
+    a staircase (it took --tau, no record). A ramp naming no record is refused too, while
+    selection alone, the exploratory path, still takes it."""
+    named = "0" * 64  # what the planted stamps carry
+    chosen = ising.select(*ising.find_runs(planted.root), _data())
+    ising._same_record(chosen, named, TAU_PINS)
+    with pytest.raises(ising.IsingDataError) as refused:
+        ising._same_record(chosen, "f" * 64, TAU_PINS)
+    message = str(refused.value)
+    assert f"L16-ramp-s1 (pilot sha256 {named})" in message and "f" * 64 in message
+    assert "L32-null-s2" in message and "-qs-" not in message
+    stamp = {"run_id": "pilot", "sha256": named, "stale": False}
+    write_run(tmp_path, "L16-ramp-s1", ramp(16), 16, 1, ramp_values(16))  # names no record
+    write_run(tmp_path, "L16-null-s1", nulls(16, 500), 16, 1, ramp_values(16), pilot=stamp)
+    write_run(tmp_path, "L16-qs-s1", staircase(16), 16, 1, plateau_values(16))
+    bare = ising.select(*ising.find_runs(tmp_path), _data(L=[16], seeds=[1]))
+    with pytest.raises(ising.IsingDataError) as refused:
+        ising._same_record(bare, named, TAU_PINS)
+    message = str(refused.value)
+    assert "L16-ramp-s1 (pilot sha256 None)" in message and "L16-null-s1" not in message
+
+
+def test_scored_staircases_must_name_the_tau_json_pinned_at_their_L(
+    planted: Any, tmp_path: Path
+) -> None:
+    """Freeze review, round 1: the prereg pinned the dwell's source in a comment, so a staircase
+    made with --tau 50 from the freeze commit scored without a word. The pin is per L: a file
+    pinned at another size is as foreign as any, and a number names none, even where nothing is
+    pinned. The message names each run and the sha256 it carries, and no other run."""
+    named = "0" * 64
+    chosen = ising.select(*ising.find_runs(planted.root), _data())
+    ising._same_record(chosen, named, TAU_PINS)
+
+    def refused(pins: dict[str, str], inputs: dict[int, ising.Inputs] = chosen) -> str:
+        with pytest.raises(ising.IsingDataError, match=r"tau\.json") as caught:
+            ising._same_record(inputs, named, pins)
+        return str(caught.value)
+
+    message = refused(TAU_PINS | {"32": "e" * 64})  # another file at L = 32
+    assert f"L32-qs-s1 (tau.json sha256 {tau_source(32)})" in message and "L32-qs-s2" in message
+    assert "L16-qs-" not in message and "-ramp-" not in message and "-null-" not in message
+    swapped = refused({"16": TAU_PINS["32"], "32": TAU_PINS["16"]})  # each file, at the other L
+    assert all(f"L{L}-qs-s{seed}" in swapped for L in (16, 32) for seed in (1, 2)), swapped
+    assert "L32-qs-s1" in refused({"16": TAU_PINS["16"]})  # L = 32 pinned nowhere
+    run_dir = write_run(tmp_path, "L16-qs-s1", staircase(16), 16, 1, plateau_values(16))
+    restamp_tau(run_dir, None)  # as --tau 50 leaves it
+    inputs = {16: ising.Inputs([], [], [ising.open_run(run_dir)], [])}
+    assert "L16-qs-s1 (tau.json sha256 None)" in refused(TAU_PINS, inputs)
+    assert "L16-qs-s1 (tau.json sha256 None)" in refused({}, inputs)  # no pin lets it through
+
+
 def test_a_null_block_that_failed_its_check_is_dropped_and_counted(tmp_path: Path) -> None:
     """Null runs are read as equilibrium, so a block whose thermalised check failed (#50 writes
     the check for null runs too) is left out of scoring and reported, not silently used."""
     for tag, schedule, values in (
         ("L16-ramp-s1", ramp(16), ramp_values(16)),
-        ("L16-qs-s1", staircase(), plateau_values(16)),
+        ("L16-qs-s1", staircase(16), plateau_values(16)),
     ):
         write_run(tmp_path, tag, schedule, 16, 1, values)
     schedule = nulls(16, 500)
@@ -172,7 +282,7 @@ def test_a_null_block_without_a_verdict_is_refused(tmp_path: Path) -> None:
     """Review round 1: a fixed run from before #50 carries no thermalised verdict and was read
     as a null block anyway. Nothing then says it is equilibrium, so it is refused."""
     write_run(tmp_path, "L16-ramp-s1", ramp(16), 16, 1, ramp_values(16))
-    write_run(tmp_path, "L16-qs-s1", staircase(), 16, 1, plateau_values(16))
+    write_run(tmp_path, "L16-qs-s1", staircase(16), 16, 1, plateau_values(16))
     write_run(tmp_path, "L16-null-s1", nulls(16, 500), 16, 1, ramp_values(16), verdicts=False)
     with pytest.raises(ising.IsingDataError, match="no thermalised verdict"):
         ising.select(*ising.find_runs(tmp_path), _data(L=[16], seeds=[1]))
@@ -192,26 +302,31 @@ def test_a_staircase_without_the_fss_plateau_is_an_error(tmp_path: Path) -> None
     with pytest.raises(ising.IsingDataError, match="no plateau at T"):
         ising._static(doc, {16: inputs}, rng)
     failed = write_run(
-        tmp_path, "L16-qs-s2", staircase(), 16, 2, plateau_values(16), failed=(PLATEAU,)
+        tmp_path, "L16-qs-s2", staircase(16), 16, 2, plateau_values(16), failed=(PLATEAU,)
     )
     inputs = ising.Inputs(ramps=[], nulls=[], staircases=[ising.open_run(failed)], dropped=[])
     with pytest.raises(ising.IsingDataError, match="usable at"):  # dropped, so no size is left
         ising._static(doc, {16: inputs}, rng)
 
 
-def test_the_pilot_record_from_50_reads(tmp_path: Path) -> None:
-    """The committed copy of #50's measured record (fixtures/ising_pilot.json): the contract the
-    scorer reads tau_c through."""
+def test_the_record_v1_pins_is_the_committed_fixture_and_reads(tmp_path: Path) -> None:
+    """#54's record, committed byte for byte as fixtures/ising_pilot.json: v1's data.tau_c pins
+    its sha256, and in a folder named as v1's pilot_run it reads through the contract the scorer
+    reads tau_c by, current (it measured the running kernel), each size's tau_c and interval as
+    recorded, every v1 size among them."""
     fixture = Path(__file__).resolve().parents[1] / "fixtures" / "ising_pilot.json"
-    folder = tmp_path / "ising" / "measured"
+    v1 = tomllib.loads(V1.read_text("utf-8"))["data"]
+    pinned = v1["tau_c"]
+    assert hashlib.sha256(fixture.read_bytes()).hexdigest() == pinned["pilot_sha256"]
+    folder = tmp_path / "ising" / pinned["pilot_run"]
     folder.mkdir(parents=True)
     (folder / "pilot.json").write_bytes(fixture.read_bytes())
-    digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
-    record = ising.read_pilot(tmp_path, "measured", digest)
-    assert sorted(record.tau_c) == [16, 32, 64]
-    assert record.tau(16) == pytest.approx(52.1, abs=0.05)
-    assert record.tau(64) == pytest.approx(875.4, abs=0.05)
-    assert len(record.kernel_commit.split("-")[0]) == 40
+    record = ising.read_pilot(tmp_path, pinned["pilot_run"], pinned["pilot_sha256"])
+    per_L = json.loads(fixture.read_text("utf-8"))["per_L"]
+    assert record.tau_c == {int(L): entry["tau_c"] for L, entry in per_L.items()}
+    assert record.tau_c_ci == {int(L): entry["tau_c_ci"] for L, entry in per_L.items()}
+    assert set(v1["L"]) < set(record.tau_c)  # L = 128 too, which v1 leaves out
+    assert record.stale is None and len(record.kernel_commit.split("-")[0]) == 40
 
 
 def test_a_doubled_slot_is_an_error_until_one_run_is_excluded(planted: Any, tmp_path: Path) -> None:

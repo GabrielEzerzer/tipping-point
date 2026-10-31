@@ -3,10 +3,14 @@
 The loop never waits on the device: records stay there until a flush. Every flush is followed by a
 checkpoint (spins, generator state, step), so a resumed run continues bit for bit where a straight
 run would be (Gate D). The unit of reproducibility is the run on one device type and torch version.
+The generator's seed comes from the run's identity (stream_key), not its seed alone: every run of
+one shape at one seed would otherwise draw the same numbers at every step.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import platform
 import time
 from dataclasses import asdict, dataclass, fields
@@ -26,6 +30,10 @@ from .pilot import kernel_sha256
 CONFIG_BUFFER_BYTES = 2**28  # flush before ~256 MB of configurations pile up on the device
 MAX_LATTICES = 2**16  # replica ids are stored as uint16
 VALIDATION_TEMPERATURES = (1.5, TC, 3.5)
+STREAM_DERIVATION = (
+    "sha256 of the JSON of {seed, L, replicas, init, schedule} with sorted keys; "
+    "its first 8 bytes, big-endian, shifted right by 1"
+)
 
 
 def default_device() -> str:
@@ -42,6 +50,25 @@ class Spec:
     init: str = "hot"  # hot: random spins; cold: all +1
     tally: bool = False  # count moves per dE for Gate C (validation runs)
     checkpoint_every: int = 100_000
+
+
+def stream_key(spec: Spec, schedule: protocol.Schedule) -> int:
+    """The generator's seed, by STREAM_DERIVATION: a run's seed hashed with what makes it this run,
+    so runs at one seed draw different numbers and one run made twice draws the same. The manifest
+    holds all of it, so its key can be checked from the manifest alone. The tag plays no part (it
+    only names the folder, and leaves out the replicas, the window, the dwell and the saves), nor
+    do tally and checkpoint_every (they change what is written, not what is drawn)."""
+    identity = {
+        "seed": spec.seed,
+        "L": spec.L,
+        "replicas": spec.replicas,
+        "init": spec.init,
+        "schedule": schedule.to_json(),
+    }
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).digest()
+    # shortcut: torch's CPU generator reads only the key's low 32 bits (v1's 90 runs: 1e-6 odds of a
+    # collision), enough until one experiment's CPU runs reach the thousands
+    return int.from_bytes(digest[:8], "big") >> 1
 
 
 def start(
@@ -63,8 +90,9 @@ def start(
     run_id = engine.run_id(tag)
     run_dir = Path(root) / "ising" / run_id
     run_dir.mkdir(parents=True)
-    io.write_json(run_dir / "manifest.json", _manifest(spec, schedule, run_id, dev, pilot))
-    gen = torch.Generator(device=dev).manual_seed(spec.seed)
+    manifest = _manifest(spec, schedule, run_id, dev, pilot)
+    io.write_json(run_dir / "manifest.json", manifest)
+    gen = torch.Generator(device=dev).manual_seed(manifest["params"]["rng"]["seed"])
     shape = (spec.replicas * schedule.blocks, spec.L, spec.L)
     if spec.init == "hot":
         s = torch.randint(0, 2, shape, generator=gen, device=dev, dtype=torch.int8) * 2 - 1
@@ -293,6 +321,8 @@ def _manifest(
             "rng": {
                 "generator": f"torch.Generator({dev.type})",
                 "unit": "run",
+                "seed": stream_key(spec, schedule),
+                "derivation": STREAM_DERIVATION,
                 "draws": "one (B, L, L) uniform tensor per half-sweep",
             },
             "encoding": {

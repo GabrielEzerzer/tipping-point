@@ -1,11 +1,12 @@
 """Simulator runs in, packed bursts in host memory out: what training samples from (Ising).
 
 Training reads staircase plateaus only, an equilibrium world uniform in T, from dedicated seeds.
-It refuses a run whose seed a pre-registration scores (PREREG_SEEDS, the data.seeds of
-paper/prereg/ising-ews-v1.toml, plus any a JEPA pre-registration adds), ramps and fixed (null)
-runs, and runs without complete.json: surprise is never fitted on the frames it will be scored
-on. Plateaus that failed complete.json's thermalised check are dropped and counted; the
-held-out-band ablation also drops the plateaus with T inside HELD_OUT (10 of the 40-point grid).
+It refuses a run whose seed a pre-registration scores (PREREG_SEEDS: the data.seeds of
+paper/prereg/ising-ews-v1.toml and the seeds of its exploratory pilot, plus any a JEPA
+pre-registration adds), ramps and fixed (null) runs, and runs without complete.json: surprise
+is never fitted on the frames it will be scored on. Plateaus that failed complete.json's
+thermalised check are dropped and counted; the held-out-band ablation also drops the plateaus
+with T inside HELD_OUT (10 of the 40-point grid).
 
 Bursts stay packed at one bit per spin, (bursts, frames, ceil(L*L/8)) uint8 in host memory
 (66 MB, 262 MB and 1.05 GB for two seeds at L = 16, 32 and 64), and cross to the device as bytes;
@@ -28,7 +29,8 @@ from torch import Tensor
 from ..ews.ising import IsingDataError, Run, find_runs, open_run
 from ..ising import io
 
-PREREG_SEEDS = frozenset({1, 2, 3, 4, 5})  # paper/prereg/ising-ews-v1.toml data.seeds
+# ising-ews-v1's data.seeds (6-10) and its exploratory pilot's (1-5, #26 decision 6)
+PREREG_SEEDS = frozenset(range(1, 11))
 HELD_OUT = (2.0, 2.5)  # the held-out-band ablation (#19): plateaus inside it are never trained on
 _COLUMNS = ["step", "replica", "temperature", "burst", "frame", "spins"]
 

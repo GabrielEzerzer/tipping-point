@@ -1,8 +1,10 @@
 """Command line: python -m tipping_point.ising <command> [options]
 
-  staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json
-  ramp       linear cooling 3.5 -> 1.5 at a Kibble-Zurek point x of a pilot record's tau_c
-             (or an explicit rate)
+  staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json, whose
+             sha256 the manifest records (a frozen prereg scores only the file it pins)
+  ramp       linear cooling 3.5 -> 1.5, or over an eps_L window, at a Kibble-Zurek point x of
+             the tau_c a pilot record measured at that L (its fit for a size it did not
+             measure, flagged in the manifest), or at an explicit rate
   null       fixed-T null run at epsilon_L = 2, 4 or 6: 700 tau_c of a size a pilot record measured
              (ramp and null refuse a stale record, one that did not measure the running kernel,
              unless --allow-stale-pilot; their manifests record the record as params.pilot)
@@ -20,6 +22,8 @@ is x0p02), so the engine can open every run.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 import sys
 import time
@@ -31,6 +35,7 @@ import numpy as np
 
 from .. import engine
 from . import autocorr, io, pilot, protocol, run
+from .exact import TC
 
 DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
 
@@ -74,9 +79,17 @@ def _parser() -> argparse.ArgumentParser:
     speed = p.add_mutually_exclusive_group(required=True)
     speed.add_argument("--x", type=float, help="Kibble-Zurek point: 0.02 slow, 2 fast")
     speed.add_argument("--rate", type=int, help="sweeps per unit T")
-    p.add_argument("--pilot", type=Path, help="pilot.json: --x is read against its A L^z")
-    p.add_argument("--pre", type=int, default=1000, help="equilibration sweeps at 3.5")
-    p.add_argument("--hold", type=int, default=1000, help="sweeps held at 1.5")
+    p.add_argument(
+        "--pilot", type=Path, help="pilot.json: --x is read against its tau_c at --L (else A L^z)"
+    )
+    p.add_argument(
+        "--eps-start",
+        type=float,
+        help="start at T0 = Tc (1 + eps_start / L); with --eps-end (default: T0 = 3.5, T1 = 1.5)",
+    )
+    p.add_argument("--eps-end", type=float, help="end at T1 = Tc (1 + eps_end / L)")
+    p.add_argument("--pre", type=int, default=1000, help="equilibration sweeps at T0")
+    p.add_argument("--hold", type=int, default=1000, help="sweeps held at T1")
     p.set_defaults(command=_ramp)
 
     p = sub.add_parser("null", parents=[sized, saving, piloted], help="fixed-T null run above Tc")
@@ -127,14 +140,18 @@ def _spec(args: argparse.Namespace) -> run.Spec:
     return run.Spec(args.L, args.replicas, args.seed, init, checkpoint_every=args.checkpoint_every)
 
 
-def _taus(value: str, temperatures: Sequence[float]) -> list[float]:
+def _taus(value: str, temperatures: Sequence[float]) -> tuple[list[float], str | None]:
     """--tau: one number for every temperature, or a pilot's tau.json that covers them all with
     reliable points. A pilot too short for its tau underestimates it, and the dwell would end
-    before the plateau equilibrates."""
+    before the plateau equilibrates. Also returns the sha256 of the bytes the taus were read from,
+    None for a number: what a frozen prereg checks the dwell's source by."""
+    source = None
     try:
         taus = [float(value)] * len(temperatures)
     except ValueError:
-        points = {round(p["temperature"], 9): p for p in io.read_json(Path(value))["points"]}
+        raw = Path(value).read_bytes()
+        source = hashlib.sha256(raw).hexdigest()
+        points = {round(p["temperature"], 9): p for p in json.loads(raw)["points"]}
         missing = [T for T in temperatures if round(T, 9) not in points]
         if missing:
             raise SystemExit(f"{value} has no tau for T = {missing}") from None
@@ -146,13 +163,15 @@ def _taus(value: str, temperatures: Sequence[float]) -> list[float]:
         taus = [points[round(T, 9)]["tau"] for T in temperatures]
     if not all(0 < tau < math.inf for tau in taus):  # NaN fails both comparisons
         raise SystemExit(f"tau must be a positive number, got {value}")
-    return taus
+    return taus, source
 
 
 def _staircase(args: argparse.Namespace) -> int:
     burst = protocol.Burst(stride=args.burst_stride)
-    taus = _taus(args.tau, protocol.GRID)
-    schedule = protocol.Staircase(taus, warmup=args.warmup, saves=args.saves, burst=burst)
+    taus, source = _taus(args.tau, protocol.GRID)
+    schedule = protocol.Staircase(
+        taus, warmup=args.warmup, saves=args.saves, burst=burst, tau_sha256=source
+    )
     tag = f"L{args.L}-qs-s{args.seed}"
     print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))
     return 0
@@ -172,16 +191,36 @@ def _record(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def _ramp(args: argparse.Namespace) -> int:
-    rate, A, z, stamp = args.rate, None, None, None
+    window = (args.eps_start, args.eps_end)
+    if (window[0] is None) != (window[1] is None):
+        raise SystemExit("--eps-start and --eps-end go together: the ramp's window in eps_L")
+    T0, T1 = protocol.T_HOT, protocol.T_COLD
+    if window[0] is not None:
+        if not -args.L < window[1] < window[0]:
+            raise SystemExit(f"need -L < --eps-end < --eps-start (cooling, T1 > 0), got {window}")
+        T0, T1 = (TC * (1 + e / args.L) for e in window)
+    rate, A, z, source, stamp = args.rate, None, None, None, None
     if args.x is not None:
         if args.pilot is None:
-            raise SystemExit("--x needs --pilot: x is measured against the record's tau_c = A L^z")
+            raise SystemExit("--x needs --pilot: x is measured against the record's tau_c")
         record, stamp = _record(args)
         A, z = record["fit"]["A"], record["fit"]["z"]
-        rate = protocol.rate_for(args.L, args.x, A, z)
+        source = "measured" if str(args.L) in record["per_L"] else "fit"  # pilot.tau_c's rule
+        rate = protocol.rate_for(args.L, args.x, pilot.tau_c(record, args.L))
     burst = protocol.Burst(stride=args.burst_stride)
     schedule = protocol.Ramp(
-        rate, args.L, pre=args.pre, hold=args.hold, burst=burst, x=args.x, A=A, z=z
+        rate,
+        args.L,
+        T0=T0,
+        T1=T1,
+        pre=args.pre,
+        hold=args.hold,
+        burst=burst,
+        x=args.x,
+        A=A,
+        z=z,
+        rate_source=source,
+        eps_L=None if window[0] is None else window,
     )
     speed = f"r{rate}" if args.x is None else f"x{_number(args.x)}"
     tag = f"L{args.L}-ramp-{speed}-s{args.seed}"

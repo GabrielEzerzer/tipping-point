@@ -1,7 +1,7 @@
 """Command line: python -m tipping_point.jepa <command> [options]
 
   train    train one model seed on the staircase runs of dedicated simulator seeds (never the
-           pre-registered 1-5, never ramps or null runs): --L 16 32 64 --train-seeds 101 102
+           scored 1-10, never ramps or null runs): --L 16 32 64 --train-seeds 101 102
            --val-seed 103 --seed 1 --pilot <pilot.json> [--held-out] [--prereg <toml>]
   resume   continue a training from its checkpoint, after a crash or a killed session
   extract  a checkpoint's latents table for a simulator run (surprise, pc_1..pc_8 per frame),

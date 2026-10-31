@@ -35,7 +35,7 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> Planted:
             plan = {
                 f"L{L}-ramp-s{seed}": (ramp(L), ramp_values(L)),
                 f"L{L}-null-s{seed}": (nulls(L, sweeps), ramp_values(L)),
-                f"L{L}-qs-s{seed}": (staircase(), plateau_values(L)),
+                f"L{L}-qs-s{seed}": (staircase(L), plateau_values(L)),
             }
             for tag, (schedule, values) in plan.items():
                 if "-qs-" not in tag:  # a staircase dwells on tau.json, not on a pilot record

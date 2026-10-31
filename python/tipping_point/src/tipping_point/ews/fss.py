@@ -5,9 +5,12 @@ scaled_temperature  eps_L = L (T - Tc) / Tc: equal eps_L is the same place in sc
 power_law           least squares of log|I| on log L, optionally with a 1/L correction term
 fit_exponent        kappa of I(L) ~ L^kappa with a CI from bootstrapping seeds, then replicas,
                     independently at each L
-inverse_nu          alarms that obey FSS sit at a fixed eps_L, so T_alarm - Tc ~ L^(-1/nu) with
-                    1/nu = 1 - d log eps_alarm / d log L; an indicator merely monotone in T
-                    alarms at a fixed T instead, eps_alarm ~ L and 1/nu = 0 (#19's risk)
+peak_position       where along a ramp each replica's indicator reaches its extremum in its
+                    expected direction, in eps_L, inside a search band (#98)
+inverse_nu          a peak that obeys FSS sits at a fixed eps_L, so T_peak - Tc ~ L^(-1/nu) with
+                    1/nu = 1 - d log|eps_peak| / d log L; an indicator merely monotone in T
+                    peaks at a fixed T instead, eps_peak ~ L and 1/nu = 0 (#19's risk)
+peak_convergence    1/nu from the median peak eps_L per L, with its bootstrap CI
 match               fail when the CI lies wholly outside expected +- tolerance; otherwise
                     inconclusive when the CI is wider than the tolerance band (too weak to
                     fail), else pass when the estimate is within tolerance
@@ -24,7 +27,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ..ising.exact import TC
-from .scoring import Grouped, hierarchical_bootstrap, percentile_interval
+from .scoring import Grouped, hierarchical_bootstrap, oriented, percentile_interval
 
 PASS, FAIL, INCONCLUSIVE = "pass", "fail", "inconclusive"
 
@@ -58,6 +61,8 @@ class Exponent:
     ci: tuple[float, float]
     kappa_corrected: float  # with a 1/L term: the finite-size robustness check (NaN below 3 sizes)
     values: dict[int, float]  # I(L) from all the data
+    draws: int = 0  # bootstrap resamples drawn for ci
+    draws_used: float = float("nan")  # the share of them with a finite exponent, ci's basis
 
 
 def fit_exponent(
@@ -77,32 +82,63 @@ def fit_exponent(
             for L in sizes
         ]
     )
+    kappas = power_law(sizes, draws)
     return Exponent(
         kappa=float(power_law(sizes, point)),
-        ci=percentile_interval(power_law(sizes, draws), level),
+        ci=percentile_interval(kappas, level),
         kappa_corrected=float(power_law(sizes, point, correction=True)),
         values=values,
+        draws=n,
+        draws_used=float(np.mean(np.isfinite(kappas))),
     )
 
 
-def inverse_nu(L: Sequence[int], eps_alarm: np.ndarray) -> np.ndarray:
-    """1/nu = 1 - slope of log eps_alarm on log L; eps_alarm (sizes, ...). NaN unless every
-    alarm came above Tc (eps_alarm > 0): below it the power law has no meaning."""
-    eps = np.asarray(eps_alarm, dtype=np.float64)
-    eps = np.where(eps > 0, eps, np.nan)
-    return 1.0 - power_law(L, eps)
+def peak_position(
+    values: np.ndarray, eps: np.ndarray, band: tuple[float, float], direction: str
+) -> np.ndarray:
+    """Per row of values (rows, time): the eps_L of its extremum in the expected direction (the
+    maximum for "greater", the minimum for "less") over the samples whose eps_L lies in
+    band = (top, bottom). NaN where that extremum is the band's first or last sample, since the
+    true one may lie beyond it, or where the row has no value inside: the peak was not located.
+    A NaN value is never the extremum."""
+    eps = np.asarray(eps, dtype=np.float64)
+    inside = np.flatnonzero((eps <= band[0]) & (eps >= band[1]))
+    v = oriented(np.atleast_2d(values)[:, inside], direction)
+    v = np.where(np.isnan(v), -np.inf, v)
+    k = np.argmax(v, axis=1)
+    lost = (k == 0) | (k == len(inside) - 1) | np.isneginf(v).all(axis=1)
+    return np.where(lost, np.nan, eps[inside][k])
 
 
-def alarm_convergence(
+def inverse_nu(L: Sequence[int], eps: np.ndarray) -> np.ndarray:
+    """1/nu = 1 - slope of log|eps_L| on log L for a position eps (sizes, ...). NaN unless the
+    position lies on one side of Tc at every size: one that changes side has no power law."""
+    eps = np.asarray(eps, dtype=np.float64)
+    one_side = (eps > 0).all(axis=0) | (eps < 0).all(axis=0)
+    return 1.0 - power_law(L, np.where(one_side, eps, np.nan))
+
+
+def peak_convergence(
     samples: Mapping[int, Grouped], n: int, rng: np.random.Generator, level: float = 0.95
-) -> tuple[float, tuple[float, float]]:
-    """1/nu from the median alarm eps_L at each L (misses are NaN and left out), with a CI from
-    bootstrapping seeds, then replicas, at each L."""
+) -> Exponent:
+    """1/nu from the median peak eps_L at each L (peaks not located are NaN and left out), with a
+    CI from bootstrapping seeds, then replicas, at each L. A draw whose medians lie on both sides
+    of Tc, or that drew no located peak at some L, has no 1/nu: the CI rests on the other draws,
+    and draws_used is their share."""
     sizes = sorted(samples)
     median = lambda eps: float(np.nanmedian(eps)) if np.isfinite(eps).any() else np.nan  # noqa: E731
     point = np.array([median(np.concatenate(samples[L])) for L in sizes])
-    draws = np.stack([hierarchical_bootstrap(median, [samples[L]], n, rng) for L in sizes])
-    return float(inverse_nu(sizes, point)), percentile_interval(inverse_nu(sizes, draws), level)
+    draws = inverse_nu(
+        sizes, np.stack([hierarchical_bootstrap(median, [samples[L]], n, rng) for L in sizes])
+    )
+    return Exponent(
+        kappa=float(inverse_nu(sizes, point)),
+        ci=percentile_interval(draws, level),
+        kappa_corrected=float("nan"),
+        values={},
+        draws=n,
+        draws_used=float(np.mean(np.isfinite(draws))),
+    )
 
 
 def _width(ci: tuple[float, float]) -> float:

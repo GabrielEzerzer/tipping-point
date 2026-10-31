@@ -36,6 +36,8 @@ pilot_sha256 = "TBD"     # sha256 of that file, pinned before the freeze
 [data.ramps]
 kind = "ramp"
 x = 0.02                 # Kibble-Zurek point of the scored ramp
+eps_L = [12.0, -8.0]     # optional: the eps_L window every scored ramp ran (ramp --eps-start,
+                         # --eps-end); a ramp at x over another window is refused
 
 [data.nulls]
 kind = "fixed"
@@ -44,6 +46,14 @@ eps_L = [2.0, 4.0, 6.0]  # fixed-temperature null runs
 [data.staircase]
 kind = "staircase"
 temperature = 2.269231   # the plateau the static FSS fits read
+
+# Per L in data.L, the sha256 of the grid pilot's tau.json the staircases' --tau reads, pinned
+# before the freeze: a scored staircase naming another file, or none (--tau given as a number),
+# is refused.
+[data.staircase.tau_sha256]
+16 = "TBD"
+32 = "TBD"
+64 = "TBD"
 
 [indicators]
 names = ["variance", "ac", "skewness"]
@@ -75,13 +85,16 @@ n = 999
 cells = "headline"       # headline | all
 
 [scoring.alarms]
-far = 0.01               # false alarms per tau_c on the half of the nulls that sets theta
+indicators = ["variance", "ac", "skewness"]  # a reported table: theta, rates, alarm eps_L
+far = 0.01               # false alarms per tau_c on the half of the nulls that sets theta; a row
+                         # says unattainable when no theta alarms that often
 report_per = 1000.0      # false alarms reported per this many tau_c on the other half
 band = [2.0, -2.0]       # eps_L range searched for each ramp's first alarm
 every = 1.0              # s(t) evaluated every this many tau_c
 
 # quantity: l2_var_abs_m | mean_abs_m | skewness_abs_m | tau_int_abs_m | one_minus_ac1
-# role: positive-control (needs expected and tolerance) | descriptive | reference
+# role: positive-control (needs expected and tolerance) | descriptive | reference (needs
+# tolerance); each entry states its own tolerance, none is inherited
 [[fss.static]]
 quantity = "l2_var_abs_m"
 role = "positive-control"
@@ -89,10 +102,15 @@ expected = 1.75
 tolerance = 0.1
 
 [fss.dynamic]
-indicators = ["variance", "ac"]
+statistic = "peak"       # each slow-ramp replica's eps_L at its indicator's extremum
+indicators = ["variance"]  # judged; every scored indicator's peaks are reported
 observable = "abs_m"
+cadence = "dense"        # the cadence whose 1/nu is judged; the others' are robustness checks
+search = [6.0, -4.0]     # eps_L band searched, hot edge first; a peak on its edge is not located;
+                         # it must lie inside data.ramps.eps_L when that is given
 expected_inverse_nu = 1.0
-tolerance = 0.1
+tolerance = 0.5
+min_draw_share = 0.95    # below this share of bootstrap draws giving 1/nu a value: inconclusive
 
 [sensitivity]
 window = [10.0, 20.0, 40.0]     # tau_c
@@ -102,6 +120,13 @@ headline = { window = 20.0, bandwidth = 10.0 }
 [trials]
 budget = 0               # evaluations this version may log
 counted = "<what one trial is>"
+
+# What was seen before the freeze, and what the frozen version scores.
+[disclosure]
+exploratory = "<data scored before the freeze, or none>"
+decisions = "<which choices were made with those results in view>"
+confirmatory = "<which runs this version scores>"
+links = []               # where the exploratory results and the decisions are recorded
 
 [deviations]
 policy = "<how a deviation is handled>"
