@@ -5,11 +5,14 @@
            --val-seed 103 --seed 1 --pilot <pilot.json> [--held-out] [--prereg <toml>]
   resume   continue a training from its checkpoint, after a crash or a killed session
   extract  a checkpoint's latents table for a simulator run (surprise, pc_1..pc_8 per frame),
-           written to <run>/latents/<training>-step<step>/
+           written to <run>/latents/<training>-step<step>/; --select tc-plus or tc-only keeps
+           a staircase's Tc plateau (plus one burst in 8 elsewhere, or alone)
   probe    ridge probes of |m|, energy and L^2 Var(|m|) from a training's frozen embeddings,
-           trained and untrained (step 0) side by side
+           each beside its iid and shuffle-within-T controls, with selectivity; trained and
+           untrained (step 0) side by side
   verify   check finished directories (trainings, latents tables, simulator runs) against their
-           complete.json; exit 1 on any problem
+           complete.json, and a latents table's rows against its selection; exit 1 on any
+           problem
   budget   GPU hours per ISO week from <data dir>/jepa/gpu_hours.jsonl against a weekly quota
 
 Trainings land in <data dir>/jepa/<run_id>/; the data dir is --data-dir, else the engine's own
@@ -78,9 +81,19 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("checkpoint", type=Path, help="final.pt or ckpt/step_0000000.pt")
     p.add_argument("dataset_run", type=Path, help="a complete simulator run folder")
     p.add_argument("--sites", type=int, default=65_536, help="sites per readout batch")
+    p.add_argument(
+        "--select",
+        choices=extract.SELECTIONS,
+        default="all",
+        help=f"staircase rows: tc-plus keeps the T = {extract.TC_PLATEAU} plateau and one burst "
+        f"in {extract.EVERY} elsewhere, tc-only that plateau alone; ramps and null runs are "
+        "always whole (default: all)",
+    )
     p.set_defaults(command=_extract)
 
-    p = sub.add_parser("probe", parents=[device], help="ridge probes, trained beside untrained")
+    p = sub.add_parser(
+        "probe", parents=[device], help="ridge probes and their controls, trained beside twin"
+    )
     p.add_argument("run_dir", type=Path, help="a finished training")
     p.add_argument("--fit", type=Path, nargs="+", required=True, help="simulator run folders")
     p.add_argument("--test", type=Path, nargs="*", default=[], help="default: odd replicas")
@@ -89,7 +102,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--json", type=Path, help="also write the rows here")
     p.set_defaults(command=_probe)
 
-    p = sub.add_parser("verify", help="check finished directories against complete.json")
+    p = sub.add_parser(
+        "verify", help="check finished directories against complete.json, latents rows too"
+    )
     p.add_argument("dirs", type=Path, nargs="+")
     p.set_defaults(command=_verify)
 
@@ -134,7 +149,7 @@ def _resume(args: argparse.Namespace) -> int:
 
 
 def _extract(args: argparse.Namespace) -> int:
-    print(extract.extract(args.checkpoint, args.dataset_run, args.device, args.sites))
+    print(extract.extract(args.checkpoint, args.dataset_run, args.device, args.sites, args.select))
     return 0
 
 
@@ -142,15 +157,18 @@ def _probe(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir)
     if not (run_dir / "complete.json").is_file():
         raise ValueError(f"{run_dir}: not a finished training (no complete.json)")
-    checkpoints = {"trained": run_dir / train.FINAL, "untrained": run_dir / train.TWIN}
+    checkpoints = [run_dir / train.FINAL, run_dir / train.TWIN]
     rows = probes.probe(checkpoints, args.fit, args.test, args.limit, args.alpha, args.device)
-    r2 = {(r["checkpoint"], r["target"]): r["r2"] for r in rows}
-    print(
-        f"{'target':<8} {'trained':>9} {'untrained':>9}   R^2, n_fit {rows[0]['n_fit']:,}, "
-        f"n_test {rows[0]['n_test']:,}"
-    )
+    by = {(r["role"], r["target"], r["column"]): r for r in rows}
+    first = rows[0]
+    print(f"L = {first['L']}, R^2 on test, n_fit {first['n_fit']:,}, n_test {first['n_test']:,}")
+    print(f"{'target':<8} {'column':<17} {'trained':>9} {'twin':>9}")
     for target in probes.TARGETS:
-        print(f"{target:<8} {r2['trained', target]:>9.4f} {r2['untrained', target]:>9.4f}")
+        for column in probes.COLUMNS:
+            r2 = [by[role, target, column]["r2"] for role in ("trained", "twin")]
+            print(f"{target:<8} {column:<17} {r2[0]:>9.4f} {r2[1]:>9.4f}")
+        sel = [by[role, target, "raw"]["selectivity"] for role in ("trained", "twin")]
+        print(f"{target:<8} {'selectivity':<17} {sel[0]:>9.4f} {sel[1]:>9.4f}")
     if args.json:
         args.json.write_text(json.dumps(rows, indent=2), encoding="utf-8")
     return 0
@@ -159,7 +177,7 @@ def _probe(args: argparse.Namespace) -> int:
 def _verify(args: argparse.Namespace) -> int:
     bad = 0
     for path in args.dirs:
-        problems = train.verify(path)
+        problems = train.verify(path) or extract.verify(path)
         bad += bool(problems)
         print(f"{path}: {'ok' if not problems else '; '.join(problems)}")
     return 1 if bad else 0
