@@ -3,6 +3,7 @@ results and trials are stamped with what was frozen."""
 
 import hashlib
 import json
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -118,9 +119,30 @@ def test_v1_holds_the_freeze_decisions() -> None:
     assert doc["event"]["horizons"] == [0, 1, 2]  # h = 2 is legal at L = 16 now
     shown = doc["disclosure"]
     assert "seeds 1-5" in shown["exploratory"] and "L = 16 and 32" in shown["exploratory"]
-    assert "in view" in shown["decisions"] and "after the freeze tag" in shown["confirmatory"]
+    assert "in view" in shown["decisions"] and "from the tagged commit" in shown["confirmatory"]
     comments = {link.rsplit("-", 1)[1] for link in shown["links"]}
     assert comments == {"6402030372", "6387307847", "6390788147", "6393467391"}
+
+
+def test_v1_says_what_the_file_itself_binds() -> None:
+    """Freeze review, round 1: the text and the numbers beside it disagreed, and only a reader
+    could tell. The file binds grid pilots on a scored seed, so "no earlier run" was false: it must
+    name them, and the only freeze-time claim it may make is the one the scorer can check, the
+    tagged commit. A null run holds two slices the length of a positive segment at every window of
+    the grid, not one: protocol.NULL_TAU_C against segment / x plus the window."""
+    raw = V1.read_text("utf-8")
+    doc = tomllib.loads(raw)
+    earlier = {int(seed) for seed in re.findall(r"-pilot-s(\d+)", raw)}
+    assert earlier & set(doc["data"]["seeds"])  # the pilots sit on a seed v1 scores: seed 6
+    for false_claim in ("no earlier run used", "used by no earlier run", "after the freeze tag"):
+        assert false_claim not in raw, false_claim
+    confirmatory = doc["disclosure"]["confirmatory"]
+    assert "three grid pilots under data.staircase" in confirmatory
+    assert "set the dwell and are never scored" in confirmatory
+    span = doc["event"]["segment"] / doc["data"]["ramps"]["x"]  # tau_c: 6 eps_L x 50 tau_c
+    assert {protocol.NULL_TAU_C // (span + w) for w in doc["sensitivity"]["window"]} == {2}
+    (nulls,) = [line for line in raw.splitlines() if line.startswith("eps_L = [2.0, 4.0, 6.0]")]
+    assert "two slices the length of a positive segment" in nulls
 
 
 @pytest.mark.parametrize(

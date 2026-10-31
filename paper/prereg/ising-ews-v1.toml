@@ -49,7 +49,10 @@ direction = "less"
 [data]
 domain = "ising"
 L = [16, 32, 64]
-seeds = [6, 7, 8, 9, 10]   # used by no earlier run; seeds 1-5 are the exploratory pilot (disclosure)
+# data.seeds: no earlier run that v1 scores or compares against used them. The only earlier
+# seed-6 runs are the three grid pilots under data.staircase, which set the dwell and are never
+# scored. Seeds 1-5 are the exploratory pilot (disclosure).
+seeds = [6, 7, 8, 9, 10]
 replicas = 64              # the GPU loop is launch-bound: 64 replicas cost what 16 did (#48)
 exclusions = []
 
@@ -65,7 +68,7 @@ eps_L = [12.0, -8.0]     # every ramp cools from eps_L = 12 to -8 after its equi
 
 [data.nulls]
 kind = "fixed"
-eps_L = [2.0, 4.0, 6.0]  # >= 5 seeds each, each run about as long as a positive segment
+eps_L = [2.0, 4.0, 6.0]  # >= 5 seeds each, each run holds two slices the length of a positive segment
 
 [data.staircase]
 kind = "staircase"
@@ -164,7 +167,7 @@ counted = "One trial per AUC evaluation of an (indicator, observable, cadence, L
 [disclosure]
 exploratory = "Before the freeze, the seeds 1-5 datasets at L = 16 and 32 were scored exploratorily: AUC, surrogate tests, alarms, peak positions and the static exponents."
 decisions = "The freeze decisions were made with those results in view: the peak-position statistic of dynamic-fss, its search band and tolerance, the alarm target, the ramp rate from measured tau_c, the eps_L window of the ramps, and the seeds and replicas."
-confirmatory = "v1 scores only runs generated after the freeze tag, from the tagged commit, on seeds 6-10, which no earlier run used; the scorer refuses a run whose manifest names another commit or a dirty tree. The seeds 1-5 datasets are never scored under v1."
+confirmatory = "v1 scores only runs generated from the tagged commit, on seeds 6-10. No earlier run that v1 scores or compares against used those seeds: the only earlier seed-6 runs are the three grid pilots under data.staircase, which set the dwell and are never scored. The scorer refuses a run whose manifest names another commit or a dirty tree. The seeds 1-5 datasets are never scored under v1."
 links = [
     "https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6402030372",
     "https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6387307847",
