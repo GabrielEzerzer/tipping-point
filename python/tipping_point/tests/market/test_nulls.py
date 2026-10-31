@@ -5,9 +5,9 @@ delay simulation by brute force; segments and slices that never see the onset; t
 the floor end to end with the real labeller, the real variance and AC1 Pipelines and scoring.auc.
 
 The floor's parameters here are stated synthetic ones, not a fit: 60% a year in 10-second variance,
-a half-life of 19 hours. S5 fits the 2023 pilot year. Their expected ranges come from ten seeds of
-three paths each (variance at 6 bars 0.61-0.71, AC1 0.45-0.57, shift medians 0.46-0.55), widened
-to hold any seed rather than this one.
+a half-life of 19 hours. S5 fits the 2023 pilot year. Their expected ranges come from eleven seeds
+of three paths each (variance at 6 bars 0.61-0.71, AC1 0.45-0.57, shift medians 0.46-0.58 for the
+trends and 0.40-0.62 for the level control), widened to hold any seed rather than this one.
 """
 
 import math
@@ -264,32 +264,81 @@ def test_null_slices_are_non_overlapping_spans_inside_their_stretch() -> None:
     assert nulls.null_rows(minutes, [], 60).shape == (0, 60)
 
 
-def test_every_shifted_onset_moves_at_least_a_day_and_stays_in_range() -> None:
-    low, high, day = 1000, 11_000, 288
-    onsets = np.array([1000, 1100, 6000, 10_999])
-    moved = nulls.shift_onsets(onsets, low, high, day, 500, np.random.default_rng(11))
-    assert moved.shape == (500, 4)
-    assert np.all((moved >= low) & (moved < high))
+def test_eligible_bars_by_hand() -> None:
+    params = msvol.Params(d_min=3, clean=4, refractory=10)
+    h = np.zeros(40, np.int8)
+    h[:5] = -1  # labels start at bar 5, so history is known from bar 15
+    h[20:22] = 1  # bars 21-25 have these inside their clean window
+    h[30] = 1  # bars 31-34 have this one
+    want = [*range(15, 21), *range(26, 31), *range(35, 40)]
+    assert nulls.eligible_onsets(h, params).tolist() == want
+    assert nulls.eligible_onsets(np.full(40, -1, np.int8), params).size == 0
+
+
+@pytest.mark.parametrize("clean, refractory", [(4, 10), (12, 4)])
+def test_eligible_bars_are_exactly_where_the_event_rule_would_place_an_event(
+    clean: int, refractory: int
+) -> None:
+    """Plant a run of d_min bars at each labelled bar in turn and let msvol.episodes class it. The
+    flickers bar clean windows and start no refractory period, which the mask leaves out."""
+    params = msvol.Params(d_min=3, clean=clean, refractory=refractory)
+    h = np.zeros(70, np.int8)
+    h[:5] = -1
+    h[20:22] = 1
+    h[30] = 1
+    h[45:47] = 1
+    missing = np.zeros(len(h), bool)
+    eligible = set(nulls.eligible_onsets(h, params).tolist())
+    assert eligible
+    for bar in range(5, len(h) - params.d_min):
+        trial = h.copy()
+        trial[bar : bar + params.d_min] = 1
+        kinds = {e["onset"]: e["kind"] for e in msvol.episodes(trial, missing, params)}
+        assert (kinds.get(bar) == "event") == (bar in eligible), bar
+
+
+def test_every_real_event_onset_is_eligible(planted: Any) -> None:
+    onsets = [e["onset"] for e in planted.full.episodes if e["kind"] == "event"]
+    assert len(onsets) >= 20
+    assert np.isin(onsets, nulls.eligible_onsets(planted.full.h, planted.params)).all()
+
+
+def test_every_shifted_onset_lands_on_an_eligible_bar_at_least_a_day_away() -> None:
+    day = 288
+    eligible = np.concatenate([np.arange(1000, 3000), np.arange(5000, 7000)])
+    onsets = np.array([1000, 2500, 6000])
+    moved, kept = nulls.shift_onsets(onsets, eligible, day, 500, np.random.default_rng(11))
+    assert moved.shape == (500, 3) and kept.all()
+    assert np.isin(moved, eligible).all()
     assert np.all(np.abs(moved - onsets) >= day)
-    assert np.unique(moved[:, 2]).size > 400  # spread, not a fixed offset
-    offsets = (moved - onsets) % (high - low)
-    assert np.all(np.ptp(offsets, axis=1) > 0)  # in each draw, each onset has its own offset
-    wide = nulls.shift_onsets(onsets[:1], low, high, day, 20_000, np.random.default_rng(12))
-    deciles = np.histogram(wide, bins=10, range=(low, high))[0]
-    assert deciles[1:9].min() > 1800  # about 2,100 each
-    # the offset goes around the range, so an onset at its start bars the day at either end
-    assert max(deciles[0], deciles[9]) < deciles[1:9].min()
-    again = nulls.shift_onsets(onsets, low, high, day, 500, np.random.default_rng(11))
+    assert np.unique(moved[:, 2]).size > 300  # spread, not a fixed offset
+    assert np.all(np.ptp(moved - onsets, axis=1) > 0)  # in each draw, each onset has its own offset
+    again, _ = nulls.shift_onsets(onsets, eligible, day, 500, np.random.default_rng(11))
     assert again.tobytes() == moved.tobytes()
 
 
-def test_a_shift_with_no_room_is_refused() -> None:
+def test_a_shift_draws_uniformly_from_the_bars_it_may_use() -> None:
+    eligible = np.arange(0, 4000, 2)  # 2,000 bars
+    wide, _ = nulls.shift_onsets(np.array([0]), eligible, 288, 40_000, np.random.default_rng(12))
+    far = eligible[eligible >= 288]
+    deciles = np.histogram(wide, bins=10, range=(288, 4000))[0]
+    assert deciles.sum() == 40_000 and far.size == 2000 - 144
+    assert deciles.min() > 0.9 * 4000 and deciles.max() < 1.1 * 4000
+
+
+def test_an_onset_with_no_eligible_bar_is_left_out_not_drawn_from_elsewhere() -> None:
+    eligible = np.array([100, 150, 200])
     rng = np.random.default_rng(13)
-    with pytest.raises(ValueError, match="shift range"):
-        nulls.shift_onsets(np.array([5]), 10, 2000, 288, 3, rng)
-    with pytest.raises(ValueError, match="either way"):
-        nulls.shift_onsets(np.array([15]), 10, 500, 288, 3, rng)
-    assert nulls.shift_onsets(np.empty(0, np.int64), 10, 2000, 288, 3, rng).shape == (3, 0)
+    # 150 has all three within a day; 1000 none; 388 only 100, a day away exactly
+    moved, kept = nulls.shift_onsets(np.array([150, 1000, 388]), eligible, 288, 50, rng)
+    assert kept.tolist() == [False, True, True]
+    assert moved.shape == (50, 2)
+    assert set(moved[:, 0].tolist()) == {100, 150, 200}
+    assert set(moved[:, 1].tolist()) == {100}
+    moved, kept = nulls.shift_onsets(np.array([5]), np.empty(0, np.int64), 288, 3, rng)
+    assert moved.shape == (3, 0) and kept.tolist() == [False]
+    moved, kept = nulls.shift_onsets(np.empty(0, np.int64), eligible, 288, 3, rng)
+    assert moved.shape == (3, 0) and kept.size == 0
 
 
 # ---------------------------------------------------------------- the floor
@@ -337,14 +386,33 @@ def test_the_floor_runs_end_to_end_on_events_and_null_slices(floor: nulls.Floor)
 class Recording:
     """A scorer that keeps the rows it is handed."""
 
-    span = 299
-
-    def __init__(self) -> None:
+    def __init__(self, span: int = 299) -> None:
+        self.span = span
         self.calls: list[np.ndarray] = []
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         self.calls.append(x.copy())
         return x[:, -1]
+
+
+def _rebuilt(seed: int, days: int, params: msvol.Params) -> tuple[np.ndarray, msvol.Labels, Any]:
+    """A floor's first path rebuilt from its seed by the documented steps: its 1-minute
+    close-to-close returns, its labels and its event onsets."""
+    rng = np.random.default_rng([seed, 0])
+    returns = nulls.simulate(FLOOR_GARCH, days * nulls.DAY_STEPS, rng)
+    klines = nulls.minute_klines(START_MS, returns)
+    bar, _ = bars.bars(START_MS, days, klines, nulls._NO_METRICS, nulls._NO_FUNDING)
+    out = msvol.label(bar["ts_ns"], bar["rv"], params)
+    minutes = np.diff(np.log(klines["close"]), prepend=np.log(klines["open"][0]))
+    onsets = np.array([e["onset"] for e in out.episodes if e["kind"] == "event"], np.int64)
+    return minutes, out, onsets
+
+
+def _moved_bars(minutes: np.ndarray, rows: np.ndarray, horizon: int) -> np.ndarray:
+    """The onset bar each segment was cut for, read from the last return it holds."""
+    ends = np.array([int(np.flatnonzero(minutes == row[-1])[0]) + 1 for row in rows])
+    assert np.all(ends % 5 == 0)
+    return ends // 5 + horizon
 
 
 def test_the_worst_known_delay_sets_the_contaminated_horizons(
@@ -373,9 +441,9 @@ def test_the_worst_known_delay_sets_the_contaminated_horizons(
 
 
 def test_the_floor_scores_the_labellers_own_segments_of_close_to_close_returns() -> None:
-    """Rebuild the path from its seed by the documented steps: the rows the scorer was handed are
-    the null slices of the labeller's stretches and the segments before its events, of 1-minute
-    close-to-close returns, and the shifted segments lie in the bars the shift was given."""
+    """The rows the scorer was handed are the null slices of the labeller's stretches and the
+    segments before its events, of 1-minute close-to-close returns, and each shifted segment is cut
+    for a bar a day from its event, with the same clean window a real onset has."""
     seed, days, h, draws = 8, 35, 6, 20  # this path holds events and null slices; not all do
     recording = Recording()
     found = nulls.circularity_floor(
@@ -389,25 +457,104 @@ def test_the_floor_scores_the_labellers_own_segments_of_close_to_close_returns()
         params=SMALL,
         draws=draws,
     )
-    rng = np.random.default_rng([seed, 0])
-    returns = nulls.simulate(FLOOR_GARCH, days * nulls.DAY_STEPS, rng)
-    klines = nulls.minute_klines(START_MS, returns)
-    bar, _ = bars.bars(START_MS, days, klines, nulls._NO_METRICS, nulls._NO_FUNDING)
-    out = msvol.label(bar["ts_ns"], bar["rv"], SMALL)
-    minutes = np.diff(np.log(klines["close"]), prepend=np.log(klines["open"][0]))
-    onsets = np.array([e["onset"] for e in out.episodes if e["kind"] == "event"], np.int64)
+    minutes, out, onsets = _rebuilt(seed, days, SMALL)
     assert onsets.size == found.paths[0]["events"] > 0 and out.nulls
+    assert found.paths[0]["unshifted_events"] == 0
     assert found.cells[0]["n_pos"] == onsets.size
     null_slices, segments, shifted = recording.calls
     assert null_slices.tobytes() == nulls.null_rows(minutes, out.nulls, 299).tobytes()
     assert len(null_slices) == found.cells[0]["n_neg"] > 0
     assert segments.tobytes() == nulls.pre_onset_rows(minutes, onsets, h, 299).tobytes()
     assert shifted.shape == (draws * onsets.size, 299)
-    # every shifted segment ends h bars before a labelled bar at least a day from its event
-    ends = np.array([int(np.flatnonzero(minutes == row[-1])[0]) + 1 for row in shifted])
-    moved = ends // 5 + h
-    assert np.all(ends % 5 == 0) and np.all(moved >= 14 * 288) and np.all(moved < days * 288)
+    moved = _moved_bars(minutes, shifted, h)
     assert np.all(np.abs(moved.reshape(draws, -1) - onsets) >= 288)
+    for bar in moved.tolist():
+        assert np.all(out.h[bar - SMALL.clean : bar] == 0) and out.h[bar] >= 0
+        assert np.all(out.h[bar - SMALL.refractory : bar] >= 0)
+
+
+def test_an_event_that_cannot_move_a_day_is_counted_and_the_rest_stay_on_eligible_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the bars just before the first event are eligible here. That event has none a day away;
+    the rest, a refractory period on at least, can only move there."""
+    seed, days, h, draws = 8, 35, 6, 20
+    minutes, _, onsets = _rebuilt(seed, days, SMALL)
+    near = np.arange(onsets[0] - 200, onsets[0])
+    monkeypatch.setattr(nulls, "eligible_onsets", lambda *_: near)
+    recording = Recording()
+    found = nulls.circularity_floor(
+        FLOOR_GARCH,
+        {"recording": recording},
+        scoring.auc,
+        (h,),
+        days=days,
+        paths=1,
+        seed=seed,
+        params=SMALL,
+        draws=draws,
+    )
+    (path,), (cell,) = found.paths, found.cells
+    assert path["events"] == onsets.size > 1 and path["unshifted_events"] == 1
+    assert cell["n_pos"] == onsets.size and cell["shift_draws"] == draws
+    shifted = recording.calls[-1]
+    assert shifted.shape == (draws * (onsets.size - 1), 299)
+    assert np.isin(_moved_bars(minutes, shifted, h), near).all()
+    report = reports.floor(found, FLOOR_GARCH)
+    assert report.tables["paths"]["unshifted_events"].to_pylist() == [1]
+    assert f"1 of the {onsets.size} events had no eligible bar a day away" in report.summary
+
+
+def test_a_path_too_short_to_move_any_event_a_day_says_so_and_shifts_nothing() -> None:
+    """Fifteen days with fourteen of warm-up label one day, so no bar lies a day from any event."""
+    params = msvol.Params(
+        warmup_days=14, baseline_days=7, max_iter_warm=10, clean=12, refractory=24, d_min=6
+    )
+    recording = Recording()
+    found = nulls.circularity_floor(
+        FLOOR_GARCH,
+        {"recording": recording},
+        scoring.auc,
+        (0,),
+        days=15,
+        paths=1,
+        seed=7,  # this path holds events; not all do
+        params=params,
+        draws=20,
+    )
+    (path,), (cell,) = found.paths, found.cells
+    assert path["labelled_bars"] == 288 and path["events"] == path["unshifted_events"] > 0
+    assert cell["n_pos"] == path["events"]
+    assert cell["shift_draws"] == 0 and math.isnan(cell["shift_auc_median"])
+    assert sum(len(rows) for rows in recording.calls) == cell["n_pos"] + cell["n_neg"]
+    report = reports.floor(found, FLOOR_GARCH)
+    assert report.tables["cells"]["shift_auc_median"].null_count == 1
+    assert report.tables["paths"]["unshifted_events"].to_pylist() == [path["events"]]
+    n = path["events"]
+    assert f"{n} of the {n} events had no eligible bar a day away" in report.summary
+
+
+def test_a_shifted_segment_always_has_the_history_its_span_needs() -> None:
+    """A span longer than the warm-up: bars too early to hold one are not drawn at all."""
+    seed, days, h, draws, span = 8, 35, 6, 5, 25_000
+    recording = Recording(span)
+    found = nulls.circularity_floor(
+        FLOOR_GARCH,
+        {"recording": recording},
+        scoring.auc,
+        (h,),
+        days=days,
+        paths=1,
+        seed=seed,
+        params=SMALL,
+        draws=draws,
+    )
+    minutes, _, onsets = _rebuilt(seed, days, SMALL)
+    assert onsets[0] < span // 5 + h  # the first label comes too early to hold a whole span
+    (path,) = found.paths
+    shifted = recording.calls[-1]
+    assert shifted.shape == (draws * (onsets.size - path["unshifted_events"]), span)
+    assert np.all(_moved_bars(minutes, shifted, h) >= span // 5 + h)
 
 
 def test_the_variance_floor_sits_above_chance_and_falls_with_the_horizon(
@@ -423,22 +570,23 @@ def test_the_variance_floor_sits_above_chance_and_falls_with_the_horizon(
 
 
 def test_the_ac1_floor_sits_at_chance(floor: nulls.Floor) -> None:
-    """GARCH returns have no autocorrelation to trend: over ten seeds 0.42-0.60 at every horizon."""
+    """GARCH returns have no autocorrelation to trend: 0.41-0.60 over eleven seeds, any horizon."""
     for h in HORIZONS:
         assert 0.38 <= _cell(floor, "ac", h)["auc"] <= 0.66
 
 
-def test_the_shift_null_sits_at_chance_for_a_trend(floor: nulls.Floor) -> None:
-    """A shifted segment can land anywhere, a null slice only in the calm, so a scorer of the level
-    reads above chance on it (0.73 for the control below). A trend does not."""
+def test_the_shift_null_sits_at_chance_for_every_scorer(floor: nulls.Floor) -> None:
+    """A shifted segment sits where a real one could, inside the clean window, so only its alignment
+    differs. That holds for a scorer of the level too: it read 0.73 when segments could land
+    anywhere, and now runs 0.47-0.49 on this fixture. Over eleven seeds every median lay in
+    0.40-0.62, about 0.50 on average."""
     for cell in floor.cells:
         assert cell["shift_auc_lo"] <= cell["shift_auc_median"] <= cell["shift_auc_hi"]
-        if cell["scorer"] != "level":
-            assert 0.42 <= cell["shift_auc_median"] <= 0.60
+        assert 0.38 <= cell["shift_auc_median"] <= 0.64
 
 
 def test_the_segments_are_aligned_with_the_onsets(floor: nulls.Floor) -> None:
-    """The level control: high right before an onset, unlike its shifted self, and fading back."""
+    """The level control: high right before an onset, at chance shifted, and fading going back."""
     near, far = _cell(floor, "level", 0), _cell(floor, "level", 24)
     assert near["auc"] > 0.75 and near["auc"] > near["shift_auc_hi"]
     assert far["auc"] < near["auc"] - 0.1
@@ -477,6 +625,7 @@ def test_the_floor_and_its_report_repeat_under_a_seed(tmp_path: Any) -> None:
         assert (written[0] / name).read_bytes() == (written[1] / name).read_bytes()
     summary = (written[0] / "summary.md").read_text(encoding="utf-8")
     assert "alpha = 0.005" in summary and "beta = 0.9949" in summary
+    assert "no eligible bar" not in summary  # every event here could move
 
 
 def test_a_process_with_no_clustering_gives_no_labels_and_no_crash() -> None:
@@ -497,7 +646,7 @@ def test_a_process_with_no_clustering_gives_no_labels_and_no_crash() -> None:
     )
     (path,), (cell,) = found.paths, found.cells
     assert path["labelled_bars"] == 0 and path["flagged_refits"] == path["refits"] > 0
-    assert path["events"] == 0 and math.isnan(path["delay_p90"])
+    assert path["events"] == path["unshifted_events"] == 0 and math.isnan(path["delay_p90"])
     assert math.isnan(cell["auc"]) and cell["n_pos"] == cell["n_neg"] == 0
     assert cell["contaminated"] and cell["shift_draws"] == 0
     report = reports.floor(found, Garch(1e-7, 0.0, 0.0, 6.0))

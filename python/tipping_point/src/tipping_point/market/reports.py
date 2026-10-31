@@ -168,6 +168,7 @@ FLOOR = {
         refits=_INT,
         flagged_refits=_INT,
         events=_INT,
+        unshifted_events=_INT,
         other_episodes=_INT,
         flickers=_INT,
         null_bars=_INT,
@@ -544,6 +545,8 @@ def parkinson_rv(start_ms: int, days: int, klines: Mapping[str, np.ndarray]) -> 
     """The bars' rv under the Parkinson estimator, the named fallback: ln(H/L)^2 / (4 ln 2) summed
     over the bar's minutes, with bars.py's rule for minutes without trades and for missing bars."""
     n = days * bars.DAY_BARS
+    # shortcut: repeats bars.bars's grid because bars takes one estimator, give bars an estimator
+    # argument when S5 next changes bars.py
     rows, minute, _ = bars._grid(klines["open_time"], start_ms, bars.MINUTE_MS, 5 * n)
     traded = klines["count"][rows] > 0
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -762,13 +765,21 @@ def floor(found: nulls.Floor, garch: nulls.Garch) -> Report:
         "paths": _table(FLOOR["paths"], found.paths),
     }
     parameters = ", ".join(f"{k} = {v:g}" for k, v in values.items())
+    events = sum(p["events"] for p in found.paths)
+    unshifted = sum(p["unshifted_events"] for p in found.paths)
+    stranded = (
+        f" {unshifted} of the {events} events had no eligible bar a day away, so the shift null "
+        "leaves them out."
+        if unshifted
+        else ""
+    )
     summary = "\n\n".join(
         [
             "# Circularity floor",
             f"GARCH(1,1)-t at 10 seconds, {parameters}, through the exact bars and labeller, over "
-            f"{len(found.paths)} simulated paths with {sum(p['events'] for p in found.paths)} "
-            "events. A clustering process with no critical dynamics gives this AUC by "
-            "construction: a real AUC counts only above it.",
+            f"{len(found.paths)} simulated paths with {events} events. A clustering process with "
+            "no critical dynamics gives this AUC by construction: a real AUC counts only above "
+            f"it.{stranded}",
             "## AUC of pre-onset segments against null slices, and of shifted events",
             _markdown(tables["cells"]),
             "## Paths",

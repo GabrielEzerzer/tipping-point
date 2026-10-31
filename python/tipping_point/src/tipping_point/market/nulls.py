@@ -6,7 +6,8 @@ research pass section 4, "Circularity, dynamic", section 2 item 12, call 7).
   simulate           its returns, started from the unconditional variance
   minute_klines      1-minute OHLC from 10-second returns, in archive.collect's columns
   delays             how late the hysteresis state rises after a planted switch, under a theta
-  shift_onsets       the event-time shift null: events moved by a random offset of at least a day
+  eligible_onsets    the bars where the event rule could have placed an event
+  shift_onsets       the event-time shift null: events moved to eligible bars at least a day away
   circularity_floor  simulate at 10 seconds, build 1-minute OHLC, run the exact bars and labeller,
                      score close-to-close 1-minute returns: the AUC of pre-onset segments against
                      null slices, and of shifted segments against the same slices
@@ -21,6 +22,10 @@ Lengths: a segment or slice is `span` 1-minute samples. Bar b covers minutes [5b
 segment at horizon h bars before onset bar b ends just before minute 5(b - h): it holds nothing of
 the onset bar or of the h bars before it. Null slices are the non-overlapping spans cut in time
 order from each null stretch, as the Ising scorer cuts its null runs.
+
+The shift null moves an onset only to a bar where the event rule could have placed one. A real
+pre-onset segment lies inside that rule's clean window, so a shifted one must too: moved anywhere,
+real against shifted would differ in where a segment sits as well as in its alignment.
 """
 
 from __future__ import annotations
@@ -202,24 +207,38 @@ def null_rows(minutes: np.ndarray, stretches: Sequence[Mapping[str, Any]], span:
     return _rows(minutes, np.array(ends, np.int64), span)
 
 
+def eligible_onsets(h: np.ndarray, params: msvol.Params) -> np.ndarray:
+    """The bars where the event rule of msvol.episodes could have placed an event: labelled, with
+    max(clean, refractory) labelled bars before them, and H = 0 through the `clean` bars before.
+    The refractory period after an earlier event stays out: it hangs on which events came before,
+    not on where a segment sits."""
+    labelled = np.flatnonzero(h >= 0)
+    if not labelled.size:
+        return labelled
+    high_before = np.concatenate([[0], np.cumsum(h == 1)])
+    known = labelled[labelled >= labelled[0] + max(params.clean, params.refractory)]
+    return known[high_before[known] == high_before[known - params.clean]]
+
+
 def shift_onsets(
     onsets: np.ndarray,
-    low: int,
-    high: int,
+    eligible: np.ndarray,
     min_offset: int,
     draws: int,
     rng: np.random.Generator,
-) -> np.ndarray:
-    """(draws, onsets): each onset moved, in each draw on its own, by a uniform offset around the
-    bars [low, high) that keeps it at least min_offset bars from where it was, either way."""
-    onsets = np.asarray(onsets, np.int64)
-    size = high - low
-    if np.any((onsets < low) | (onsets >= high)):
-        raise ValueError(f"onsets must lie in the shift range [{low}, {high})")
-    if size < 2 * min_offset:
-        raise ValueError(f"{size} bars cannot hold an offset of {min_offset} either way")
-    offsets = rng.integers(min_offset, size - min_offset, (draws, len(onsets)), endpoint=True)
-    return low + (onsets - low + offsets) % size
+) -> tuple[np.ndarray, np.ndarray]:
+    """Each onset moved, in each draw on its own, to one of the eligible bars at least min_offset
+    from it, drawn uniformly. Returns those (draws, kept) bars and the boolean `kept` per onset: an
+    onset with no such bar is left out, for the caller to count, and never drawn from elsewhere."""
+    onsets, eligible = np.asarray(onsets, np.int64), np.asarray(eligible, np.int64)
+    kept = np.zeros(len(onsets), bool)
+    moved = []
+    for i, onset in enumerate(onsets):
+        far = eligible[np.abs(eligible - onset) >= min_offset]
+        if far.size:
+            kept[i] = True
+            moved.append(rng.choice(far, draws))
+    return np.stack(moved, axis=1) if moved else np.empty((draws, 0), np.int64), kept
 
 
 # ---------------------------------------------------------------- the floor
@@ -254,8 +273,9 @@ def circularity_floor(
 ) -> Floor:
     """The AUC a clustering process with no critical dynamics gives each scorer at each horizon
     (in bars), pooled over `paths` simulated series of `days` days, and the same with each path's
-    events shifted, per draw. A horizon below the worst path's p90 detection delay, or with no
-    delay known, is marked contaminated (research pass section 2, item 12)."""
+    events shifted, per draw; an event with no eligible bar a day away counts in its path's
+    unshifted_events and stays out of the shift. A horizon below the worst path's p90 detection
+    delay, or with no delay known, is marked contaminated (research pass section 2, item 12)."""
     params = params or msvol.Params()
     refuse_confirmatory(archive.day_ms(first + timedelta(days=days - 1)) * 1_000_000)
     start_ms = archive.day_ms(first)
@@ -273,12 +293,9 @@ def circularity_floor(
         out = msvol.label(bar["ts_ns"], bar["rv"], params)
         minutes = close_returns(klines)
         onsets = np.array([e["onset"] for e in out.episodes if e["kind"] == "event"], np.int64)
-        labelled = np.flatnonzero(out.h >= 0)
-        low = max(int(labelled[0]) if labelled.size else len(out.h), room)
-        inside = onsets[onsets >= low]
-        shifted = np.empty((draws, 0), np.int64)
-        if inside.size and len(out.h) - low >= 2 * min_offset:
-            shifted = shift_onsets(inside, low, len(out.h), min_offset, draws, rng)
+        eligible = eligible_onsets(out.h, params)
+        eligible = eligible[eligible >= room]
+        shifted, kept = shift_onsets(onsets, eligible, min_offset, draws, rng)
         for name, scorer in scorers.items():
             neg[name].append(_score(scorer, null_rows(minutes, out.nulls, scorer.span)))
             for h in horizons:
@@ -292,10 +309,11 @@ def circularity_floor(
             {
                 "path": path,
                 "bars": len(out.h),
-                "labelled_bars": int(labelled.size),
+                "labelled_bars": int(np.sum(out.h >= 0)),
                 "refits": len(out.refits),
                 "flagged_refits": sum(r["flagged"] for r in out.refits),
                 "events": int(onsets.size),
+                "unshifted_events": int(np.sum(~kept)),
                 "other_episodes": sum(e["kind"] == "episode" for e in out.episodes),
                 "flickers": sum(e["kind"] == "flicker" for e in out.episodes),
                 "null_bars": sum(s["bars"] for s in out.nulls),
