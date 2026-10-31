@@ -185,6 +185,29 @@ set, `cargo test --release -p engine-harness --test rotate_soak -- --nocapture` 
 1 GiB segment of synthetic frames, rotates it, and records the time and peak memory in
 `harness/out/rotate-soak-<ms>.json` (#52; `TP_ROTATE_SOAK_MB` for another size).
 
+### Regime labels (#29)
+
+The market experiment's labels come from Binance's free USD-M archive and need no engine
+(`python/tipping_point/src/tipping_point/market/`, stdlib, numpy and pyarrow). `fetch` downloads a
+span's 1-minute klines, 5-minute metrics and monthly funding into
+`harness/fixtures/archives/binance/<kind>/<symbol>/` (gitignored), checks each file's SHA-256
+against the `.CHECKSUM` beside it, skips files already verified, and lists every file in that
+folder's `manifest.json` with its URL, size, sha256 and row checks: gaps in the minute or 5-minute
+grid, duplicate stamps, rows out of order. `labels` turns a fetched span into 5-minute bars
+(Garman-Klass variance, close, volume, taker-buy share, open interest, funding) and labels them:
+a two-state Gaussian HMM on deseasonalised, baseline-relative log variance, refitted every Monday
+by deterministic EM, read through as-of filtered probabilities and a hysteresis rule into
+episodes, events, flickers and null stretches. A run lands in `<data dir>/labels/<run_id>/`:
+`manifest.json` with every source file and parameter, Parquet tables `bars`, `labels`, `refits`,
+`episodes` and `nulls` keyed by `ts_ns`, then `complete.json`. Every labeller parameter is an
+option at the research pass's start value until the 2023 pilot sets it; days from 2024-01-01 are
+refused until `market-labels-v1` is frozen.
+
+```sh
+uv run python -m tipping_point.market fetch --start 2022-07-01 --end 2023-12-31
+uv run python -m tipping_point.market labels --start 2022-07-01 --end 2023-12-31
+```
+
 ## Engine API
 
 `serve` runs the engine as its own process: the live feed plus one HTTP server on 127.0.0.1
