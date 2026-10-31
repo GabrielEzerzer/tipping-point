@@ -1,5 +1,6 @@
-"""Ising adapter: simulator runs in, (batch, time) arrays of |m| and e per site out, and the Ising
-experiment of a pre-registration scored from them.
+"""Ising adapter: simulator runs in, (batch, time) arrays of |m|, e per site and, where a checkpoint
+has been read over the run, its latent columns out, and the Ising experiment of a pre-registration
+scored from them.
 
 Runs follow tipping_point.ising.io's layout. This module reads the manifest (L, Tc, seed,
 replicas, blocks, schedule), `stats` (step, replica, temperature, segment, phase, magnetisation,
@@ -22,6 +23,14 @@ held to), is refused unless the caller allows it.
 Cadences: `dense` is every stats row, thinned to one sample per `thin` tau_c; `matched` is every
 saved frame (bursts of consecutive sweeps), exactly what the JEPA sees. Windows, bandwidths and
 segments are converted from tau_c and eps_L into samples per cadence and L.
+
+Latents (#28): <run>/latents/<training>-step<step:07d>/ is what `jepa extract` writes, and it is
+read here with a plain Parquet reader, since jepa.extract imports this module. It holds the saved
+frames its manifest's selection keeps, so its columns exist at the matched cadence only: series()
+joins them on the six key columns, whose equality it asserts, and refuses a table without
+complete.json. A prereg with a [latents] section is scored once per checkpoint it names, a trained
+checkpoint and its untrained twin alike, and every row of every table says which in its `checkpoint`
+column: the table's folder name, or "" for a row of the classic observables, which read no table.
 """
 
 from __future__ import annotations
@@ -29,8 +38,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,21 +50,16 @@ import pyarrow.parquet as pq
 from ..ising import autocorr, io
 from ..ising.pilot import stale as _stale
 from . import fss, indicators, scoring, surrogates
-from .trend import Pipeline, trailing_score
+from .trend import RAW, Pipeline, trailing_score
 
 PILOT = "pilot.json"
 OBSERVABLES = ("abs_m", "energy")
 _STATS = ("step", "replica", "temperature", "segment", "phase", "magnetisation", "energy")
-_CONFIGS = (
-    "step",
-    "replica",
-    "temperature",
-    "segment",
-    "burst",
-    "frame",
-    "magnetisation",
-    "energy",
-)
+KEY = ("step", "replica", "temperature", "segment", "burst", "frame")
+_CONFIGS = (*KEY, "magnetisation", "energy")
+LATENTS = "latents"
+PRIMARY = "primary"  # latents.checkpoints.role of the checkpoints scored on the whole grid
+_CELL_TABLES = ("auc", "surrogates", "alarms", "peaks")  # what _cells fills
 Row = dict[str, Any]
 Peaks = dict[tuple[str, str], dict[int, list[np.ndarray]]]  # per-L, per-seed peak eps_L
 
@@ -201,8 +205,11 @@ class Series:
     abs_m: np.ndarray  # (batch, time) |m| per site
     energy: np.ndarray  # (batch, time) energy per site
     replicas: np.ndarray  # (batch,)
+    latents: dict[str, np.ndarray] = field(default_factory=dict)  # column -> (batch, time)
 
     def observable(self, name: str) -> np.ndarray:
+        if name in self.latents:
+            return self.latents[name]
         if name not in OBSERVABLES:
             raise ValueError(f"observable must be one of {OBSERVABLES}, got {name!r}")
         return self.abs_m if name == "abs_m" else self.energy
@@ -216,23 +223,79 @@ class Series:
             phase=self.phase[index],
             abs_m=self.abs_m[:, index],
             energy=self.energy[:, index],
+            latents={name: values[:, index] for name, values in self.latents.items()},
         )
 
 
-def series(run: Run, cadence: str) -> list[Series]:
+def latents_name(training: str, step: int) -> str:
+    """The folder a checkpoint's table has under <run>/latents/."""
+    return f"{training}-step{step:07d}"
+
+
+def at_plateau(temperature: np.ndarray, rule: dict[str, Any]) -> np.ndarray:
+    return np.isclose(temperature, rule["tc_plateau"], rtol=1e-6, atol=1e-6)
+
+
+def kept(kind: str, rows: pa.Table, rule: dict[str, Any]) -> np.ndarray:
+    """Which configs rows (temperature and burst columns) of a run of `kind` a latents table's
+    selection rule keeps, as jepa.extract.selection records it in the table's manifest."""
+    temperature = rows["temperature"].to_numpy()
+    if rule["rule"] == "all" or kind != "staircase":
+        return np.ones(len(temperature), dtype=bool)
+    plateau = at_plateau(temperature, rule)
+    if rule["rule"] == "tc-only":
+        return plateau
+    return plateau | (rows["burst"].to_numpy() % rule["every"] == 0)
+
+
+def _join_latents(run: Run, frames: pa.Table, name: str) -> tuple[pa.Table, dict[str, np.ndarray]]:
+    """A run's frames (a configs table) that its latents table `name` holds, and the table's other
+    columns, row for row. Its key columns must equal those of the frames its selection keeps, in
+    their order and with configs' types; anything else, or a table not complete, is refused."""
+    folder, where = run.path / LATENTS / name, f"{run.run_id}: latents/{name}"
+    if not ((folder / "complete.json").is_file() and (folder / "manifest.json").is_file()):
+        raise IsingDataError(f"{where} has no complete.json (running, crashed or absent); refused")
+    manifest = io.read_json(folder / "manifest.json")
+    rule = manifest.get("params", {}).get("selection") or {"rule": "all"}
+    try:
+        own = frames.filter(kept(run.kind, frames, rule))
+        table = pa.concat_tables([pq.read_table(p) for p in io.chunks(folder.parent, name)])
+        same = bool(table.num_rows) and table.select(KEY).equals(own.select(KEY))
+    except (pa.ArrowInvalid, KeyError) as exc:
+        raise IsingDataError(f"{where}: not a latents table ({exc!r}); refused") from exc
+    if not same:
+        raise IsingDataError(
+            f"{where}: its {table.num_rows} rows are not keyed exactly as the {own.num_rows} "
+            f"frames its {rule['rule']} selection keeps; refused"
+        )
+    columns = [c for c in table.column_names if c not in KEY]
+    return own, {c: table[c].to_numpy().astype(np.float64) for c in columns}
+
+
+def series(run: Run, cadence: str, latents: str | None = None) -> list[Series]:
     """Every recorded row of a cadence (dense: stats, matched: configs), one Series per
-    temperature block, in step order."""
+    temperature block, in step order. With `latents`, a folder under <run>/latents/, the matched
+    cadence's frames that table holds, its columns joined on as observables."""
     table, names = {"dense": ("stats", _STATS), "matched": ("configs", _CONFIGS)}[cadence]
+    if latents is not None and cadence != "matched":
+        raise IsingDataError(
+            f"{run.run_id}: latents/{latents} holds saved frames, read at the matched cadence "
+            f"alone, not at {cadence}"
+        )
     paths = io.chunks(run.path, table)
     if not paths:
         raise IsingDataError(f"{run.run_id}: no {table} rows for the {cadence} cadence")
     data = pa.concat_tables([pq.read_table(p, columns=list(names)) for p in paths])
+    joined: dict[str, np.ndarray] = {}
+    if latents is not None:
+        data, joined = _join_latents(run, data, latents)
     replicas, blocks = int(run.params["replicas"]), int(run.params["blocks"])
     lattices = replicas * blocks
     rows = data.num_rows // lattices
     if rows * lattices != data.num_rows:
         raise IsingDataError(f"{run.run_id}: {table} does not hold whole steps of {lattices} rows")
     grid = {name: data[name].to_numpy().reshape(rows, lattices) for name in names}
+    columns = {name: values.reshape(rows, lattices) for name, values in joined.items()}
     area = float(run.L**2)
     out = []
     for b in range(blocks):
@@ -247,6 +310,7 @@ def series(run: Run, cadence: str) -> list[Series]:
                 abs_m=np.abs(grid["magnetisation"][:, own]).T / area,
                 energy=grid["energy"][:, own].T / area,
                 replicas=grid["replica"][0, own],
+                latents={name: values[:, own].T for name, values in columns.items()},
             )
         )
     return out
@@ -269,24 +333,25 @@ def thin(s: Series, every: float) -> Series:
     return s.take(np.unique(nearer))
 
 
-def plateaus(run: Run, cadence: str) -> tuple[dict[float, Series], int]:
+def plateaus(run: Run, cadence: str, latents: str | None = None) -> tuple[dict[float, Series], int]:
     """A staircase's measured rows per plateau temperature, without the plateaus that failed the
-    thermalised check; returns them and how many were dropped."""
+    thermalised check; returns them and how many were dropped. With `latents`, as in series(): a
+    plateau the table's selection keeps nothing of is not there."""
     if run.kind != "staircase":
         raise IsingDataError(f"{run.run_id} is a {run.kind} run, not a staircase")
     checks = run.checks.get("thermalised", [])
     failed = {round(c["temperature"], 9) for c in checks if not c["passed"]}
-    (s,) = series(run, cadence)
+    (s,) = series(run, cadence, latents)
     s = measured(s)
-    kept, dropped = {}, 0
+    found, dropped = {}, 0
     for segment in np.unique(s.segment):
         part = s.take(s.segment == segment)
         T = float(part.temperature[0])
         if round(T, 9) in failed:
             dropped += 1
         else:
-            kept[T] = part
-    return kept, dropped
+            found[T] = part
+    return found, dropped
 
 
 def ramp_segment(s: Series, run: Run, top: float, bottom: float) -> tuple[int, int]:
@@ -320,6 +385,7 @@ class Inputs:
     nulls: list[tuple[Run, int]]  # (run, block) per (seed, eps_L) that passed its check
     staircases: list[Run]  # one per seed
     dropped: list[str]  # null blocks that failed complete.json's thermalised check
+    latents: str | None = None  # the latents table (a folder under each run) to read them with
 
     def runs(self) -> Iterator[Run]:
         yield from self.ramps
@@ -373,13 +439,17 @@ def _slots(run: Run, data: dict[str, Any]) -> list[tuple[Any, ...]]:
 
 
 def select(
-    runs: Sequence[Run], incomplete: Sequence[Run], data: dict[str, Any]
+    runs: Sequence[Run],
+    incomplete: Sequence[Run],
+    data: dict[str, Any],
+    latents: Sequence[str] = (),
 ) -> dict[int, Inputs]:
     """For each L, exactly one complete run per (kind, seed) and one null block per
     (seed, eps_L). A slot left empty or filled twice, or a matching run that has not completed,
     is an error; listing a run in data.exclusions takes it out. A null block is read as
     equilibrium, so it needs complete.json's thermalised verdict: without one it is refused,
-    and one that failed fills its slot but is dropped from scoring and counted."""
+    and one that failed fills its slot but is dropped from scoring and counted. Every scored run
+    must hold a complete table of each name in `latents`."""
     excluded = {e["run_id"] for e in data["exclusions"]}
     pending = [r.run_id for r in incomplete if r.run_id not in excluded and _slots(r, data)]
     if pending:
@@ -440,6 +510,15 @@ def select(
             staircases=[filled[(L, "staircase", s)][0][0] for s in data["seeds"]],
             dropped=[f"{r.run_id} block {b}" for r, b in blocks if (r, b) not in passed],
         )
+    absent = {
+        f"{r.run_id}/{LATENTS}/{name}"
+        for inputs in chosen.values()
+        for r in inputs.runs()
+        for name in latents
+        if not (r.path / LATENTS / name / "complete.json").is_file()
+    }
+    if absent:
+        raise IsingDataError(f"scored runs without a complete latents table: {sorted(absent)}")
     return chosen
 
 
@@ -481,8 +560,10 @@ def prepare(
     stats stride), nearest rows to one shared grid spacing. Matched: keep every frame; ramps and
     nulls must save at the same rate (frames per sweep) inside the analysis band, or a window
     would span different times."""
-    ramps = [(run, series(run, cadence)[0]) for run in inputs.ramps]
-    nulls = [(run, measured(series(run, cadence)[block])) for run, block in inputs.nulls]
+    ramps = [(run, series(run, cadence, inputs.latents)[0]) for run in inputs.ramps]
+    nulls = [
+        (run, measured(series(run, cadence, inputs.latents)[block])) for run, block in inputs.nulls
+    ]
     if cadence == "dense":
         coarsest = max(_stride(run) for run, _ in [*ramps, *nulls])
         every = max(float(coarsest), thin_taus * tau_c)
@@ -532,6 +613,43 @@ class Evaluation:
     inputs: list[Run]
     pilot: Pilot
     dropped: dict[str, list[str] | int]  # failed null blocks, and how many plateaus were dropped
+    latents: dict[str, dict[str, str]] = field(default_factory=dict)  # run id -> table -> sha256
+    # of the table's complete.json; each run's empty when the prereg reads no table
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    """What one pass of the scorer reads: a latents table, or, named "", the classic observables."""
+
+    name: str  # the table's folder under each run, and the rows' `checkpoint` column
+    sha256: str  # of the checkpoint file the prereg pins
+    role: str  # latents.checkpoints.role, a twin's that of its trained checkpoint
+
+
+def checkpoints(doc: dict[str, Any]) -> list[Checkpoint]:
+    """The passes a prereg scores: each [[latents.checkpoints]] entry's trained checkpoint and its
+    untrained twin, or the one classic pass of a prereg with no [latents]."""
+    if "latents" not in doc:
+        return [Checkpoint("", "", PRIMARY)]
+    steps = int(doc["latents"]["steps"])
+    return [
+        Checkpoint(latents_name(entry["training"], step), entry[pin], entry["role"])
+        for entry in doc["latents"]["checkpoints"]
+        for step, pin in ((steps, "trained_sha256"), (0, "twin_sha256"))
+    ]
+
+
+def _scored_as(doc: dict[str, Any], role: str) -> dict[str, Any]:
+    """A prereg as a checkpoint of `role` is scored under it: an ablation, descriptive, at the
+    headline cell alone and with its own, smaller count of surrogates (#28, call 7)."""
+    if role == PRIMARY:
+        return doc
+    sens, sc, tests = doc["sensitivity"], doc["scoring"], doc["scoring"]["surrogates"]
+    head = sens["headline"]
+    return doc | {
+        "sensitivity": sens | {"window": [head["window"]], "bandwidth": [head["bandwidth"]]},
+        "scoring": sc | {"surrogates": tests | {"n": tests["n_ablation"]}},
+    }
 
 
 def evaluate(
@@ -541,6 +659,7 @@ def evaluate(
     say: Callable[[str], None] = print,
     allow_stale: bool = False,
     commit: str | None = None,
+    runs_commit: str | None = None,
 ) -> Evaluation:
     """Score a pre-registration's Ising experiment: the AUC of every cell, the surrogate tests,
     alarms and peak positions at the headline cell, and static and dynamic finite-size scaling.
@@ -549,30 +668,81 @@ def evaluate(
     every scored run must have been made by that commit from a clean tree, every scored ramp and
     null run against the pilot record the prereg pins, and every scored staircase from the
     tau.json it pins at that L. Without it (an unfrozen prereg, exploratory use) none is asked:
-    the exploratory L = 16 null runs name no record."""
+    the exploratory L = 16 null runs name no record. With `runs_commit` too, the commit of a
+    baseline's tag, the runs must come from that commit instead (a latent prereg reads the runs of
+    the version it compares with), and each latents table from `commit` and the checkpoint the
+    prereg pins (_same_latents). A prereg with a [latents] section is scored once per checkpoint."""
     data = doc["data"]
     pinned = data["tau_c"]["pilot_sha256"]
     pinned = pinned if len(pinned) == 64 else None
     pilot = read_pilot(data_dir, data["tau_c"]["pilot_run"], pinned, allow_stale)
     if pilot.stale:
         say(f"warning: {pilot.path}: {pilot.stale}; scored anyway (--allow-stale-pilot)")
-    chosen = select(*find_runs(data_dir), data)
+    passes = checkpoints(doc)
+    read = {c.name: c.sha256 for c in passes if c.name}
+    chosen = select(*find_runs(data_dir), data, list(read))
     scored = list({run.run_id: run for i in chosen.values() for run in i.runs()}.values())
     if commit is not None:
-        _same_commit(scored, commit)
+        _same_commit(scored, runs_commit or commit)
         if pinned is not None:  # always, once frozen: the freeze refuses an unpinned record
             _same_record(chosen, pinned, data["staircase"].get("tau_sha256", {}))
-    tables: dict[str, list[Row]] = {"auc": [], "surrogates": [], "alarms": [], "peaks": []}
-    peaks: Peaks = {}
-    for L, inputs in chosen.items():
-        for cadence in doc["indicators"]["cadences"]:
-            prep = _cells(doc, L, inputs, cadence, pilot.tau(L), tables, peaks, rng)
-            say(f"L = {L}, {cadence}: {prep.sweeps:g} sweeps per sample, tau_c = {pilot.tau(L):g}")
-    static, plateaus_dropped = _static(doc, chosen, rng)
-    tables["fss"] = static + _dynamic(doc, peaks, rng)
+        _same_latents(scored, read, commit)
+    tables: dict[str, list[Row]] = {name: [] for name in (*_CELL_TABLES, "fss")}
+    plateaus_dropped = 0
+    for checkpoint in passes:
+        own = _scored_as(doc, checkpoint.role)
+        slots = {L: replace(i, latents=checkpoint.name or None) for L, i in chosen.items()}
+        part: dict[str, list[Row]] = {name: [] for name in _CELL_TABLES}
+        peaks: Peaks = {}
+        for L, inputs in slots.items():
+            for cadence in own["indicators"]["cadences"]:
+                prep = _cells(own, L, inputs, cadence, pilot.tau(L), part, peaks, rng)
+                say(
+                    f"L = {L}, {cadence}: {prep.sweeps:g} sweeps per sample, "
+                    f"tau_c = {pilot.tau(L):g}"
+                )
+        static, lost = _static(own, slots, rng)
+        part["fss"] = static + _dynamic(own, peaks, rng)
+        plateaus_dropped = max(plateaus_dropped, lost)  # the same plateaus, table after table
+        for table, rows in part.items():
+            tables[table] += [row | {"checkpoint": checkpoint.name} for row in rows]
     null_blocks = [block for i in chosen.values() for block in i.dropped]
     dropped = {"null_blocks": null_blocks, "plateaus": plateaus_dropped}
-    return Evaluation(tables, scored, pilot, dropped)
+    return Evaluation(tables, scored, pilot, dropped, {r.run_id: _digests(r, read) for r in scored})
+
+
+def _digests(run: Run, names: Iterable[str]) -> dict[str, str]:
+    """The sha256 of each named latents table's complete.json: what a result says it read."""
+    done = (run.path / LATENTS / name / "complete.json" for name in names)
+    return {p.parent.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in done}
+
+
+def _same_latents(runs: Sequence[Run], pinned: dict[str, str], commit: str) -> None:
+    """Refuse a scored latents table that is not the one a frozen prereg pins: from another
+    checkpoint than the sha256 it pins, read over another state of its run, or extracted by anything
+    but the tag's commit from a clean tree (#28, call 11: the freeze comes before any extraction).
+    Each table's manifest says all three."""
+    foreign = []
+    for run in runs:
+        for name, sha in pinned.items():
+            manifest = io.read_json(run.path / LATENTS / name / "manifest.json")
+            params, producer = manifest["params"], manifest["producer"]
+            if (
+                params["checkpoint"]["sha256"] != sha
+                or params["dataset"]["complete_sha256"] != run.complete_sha256
+                or producer.get("git_sha") != commit
+                or producer.get("dirty") is not False
+            ):
+                foreign.append(
+                    f"{run.run_id}/{LATENTS}/{name} (checkpoint sha256 "
+                    f"{params['checkpoint']['sha256']}, git_sha {producer.get('git_sha')}, "
+                    f"dirty {producer.get('dirty')})"
+                )
+    if foreign:
+        raise IsingDataError(
+            f"latents tables not made by the freeze tag's commit {commit}, from a clean tree, from "
+            f"the checkpoint the prereg pins and over the run as it stands: {foreign}"
+        )
 
 
 def _same_record(chosen: dict[int, Inputs], pinned: str, tau_pins: dict[str, str]) -> None:
@@ -656,7 +826,10 @@ def _cells(
                     pos_rows, length = positives(prep, observable, h, segment, window)
                     span = window + length - 1
                     neg_rows = [null_slices(s.observable(observable), span) for _, s in prep.nulls]
-                    for name in ind["names"]:
+                    for name in _indicators(ind, observable):
+                        raw = name in RAW
+                        if raw and bandwidth_taus != headline[1]:
+                            continue  # no bandwidth to vary: one cell per window
                         pipe = Pipeline(name, window, length, bandwidth, int(ind["lag"]))
                         key = (observable, pipe)  # the pipeline fixes the span
                         if key not in null_scores:
@@ -668,14 +841,14 @@ def _cells(
                             "L": L,
                             "h": h,
                             "window_taus": window_taus,
-                            "bandwidth_taus": bandwidth_taus,
+                            "bandwidth_taus": np.nan if raw else bandwidth_taus,
                             "headline": top,
-                            "direction": ind["direction"][name],
+                            "direction": _direction(ind, observable, name),
                         }
                         pos, neg = [pipe(g) for g in pos_rows], null_scores[key]
                         samples = {
                             "window": window,
-                            "bandwidth": np.nan if bandwidth is None else bandwidth,
+                            "bandwidth": np.nan if bandwidth is None or raw else bandwidth,
                             "length": length,
                             "sweeps_per_sample": prep.sweeps,
                             "tau_c": tau_c,
@@ -695,6 +868,19 @@ def _cells(
                 for key, groups in found.items():
                     peaks.setdefault(key, {})[L] = groups
     return prep
+
+
+def _indicators(ind: dict[str, Any], observable: str) -> list[str]:
+    """The indicators scored on an observable: every one, or those indicators.pairs gives it."""
+    if "pairs" not in ind:
+        return ind["names"]
+    return [name for paired, name in ind["pairs"] if paired == observable]
+
+
+def _direction(ind: dict[str, Any], observable: str, name: str) -> str:
+    """The trend an indicator is expected to take on an observable."""
+    own = ind.get("direction_by_observable", {}).get(observable, {})
+    return own.get(name, ind["direction"][name])
 
 
 def _auc_row(
@@ -725,9 +911,14 @@ def _pvalues(
     rng: np.random.Generator,
     direction: str,
 ) -> dict[str, np.ndarray]:
-    """Per surrogate test of the prereg, the one-sided p-value of every row of every seed."""
+    """Per surrogate test of the prereg, the one-sided p-value of every row of every seed. A raw
+    series has no ar1 test: fitted to a trend, ar1 draws near-random walks with no trend."""
     s, x = sc["surrogates"], np.concatenate(rows)
-    tests = {kind: surrogates.KINDS[kind] for kind in (s["primary"], s["secondary"])}
+    tests = {
+        kind: surrogates.KINDS[kind]
+        for kind in (s["primary"], s["secondary"])
+        if not (kind == "ar1" and pipe.indicator in RAW)
+    }
     return {
         kind: scoring.surrogate_test(x, pipe, make, int(s["n"]), rng, direction)[1]
         for kind, make in tests.items()
@@ -750,7 +941,7 @@ def _surrogate_rows(
             "n_pos": len(p_pos[kind]),
             "n_neg": len(p_neg[kind]),
         }
-        for kind in (s["primary"], s["secondary"])
+        for kind in p_pos
     ]
 
 
@@ -762,24 +953,28 @@ def _alarms(
     window: int,
     bandwidth: float | None,
 ) -> list[Row]:
-    """A descriptive row per scoring.alarms indicator (#97): theta from the null blocks of half
-    the seeds at the target false-alarm rate per tau_c, the rate on the other half, and the eps_L
+    """A descriptive row per scoring.alarms indicator, or per judged pair in a prereg with
+    indicators.pairs (#97): theta from the null blocks of half the seeds at the target
+    false-alarm rate per tau_c, the rate on the other half, and the eps_L
     at which each ramp replica's s(t) first rises above theta inside the band (NaN: a miss, or
     censored: above theta already as the band opens, so its alarm came before the band and is not
     measured here). When no theta alarms as often as the target, the row says unattainable and
     every field that needs a theta is NaN. s(t) runs every `every` tau_c over each whole series,
     each score seeing only its past."""
     a = doc["scoring"]["alarms"]
-    observable, per = doc["fss"]["dynamic"]["observable"], float(a["report_per"])
+    per = float(a["report_per"])
+    pairs = doc["indicators"].get("pairs")
+    if pairs is None:
+        pairs = [(doc["fss"]["dynamic"]["observable"], name) for name in a["indicators"]]
     every = max(1, round(float(a["every"]) * tau_c / prep.sweeps))
     taus_per_score = every * prep.sweeps / tau_c
     lowest = min(float(h) for h in doc["event"]["horizons"])
-    _, length = positives(prep, observable, lowest, float(doc["event"]["segment"]), window)
     band_top, band_bottom = (float(v) for v in a["band"])
     rows = []
-    for name in a["indicators"]:
+    for observable, name in pairs:
+        _, length = positives(prep, observable, lowest, float(doc["event"]["segment"]), window)
         pipe = Pipeline(name, window, length, bandwidth, int(doc["indicators"]["lag"]))
-        direction = doc["indicators"]["direction"][name]  # a falling indicator alarms on -s(t)
+        direction = _direction(doc["indicators"], observable, name)  # falling: alarms on -s(t)
         seeds = sorted({run.seed for run, _ in prep.nulls})
         halves: list[list[np.ndarray]] = [[], []]  # alternate seeds set theta and test it
         for run, s in prep.nulls:
@@ -844,18 +1039,16 @@ def _alarms(
 def _peaks(
     doc: dict[str, Any], prep: Prepared, L: int, window: int, bandwidth: float | None
 ) -> tuple[list[Row], dict[tuple[str, str], list[np.ndarray]]]:
-    """Where each slow-ramp replica's indicator peaks (#98), for every scored indicator: the
-    headline pipeline's detrend, window and lag along the whole ramp, and the eps_L of its
+    """Where each slow-ramp replica's indicator peaks (#98), for each one _peak_statistics names:
+    the headline pipeline's detrend, window and lag along the whole ramp, and the eps_L of its
     extremum in the indicator's expected direction inside fss.dynamic.search (NaN on the band's
-    edge: not located). A descriptive row per indicator; the per-seed positions go to the
-    dynamic test."""
+    edge: not located). A descriptive row per indicator; the per-seed positions go to the dynamic
+    test. Only a position is read, so a slope's scale, per sample here, plays no part."""
     dyn, ind = doc["fss"]["dynamic"], doc["indicators"]
-    observable = dyn["observable"]
     band = (float(dyn["search"][0]), float(dyn["search"][1]))
     rows, found = [], {}
-    for name in ind["names"]:
+    for key, observable, name, direction in _peak_statistics(doc):
         pipe = Pipeline(name, window, 2, bandwidth, int(ind["lag"]))  # rolling ignores length
-        direction = ind["direction"][name]
         groups = []
         for run, s in prep.ramps:
             ramp_segment(s, run, *band)  # refuses a ramp that does not cross the whole band
@@ -864,7 +1057,7 @@ def _peaks(
         peak = np.concatenate(groups)
         located = peak[np.isfinite(peak)]
         q1, median, q3 = np.quantile(located, [0.25, 0.5, 0.75]) if len(located) else [np.nan] * 3
-        found[(name, prep.cadence)] = groups
+        found[(key, prep.cadence)] = groups
         rows.append(
             {
                 "indicator": name,
@@ -880,6 +1073,31 @@ def _peaks(
             }
         )
     return rows, found
+
+
+def _peak_statistics(doc: dict[str, Any]) -> list[tuple[str, str, str, str]]:
+    """(its key in the dynamic test, observable, indicator, direction) of each peak read: every
+    scored indicator of fss.dynamic.observable or, in a prereg with fss.dynamic.statistics, each of
+    those, then each judged pair's as well, reported but never judged (AC1 peaks at Tc, as v1's
+    does). A level has no peak to report: its Kendall's tau is its statistic."""
+    dyn, ind = doc["fss"]["dynamic"], doc["indicators"]
+    if "statistics" not in dyn:
+        return [(n, dyn["observable"], n, ind["direction"][n]) for n in ind["names"]]
+    directions = {"max": "greater", "min": "less"}
+    judged = [
+        (_statistic_key(s), s["observable"], s["indicator"], directions[s["extremum"]])
+        for s in dyn["statistics"]
+    ]
+    keys = {key for key, *_ in judged}
+    return judged + [
+        (key, observable, name, _direction(ind, observable, name))
+        for observable, name in ind["pairs"]
+        if name not in RAW and (key := f"{observable}_{name}") not in keys
+    ]
+
+
+def _statistic_key(entry: dict[str, str]) -> str:
+    return f"{entry['observable']}_{entry['indicator']}"
 
 
 def _ragged(blocks: list[np.ndarray]) -> np.ndarray:
@@ -908,16 +1126,20 @@ def _fss_row(quantity: str, cadence: str, role: str, fit: fss.Exponent, judged: 
 def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> list[Row]:
     """1/nu from the median peak eps_L over L, per fss.dynamic indicator and cadence. Only
     fss.dynamic.cadence carries the pre-registered verdict (role dynamic); another cadence's row
-    is a robustness check (role dynamic-robustness, no verdict). A peak on the search band's edge
+    is a robustness check (role dynamic-robustness, no verdict). A fss.dynamic.statistics entry
+    is judged like an indicator, its row's role dynamic-<its role>. A peak on the search band's edge
     was not located and is left out. The verdict, in this order: inconclusive when 1/nu has no
     value, when more than half of an L's replicas were not located, or when fewer than
     fss.dynamic.min_draw_share of the bootstrap draws give 1/nu a value (the CI would rest on a
     sign-selected subset); otherwise fss.match and fss.excludes, combined."""
     dyn, sc = doc["fss"]["dynamic"], doc["scoring"]
     expected, tolerance = float(dyn["expected_inverse_nu"]), float(dyn["tolerance"])
+    roles = {_statistic_key(entry): entry["role"] for entry in dyn.get("statistics", [])}
+    # dispatched as _peak_statistics is: what is read is judged, whatever else the section holds
+    named = roles if "statistics" in dyn else dyn["indicators"]
     rows = []
     for (name, cadence), samples in peaks.items():
-        if name not in dyn["indicators"]:
+        if name not in named:
             continue  # reported in the peaks table, never judged
         fit = fss.peak_convergence(samples, int(sc["bootstrap"]), rng, float(sc["ci_level"]))
         judged = cadence == dyn["cadence"]
@@ -931,12 +1153,26 @@ def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> lis
             verdict = fss.combine(match, fss.excludes(fit.ci, 0.0, tolerance))
         row = {"expected": expected, "tolerance": tolerance, "verdict": verdict}
         role = "dynamic" if judged else "dynamic-robustness"
+        if name in roles:
+            role = f"dynamic-{roles[name]}"
         rows.append(_fss_row(f"inverse_nu_{name}", cadence, role, fit, row))
     return rows
 
 
-def _statistic(quantity: str) -> Callable[[int, np.ndarray, int], float]:
-    """I(L) for one fss.static quantity, from replica rows, L and the sweeps per row."""
+def _quantity(quantity: str) -> tuple[str, str]:
+    """An fss.static quantity's (statistic, observable): l2_var_pc_1 is ("l2_var", "pc_1"), and
+    the frozen one_minus_ac1 of ising-ews-v1 reads |m|."""
+    if quantity == "one_minus_ac1":
+        return quantity, "abs_m"
+    for statistic in ("l2_var", "mean", "skewness", "tau_int", "one_minus_ac1"):
+        if quantity.startswith(f"{statistic}_"):
+            return statistic, quantity.removeprefix(f"{statistic}_")
+    raise ValueError(f"not an fss.static quantity: {quantity!r}")
+
+
+def _statistic(name: str) -> Callable[[int, np.ndarray, int], float]:
+    """I(L) for one statistic of an fss.static quantity, from replica rows, L and the sweeps per
+    row."""
 
     def skewness(L: int, a: np.ndarray, stride: int) -> float:
         pooled = a.ravel()
@@ -946,17 +1182,17 @@ def _statistic(quantity: str) -> Callable[[int, np.ndarray, int], float]:
         return float(1.0 - indicators.burst_autocorrelation(a.reshape(1, -1, a.shape[-1]))[0])
 
     statistics: dict[str, Callable[[int, np.ndarray, int], float]] = {
-        "l2_var_abs_m": lambda L, a, stride: float(L**2 * a.var(ddof=1)),
-        "mean_abs_m": lambda L, a, stride: float(a.mean()),
-        "skewness_abs_m": skewness,
-        "tau_int_abs_m": lambda L, a, stride: float(autocorr.estimate(a).tau * stride),
+        "l2_var": lambda L, a, stride: float(L**2 * a.var(ddof=1)),
+        "mean": lambda L, a, stride: float(a.mean()),
+        "skewness": skewness,
+        "tau_int": lambda L, a, stride: float(autocorr.estimate(a).tau * stride),
         "one_minus_ac1": one_minus_ac1,
     }
-    return statistics[quantity]
+    return statistics[name]
 
 
 def _verdict(role: str, fit: fss.Exponent, expected: float, tolerance: float) -> str:
-    if role == "positive-control":
+    if role in ("positive-control", "pipeline-check"):
         return fss.match(fit.kappa, fit.ci, expected, tolerance)
     if role == "reference":
         return fss.excludes(fit.ci, 0.0, tolerance)
@@ -967,40 +1203,52 @@ def _static(
     doc: dict[str, Any], chosen: dict[int, Inputs], rng: np.random.Generator
 ) -> tuple[list[Row], int]:
     """Exponents at the staircase plateau nearest Tc, one row per fss.static entry: the measured
-    rows feed the moments and tau_int, bursts of frames one sweep apart feed 1 - AC1."""
+    rows feed the moments and tau_int, bursts of frames one sweep apart feed 1 - AC1. A latents
+    table holds the matched cadence alone, so its frames feed both."""
     T = float(doc["data"]["staircase"]["temperature"])
     sc = doc["scoring"]
-    dense: dict[int, list[np.ndarray]] = {L: [] for L in chosen}
-    bursts: dict[int, list[np.ndarray]] = {L: [] for L in chosen}
+    latent = any(inputs.latents for inputs in chosen.values())
+    observables = {_quantity(spec["quantity"])[1] for spec in doc["fss"]["static"]}
+    moments: dict[str, dict[int, list[np.ndarray]]] = {
+        name: {L: [] for L in chosen} for name in observables
+    }
+    bursts: dict[str, dict[int, list[np.ndarray]]] = {
+        name: {L: [] for L in chosen} for name in observables
+    }
     strides: dict[int, int] = {}
     dropped = 0
     for L, inputs in chosen.items():
         for run in inputs.staircases:
-            kept, lost = plateaus(run, "dense")
+            found, lost = plateaus(run, "matched" if latent else "dense", inputs.latents)
             dropped += lost
-            here = [t for t in kept if _close(t, T)]
+            here = [t for t in found if _close(t, T)]
             if not here:
                 if _thermalised(run, T) is False:
                     continue  # failed its thermalised check: counted above, not scored
                 raise IsingDataError(f"{run.run_id}: no plateau at T = {T} for the static fit")
-            plateau = kept[here[0]]
-            dense[L].append(plateau.abs_m)
-            strides[L] = int(run.schedule["stats_strides"][int(plateau.segment[0])])
+            plateau = found[here[0]]
+            frames = plateau
+            if not latent:
+                strides[L] = int(run.schedule["stats_strides"][int(plateau.segment[0])])
+                frames = plateaus(run, "matched")[0].get(here[0])
             burst = run.schedule["params"]["burst"]
-            frames = plateaus(run, "matched")[0].get(here[0])
-            if frames is not None and int(burst["stride"]) == 1:
-                per = int(burst["frames"])
-                whole = len(frames.steps) // per * per
-                bursts[L].append(frames.abs_m[:, :whole].reshape(len(frames.replicas), -1, per))
+            for name in observables:
+                moments[name][L].append(plateau.observable(name))
+                if frames is not None and int(burst["stride"]) == 1:
+                    per = int(burst["frames"])
+                    whole = len(frames.steps) // per * per
+                    values = frames.observable(name)[:, :whole]
+                    bursts[name][L].append(values.reshape(len(frames.replicas), -1, per))
     rows = []
     for spec in doc["fss"]["static"]:
         quantity, role = spec["quantity"], spec["role"]
-        source = bursts if quantity == "one_minus_ac1" else dense
-        samples = {L: groups for L, groups in source.items() if groups}
+        name, observable = _quantity(quantity)
+        source = bursts if name == "one_minus_ac1" else moments
+        samples = {L: groups for L, groups in source[observable].items() if groups}
         if len(samples) < 2:
             usable = sorted(samples)
             raise IsingDataError(f"fss {quantity}: the T = {T} plateau is usable at {usable}")
-        stat = _statistic(quantity)
+        stat = _statistic(name)
 
         def statistic(L: int, a: np.ndarray, stat: Callable[..., float] = stat) -> float:
             return stat(L, a, strides.get(L, 1))
@@ -1008,7 +1256,7 @@ def _static(
         fit = fss.fit_exponent(samples, statistic, int(sc["bootstrap"]), rng, float(sc["ci_level"]))
         expected = float(spec.get("expected", np.nan))
         tolerance = float(spec.get("tolerance", np.nan))  # validation: judged roles state one
-        cadence = "matched" if quantity == "one_minus_ac1" else "dense"
+        cadence = "matched" if latent or name == "one_minus_ac1" else "dense"
         judged = {
             "expected": expected,
             "tolerance": tolerance,

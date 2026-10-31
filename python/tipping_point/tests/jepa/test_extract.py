@@ -8,6 +8,7 @@ import json
 import shutil
 from pathlib import Path
 
+import ews_planted
 import jepa_ising
 import numpy as np
 import pyarrow as pa
@@ -116,6 +117,89 @@ def test_latents_keep_the_configs_contract_the_scorer_reads(
     complete, incomplete = ews_ising.find_runs(ising.root)
     assert sorted(r.run_id for r in complete) == sorted(p.name for p in ising.runs.values())
     assert incomplete == []
+
+
+def test_the_adapter_joins_a_table_extract_wrote_row_for_row(
+    ising: jepa_ising.Ising, ramp_latents: Path
+) -> None:
+    """#28's join on the real thing: what ews.ising.series gives for a table extract wrote is that
+    table's columns on the run's frames, every other field as without it. Catches an adapter and a
+    writer that drift apart, which planted tables cannot show: the harness writes both of those."""
+    ramp = ews_ising.open_run(ising.runs["ramp"])
+    (plain,), (joined,) = (ews_ising.series(ramp, "matched", n) for n in (None, ramp_latents.name))
+    table = extract.read(ramp.path, ramp_latents.name)
+    assert set(joined.latents) == set(table.column_names) - set(extract.KEY)
+    for column, values in joined.latents.items():
+        expected = table[column].to_numpy().reshape(-1, jepa_ising.REPLICAS).T
+        assert np.array_equal(values, expected.astype(np.float64)), column
+    assert np.array_equal(joined.abs_m, plain.abs_m) and np.array_equal(joined.steps, plain.steps)
+
+
+@pytest.mark.parametrize(
+    ("rule", "bursts"),
+    [("tc-plus", {1.5: 1, 2.269231: 8, 3.5: 1}), ("tc-only", {2.269231: 8})],
+)
+def test_the_adapter_reads_a_subsampled_table_as_the_frames_its_rule_keeps(
+    tmp_path: Path, ising: jepa_ising.Ising, rule: str, bursts: dict[float, int]
+) -> None:
+    """A staircase's table holds the rows `--select` keeps, not configs' rows: the join's key
+    equality is with those, by the rule in the table's own manifest, and each plateau comes back
+    with the bursts the rule left it. The rule lives in ews.ising, so writer and reader read one."""
+    run_dir = _copy(ising.runs["scored"], tmp_path)
+    out = extract.extract(ising.training / train.TWIN, run_dir, "cpu", select=rule)
+    (s,) = ews_ising.series(ews_ising.open_run(run_dir), "matched", out.name)
+    temperatures, frames = np.unique(s.temperature, return_counts=True)
+    assert dict(zip(temperatures.tolist(), frames.tolist(), strict=True)) == {
+        T: count * 8 for T, count in bursts.items()
+    }
+    table = extract.read(run_dir, out.name)
+    assert np.array_equal(s.steps, table["step"].to_numpy()[:: jepa_ising.REPLICAS])
+    surprise = table["surprise"].to_numpy().reshape(-1, jepa_ising.REPLICAS).T
+    assert np.array_equal(s.latents["surprise"], surprise.astype(np.float64))
+
+
+def test_a_prereg_names_the_tables_extract_writes_and_pins_their_checkpoints(
+    ising: jepa_ising.Ising, ramp_latents: Path
+) -> None:
+    """What the scorer asks of [[latents.checkpoints]], against a real training: the folder of its
+    trained checkpoint and of its twin, and the sha256 each table's manifest records, which is what
+    the scorer holds a frozen file's pin to. The manifest's other keys it reads are there too."""
+    entry = {
+        "role": "primary",
+        "training": ising.training.name,
+        "trained_sha256": _sha256(ising.training / train.FINAL),
+        "twin_sha256": _sha256(ising.training / train.TWIN),
+    }
+    doc = {"latents": {"steps": jepa_ising.CONFIG.steps, "checkpoints": [entry]}}
+    trained, twin = ews_ising.checkpoints(doc)
+    assert trained.name == ramp_latents.name
+    run = ising.runs["ramp"]
+    assert twin.name == extract.folder(run, ising.training.name, 0).name
+    assert (trained.role, twin.role) == ("primary", "primary")
+    manifest = io.read_json(ramp_latents / "manifest.json")
+    assert manifest["params"]["checkpoint"]["sha256"] == trained.sha256
+    assert manifest["params"]["dataset"]["complete_sha256"] == _sha256(run / "complete.json")
+    assert {"git_sha", "dirty"} <= manifest["producer"].keys()
+
+
+def test_a_planted_table_is_laid_out_as_extract_lays_it_out(tmp_path: Path) -> None:
+    """The EWS tests read harness/ews_planted.py's tables in place of the real ones, so the two must
+    not differ: the same schema, and `jepa verify` (rows and file hashes both) passes them, whole or
+    subsampled."""
+    for rule, tag in (("all", "a"), ("tc-plus", "b"), ("tc-only", "c")):
+        run_dir = ews_planted.write_run(
+            tmp_path,
+            f"L16-qs-s6-{tag}",
+            ews_planted.v1_staircase(16),
+            16,
+            6,
+            ews_planted.plateau_values(16),
+        )
+        out = ews_planted.write_latents(run_dir, "planted-step0000000", select=rule)
+        assert extract.verify(out) == [] and train.verify(out) == []
+        table = extract.read(run_dir, out.name)
+        assert table.schema.equals(extract.schema(16, 8))
+        assert ews_ising.series(ews_ising.open_run(run_dir), "matched", out.name)[0].latents
 
 
 def test_the_untrained_twin_extracts_end_to_end(

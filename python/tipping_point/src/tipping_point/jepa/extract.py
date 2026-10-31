@@ -40,7 +40,7 @@ import pyarrow.parquet as pq
 import torch
 
 from .. import __version__
-from ..ews.ising import Run, open_run
+from ..ews.ising import KEY, LATENTS, Run, at_plateau, kept, latents_name, open_run
 from ..ising import io
 from .data import DataError, packed_spins
 from .lattice import canonical, unpack
@@ -56,33 +56,17 @@ from .train import (
     sha256,
 )
 
-LATENTS = "latents"
-KEY = ("step", "replica", "temperature", "segment", "burst", "frame")
 SELECTIONS = ("all", "tc-plus", "tc-only")
 TC_PLATEAU = 2.269231  # the grid point Tc + 4.5e-5, the plateau static FSS reads
 EVERY = 8  # tc-plus keeps one burst in EVERY at the other plateaus
 
 
 def selection(rule: str) -> dict[str, Any]:
-    """A selection rule as the manifest records it, and as `kept` and `verify` read it back."""
+    """A selection rule as the manifest records it, and as `kept` (in ews.ising, whose adapter reads
+    these tables and cannot import this module) and `verify` read it back."""
     if rule not in SELECTIONS:
         raise ValueError(f"selection must be one of {SELECTIONS}, got {rule!r}")
     return {"rule": rule, "tc_plateau": TC_PLATEAU, "every": EVERY}
-
-
-def _at_plateau(temperature: np.ndarray, rule: dict[str, Any]) -> np.ndarray:
-    return np.isclose(temperature, rule["tc_plateau"], rtol=1e-6, atol=1e-6)
-
-
-def kept(kind: str, rows: pa.Table, rule: dict[str, Any]) -> np.ndarray:
-    """Which configs rows (temperature and burst columns) of a run of `kind` a selection keeps."""
-    temperature = rows["temperature"].to_numpy()
-    if rule["rule"] == "all" or kind != "staircase":
-        return np.ones(len(temperature), dtype=bool)
-    plateau = _at_plateau(temperature, rule)
-    if rule["rule"] == "tc-only":
-        return plateau
-    return plateau | (rows["burst"].to_numpy() % rule["every"] == 0)
 
 
 def schema(L: int, components: int) -> pa.Schema:
@@ -95,7 +79,7 @@ def schema(L: int, components: int) -> pa.Schema:
 
 
 def folder(dataset_run: Path, run_id: str, step: int) -> Path:
-    return Path(dataset_run) / LATENTS / f"{run_id}-step{step:07d}"
+    return Path(dataset_run) / LATENTS / latents_name(run_id, step)
 
 
 def _refusal(checkpoint: Path, digest: str) -> str | None:
@@ -186,7 +170,7 @@ def extract(
     if run.kind == "staircase" and select != "all":
         params = run.schedule["params"]
         grid = np.array(params["temperatures"], dtype=np.float64)
-        if not _at_plateau(grid, rule).any():
+        if not at_plateau(grid, rule).any():
             raise DataError(f"{run.run_id} has no plateau at T = {TC_PLATEAU} for {select} to keep")
         # shortcut: assumes every plateau holds `saves` bursts (its measuring window fits them, as
         # 2,000 sweeps fit 200 bursts of 8); count bursts per plateau if a schedule saves fewer

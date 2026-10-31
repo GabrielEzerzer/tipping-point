@@ -12,6 +12,13 @@ log_trial append one evaluation to <data dir>/ews/trials.jsonl; every evaluation
 
 An amendment is a new file, <id>-v<k+1>.toml, whose `supersedes` names the version it replaces
 and whose `reason` says why; results scored under an earlier version stay bound to it.
+
+A file with a [latents] section scores a JEPA's latent columns (#28). It is checked against its own
+schema (_LATENT_SCHEMA): the checkpoints it scores, each with its untrained twin, the (observable,
+indicator) pairs judged by AUC, the statistics judged by the dynamic test, and the [baseline] whose
+runs it reads. As a draft it may leave as a placeholder a direction, an extremum or a reference's
+tolerance, which the file's experiment sets before the freeze; the freeze's strict check refuses
+every placeholder, whichever key holds it.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ import pyarrow.parquet as pq
 
 from .. import __version__, engine
 from ..ising import io
+from .trend import RAW
 
 PREREG_DIR = Path("paper") / "prereg"
 INDICATORS = {"variance", "ac", "skewness"}
@@ -42,7 +50,18 @@ ROLES = {"positive-control", "descriptive", "reference"}
 QUANTITIES = {"l2_var_abs_m", "mean_abs_m", "skewness_abs_m", "tau_int_abs_m", "one_minus_ac1"}
 SURROGATES = {"phase", "ar1"}
 STATISTICS = {"peak"}  # fss.dynamic.statistic: what the dynamic test reads off each ramp
-_PLACEHOLDER = re.compile(r"TBD|<[a-z][^<>|]*>")  # "TBD", or "<words>" as in TEMPLATE
+# in a file with a [latents] section, which has its own observables, roles and statistics
+LATENT_COLUMNS = {"surprise", *(f"pc_{k}" for k in range(1, 9))}
+LATENT_INDICATORS = INDICATORS | RAW
+LATENT_ROLES = ROLES | {"pipeline-check"}
+LATENT_STATISTICS = ("l2_var", "mean", "one_minus_ac1")  # a quantity is <statistic>_<column>
+CHECKPOINT_ROLES = {"primary", "ema-only", "held-out"}  # primary: the whole grid; else the headline
+DYNAMIC_ROLES = {"pipeline-check", "test"}
+EXTREMA = {"max", "min"}
+# jepa.probes.TARGETS and COLUMNS but raw, which this package cannot import
+PROBE_TARGETS, PROBE_CONTROLS = {"abs_m", "energy", "l2var"}, {"iid", "shuffle_within_T"}
+# "TBD", "<words>" as in TEMPLATE, or a choice still open, "<min|max, set before the freeze>"
+_PLACEHOLDER = re.compile(r"TBD|<[a-z][^<>|]*>|<[a-z]+(\|[a-z]+)+,[^<>]*>")
 _SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -142,6 +161,60 @@ _SCHEMA: dict[str, Any] = {
     "trials": {"budget": int, "counted": str},
     "deviations": {"policy": str, "log": [{"date": str, "change": str, "reason": str}]},
 }
+_LATENT_SCHEMA: dict[str, Any] = _SCHEMA | {
+    "baseline": {"prereg": str, "result": str},
+    "latents": {
+        "table": str,
+        "columns": [str],
+        "training_seeds": [int],
+        "validation_seed": int,
+        "steps": int,
+        "extraction": str,
+        "spares": [int],
+        "checkpoints": [
+            {
+                "role": str,
+                "model_seed": int,
+                "training": str,
+                "trained_sha256": str,
+                "twin_sha256": str,
+            }
+        ],
+    },
+    "indicators": _SCHEMA["indicators"] | {"pairs": [[str]]},
+    "scoring": _SCHEMA["scoring"]
+    | {
+        "surrogates": _SCHEMA["scoring"]["surrogates"] | {"n_ablation": int},
+        "alarms": {  # every judged pair's: indicators.pairs
+            "far": _NUMBER,
+            "report_per": _NUMBER,
+            "band": [_NUMBER],
+            "every": _NUMBER,
+        },
+        "margins": {"pairing": str, "seeds": str, "sign_test": bool, "ablations": str},
+    },
+    "fss": {
+        "static": _SCHEMA["fss"]["static"],
+        "dynamic": {
+            "statistics": [{"observable": str, "indicator": str, "extremum": str, "role": str}],
+            "cadence": str,
+            "search": [_NUMBER],
+            "expected_inverse_nu": _NUMBER,
+            "tolerance": _NUMBER,
+            "edge_rule": str,
+            "min_draw_share": _NUMBER,
+        },
+    },
+    "probes": {
+        "targets": [str],
+        "controls": [str],
+        "fit": str,
+        "test": str,
+        "ridge_alpha": _NUMBER,
+        "selectivity": str,
+        "per": str,
+    },
+}
 
 
 def _check(value: Any, schema: Any, where: str, problems: list[str]) -> None:
@@ -160,7 +233,8 @@ def _check(value: Any, schema: Any, where: str, problems: list[str]) -> None:
             return
         for i, item in enumerate(value):
             _check(item, schema[0], f"{where}[{i}]", problems)
-    elif isinstance(value, bool) or not isinstance(value, schema):  # TOML booleans are not numbers
+    elif (isinstance(value, bool) and schema is not bool) or not isinstance(value, schema):
+        # TOML booleans are not numbers
         names = " or ".join(
             t.__name__ for t in (schema if isinstance(schema, tuple) else (schema,))
         )
@@ -175,10 +249,97 @@ def _strings(value: Any, where: str = "") -> list[tuple[str, str]]:
     return [(where, value)] if isinstance(value, str) else []
 
 
+def _placeholder(value: Any) -> bool:
+    """A value still to be set: a latent draft may leave one where it has to choose, and strict
+    refuses it anywhere."""
+    return isinstance(value, str) and _PLACEHOLDER.search(value) is not None
+
+
+def _latent_problems(doc: dict[str, Any]) -> list[str]:
+    """What a file with a [latents] section can have wrong beyond the checks every file takes."""
+    found: list[str] = []
+    ind, latents, dyn = doc["indicators"], doc["latents"], doc["fss"]["dynamic"]
+    columns = set(latents["columns"])
+    if latents["table"] != "latents":
+        found.append("latents.table: 'latents', the folder extract writes under each run")
+    if not columns or not columns <= LATENT_COLUMNS:
+        found.append(f"latents.columns: a non-empty subset of {sorted(LATENT_COLUMNS)}")
+    if not set(ind["observables"]) <= columns:
+        found.append("indicators.observables: must be latents.columns")
+    pairs = [tuple(pair) for pair in ind["pairs"]]
+    if (
+        not pairs
+        or len(set(pairs)) != len(pairs)
+        or any(
+            len(pair) != 2 or pair[0] not in ind["observables"] or pair[1] not in ind["names"]
+            for pair in pairs
+        )
+    ):
+        found.append("indicators.pairs: distinct [observable, indicator] pairs of the scored ones")
+    for observable, own in ind.get("direction_by_observable", {}).items():
+        if observable not in ind["observables"] or not isinstance(own, dict):
+            found.append(f"indicators.direction_by_observable.{observable}: a scored observable")
+            continue
+        for name, value in own.items():
+            if value not in ("greater", "less") and not _placeholder(value):
+                where = f"indicators.direction_by_observable.{observable}.{name}"
+                found.append(f"{where}: 'greater' or 'less', the expected trend")
+    entries = latents["checkpoints"]
+    for i, entry in enumerate(entries):
+        if entry["role"] not in CHECKPOINT_ROLES:
+            found.append(f"latents.checkpoints[{i}].role: one of {sorted(CHECKPOINT_ROLES)}")
+    if not any(entry["role"] == "primary" for entry in entries):
+        found.append("latents.checkpoints: at least one primary")
+    seeds = [entry["model_seed"] for entry in entries]
+    if len(set(seeds)) != len(seeds):
+        found.append("latents.checkpoints: one entry per model_seed")
+    named = [entry["training"] for entry in entries if not _placeholder(entry["training"])]
+    if len(set(named)) != len(named):
+        found.append("latents.checkpoints: one entry per training")
+    trained = {*latents["training_seeds"], latents["validation_seed"]}
+    if trained & set(doc["data"]["seeds"]):
+        found.append(
+            "latents.training_seeds: a simulator seed this file scores is never trained on"
+        )
+    if doc["scoring"]["surrogates"]["n_ablation"] < 1:
+        found.append("scoring.surrogates.n_ablation: the surrogates per ablation checkpoint")
+    if not _SLUG.fullmatch(doc["baseline"]["prereg"]):
+        found.append("baseline.prereg: the <id>-v<k> whose runs this file reads")
+    for key in ("statistic", "indicators", "observable"):  # v1's, which statistics replaces
+        if key in dyn:
+            found.append(f"fss.dynamic.{key}: a file with [latents] judges fss.dynamic.statistics")
+    if not dyn["statistics"]:
+        found.append("fss.dynamic.statistics: at least one")
+    for i, entry in enumerate(dyn["statistics"]):
+        where = f"fss.dynamic.statistics[{i}]"
+        if entry["observable"] not in columns:
+            found.append(f"{where}.observable: one of latents.columns")
+        if entry["indicator"] not in LATENT_INDICATORS:
+            found.append(f"{where}.indicator: one of {sorted(LATENT_INDICATORS)}")
+        if entry["extremum"] not in EXTREMA and not _placeholder(entry["extremum"]):
+            found.append(f"{where}.extremum: one of {sorted(EXTREMA)}")
+        if entry["role"] not in DYNAMIC_ROLES:
+            found.append(f"{where}.role: one of {sorted(DYNAMIC_ROLES)}")
+    for i, row in enumerate(doc["fss"]["static"]):
+        tolerance = row.get("tolerance", 0.0)
+        number = isinstance(tolerance, _NUMBER) and not isinstance(tolerance, bool)
+        if not number and not _placeholder(tolerance):
+            found.append(f"fss.static[{i}].tolerance: a number")
+    probes = doc["probes"]
+    if not probes["targets"] or not set(probes["targets"]) <= PROBE_TARGETS:
+        found.append(f"probes.targets: a non-empty subset of {sorted(PROBE_TARGETS)}")
+    if set(probes["controls"]) != PROBE_CONTROLS:
+        found.append(f"probes.controls: {sorted(PROBE_CONTROLS)}")
+    if probes["ridge_alpha"] <= 0:
+        found.append("probes.ridge_alpha: positive, per sample")
+    return found
+
+
 def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     """Everything wrong with a pre-registration document; strict also refuses placeholders."""
     found: list[str] = []
-    _check(doc, _SCHEMA, "", found)
+    latent = "latents" in doc
+    _check(doc, _LATENT_SCHEMA if latent else _SCHEMA, "", found)
     if found:
         return found
     if not _SLUG.fullmatch(doc["id"]) and not _PLACEHOLDER.search(doc["id"]):
@@ -190,13 +351,13 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     if not doc["hypotheses"]:
         found.append("hypotheses: at least one")
     for i, h in enumerate(doc["hypotheses"]):
-        if h["direction"] not in DIRECTIONS:
+        if h["direction"] not in DIRECTIONS and not (latent and _placeholder(h["direction"])):
             found.append(f"hypotheses[{i}].direction: one of {sorted(DIRECTIONS)}")
     ind, data, fss = doc["indicators"], doc["data"], doc["fss"]
     for key, allowed in (
-        ("names", INDICATORS),
-        ("observables", OBSERVABLES),
-        ("cadences", CADENCES),
+        ("names", LATENT_INDICATORS if latent else INDICATORS),
+        ("observables", LATENT_COLUMNS if latent else OBSERVABLES),
+        ("cadences", {"matched"} if latent else CADENCES),  # a latents table holds saved frames
     ):
         if not ind[key] or not set(ind[key]) <= allowed:
             found.append(f"indicators.{key}: a non-empty subset of {sorted(allowed)}")
@@ -208,7 +369,8 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         found.append("data.seeds: at least one")
     directions = ind["direction"]
     for name in ind["names"]:
-        if directions.get(name) not in ("greater", "less"):
+        value = directions.get(name)
+        if value not in ("greater", "less") and not (latent and _placeholder(value)):
             found.append(f"indicators.direction.{name}: 'greater' or 'less', the expected trend")
     if (data["ramps"]["kind"], data["nulls"]["kind"]) != ("ramp", "fixed"):
         found.append("data: ramps are kind 'ramp' and nulls kind 'fixed'")
@@ -223,22 +385,36 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         found.append("data.ramps.eps_L: [start, end] in eps_L, start above end (a cooling ramp)")
     if data["tau_c"]["source"] != "pilot":
         found.append("data.tau_c.source: 'pilot', tau_c as measured per L (never fitted)")
+    quantities, roles = QUANTITIES, ROLES
+    if latent:
+        columns = doc["latents"]["columns"]
+        quantities = {f"{stat}_{column}" for stat in LATENT_STATISTICS for column in columns}
+        roles = LATENT_ROLES
     for i, row in enumerate(fss["static"]):
-        if row["quantity"] not in QUANTITIES or row["role"] not in ROLES:
+        if row["quantity"] not in quantities or row["role"] not in roles:
             found.append(
-                f"fss.static[{i}]: quantity in {sorted(QUANTITIES)}, role in {sorted(ROLES)}"
+                f"fss.static[{i}]: quantity in {sorted(quantities)}, role in {sorted(roles)}"
             )
-        if row["role"] == "positive-control" and not {"expected", "tolerance"} <= row.keys():
-            found.append(f"fss.static[{i}]: a positive control needs expected and tolerance")
+        if (
+            row["role"] in ("positive-control", "pipeline-check")
+            and not {"expected", "tolerance"} <= row.keys()
+        ):
+            judged = row["role"].replace("-", " ")
+            found.append(f"fss.static[{i}]: a {judged} needs expected and tolerance")
         if row["role"] == "reference" and "tolerance" not in row:
             found.append(f"fss.static[{i}]: a reference needs its own tolerance")
     dyn = fss["dynamic"]
-    if dyn["statistic"] not in STATISTICS:
-        found.append(f"fss.dynamic.statistic: one of {sorted(STATISTICS)}")
-    if not set(dyn["indicators"]) <= set(ind["names"]):
-        found.append("fss.dynamic.indicators: must be scored indicators")
-    if dyn["observable"] not in ind["observables"]:
-        found.append("fss.dynamic.observable: must be a scored observable")
+    if latent:
+        found += _latent_problems(doc)
+    else:
+        if dyn["statistic"] not in STATISTICS:
+            found.append(f"fss.dynamic.statistic: one of {sorted(STATISTICS)}")
+        if not set(dyn["indicators"]) <= set(ind["names"]):
+            found.append("fss.dynamic.indicators: must be scored indicators")
+        if dyn["observable"] not in ind["observables"]:
+            found.append("fss.dynamic.observable: must be a scored observable")
+        if not set(doc["scoring"]["alarms"]["indicators"]) <= set(ind["names"]):
+            found.append("scoring.alarms.indicators: must be scored indicators")
     if dyn["cadence"] not in ind["cadences"]:
         found.append("fss.dynamic.cadence: one of indicators.cadences, the verdict's cadence")
     if not 0 < dyn["min_draw_share"] <= 1:
@@ -252,8 +428,6 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         and not (window[0] >= search[0] and window[1] <= search[1])
     ):
         found.append("fss.dynamic.search: must lie inside data.ramps.eps_L, the window ramps run")
-    if not set(doc["scoring"]["alarms"]["indicators"]) <= set(ind["names"]):
-        found.append("scoring.alarms.indicators: must be scored indicators")
     sens = doc["sensitivity"]
     if (
         sens["headline"]["window"] not in sens["window"]
@@ -294,6 +468,10 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
             )
         if doc["trials"]["budget"] < cells(doc):
             found.append(f"trials.budget: one scoring run evaluates {cells(doc)} cells")
+        for i, entry in enumerate(doc["latents"]["checkpoints"] if latent else ()):
+            for key in ("trained_sha256", "twin_sha256"):
+                if not _SHA256.fullmatch(entry[key]):
+                    found.append(f"latents.checkpoints[{i}].{key}: a sha256 (64 hex digits)")
     return found
 
 
@@ -353,6 +531,7 @@ def freeze(root: Path, prereg_id: str) -> str:
         raise PreregError(f"{relative} differs from HEAD: commit it before the freeze")
     if _git(root, "tag", "--list", prereg.tag):
         raise PreregError(f"{prereg.tag} exists: a frozen version is never re-tagged; amend it")
+    baseline_commit(prereg)  # the runs it reads must already be fixed
     message = f"Pre-registration {prereg.name}, sha256 {prereg.sha256}"
     _git(root, "tag", "-a", prereg.tag, "-m", message, "HEAD")
     return prereg.tag
@@ -375,6 +554,18 @@ def frozen(prereg: Prereg) -> Frozen:
     if hashlib.sha256(blob).hexdigest() != prereg.sha256:
         raise PreregError(f"{relative} differs from the version frozen at {prereg.tag}")
     return Frozen(prereg.tag, _git(root, "rev-parse", f"{prereg.tag}^{{commit}}"))
+
+
+def baseline_commit(prereg: Prereg) -> str | None:
+    """The commit of the tag of the version a file's [baseline] names, whose runs it reads and which
+    therefore made them; None for a file with no [baseline]."""
+    baseline = prereg.doc.get("baseline")
+    if baseline is None:
+        return None
+    root, tag = repo_root(prereg.path), f"prereg/{baseline['prereg']}"
+    if not _git(root, "tag", "--list", tag):
+        raise PreregError(f"{prereg.name} reads the runs of {baseline['prereg']}: no tag {tag}")
+    return _git(root, "rev-parse", f"{tag}^{{commit}}")
 
 
 def stamp(prereg: Prereg, freeze_ref: Frozen) -> dict[str, Any]:
@@ -418,11 +609,19 @@ def trials(data_dir: Path, prereg: Prereg) -> int:
 
 
 def cells(doc: dict[str, Any]) -> int:
-    """AUC evaluations one scoring run makes: one trial each."""
+    """AUC evaluations one scoring run makes: one trial each. A file with a [latents] section makes
+    them per checkpoint and per pair: each primary checkpoint and its twin on the whole grid, where
+    an indicator in RAW has no bandwidth and so one cell per window, each ablation checkpoint and
+    its twin at the headline cell alone."""
     ind, sens = doc["indicators"], doc["sensitivity"]
-    per_size = len(ind["names"]) * len(ind["observables"]) * len(ind["cadences"])
+    sizes = len(doc["data"]["L"]) * len(doc["event"]["horizons"]) * len(ind["cadences"])
     grid = len(sens["window"]) * len(sens["bandwidth"])
-    return per_size * len(doc["data"]["L"]) * len(doc["event"]["horizons"]) * grid
+    if "latents" not in doc:
+        return len(ind["names"]) * len(ind["observables"]) * sizes * grid
+    raw = sum(name in RAW for _, name in ind["pairs"])
+    primary = (len(ind["pairs"]) - raw) * grid + raw * len(sens["window"])
+    roles = [entry["role"] for entry in doc["latents"]["checkpoints"]]
+    return 2 * sizes * sum(primary if role == "primary" else len(ind["pairs"]) for role in roles)
 
 
 def write_result(

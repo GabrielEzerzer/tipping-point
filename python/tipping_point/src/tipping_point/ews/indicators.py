@@ -1,5 +1,5 @@
-"""Classic early-warning indicators on (..., n) arrays: time is the last axis, and every window,
-lag and bandwidth is in samples.
+"""Early-warning indicators on (..., n) arrays: time is the last axis, and every window, lag and
+bandwidth is in samples.
 
 The definitions are ewstools 2.1.3's, pinned by a golden fixture (tests/fixtures/ews_golden.json):
   gaussian_smooth          scipy.ndimage.gaussian_filter(x, sigma, mode="reflect"), the kernel's
@@ -9,6 +9,10 @@ The definitions are ewstools 2.1.3's, pinned by a golden fixture (tests/fixtures
   rolling_autocorrelation  Pearson correlation of the window's (x_s, x_s+lag) pairs, as pandas'
                            Series.autocorr: each side of the pairs keeps its own mean and spread
   rolling_skewness         bias-corrected sample skewness G1 = sqrt(w (w-1)) / (w-2) m3 / m2^1.5
+Two more that ewstools has not, for a channel with no interior peak (#28); both read the raw series,
+since a detrended one has neither a level nor a steepest change:
+  rolling_mean             mean of each trailing window
+  rolling_slope            OLS slope of each trailing window on its sample index, per sample
 The rolling value at index t describes the window x[t - window + 1 .. t]. The first window - 1
 values are NaN, as in pandas, so an output lines up with its input. A window without spread has
 variance 0 and no autocorrelation or skewness (NaN).
@@ -205,6 +209,39 @@ def rolling_skewness(x: np.ndarray, window: int) -> np.ndarray:
         error = scale * (err3 / m2**1.5 + 1.5 * np.abs(m3) * err2 / m2**2.5)
     _redo(y, g1, ~(error <= _TRUST), w, _exact_skewness)
     return _lined_up(g1, x.shape)
+
+
+def _exact_mean(windows: np.ndarray) -> np.ndarray:
+    first = windows[..., :1]
+    return (first + (windows - first).mean(axis=-1, keepdims=True))[..., 0]
+
+
+def rolling_mean(x: np.ndarray, window: int) -> np.ndarray:
+    x = _series(x, window, 1)
+    rows = x.reshape(-1, x.shape[-1])
+    level = rows.mean(axis=-1, keepdims=True)
+    y = rows - level
+    (s1, e1), (s2, _) = _window_sums(y, window), _window_sums(y * y, window)
+    spread = np.sqrt(np.maximum(s2 - s1 * s1 / window, 0.0))  # flat: exactly 0, so never trusted
+    mean = s1 / window
+    _redo(y, mean, ~(e1 <= _TRUST * spread), window, _exact_mean)
+    return _lined_up(mean + level, x.shape)
+
+
+def _exact_slope(windows: np.ndarray) -> np.ndarray:
+    w = windows.shape[-1]
+    index = np.arange(w) - (w - 1) / 2.0
+    return np.sum(_deviations(windows) * index, axis=-1) / (w * (w * w - 1.0) / 12.0)
+
+
+def rolling_slope(x: np.ndarray, window: int) -> np.ndarray:
+    x = _series(x, window, 2)
+    y = x.reshape(-1, x.shape[-1])
+    slope = np.empty((len(y), y.shape[-1] - window + 1))
+    # shortcut: two-pass per window, O(n window), since no surrogate test scores it; move it to
+    # running sums if a slope ever joins indicators.pairs
+    _redo(y, slope, np.ones_like(slope, dtype=bool), window, _exact_slope)
+    return _lined_up(slope, x.shape)
 
 
 def _pearson(a: np.ndarray, b: np.ndarray) -> np.ndarray:
