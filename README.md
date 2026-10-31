@@ -318,6 +318,22 @@ must accept them. `tauc` also needs every size from one commit and one kernel, s
 new sizes re-runs the old sizes from the same build. #50's pilots predate `kernel_sha256` in any
 case, so #54 re-measured L = 16 and 32 beside 64 and 128.
 
+### Which stream a run draws
+
+A run's generator is seeded from its identity, not its seed alone: `run.stream_key` hashes the
+seed, L, replicas, start and schedule. The manifest holds the result in `params.rng.seed` and names
+the rule in `params.rng.derivation`, so the key can be checked from the manifest alone. Runs at one
+seed therefore draw different numbers, and one run made twice draws the same whatever its tag,
+which only names the folder. `--checkpoint-every` and Gate C's tallies stay out of it: they change
+what is written, not what is drawn.
+
+Runs made before this (the seeds 1-5 datasets, the grid pilots, #54's record) drew from the seed
+alone, so two of one shape at one seed shared their start and all their numbers. Measured at
+L = 16 with 64 replicas, that shows in the first sweeps and wherever two runs hold one temperature,
+as two ramps do during their equilibration, where they are bit-identical. Runs at different
+temperatures decorrelate within about 20 sweeps, and over 700 measured sweeps the correlation of
+M(t) between null runs stays within 0.03 of zero with or without a shared stream.
+
 ### The pilot record: tau_c(L)
 
 The time unit of everything downstream (ramp rates, null-run lengths, the EWS scorer's windows) is

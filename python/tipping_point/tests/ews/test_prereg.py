@@ -139,6 +139,7 @@ def test_v1_says_what_the_file_itself_binds() -> None:
     confirmatory = doc["disclosure"]["confirmatory"]
     assert "three grid pilots under data.staircase" in confirmatory
     assert "set the dwell and are never scored" in confirmatory
+    assert "derived from its seed and its identity" in confirmatory  # run.stream_key
     span = doc["event"]["segment"] / doc["data"]["ramps"]["x"]  # tau_c: 6 eps_L x 50 tau_c
     assert {protocol.NULL_TAU_C // (span + w) for w in doc["sensitivity"]["window"]} == {2}
     (nulls,) = [line for line in raw.splitlines() if line.startswith("eps_L = [2.0, 4.0, 6.0]")]
