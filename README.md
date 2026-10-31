@@ -53,7 +53,7 @@ Tipping Point is released under the MIT licence; see [LICENSE](LICENSE).
 - `engine/` — Rust core, a member of the root Cargo workspace (`Cargo.toml`).
 - `python/tipping_point/` — the Python package (src layout), a member of the root uv workspace (`pyproject.toml`).
 - `app/` — the Tauri desktop app (not yet started).
-- `notebooks/` — Kaggle kernels (JEPA training on the GPUs).
+- `notebooks/` — the Kaggle kernel runner (`kaggle_ising_runs.py`) and the plans it runs (`plans/`).
 - `paper/` — the paper.
 - `harness/` — supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
   a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries, the
@@ -207,6 +207,52 @@ refused until `market-labels-v1` is frozen.
 uv run python -m tipping_point.market fetch --start 2022-07-01 --end 2023-12-31
 uv run python -m tipping_point.market labels --start 2022-07-01 --end 2023-12-31
 ```
+
+The cascade proxy, `market/cascade.py`, reads the same fetched files. No free source holds the
+span's liquidations, so a cascade is inferred per symbol from a trailing 30-minute window: open
+interest in contracts falls by at least `a` (as a log ratio), the price moves at least `b` one way,
+taker flow leans at least `c` the same way, and volume reaches `v` times the median 30-minute
+volume of the trailing 28 days. A long cascade falls and a short squeeze rises; a drop in open
+interest alone fires neither. A window touching a missing open-interest step is not evaluated and
+is counted. Candidates within 24 hours merge into the earliest, and both symbols firing within an
+hour count as one market event with two asset instances; both counts are reported. The pooled list,
+with each instance's onset and the bounds of its L2 window 12 hours either side, lands as the table
+`cascades` of a run in `<data dir>/labels/<run_id>/`. `a`, `b`, `c` and `v` are options at their
+start values (3 %, 2.5 %, 0.15, 3) until the 2023 pilot sets them, and days from 2024-01-01 are
+refused as the labels' are. How open interest lines up with price is not an option, because the
+feed's timing fixes it: a bar's row holds the open interest at its start and its close the price at
+its end, so each stamp pairs with the klines before it and all the legs span the same 30 minutes (in
+every month of 2023, on both symbols, a change in open interest correlates most with the 1-minute
+returns between its two stamps). A `liquidations` table in a market run (#90) is read when there is
+one; until then the run says `liquidations: not recorded`. The first 28 days only fill the trailing
+medians, so this span lists 2023 alone:
+
+```sh
+uv run python -m tipping_point.market.cascade --start 2022-12-04 --end 2023-12-31
+```
+
+`market/documented_cascades.toml` lists documented cascades with their sources. With
+`TP_CASCADE_RECALL` set, `uv run pytest python/tipping_point/tests/market/test_cascade.py -k
+documented_cascades_on_real_days` runs the rule over each event found fetched, with the 29 days
+before it; without it the test skips and says so. Five of the six events lie in the confirmatory
+span, so the check gives only what the rule says inside each event's own days and reports recall
+with no floor: nothing is to be tuned on it. Two more checks read 2023 days if they are fetched, and
+otherwise skip and say so: the metrics stamp's timing, and 2023-08-17 at the start values.
+
+`market/reports.py` writes two reports on labelled series, each as Parquet tables plus a Markdown
+summary for the issue. The label-count report counts events, episodes, flickers, durations and time
+high per asset and month, clocks the onsets by UTC hour and weekday, and counts onsets that coincide
+across assets, the null hours and the 4-hour slices they hold. The stability report compares the
+as-of labels with an oracle (the final theta, smoothed over the whole sample) and with each declared
+variant and a plain threshold rule, follows theta over the refits with its flagged fits and the
+jumps they make in P, and gives the filter's detection delay. The calendar of CPI, NFP and FOMC
+releases, the cascade candidates and the aggTrades cross-check are optional inputs; a report without
+one says "not supplied". `market/nulls.py` holds the GARCH(1,1)-t simulator, the delay simulation,
+the event-time shift and the circularity floor. The floor simulates 10-second returns, builds
+1-minute OHLC, runs the real bars and labeller, and scores 1-minute close-to-close returns, which
+gives the AUC a clustering process with no critical dynamics produces by construction. Its GARCH
+parameters, pipelines and `scoring.auc` are inputs: the parameters' fit belongs to the 2023 pilot,
+and no module in `market/` may import the feature code (`tests/market/test_circularity.py`).
 
 ## Engine API
 
@@ -509,9 +555,12 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   through every test. `tipping_point.ews.margins.paired` judges one: the CI of the mean margin
   over model seeds (nested with paired data-bootstrap draws) must exclude 0 in the predicted
   direction, and every seed's margin must carry the predicted sign.
-- **Kaggle:** `notebooks/kaggle_train.py` clones a pinned commit with a read-only token from
-  Kaggle Secrets, installs with `--extra cu126`, checks the dataset's hashes, trains one model seed
-  per T4 and resumes from the previous version's output.
+- **Kaggle:** `notebooks/kaggle_ising_runs.py` runs a JSON plan from `notebooks/plans/` as a
+  kernel: simulator runs, `jepa train` and `jepa extract`, one queue per T4. It installs the
+  commit-stamped wheel from a wheel dataset (no clone and no token), stages the dataset runs a
+  plan reads, checks every run with `jepa verify`, and resumes from the previous version's output.
+  `--write-kernel <plan> <dir>` writes the folder `kaggle kernels push` takes; `--dry-run-jepa`
+  rehearses training, resume and extraction on the CPU. Its docstring is the manual.
 
 The harness trains a planted-stripe toy on the CPU (`harness/jepa_toy.py`: validation error 1.37
 to 0.34 in 150 steps; probes cannot tell it from its twin, prediction error can), breaks the loss

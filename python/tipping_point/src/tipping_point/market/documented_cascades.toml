@@ -1,0 +1,74 @@
+# Liquidation cascades documented inside the label span (#29, research pass section 3, validation
+# (b)). cascade.recall reads this list. Nothing is to be tuned on it: all but the first event lie in
+# the confirmatory span. Days are UTC and inclusive.
+#
+# Garcia Seuma (2026, https://arxiv.org/abs/2607.27070), the first source of the last five, dates
+# only October 2025 to the minute. It names the others by month, and takes each onset from "the
+# documented crash day" without saying which day that is, so 2024-12, 2025-02 and 2025-04 span the
+# whole month they name, and the rule firing anywhere in it counts as recalling them. The other
+# sources are press reports of liquidations in that month; those days are in the notes, and they
+# are not the list's dates.
+
+[[event]]
+name = "2023-08-17"
+first_day = 2023-08-17
+last_day = 2023-08-17
+note = "In the pilot year. In Binance's own files BTC falls 10.0 % in the bar from 21:40 UTC and open interest 8.0 % by the 21:45 stamp (log changes -0.106 and -0.084); #23's cruder detector found it first."
+sources = [
+    "https://decrypt.co/152872/bitcoin-ethereum-flash-crash-triggers-800-million-liquidations",
+    "https://cointelegraph.com/news/bitcoin-ether-price-slump-crypto-bloodbath-1-b-liquidations",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/23",
+]
+
+[[event]]
+name = "2024-08-05"
+first_day = 2024-08-05
+last_day = 2024-08-05
+note = "Yen-carry unwind. Garcia Seuma names August 2024; the press report gives over USD 1 billion liquidated in the 24 hours to 2024-08-05."
+sources = [
+    "https://arxiv.org/abs/2607.27070",
+    "https://cointelegraph.com/news/crypto-market-crash-1b-liquidations-2024",
+]
+
+[[event]]
+name = "2024-12"
+first_day = 2024-12-01
+last_day = 2024-12-31
+note = "Garcia Seuma gives no cause. The press reports two episodes: 2024-12-09/10 (about USD 1.6 billion) and 2024-12-19/20 (about USD 1 billion)."
+sources = [
+    "https://arxiv.org/abs/2607.27070",
+    "https://cointelegraph.com/news/bitcoin-most-liquidations-since-2021-crazy-reset-wipes-1-6-b",
+    "https://cointelegraph.com/news/crypto-market-liquidations-1-billion-unexpected-santa-rally-crypto-analyst",
+]
+
+[[event]]
+name = "2025-02"
+first_day = 2025-02-01
+last_day = 2025-02-28
+note = "Tariff scare, around 2025-02-03 in the press."
+sources = [
+    "https://arxiv.org/abs/2607.27070",
+    "https://markets.businessinsider.com/news/currencies/crypto-sell-off-tariffs-canada-mexico-ethereum-bitcoin-solana-eth-2025-2",
+]
+
+[[event]]
+name = "2025-04"
+first_day = 2025-04-01
+last_day = 2025-04-30
+note = "Liberation Day tariffs, 2025-04-02/03 and again 2025-04-06/07 in the press."
+sources = [
+    "https://arxiv.org/abs/2607.27070",
+    "https://www.fxstreet.com/cryptocurrencies/news/bitcoin-weekly-forecast-tariff-liberation-day-sparks-liquidation-in-crypto-market-202504041146",
+    "https://www.coinspeaker.com/444k-traders-lost-1-3b-why-bull-run-might-have-ended/",
+]
+
+[[event]]
+name = "2025-10-10"
+first_day = 2025-10-10
+last_day = 2025-10-10
+note = "The record collateral-depeg cascade, about USD 19 billion, which Garcia Seuma pins to 20:50 UTC."
+sources = [
+    "https://arxiv.org/abs/2607.27070",
+    "https://blog.amberdata.io/how-3.21b-vanished-in-60-seconds-october-2025-crypto-crash-explained-through-7-charts",
+    "https://finance.yahoo.com/news/record-19bn-crypto-crash-exposes-194741410.html",
+]

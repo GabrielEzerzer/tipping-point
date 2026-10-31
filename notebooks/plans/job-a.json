@@ -1,0 +1,15 @@
+{
+  "kernel": "tp-ising-job-a",
+  "description": "Job A. Grid pilots (the 40-temperature grid, 16 replicas per temperature, seed 6) at L = 16, 32 and 64, which set the staircase dwell; L = 16 at README's lengths, L = 32 as the existing grid pilot, L = 64 at 40,000 + 200,000 sweeps (about 216 tau_c at tau_c = 900). Then the JEPA's L = 64 training staircases, seeds 11-15 and validation seed 16, with the flags of 20261024T224804Z-L32-qs-s11 (16 replicas, hot start, defaults otherwise) and dwell from this plan's L = 64 grid pilot. No pilot record: staircases take --tau.",
+  "runs": [
+    {"name": "grid-L16", "command": "pilot", "args": ["--L", 16, "--replicas", 16, "--seed", 6, "--therm", 2000, "--sweeps", 50000, "--checkpoint-every", 10000]},
+    {"name": "grid-L32", "command": "pilot", "args": ["--L", 32, "--replicas", 16, "--seed", 6, "--therm", 10000, "--sweeps", 50000, "--checkpoint-every", 10000]},
+    {"name": "grid-L64", "command": "pilot", "args": ["--L", 64, "--replicas", 16, "--seed", 6, "--therm", 40000, "--sweeps", 200000, "--checkpoint-every", 10000]},
+    {"name": "qs-L64-s11", "command": "staircase", "args": ["--L", 64, "--replicas", 16, "--seed", 11, "--init", "hot", "--tau", {"run": "grid-L64", "file": "tau.json"}]},
+    {"name": "qs-L64-s12", "command": "staircase", "args": ["--L", 64, "--replicas", 16, "--seed", 12, "--init", "hot", "--tau", {"run": "grid-L64", "file": "tau.json"}]},
+    {"name": "qs-L64-s13", "command": "staircase", "args": ["--L", 64, "--replicas", 16, "--seed", 13, "--init", "hot", "--tau", {"run": "grid-L64", "file": "tau.json"}]},
+    {"name": "qs-L64-s14", "command": "staircase", "args": ["--L", 64, "--replicas", 16, "--seed", 14, "--init", "hot", "--tau", {"run": "grid-L64", "file": "tau.json"}]},
+    {"name": "qs-L64-s15", "command": "staircase", "args": ["--L", 64, "--replicas", 16, "--seed", 15, "--init", "hot", "--tau", {"run": "grid-L64", "file": "tau.json"}]},
+    {"name": "qs-L64-s16", "command": "staircase", "args": ["--L", 64, "--replicas", 16, "--seed", 16, "--init", "hot", "--tau", {"run": "grid-L64", "file": "tau.json"}]}
+  ]
+}
