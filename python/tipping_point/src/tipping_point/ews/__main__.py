@@ -5,8 +5,9 @@
   score --prereg FILE  score a frozen pre-registration: results to <data dir>/ews/<run_id>/, one
                        line per evaluated cell to <data dir>/ews/trials.jsonl; a stale pilot
                        record is refused unless --allow-stale-pilot, and so is any scored run
-                       not made by the freeze tag's commit from a clean tree, or any ramp or
-                       null run not made against the pilot record the prereg pins
+                       not made by the freeze tag's commit from a clean tree, any ramp or null
+                       run not made against the pilot record the prereg pins, or any staircase
+                       whose dwell was not read from the tau.json it pins at that L
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside

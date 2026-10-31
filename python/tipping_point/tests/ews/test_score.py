@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
-from ews_planted import NULL_EPS, PILOT_RUN, PLATEAU
+from ews_planted import NULL_EPS, PILOT_RUN, PLATEAU, tau_source
 from tipping_point.ews import ising, prereg, scoring
 from tipping_point.ews.__main__ import main
 from tipping_point.ews.trend import Pipeline
@@ -58,6 +58,10 @@ eps_L = {eps}
 [data.staircase]
 kind = "staircase"
 temperature = {plateau}
+
+[data.staircase.tau_sha256]
+16 = "{tau_16}"
+32 = "{tau_32}"
 
 [indicators]
 names = ["variance", "ac", "skewness"]
@@ -165,7 +169,13 @@ def _text(data_dir: Path, prereg_id: str, pilot_run: str) -> str:
     pilot = data_dir / "ising" / PILOT_RUN / "pilot.json"
     digest = hashlib.sha256(pilot.read_bytes()).hexdigest()
     return PREREG.format(
-        id=prereg_id, pilot_run=pilot_run, pilot_sha256=digest, eps=list(NULL_EPS), plateau=PLATEAU
+        id=prereg_id,
+        pilot_run=pilot_run,
+        pilot_sha256=digest,
+        eps=list(NULL_EPS),
+        plateau=PLATEAU,
+        tau_16=tau_source(16),
+        tau_32=tau_source(32),
     )
 
 
@@ -241,7 +251,7 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     pinned = prereg.load(paths["demo"]).doc["data"]["tau_c"]["pilot_sha256"]
     refused = capsys.readouterr().err
     assert f"sha256 {pinned}" in refused and f"L16-null-s1 (pilot sha256 {'0' * 64})" in refused
-    assert "-qs-" not in refused  # a staircase takes --tau, not a record
+    assert "-qs-" not in refused  # a staircase's dwell comes from a tau.json, not a record
     assert prereg.trials(data_dir, prereg.load(paths["demo"])) == 0  # nothing scored or logged
     assert not (data_dir / "ews").exists()
     _made_by(data_dir, tagged, record=pinned)

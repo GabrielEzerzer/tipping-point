@@ -47,6 +47,14 @@ eps_L = [2.0, 4.0, 6.0]  # fixed-temperature null runs
 kind = "staircase"
 temperature = 2.269231   # the plateau the static FSS fits read
 
+# Per L in data.L, the sha256 of the grid pilot's tau.json the staircases' --tau reads, pinned
+# before the freeze: a scored staircase naming another file, or none (--tau given as a number),
+# is refused.
+[data.staircase.tau_sha256]
+16 = "TBD"
+32 = "TBD"
+64 = "TBD"
+
 [indicators]
 names = ["variance", "ac", "skewness"]
 observables = ["abs_m", "energy"]

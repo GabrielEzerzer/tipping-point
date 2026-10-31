@@ -114,6 +114,7 @@ class Staircase:
         min_meas: int = 2000,
         saves: int = 200,
         burst: Burst = BURST,
+        tau_sha256: str | None = None,  # the tau.json the taus came from; None: given as a number
     ) -> None:
         if len(taus) != len(temperatures):
             raise ValueError(f"{len(taus)} taus for {len(temperatures)} temperatures")
@@ -125,6 +126,7 @@ class Staircase:
             "min_meas": min_meas,
             "saves": saves,
             "burst": asdict(burst),
+            "tau_sha256": tau_sha256,
         }
         self.temps = tuple(temperatures)
         dwells = [dwell(tau, min_therm, min_meas) for tau in taus]

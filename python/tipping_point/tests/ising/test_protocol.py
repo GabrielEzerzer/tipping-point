@@ -79,6 +79,20 @@ def test_staircase_bursts_sit_inside_measurement_windows() -> None:
     assert min(b - a for a, b in itertools.pairwise(starts)) >= burst.span
 
 
+def test_a_staircase_keeps_the_tau_json_its_dwell_came_from() -> None:
+    """A resume rebuilds the schedule from its manifest, so the source comes back with it, and a
+    manifest from before the field rebuilds too, naming none. The field changes no plateau."""
+    plain = Staircase([2.0], temperatures=(3.0,), saves=10)
+    named = Staircase([2.0], temperatures=(3.0,), saves=10, tau_sha256="a" * 64)
+    assert plain.to_json()["params"]["tau_sha256"] is None
+    assert named.to_json()["params"]["tau_sha256"] == "a" * 64
+    assert protocol.from_json(named.to_json()).to_json() == named.to_json()
+    assert named.frames == plain.frames and named.total == plain.total
+    older = {k: v for k, v in plain.to_json()["params"].items() if k != "tau_sha256"}
+    legacy = plain.to_json() | {"params": older}
+    assert protocol.from_json(legacy).to_json() == plain.to_json()
+
+
 def test_short_windows_save_fewer_bursts_rather_than_overlap() -> None:
     s = Staircase([1.0], temperatures=(3.0,), min_meas=100, saves=200, burst=Burst(stride=2))
     assert len(s.frames) == (100 // 16) * 8

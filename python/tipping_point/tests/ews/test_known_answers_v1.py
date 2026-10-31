@@ -28,13 +28,13 @@ variance peaks at the rise, eps_L -0.2 as read.
 
 The prereg copy keeps every setting the dynamic test reads as frozen (the headline window and
 bandwidth, thin, lag, detrend and direction, fss.dynamic, data.ramps, data.nulls) and changes what
-the planted data require (seeds, replicas, the tau_c record), plus, to score in seconds, 40
-bootstrap draws and settings the dynamic test does not read: the sensitivity grid cut to its
-headline cell, |m| the only observable, horizon 0 alone, one surrogate per test, and alarm scores
-every 200 tau_c instead of every one. The alarm tests read that last one: one score per null path
-puts far_max at 5 per 1000 tau_c whatever the data, so the attainable control checks the flag,
-not the rate. As frozen, a mode takes minutes to score: the alarm s(t) alone is ~100,000 Kendall
-scores of 300 tau_c each.
+the planted data require (seeds, replicas, the tau_c record, the tau.json pins), plus, to score
+in seconds, 40 bootstrap draws and settings the dynamic test does not read: the sensitivity grid
+cut to its headline cell, |m| the only observable, horizon 0 alone, one surrogate per test, and
+alarm scores every 200 tau_c instead of every one. The alarm tests read that last one: one score
+per null path puts far_max at 5 per 1000 tau_c whatever the data, so the attainable control checks
+the flag, not the rate. As frozen, a mode takes minutes to score: the alarm s(t) alone is ~100,000
+Kendall scores of 300 tau_c each.
 
 The generator's own checks read its output only; the rest need the freeze's scorer.
 """
@@ -71,6 +71,8 @@ from ews_planted import (
     V1_X,
     restamp,
     restamp_pilot,
+    restamp_tau,
+    tau_source,
     v1_copy,
     v1_dataset,
     v1_mean,
@@ -172,6 +174,7 @@ def _prereg(data: V1, changes: dict[str, Any] | None = None) -> str:
         "data.replicas": V1_REPLICAS,
         "data.tau_c.pilot_run": V1_PILOT_RUN,
         "data.tau_c.pilot_sha256": hashlib.sha256(data.pilot.read_bytes()).hexdigest(),
+        **{f"data.staircase.tau_sha256.{L}": tau_source(L) for L in V1_SIZES},
         "scoring.bootstrap": 40,
         "sensitivity.window": [head["window"]],
         "sensitivity.bandwidth": [head["bandwidth"]],
@@ -627,6 +630,9 @@ def frozen_copy(
         ("qs", "a dirty tree"),
         ("null", "no pilot record"),
         ("ramp", "another pilot record"),
+        ("qs", "a number for tau"),
+        ("qs", "another tau.json"),
+        ("qs", "another size's tau.json"),
     ],
 )
 def test_a_frozen_prereg_refuses_a_run_its_commit_and_record_did_not_make(
@@ -636,20 +642,30 @@ def test_a_frozen_prereg_refuses_a_run_its_commit_and_record_did_not_make(
     fault: str,
 ) -> None:
     """Under a frozen prereg ews score takes only runs its tag's commit made from a clean tree
-    (#26 decision 6), and only ramps and null runs made against the pilot record it pins (#26 K).
-    One run from another commit or from none (as runs made before the freeze), from a dirty tree,
-    or naming no record (as the exploratory null runs do) or another one, and nothing is scored or
+    (#26 decision 6), only ramps and null runs made against the pilot record it pins (#26 K), and
+    only staircases whose dwell was read from the tau.json it pins at their L (freeze review,
+    round 1). One run from another commit or from none (as runs made before the freeze), from a
+    dirty tree, naming no record (as the exploratory null runs do) or another one, or a staircase
+    given --tau 50, or another file, or the file pinned at another size, and nothing is scored or
     logged: the error names that run and no other."""
     path, copy, commit = frozen_copy
     run_dir = copy.runs[kind, 32, V1_SEEDS[0]]
-    pilot = io.read_json(run_dir / "manifest.json")["params"].get("pilot")
+    params = io.read_json(run_dir / "manifest.json")["params"]
+    pilot, tau = params.get("pilot"), params["schedule"]["params"].get("tau_sha256")
     made = {
         "another commit": ("f" * 40, False),
         "no commit": (None, None),
         "a dirty tree": (commit, True),
     }
+    dwells = {
+        "a number for tau": None,
+        "another tau.json": "e" * 64,
+        "another size's tau.json": tau_source(16),
+    }
     if fault in made:
         restamp(run_dir, *made[fault])
+    elif fault in dwells:
+        restamp_tau(run_dir, dwells[fault])
     else:
         restamp_pilot(
             run_dir, None if fault == "no pilot record" else {**pilot, "sha256": "e" * 64}
@@ -658,7 +674,9 @@ def test_a_frozen_prereg_refuses_a_run_its_commit_and_record_did_not_make(
         assert main(["score", "--prereg", str(path), "--data-dir", str(copy.root)]) == 1
     finally:
         restamp(run_dir, commit, False)
-        if fault not in made:
+        if fault in dwells:
+            restamp_tau(run_dir, tau)
+        elif fault not in made:
             restamp_pilot(run_dir, pilot)
     err = capsys.readouterr().err
     assert {r.name for r in copy.runs.values() if r.name in err} == {run_dir.name}, err

@@ -1,6 +1,7 @@
 """Command line: python -m tipping_point.ising <command> [options]
 
-  staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json
+  staircase  quasi-static sweep down the 40-point grid, dwell set by a pilot's tau.json, whose
+             sha256 the manifest records (a frozen prereg scores only the file it pins)
   ramp       linear cooling 3.5 -> 1.5, or over an eps_L window, at a Kibble-Zurek point x of
              the tau_c a pilot record measured at that L (its fit for a size it did not
              measure, flagged in the manifest), or at an explicit rate
@@ -21,6 +22,8 @@ is x0p02), so the engine can open every run.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 import sys
 import time
@@ -137,14 +140,18 @@ def _spec(args: argparse.Namespace) -> run.Spec:
     return run.Spec(args.L, args.replicas, args.seed, init, checkpoint_every=args.checkpoint_every)
 
 
-def _taus(value: str, temperatures: Sequence[float]) -> list[float]:
+def _taus(value: str, temperatures: Sequence[float]) -> tuple[list[float], str | None]:
     """--tau: one number for every temperature, or a pilot's tau.json that covers them all with
     reliable points. A pilot too short for its tau underestimates it, and the dwell would end
-    before the plateau equilibrates."""
+    before the plateau equilibrates. Also returns the sha256 of the bytes the taus were read from,
+    None for a number: what a frozen prereg checks the dwell's source by."""
+    source = None
     try:
         taus = [float(value)] * len(temperatures)
     except ValueError:
-        points = {round(p["temperature"], 9): p for p in io.read_json(Path(value))["points"]}
+        raw = Path(value).read_bytes()
+        source = hashlib.sha256(raw).hexdigest()
+        points = {round(p["temperature"], 9): p for p in json.loads(raw)["points"]}
         missing = [T for T in temperatures if round(T, 9) not in points]
         if missing:
             raise SystemExit(f"{value} has no tau for T = {missing}") from None
@@ -156,13 +163,15 @@ def _taus(value: str, temperatures: Sequence[float]) -> list[float]:
         taus = [points[round(T, 9)]["tau"] for T in temperatures]
     if not all(0 < tau < math.inf for tau in taus):  # NaN fails both comparisons
         raise SystemExit(f"tau must be a positive number, got {value}")
-    return taus
+    return taus, source
 
 
 def _staircase(args: argparse.Namespace) -> int:
     burst = protocol.Burst(stride=args.burst_stride)
-    taus = _taus(args.tau, protocol.GRID)
-    schedule = protocol.Staircase(taus, warmup=args.warmup, saves=args.saves, burst=burst)
+    taus, source = _taus(args.tau, protocol.GRID)
+    schedule = protocol.Staircase(
+        taus, warmup=args.warmup, saves=args.saves, burst=burst, tau_sha256=source
+    )
     tag = f"L{args.L}-qs-s{args.seed}"
     print(run.start(_spec(args), schedule, args.data_dir, tag, args.device))
     return 0

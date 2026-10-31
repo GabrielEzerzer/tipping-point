@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+from tipping_point.ews import ising
 from tipping_point.ising import exact, gates, io, pilot, protocol
 from tipping_point.ising.__main__ import _number, _taus, main
 
@@ -258,6 +259,38 @@ def test_staircase_cli_reads_taus_from_a_pilot(
     schedule = io.read_json(_only_run(tmp_path / "d") / "manifest.json")["params"]["schedule"]
     assert schedule["kind"] == "staircase" and schedule["total"] == 40 * 8
     assert schedule["params"]["taus"] == [1.0] * 40
+    assert schedule["params"]["tau_sha256"] == hashlib.sha256(pilot.read_bytes()).hexdigest()
+
+
+def test_a_frozen_prereg_takes_a_staircase_from_its_pinned_tau_json_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Freeze review, round 1, from the command line to the scorer's check. The prereg pinned the
+    dwell's source in a comment and the manifest recorded only the taus, so `--tau 50` from the
+    freeze's commit scored without a word. A run from the pinned file passes. A number is refused,
+    and so is another file holding the same taus: the pin is on the bytes, not what they parse
+    to."""
+    pilot = _pilot_file(tmp_path / "tau.json")
+    copy = tmp_path / "copy.json"
+    copy.write_text(pilot.read_text() + "\n")
+    assert json.loads(copy.read_text()) == json.loads(pilot.read_text())
+    pins = {"4": hashlib.sha256(pilot.read_bytes()).hexdigest()}
+    monkeypatch.setattr(protocol, "dwell", lambda tau, *_: (2, 6))
+
+    def made(tau: str, data_dir: Path) -> ising.Run:
+        size = ["--L", "4", "--replicas", "2", "--warmup", "0", "--saves", "0", "--device", "cpu"]
+        assert main(["staircase", "--tau", tau, *size, "--data-dir", str(data_dir)]) == 0
+        return ising.open_run(_only_run(data_dir))
+
+    def check(staircase: ising.Run) -> None:
+        inputs = ising.Inputs(ramps=[], nulls=[], staircases=[staircase], dropped=[])
+        ising._same_record({4: inputs}, "0" * 64, pins)
+
+    check(made(str(pilot), tmp_path / "pinned"))
+    for name, tau in (("number", "50"), ("copy", str(copy))):
+        staircase = made(tau, tmp_path / name)
+        with pytest.raises(ising.IsingDataError, match=re.escape(staircase.run_id)):
+            check(staircase)
 
 
 def test_staircase_refuses_a_pilot_tau_marked_unreliable(
@@ -286,10 +319,10 @@ def test_pilot_too_short_for_a_window_is_unreliable_and_does_not_crash(tmp_path:
 
 
 def test_tau_option_takes_a_number_or_a_complete_pilot(tmp_path: Path) -> None:
-    assert _taus("4.5", (3.5, 2.0)) == [4.5, 4.5]
+    assert _taus("4.5", (3.5, 2.0)) == ([4.5, 4.5], None)  # a number names no source
     pilot = tmp_path / "tau.json"
     pilot.write_text(json.dumps({"points": [{"temperature": 3.5, "tau": 2.0, "reliable": True}]}))
-    assert _taus(str(pilot), (3.5,)) == [2.0]
+    assert _taus(str(pilot), (3.5,)) == ([2.0], hashlib.sha256(pilot.read_bytes()).hexdigest())
     with pytest.raises(SystemExit):
         _taus(str(pilot), (3.5, 2.0))  # no tau measured at 2.0
 

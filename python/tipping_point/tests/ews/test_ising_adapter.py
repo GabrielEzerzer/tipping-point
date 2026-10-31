@@ -19,7 +19,9 @@ from ews_planted import (
     plateau_values,
     ramp,
     ramp_values,
+    restamp_tau,
     staircase,
+    tau_source,
     write_run,
 )
 from tipping_point.ews import fss, ising
@@ -27,6 +29,7 @@ from tipping_point.ising import io, protocol, run
 from tipping_point.ising.exact import TC
 
 V1 = Path(__file__).resolve().parents[4] / "paper" / "prereg" / "ising-ews-v1.toml"
+TAU_PINS = {"16": tau_source(16), "32": tau_source(32)}  # what the planted staircases name
 
 
 def _data(**changes: object) -> dict:
@@ -93,7 +96,9 @@ def test_a_run_without_complete_json_is_refused(tmp_path: Path) -> None:
 
 
 def test_failed_plateaus_are_dropped_and_counted(tmp_path: Path) -> None:
-    folder = write_run(tmp_path, "L16-qs-s1", staircase(), 16, 1, plateau_values(16), failed=(3.0,))
+    folder = write_run(
+        tmp_path, "L16-qs-s1", staircase(16), 16, 1, plateau_values(16), failed=(3.0,)
+    )
     kept, dropped = ising.plateaus(ising.open_run(folder), "dense")
     assert list(kept) == [pytest.approx(PLATEAU)] and dropped == 1
     frames, _ = ising.plateaus(ising.open_run(folder), "matched")
@@ -211,21 +216,50 @@ def test_scored_ramps_and_nulls_must_name_the_pinned_pilot_record(
     selection alone, the exploratory path, still takes it."""
     named = "0" * 64  # what the planted stamps carry
     chosen = ising.select(*ising.find_runs(planted.root), _data())
-    ising._same_record(chosen, named)
+    ising._same_record(chosen, named, TAU_PINS)
     with pytest.raises(ising.IsingDataError) as refused:
-        ising._same_record(chosen, "f" * 64)
+        ising._same_record(chosen, "f" * 64, TAU_PINS)
     message = str(refused.value)
     assert f"L16-ramp-s1 (pilot sha256 {named})" in message and "f" * 64 in message
     assert "L32-null-s2" in message and "-qs-" not in message
     stamp = {"run_id": "pilot", "sha256": named, "stale": False}
     write_run(tmp_path, "L16-ramp-s1", ramp(16), 16, 1, ramp_values(16))  # names no record
     write_run(tmp_path, "L16-null-s1", nulls(16, 500), 16, 1, ramp_values(16), pilot=stamp)
-    write_run(tmp_path, "L16-qs-s1", staircase(), 16, 1, plateau_values(16))
+    write_run(tmp_path, "L16-qs-s1", staircase(16), 16, 1, plateau_values(16))
     bare = ising.select(*ising.find_runs(tmp_path), _data(L=[16], seeds=[1]))
     with pytest.raises(ising.IsingDataError) as refused:
-        ising._same_record(bare, named)
+        ising._same_record(bare, named, TAU_PINS)
     message = str(refused.value)
     assert "L16-ramp-s1 (pilot sha256 None)" in message and "L16-null-s1" not in message
+
+
+def test_scored_staircases_must_name_the_tau_json_pinned_at_their_L(
+    planted: Any, tmp_path: Path
+) -> None:
+    """Freeze review, round 1: the prereg pinned the dwell's source in a comment, so a staircase
+    made with --tau 50 from the freeze commit scored without a word. The pin is per L: a file
+    pinned at another size is as foreign as any, and a number names none, even where nothing is
+    pinned. The message names each run and the sha256 it carries, and no other run."""
+    named = "0" * 64
+    chosen = ising.select(*ising.find_runs(planted.root), _data())
+    ising._same_record(chosen, named, TAU_PINS)
+
+    def refused(pins: dict[str, str], inputs: dict[int, ising.Inputs] = chosen) -> str:
+        with pytest.raises(ising.IsingDataError, match=r"tau\.json") as caught:
+            ising._same_record(inputs, named, pins)
+        return str(caught.value)
+
+    message = refused(TAU_PINS | {"32": "e" * 64})  # another file at L = 32
+    assert f"L32-qs-s1 (tau.json sha256 {tau_source(32)})" in message and "L32-qs-s2" in message
+    assert "L16-qs-" not in message and "-ramp-" not in message and "-null-" not in message
+    swapped = refused({"16": TAU_PINS["32"], "32": TAU_PINS["16"]})  # each file, at the other L
+    assert all(f"L{L}-qs-s{seed}" in swapped for L in (16, 32) for seed in (1, 2)), swapped
+    assert "L32-qs-s1" in refused({"16": TAU_PINS["16"]})  # L = 32 pinned nowhere
+    run_dir = write_run(tmp_path, "L16-qs-s1", staircase(16), 16, 1, plateau_values(16))
+    restamp_tau(run_dir, None)  # as --tau 50 leaves it
+    inputs = {16: ising.Inputs([], [], [ising.open_run(run_dir)], [])}
+    assert "L16-qs-s1 (tau.json sha256 None)" in refused(TAU_PINS, inputs)
+    assert "L16-qs-s1 (tau.json sha256 None)" in refused({}, inputs)  # no pin lets it through
 
 
 def test_a_null_block_that_failed_its_check_is_dropped_and_counted(tmp_path: Path) -> None:
@@ -233,7 +267,7 @@ def test_a_null_block_that_failed_its_check_is_dropped_and_counted(tmp_path: Pat
     the check for null runs too) is left out of scoring and reported, not silently used."""
     for tag, schedule, values in (
         ("L16-ramp-s1", ramp(16), ramp_values(16)),
-        ("L16-qs-s1", staircase(), plateau_values(16)),
+        ("L16-qs-s1", staircase(16), plateau_values(16)),
     ):
         write_run(tmp_path, tag, schedule, 16, 1, values)
     schedule = nulls(16, 500)
@@ -248,7 +282,7 @@ def test_a_null_block_without_a_verdict_is_refused(tmp_path: Path) -> None:
     """Review round 1: a fixed run from before #50 carries no thermalised verdict and was read
     as a null block anyway. Nothing then says it is equilibrium, so it is refused."""
     write_run(tmp_path, "L16-ramp-s1", ramp(16), 16, 1, ramp_values(16))
-    write_run(tmp_path, "L16-qs-s1", staircase(), 16, 1, plateau_values(16))
+    write_run(tmp_path, "L16-qs-s1", staircase(16), 16, 1, plateau_values(16))
     write_run(tmp_path, "L16-null-s1", nulls(16, 500), 16, 1, ramp_values(16), verdicts=False)
     with pytest.raises(ising.IsingDataError, match="no thermalised verdict"):
         ising.select(*ising.find_runs(tmp_path), _data(L=[16], seeds=[1]))
@@ -268,7 +302,7 @@ def test_a_staircase_without_the_fss_plateau_is_an_error(tmp_path: Path) -> None
     with pytest.raises(ising.IsingDataError, match="no plateau at T"):
         ising._static(doc, {16: inputs}, rng)
     failed = write_run(
-        tmp_path, "L16-qs-s2", staircase(), 16, 2, plateau_values(16), failed=(PLATEAU,)
+        tmp_path, "L16-qs-s2", staircase(16), 16, 2, plateau_values(16), failed=(PLATEAU,)
     )
     inputs = ising.Inputs(ramps=[], nulls=[], staircases=[ising.open_run(failed)], dropped=[])
     with pytest.raises(ising.IsingDataError, match="usable at"):  # dropped, so no size is left

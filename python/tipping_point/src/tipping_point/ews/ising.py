@@ -546,9 +546,10 @@ def evaluate(
     alarms and peak positions at the headline cell, and static and dynamic finite-size scaling.
     It computes only: writing results and logging trials are the caller's. A stale pilot record
     is refused unless allow_stale. With `commit`, the commit a frozen prereg's tag points at,
-    every scored run must have been made by that commit from a clean tree, and every scored ramp
-    and null run against the pilot record the prereg pins. Without it (an unfrozen prereg,
-    exploratory use) neither is asked: the exploratory L = 16 null runs name no record."""
+    every scored run must have been made by that commit from a clean tree, every scored ramp and
+    null run against the pilot record the prereg pins, and every scored staircase from the
+    tau.json it pins at that L. Without it (an unfrozen prereg, exploratory use) none is asked:
+    the exploratory L = 16 null runs name no record."""
     data = doc["data"]
     pinned = data["tau_c"]["pilot_sha256"]
     pinned = pinned if len(pinned) == 64 else None
@@ -560,7 +561,7 @@ def evaluate(
     if commit is not None:
         _same_commit(scored, commit)
         if pinned is not None:  # always, once frozen: the freeze refuses an unpinned record
-            _same_record(chosen, pinned)
+            _same_record(chosen, pinned, data["staircase"].get("tau_sha256", {}))
     tables: dict[str, list[Row]] = {"auc": [], "surrogates": [], "alarms": [], "peaks": []}
     peaks: Peaks = {}
     for L, inputs in chosen.items():
@@ -574,10 +575,12 @@ def evaluate(
     return Evaluation(tables, scored, pilot, dropped)
 
 
-def _same_record(chosen: dict[int, Inputs], pinned: str) -> None:
+def _same_record(chosen: dict[int, Inputs], pinned: str, tau_pins: dict[str, str]) -> None:
     """Refuse a scored ramp or null run made against another pilot record than the one the
-    prereg pins, or naming none (#26 K): its rate or length was set by another tau_c clock.
-    Staircases are exempt: their dwell comes from a grid pilot's tau.json (--tau), no record."""
+    prereg pins, or naming none (#26 K): its rate or length was set by another tau_c clock. And
+    refuse a scored staircase whose dwell was not read from the tau.json the prereg pins at its L
+    (data.staircase.tau_sha256), whether another file's or a number's, which names none: its
+    plateaus were held for another time."""
     runs = {r.run_id: r for i in chosen.values() for r in [*i.ramps, *(run for run, _ in i.nulls)]}
     foreign = [
         f"{r.run_id} (pilot sha256 {sha})"
@@ -588,6 +591,18 @@ def _same_record(chosen: dict[int, Inputs], pinned: str) -> None:
         raise IsingDataError(
             f"ramp and null runs not made against the pilot record the prereg pins, sha256 "
             f"{pinned}: {foreign}"
+        )
+    dwelled = [
+        f"{r.run_id} (tau.json sha256 {sha})"
+        for L, inputs in chosen.items()
+        for r in inputs.staircases
+        if (sha := r.schedule.get("params", {}).get("tau_sha256")) is None
+        or sha != tau_pins.get(str(L))
+    ]
+    if dwelled:
+        raise IsingDataError(
+            f"staircases whose dwell was not read from the tau.json the prereg pins at their L "
+            f"(data.staircase.tau_sha256 {tau_pins}): {dwelled}"
         )
 
 

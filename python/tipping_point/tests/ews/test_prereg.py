@@ -140,10 +140,44 @@ def test_v1_says_what_the_file_itself_binds() -> None:
     assert "three grid pilots under data.staircase" in confirmatory
     assert "set the dwell and are never scored" in confirmatory
     assert "derived from its seed and its identity" in confirmatory  # run.stream_key
+    assert "another tau.json or given as a number" in confirmatory  # ising._same_record
     span = doc["event"]["segment"] / doc["data"]["ramps"]["x"]  # tau_c: 6 eps_L x 50 tau_c
     assert {protocol.NULL_TAU_C // (span + w) for w in doc["sensitivity"]["window"]} == {2}
     (nulls,) = [line for line in raw.splitlines() if line.startswith("eps_L = [2.0, 4.0, 6.0]")]
     assert "two slices the length of a positive segment" in nulls
+
+
+def test_v1_pins_the_dwell_of_every_size_and_the_freeze_asks_for_it() -> None:
+    """Freeze review, round 1: the three tau.json hashes were comments, which nothing could read.
+    They are data now, the file names the pilot run beside each, and they are the ones checked
+    against Job A's output. The freeze refuses a file that leaves a size unpinned, or pins one with
+    anything but a sha256; before the freeze, a file may leave them out."""
+    raw = V1.read_text("utf-8")
+    doc = tomllib.loads(raw)
+    pins = doc["data"]["staircase"]["tau_sha256"]
+    assert pins == {
+        "16": "88d0878b63b6608af7bc03a6c2bf2812f24b50e54ea9af4f77c9a082e0632138",
+        "32": "f5adbf804f658eb30cdf44ae2cc218336b8d828a859da292cda88a41ccf1d610",
+        "64": "e3239a04e033f2e0f693dedea481a16e1c69271072e4df25fa1c3de30efc93e9",
+    }
+    for L, run_id in (
+        (16, "20261025T220933Z-L16-pilot-s6"),
+        (32, "20261025T220814Z-L32-pilot-s6"),
+        (64, "20261025T220810Z-L64-pilot-s6"),
+    ):
+        assert f'{L} = "{pins[str(L)]}"  # {run_id}' in raw
+    assert prereg.problems(doc, strict=True) == []
+    for unready in (
+        {k: v for k, v in pins.items() if k != "32"},
+        pins | {"32": "not a sha256"},
+        "a table, per L",
+    ):
+        doc["data"]["staircase"]["tau_sha256"] = unready
+        found = prereg.problems(doc, strict=True)
+        assert any("data.staircase.tau_sha256" in p and "32" in p for p in found), found
+    del doc["data"]["staircase"]["tau_sha256"]
+    assert prereg.problems(doc) == []
+    assert any("data.staircase.tau_sha256" in p for p in prereg.problems(doc, strict=True))
 
 
 @pytest.mark.parametrize(

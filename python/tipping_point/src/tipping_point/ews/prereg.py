@@ -281,6 +281,17 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         ]
         if not _SHA256.fullmatch(data["tau_c"]["pilot_sha256"]):
             found.append("data.tau_c.pilot_sha256: the pilot record's sha256 (64 hex digits)")
+        pins = data["staircase"].get("tau_sha256")
+        unpinned = [
+            L
+            for L in data["L"]
+            if not (isinstance(pins, dict) and _SHA256.fullmatch(str(pins.get(str(L)))))
+        ]
+        if unpinned:
+            found.append(
+                "data.staircase.tau_sha256: per L, the sha256 of the tau.json the staircases' "
+                f"dwell is read from (64 hex digits); none for L = {unpinned}"
+            )
         if doc["trials"]["budget"] < cells(doc):
             found.append(f"trials.budget: one scoring run evaluates {cells(doc)} cells")
     return found

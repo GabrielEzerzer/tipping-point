@@ -73,14 +73,16 @@ eps_L = [2.0, 4.0, 6.0]  # >= 5 seeds each, each run holds two slices the length
 [data.staircase]
 kind = "staircase"
 temperature = 2.269231   # grid point Tc + 4.5e-5; plateaus failing `thermalised` are dropped
-# The staircases' dwell (--tau) is read from these seed-6 grid pilots, made on Kaggle at commit
-# 655949a (kernel tp-ising-job-a), 40 points each, none unreliable; run and tau.json sha256:
-#   L = 16  20261025T220933Z-L16-pilot-s6
-#           88d0878b63b6608af7bc03a6c2bf2812f24b50e54ea9af4f77c9a082e0632138
-#   L = 32  20261025T220814Z-L32-pilot-s6
-#           f5adbf804f658eb30cdf44ae2cc218336b8d828a859da292cda88a41ccf1d610
-#   L = 64  20261025T220810Z-L64-pilot-s6
-#           e3239a04e033f2e0f693dedea481a16e1c69271072e4df25fa1c3de30efc93e9
+
+# The staircases' dwell (--tau) is read from three seed-6 grid pilots, made on Kaggle at commit
+# 655949a (kernel tp-ising-job-a), 40 points each, none unreliable. Below, per L, the sha256 of
+# the pilot's tau.json. A scored staircase's manifest must name it, in
+# params.schedule.params.tau_sha256: the scorer refuses another file's, or none, which is what a
+# number given to --tau leaves.
+[data.staircase.tau_sha256]
+16 = "88d0878b63b6608af7bc03a6c2bf2812f24b50e54ea9af4f77c9a082e0632138"  # 20261025T220933Z-L16-pilot-s6
+32 = "f5adbf804f658eb30cdf44ae2cc218336b8d828a859da292cda88a41ccf1d610"  # 20261025T220814Z-L32-pilot-s6
+64 = "e3239a04e033f2e0f693dedea481a16e1c69271072e4df25fa1c3de30efc93e9"  # 20261025T220810Z-L64-pilot-s6
 
 [indicators]
 names = ["variance", "ac", "skewness"]
@@ -167,7 +169,7 @@ counted = "One trial per AUC evaluation of an (indicator, observable, cadence, L
 [disclosure]
 exploratory = "Before the freeze, the seeds 1-5 datasets at L = 16 and 32 were scored exploratorily: AUC, surrogate tests, alarms, peak positions and the static exponents."
 decisions = "The freeze decisions were made with those results in view: the peak-position statistic of dynamic-fss, its search band and tolerance, the alarm target, the ramp rate from measured tau_c, the eps_L window of the ramps, and the seeds and replicas."
-confirmatory = "v1 scores only runs generated from the tagged commit, on seeds 6-10. No earlier run that v1 scores or compares against used those seeds: the only earlier seed-6 runs are the three grid pilots under data.staircase, which set the dwell and are never scored. The scorer refuses a run whose manifest names another commit or a dirty tree. The seeds 1-5 datasets are never scored under v1. Each run's random stream is derived from its seed and its identity (size, replicas, start and schedule; the manifest's rng block names the derivation), so runs at one seed draw different numbers and one run made twice draws the same. The earlier runs, the seeds 1-5 datasets and the grid pilots among them, took their stream from the seed alone."
+confirmatory = "v1 scores only runs generated from the tagged commit, on seeds 6-10. No earlier run that v1 scores or compares against used those seeds: the only earlier seed-6 runs are the three grid pilots under data.staircase, which set the dwell and are never scored. The scorer refuses a run whose manifest names another commit or a dirty tree, a ramp or null run made against another tau_c record, and a staircase whose dwell was read from another tau.json or given as a number. The seeds 1-5 datasets are never scored under v1. Each run's random stream is derived from its seed and its identity (size, replicas, start and schedule; the manifest's rng block names the derivation), so runs at one seed draw different numbers and one run made twice, on one device type and torch version, draws the same. The earlier runs, the seeds 1-5 datasets and the grid pilots among them, took their stream from the seed alone."
 links = [
     "https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6402030372",
     "https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6387307847",

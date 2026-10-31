@@ -6,13 +6,15 @@ The dataset (L = 16 and 32, seeds 1 and 2, 8 replicas):
   ramps       3.5 -> 1.5; |m| an AR(1) whose spread and memory grow as eps_L falls to 0
   nulls       fixed runs, blocks at eps_L = 1.5 and 2.5; the same AR(1) frozen at that eps_L
   staircases  plateaus at 3.0 and 2.269231; at the second, L^2 Var(|m|) ~ L^1.75,
-              <|m|> ~ L^-0.125, constant skewness, and a memory of L^2/512 sweeps
+              <|m|> ~ L^-0.125, constant skewness, and a memory of L^2/512 sweeps; each names
+              the tau.json its dwell came from, by the sha256 tau_source gives for its L
   pilot.json  tau_c = 4 and 8 sweeps, in a pilot run folder
 
 The ising-ews v1 dataset (v1_dataset, below the first) is the freeze's: L = 16, 32 and 64, ramps
 over the scaled window eps_L = 12 -> -8, and a spread of |m| that peaks where a mode plants it.
 """
 
+import hashlib
 import inspect
 import json
 import math
@@ -208,9 +210,20 @@ def nulls(L: int, sweeps: int) -> protocol.Fixed:
     return protocol.Fixed(temps, therm=20, sweeps=sweeps, saves=sweeps // burst_gap(ramp(L), L))
 
 
-def staircase() -> protocol.Staircase:
+def tau_source(L: int) -> str:
+    """The sha256 a planted staircase at L names as its tau.json's, and a planted prereg pins."""
+    return hashlib.sha256(f"planted tau.json, L = {L}".encode()).hexdigest()
+
+
+def staircase(L: int) -> protocol.Staircase:
     return protocol.Staircase(
-        [2.0, 2.0], temperatures=(3.0, PLATEAU), warmup=0, min_therm=50, min_meas=2000, saves=100
+        [2.0, 2.0],
+        temperatures=(3.0, PLATEAU),
+        warmup=0,
+        min_therm=50,
+        min_meas=2000,
+        saves=100,
+        tau_sha256=tau_source(L),
     )
 
 
@@ -390,11 +403,17 @@ def v1_nulls(L: int) -> protocol.Fixed:
     return protocol.Fixed(temps, therm=20, sweeps=sweeps, saves=sweeps // gap, tau_c=V1_TAU_C[L])
 
 
-def v1_staircase() -> protocol.Staircase:
-    """staircase() with 500 measured sweeps per plateau instead of 2,000: the static fits only
+def v1_staircase(L: int) -> protocol.Staircase:
+    """staircase(L) with 500 measured sweeps per plateau instead of 2,000: the static fits only
     have to run, since no v1 test reads them."""
     return protocol.Staircase(
-        [2.0, 2.0], temperatures=(3.0, PLATEAU), warmup=0, min_therm=50, min_meas=500, saves=40
+        [2.0, 2.0],
+        temperatures=(3.0, PLATEAU),
+        warmup=0,
+        min_therm=50,
+        min_meas=500,
+        saves=40,
+        tau_sha256=tau_source(L),
     )
 
 
@@ -486,7 +505,7 @@ def v1_dataset(
                     **made,
                 )  # fmt: skip
                 runs["qs", L, seed] = write_run(
-                    root, f"L{L}-qs-s{seed}", v1_staircase(), L, seed, plateau_values(L),
+                    root, f"L{L}-qs-s{seed}", v1_staircase(L), L, seed, plateau_values(L),
                     rng=np.random.default_rng([seed, L, _STREAMS["qs"]]), **made,
                 )  # fmt: skip
     else:
@@ -540,4 +559,13 @@ def restamp_pilot(run_dir: Path, stamp: dict[str, Any] | None) -> None:
     against no record). As with restamp, the run stays complete."""
     manifest = io.read_json(run_dir / "manifest.json")
     manifest["params"]["pilot"] = stamp
+    io.write_json(run_dir / "manifest.json", manifest, replace=True)
+
+
+def restamp_tau(run_dir: Path, sha256: str | None) -> None:
+    """Change the tau.json a planted staircase says its dwell was read from
+    (params.schedule.params.tau_sha256; None, as a number given to --tau leaves). As with
+    restamp, the run stays complete."""
+    manifest = io.read_json(run_dir / "manifest.json")
+    manifest["params"]["schedule"]["params"]["tau_sha256"] = sha256
     io.write_json(run_dir / "manifest.json", manifest, replace=True)
