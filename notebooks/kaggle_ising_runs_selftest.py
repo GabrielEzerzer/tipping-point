@@ -4,17 +4,19 @@
     uv run --no-sync python notebooks/kaggle_ising_runs_selftest.py
 
 Plan validation and the CLI's verdict on every run's arguments; dependency resolution; the queues
-(longest first, dependencies, pinning, a failure, the deadline, the output cap) with a stand-in for
-the simulator; the previous session's runs carried forward and reused or resumed; inputs found and
-checked against their sha256; the wheel and COMMIT.txt checks; run verification, judged by exit
-codes and files only; the kernel folder against what `kaggle kernels push` checks; invalid plans
-refused at every door; pilot-28.json, its stage ids and kernel sources, on stand-in mounts.
+(longest first, dependencies, pinning, a failure, a failed extraction, the deadline, the output
+cap) with a stand-in for the simulator; the previous session's runs carried forward and reused or
+resumed; inputs found and checked against their sha256; the wheel and COMMIT.txt checks; run
+verification, judged by exit codes and files only; the rates STATUS gives, by checkpoint and L; the
+kernel folder against what `kaggle kernels push` checks; invalid plans refused at every door;
+pilot-28.json, its stage ids and kernel sources, on stand-in mounts.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
-`jepa extract` of its final.pt and of its twin, each run checked with `jepa verify`) in a venv that
-prints Kaggle's sitecustomize errors on stderr from every child. No wheel is built: the venv holds
-a copy of the package stamped clean, so the outcome does not depend on this checkout's state.
+`jepa extract` of its final.pt and of its twin, each run checked with `jepa verify`), then a real
+extraction fails with another behind it on its queue, all in a venv that prints Kaggle's
+sitecustomize errors on stderr from every child. No wheel is built: the venv holds a copy of the
+package stamped clean, so the outcome does not depend on this checkout's state.
 
 About five minutes on a laptop CPU. One line per check, then exit 1 if any failed.
 """
@@ -278,6 +280,101 @@ def drive(
         threading.Timer(stop_after, sched.stop, args=("session deadline",)).start()
     sched.run(lambda: None, 0.01)
     return sched, events
+
+
+def failed_extractions(k: ModuleType) -> None:
+    """One table that fails must not cost the tables behind it, since GPU quota is the scarce
+    thing. A failed training or simulator run still stops its queue."""
+
+    def extraction(name: str, *reads: str, gpu: int | None = None) -> dict:
+        refs = [{"run": r, "file": k.FINAL} for r in reads]
+        return {"name": name, "command": "jepa extract", "gpu": gpu, "args": refs}
+
+    training = {"name": "m", "command": "jepa train", "gpu": 0, "args": []}
+    plan = {
+        "kernel": "tp-self-test",
+        "runs": [
+            training,
+            extraction("x1", "m", gpu=1),
+            extraction("x2", "m", gpu=1),
+            extraction("x3", "m", gpu=1),
+            extraction("y", "x2", gpu=1),
+            extraction("z", "y", gpu=1),
+            extraction("x4", "m", gpu=1),
+        ],
+    }
+    sched, events = drive(k, plan, 2, outcome={"x2": ("failed", "exit 1: boom")})
+    by = {r.name: r for r in sched.runs}
+    states = {name: r.state for name, r in by.items()}
+    failed_at = events.index(("end", "x2", 1))
+    check(
+        "a failed extraction leaves its queue running: the tables behind it start and complete",
+        all(states[n] == "complete" for n in ("x1", "x3", "x4"))
+        and all(events.index(("start", n, 1)) > failed_at for n in ("x3", "x4")),
+        events,
+    )
+    check("... and its queue is not marked stopped", sched.stopped == {}, sched.stopped)
+    check(
+        "... it blocks only what reads it, directly or in turn",
+        states["y"] == states["z"] == "blocked"
+        and by["y"].note == "depends on x2, which failed"
+        and by["z"].note == "depends on y, which is blocked",
+        [(r.name, r.state, r.note) for r in sched.runs],
+    )
+    status, detail = k.verdict(sched.runs, sched.stopped)
+    check(
+        "... STATUS failed names it and what it blocked, and no stopped queue",
+        status == "failed"
+        and "x2 FAILED on gpu1" in detail
+        and "out/logs/x2.log" in detail
+        and "blocked by a failure: y, z" in detail
+        and "queue stopped" not in detail
+        and "4/7 complete" in detail,
+        detail,
+    )
+    plan = {
+        "kernel": "tp-self-test",
+        "runs": [extraction("x1"), extraction("x2"), extraction("x3")],
+    }
+    sched, _ = drive(k, plan, 1, outcome={"x1": ("failed", "exit 1: boom")})
+    states = {r.name: r.state for r in sched.runs}
+    check(
+        "... on one GPU, with nothing pinned, too",
+        states == {"x1": "failed", "x2": "complete", "x3": "complete"} and sched.stopped == {},
+        states,
+    )
+
+    for command in ("jepa train", *k.ISING_COMMANDS):
+        plan = {
+            "kernel": "tp-self-test",
+            "runs": [
+                {"name": "s", "command": command, "gpu": 0, "args": []},
+                {"name": "t", "command": command, "gpu": 0, "args": []},
+                extraction("after", gpu=0),
+                extraction("reader", "s", gpu=1),
+                extraction("other", gpu=1),
+            ],
+        }
+        sched, _ = drive(k, plan, 2, outcome={"s": ("failed", "exit 1: boom")})
+        by = {r.name: r for r in sched.runs}
+        pinned = "pinned to gpu0, whose queue stopped after s failed"
+        check(
+            f"a failed {command} still stops its queue, and the other queue goes on",
+            sched.stopped == {0: "s failed"}
+            and by["t"].state == by["after"].state == "not started"
+            and by["t"].note == by["after"].note == pinned
+            and by["reader"].state == "blocked"
+            and by["other"].state == "complete",
+            [(r.name, r.state, r.note) for r in sched.runs],
+        )
+    plan = {"kernel": "tp-self-test", "runs": [dict(training, gpu=None), extraction("x1")]}
+    sched, _ = drive(k, plan, 1, outcome={"m": ("failed", "exit 1: boom")})
+    by = {r.name: r for r in sched.runs}
+    check(
+        "... on one GPU an independent extraction behind it is not started",
+        by["x1"].state == "not started" and by["x1"].note == "every queue stopped",
+        (by["x1"].state, by["x1"].note),
+    )
 
 
 def queues(k: ModuleType) -> None:
@@ -940,7 +1037,7 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
     manifest = {
         "producer": {"git_sha": COMMIT, "dirty": False},
         "env": {"torch": TORCH, "device": "cpu"},
-        "params": {"checkpoint": {"sha256": digest}},
+        "params": {"checkpoint": {"sha256": digest}, "dataset": {"L": 16}},
     }
     (table / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     check(
@@ -1006,7 +1103,7 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         rates["train"].get("m3", {}).get("s_per_step") == 0.005,
         rates,
     )
-    group = rates["extract"].get("m3 final.pt", {})
+    group = rates["extract"].get("m3 final.pt L16", {})
     check(
         "an extraction's rate is per frame, by checkpoint: the readout by its table's own clock",
         group.get("readout_us_per_frame") == 500.0 and group.get("us_per_frame") == 2000.0,
@@ -1019,7 +1116,7 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         text,
     )
     final.resumed = True
-    group = session.measured()["extract"].get("m3 final.pt", {})
+    group = session.measured()["extract"].get("m3 final.pt L16", {})
     check(
         "a table finished across sessions has no readout clock",
         group.get("readout_us_per_frame") is None,
@@ -1099,6 +1196,69 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         meta["dataset_sources"]
         == ["gabrielezerzer/tipping-point-wheel-v1", "gabrielezerzer/tp-data"],
         meta,
+    )
+
+
+def extraction_rates(k: ModuleType, root: Path) -> None:
+    """Section 4 projects extraction per L, and a frame at L = 64 costs many at L = 16, so STATUS
+    must not average them. The benchmark's shape: one checkpoint over several sizes."""
+    ctx = ctx_at(k, root)
+    trained, twin = {"run": "m", "file": k.FINAL}, {"run": "m", "file": k.TWIN}
+    tables = (  # name, checkpoint, dataset run, L, frames, seconds of readout, of the whole process
+        ("a", trained, "20261101T000001Z-L16-null-e2-s1", 16, 1000, 0.5, 2.0),
+        ("b", trained, "20261101T000002Z-L16-ramp-x2-s1", 16, 3000, 1.5, 2.0),
+        ("c", trained, "20261101T000003Z-L64-qs-s16", 64, 1000, 8.0, 10.0),
+        ("d", twin, "20261101T000001Z-L16-null-e2-s1", 16, 2000, 3.0, 4.0),
+    )
+    plan = {
+        "kernel": "tp-self-test",
+        "runs": [
+            {"name": "m", "command": "jepa train", "args": []},
+            *(
+                {"name": t[0], "command": "jepa extract", "args": [t[1], {"dataset_run": t[2]}]}
+                for t in tables
+            ),
+        ],
+    }
+    session = k.Session(ctx, plan, {}, COMMIT, TORCH, 2)
+    for name, _, run_id, L, frames, readout, whole in tables:
+        folder = ctx.out / "ising" / run_id / "latents" / name
+        folder.mkdir(parents=True)
+        manifest = {"started_ns": 10**9, "params": {"dataset": {"L": L}}}
+        (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        done = {"rows": {"latents": frames}, "ended_ns": 10**9 + int(readout * 1e9)}
+        (folder / "complete.json").write_text(json.dumps(done), encoding="utf-8")
+        run = session.by_name[name]
+        run.state, run.folder = "complete", folder.relative_to(ctx.out).as_posix()
+        run.wall_s = whole
+    rates = session.measured()
+    groups = rates["extract"]
+    small, large = groups.get("m final.pt L16", {}), groups.get("m final.pt L64", {})
+    check(
+        "an extraction's rate is by checkpoint and L: one group for each pair",
+        sorted(groups) == ["m ckpt/step_0000000.pt L16", "m final.pt L16", "m final.pt L64"],
+        sorted(groups),
+    )
+    check(
+        "... the tables at one L add up",
+        (small.get("tables"), small.get("frames")) == (2, 4000)
+        and small.get("readout_us_per_frame") == 500.0
+        and small.get("us_per_frame") == 1000.0,
+        small,
+    )
+    check(
+        "... and L = 64 keeps its own rate, not an average with L = 16",
+        large.get("readout_us_per_frame") == 8000.0 and large.get("us_per_frame") == 10000.0,
+        large,
+    )
+    twin_rate = groups.get("m ckpt/step_0000000.pt L16", {}).get("readout_us_per_frame")
+    check("... and the twin stays apart from final.pt", twin_rate == 1500.0, twin_rate)
+    text = k.rates_text(rates)
+    check(
+        "STATUS gives the rate of each L",
+        "extract m final.pt L16 500.0 us/frame readout" in text
+        and "extract m final.pt L64 8000.0 us/frame readout" in text,
+        text,
     )
 
 
@@ -1315,6 +1475,12 @@ def pilot_28(k: ModuleType, root: Path) -> None:
             and len(staged) == len(runs[name]["stage"]),
             runs[name]["stage"],
         )
+    check(
+        "pilot-28: timing checkpoints every 500 steps, the pilot at the training's default",
+        flag_ints(runs["timing"]["args"], "--checkpoint-every") == [500]
+        and "--checkpoint-every" not in runs["pilot"]["args"],
+        runs["timing"]["args"],
+    )
     made = {
         tuple(flag_ints(r["args"], f)[0] for f in ("--L", "--seed"))
         for r in job_a()["runs"]
@@ -1421,6 +1587,23 @@ def pilot_28(k: ModuleType, root: Path) -> None:
         "pilot-28: no extraction reads seeds 6-10, read from the runs' own manifests",
         not refused_seeds,
         refused_seeds,
+    )
+    every = flag_ints(runs["timing"]["args"], "--checkpoint-every")[0]
+    ends = [*range(every, trainings["timing"][2] + 1, every), trainings["timing"][2]]  # + closing
+    clock = [i * 10**9 for i in range(len(ends) + 1)]
+    ledger = [
+        {"run_id": "timing", "from_ns": a, "to_ns": b, "step": step}
+        for (a, b), step in zip(itertools.pairwise(clock), ends, strict=True)
+    ]
+    (ctx.out / "jepa" / k.LEDGER).write_text(
+        "".join(json.dumps(line) + "\n" for line in ledger), encoding="utf-8"
+    )
+    session.by_name["timing"].run_id = "timing"
+    rate = session.measured()["train"].get("timing", {})
+    check(
+        "pilot-28: so timing's rate comes from 1,500 steps after warm-up, not from one interval",
+        rate.get("steps") == 1500,
+        rate,
     )
     session.unstage()
     left = [p.name for p in (ctx.out / "ising").iterdir()]
@@ -1544,7 +1727,7 @@ def real_runs(k: ModuleType, root: Path) -> None:
     check(
         "STATUS gives the measured rates: seconds per step, microseconds per frame",
         rates["train"]["tiny"]["s_per_step"] > 0
-        and rates["extract"][f"tiny {k.FINAL}"]["us_per_frame"] > 0
+        and rates["extract"][f"tiny {k.FINAL} L16"]["us_per_frame"] > 0
         and "s/step" in status
         and "us/frame" in status,
         status,
@@ -1603,6 +1786,34 @@ def real_runs(k: ModuleType, root: Path) -> None:
         (state, note),
     )
 
+    # x-final's table is complete, so `jepa extract` of it again exits 1: a real failed extraction,
+    # with a real one behind it on the same queue and another that reads the failure
+    specs = {r["name"]: r for r in plan["runs"]}
+    again = dict(specs["x-final"], name="x-again", gpu=0)
+    null = again["args"][1]
+    reader = dict(again, name="x-reader", args=[{"run": "x-again", "file": k.FINAL}, null])
+    behind = dict(again, name="x-behind", args=[{"run": "tiny", "file": k.TWIN}, null])
+    queued = dict(plan, runs=[specs["tiny"], again, reader, behind])
+    prior = {"runs": [by2["tiny"]]}
+    session = k.Session(ctx, queued, {}, COMMIT, last["env"]["torch"], 1, prior)
+    session.by_name["tiny"].state = "complete"
+    session.scheduler.run(session.tick, 0.05)
+    by = session.by_name
+    check(
+        "a real failed extraction: failed for its own reason, the queue not stopped",
+        by["x-again"].state == "failed"
+        and "a latents table is written once" in by["x-again"].note
+        and session.scheduler.stopped == {},
+        [(r.name, r.state, r.note) for r in session.runs],
+    )
+    check(
+        "... the one reading it blocked, the real one behind it complete and verified",
+        by["x-reader"].state == "blocked"
+        and by["x-behind"].state == "complete"
+        and (out2 / str(by["x-behind"].folder) / "complete.json").is_file(),
+        [(r.name, r.state, r.note) for r in session.runs],
+    )
+
 
 def run_all(k: ModuleType) -> int:
     with tempfile.TemporaryDirectory(prefix="tp-self-test-", ignore_cleanup_errors=True) as tmp:
@@ -1612,6 +1823,7 @@ def run_all(k: ModuleType) -> int:
         cli(k)
         shrinking(k)
         queues(k)
+        failed_extractions(k)
         resolution(k, root / "resolve")
         previous(k, root / "previous")
         inputs(k, root / "inputs")
@@ -1619,6 +1831,7 @@ def run_all(k: ModuleType) -> int:
         verification(k, root / "verify")
         kernel_folder(k, root / "kernel")
         jepa_entries(k, root / "jepa")
+        extraction_rates(k, root / "rates")
         kernel_acceptance(k, root / "acceptance")
         invalid_plans(k, root / "invalid")
         pilot_28(k, root / "pilot-28")

@@ -60,7 +60,9 @@ then `kaggle datasets version -p <dir> -m <note>`, with a dataset-metadata.json 
 a session stopped at the deadline, and that version reuses the finished runs and continues the
 unfinished ones (`ising resume`, `jepa resume`, or the same `jepa extract` again, which resumes).
 Every session first copies the previous output's runs and the GPU-hour ledger into its own, so
-each version's output holds the whole plan so far.
+each version's output holds the whole plan so far. So one version's 20 GB caps the whole chain: it
+stops at 18 GB however it is split across versions. A plan whose output would exceed 18 GB must be
+cut into separate plans; #28 slice 4's 23 GB of latents will be.
 
 --dry-run really executes the plan on the CPU in a temporary folder, with sizes divided by
 --shrink (8: L = 4 and 8 for Job A) and sweep counts by its square. It builds a wheel from HEAD in a
@@ -84,13 +86,14 @@ runner checks: exit 0; complete.json present, clean, with every check passed; ev
 intact (`jepa verify`, which also checks a latents table's rows); and a manifest whose git_sha is
 COMMIT.txt's, with dirty false. Runs are judged by exit codes, files and manifests, never by
 output text, because Kaggle's image prints sitecustomize errors from every child process. A
-failed run stops its GPU's queue and blocks the runs that read it; the other queues go on. No run
-starts once /kaggle/working holds 18 GB (Kaggle keeps 20 GB) or past 8 h 15 min.
+failed simulator run or training stops its GPU's queue and blocks the runs that read it; the other
+queues go on. A failed extraction blocks only the runs that read it, and its queue's other tables
+go on. No run starts once /kaggle/working holds 18 GB (Kaggle keeps 20 GB) or past 8 h 15 min.
 
 Status: out/STATUS holds one line (running, complete, incomplete, failed or refused) with the
 measured rates: seconds per training step after warm-up, from the training's own GPU-hour ledger,
-and microseconds per extracted frame, by checkpoint. out/kaggle-ising-runs.json holds every run's
-state, the rates, the plan, the environment and the preflight. The kernel exits non-zero only
+and microseconds per extracted frame, by checkpoint and L. out/kaggle-ising-runs.json holds every
+run's state, the rates, the plan, the environment and the preflight. The kernel exits non-zero only
 when its output holds no run folder, since a failed version may not keep its output.
 """
 
@@ -975,8 +978,10 @@ def file_problems(code: int, lines: list[str], dirs: list[Path]) -> list[str]:
 
 class Scheduler:
     """One queue per GPU. A free GPU takes the longest pending run whose dependencies are complete
-    (a pinned run only on its own GPU). A failed run stops its GPU's queue and blocks the runs that
-    read it, while the other queues go on. No run starts after `stop`, or once `budget` objects."""
+    (a pinned run only on its own GPU). A failed run blocks the runs that read it. A failed
+    simulator run or training also stops its GPU's queue, while the other queues go on; a failed
+    extraction does not, so the tables behind it still run. No run starts after `stop`, or once
+    `budget` objects."""
 
     def __init__(
         self,
@@ -1024,7 +1029,8 @@ class Scheduler:
                 log(traceback.format_exc())
             with self.cond:
                 run.state, run.note = state, note
-                if state == "failed":
+                # a failed table costs only the runs that read it: quota is what stopping wastes
+                if state == "failed" and run.command != "jepa extract":
                     self.stopped[gpu] = f"{run.name} failed"
             if state == "complete":
                 guarded("sizing the runs it frees", self.ready, self._unblocked(run))
@@ -1705,9 +1711,10 @@ class Session:
         from its own ledger lines: only lines that continue the one before them in one process,
         so each session's first line, which holds start-up, data loading and the twin's PCA, is
         left out (and so is the closing line, which adds no step). An extraction's microseconds
-        per frame (a latents row), by checkpoint: the readout from its table's own clock (the
-        manifest's started_ns, written once the model is loaded, to complete.json's ended_ns;
-        tables finished in one session only), and the whole process, start-up included."""
+        per frame (a latents row), by checkpoint and by the L its table's manifest records, since
+        a frame's cost grows with L: the readout from the table's own clock (the manifest's
+        started_ns, written once the model is loaded, to complete.json's ended_ns; tables finished
+        in one session only), and the whole process, start-up included."""
         ledger = []
         path = self.ctx.out / "jepa" / LEDGER
         if path.is_file():
@@ -1737,8 +1744,10 @@ class Session:
                     }
             elif r.command == "jepa extract":
                 ckpt = next((a for a in r.args if isinstance(a, dict) and "file" in a), {})
+                manifest = read_json(self.ctx.out / r.folder / "manifest.json") or {}
+                size = ((manifest.get("params") or {}).get("dataset") or {}).get("L")
                 group = extract.setdefault(
-                    f"{ckpt.get('run', '?')} {ckpt.get('file', '')}".strip(),
+                    " ".join(filter(None, (ckpt.get("run", "?"), ckpt.get("file"), f"L{size}"))),
                     {
                         "tables": 0,
                         "frames": 0,
@@ -1751,9 +1760,7 @@ class Session:
                 group["tables"] += 1
                 group["frames"] += rows
                 group["seconds"] += r.wall_s
-                began = (read_json(self.ctx.out / r.folder / "manifest.json") or {}).get(
-                    "started_ns"
-                )
+                began = manifest.get("started_ns")
                 if (
                     not r.resumed
                     and isinstance(began, int)
