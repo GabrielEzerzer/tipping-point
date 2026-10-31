@@ -328,11 +328,13 @@ which only names the folder. `--checkpoint-every` and Gate C's tallies stay out 
 what is written, not what is drawn.
 
 Runs made before this (the seeds 1-5 datasets, the grid pilots, #54's record) drew from the seed
-alone, so two of one shape at one seed shared their start and all their numbers. Measured at
-L = 16 with 64 replicas, that shows in the first sweeps and wherever two runs hold one temperature,
-as two ramps do during their equilibration, where they are bit-identical. Runs at different
-temperatures decorrelate within about 20 sweeps, and over 700 measured sweeps the correlation of
-M(t) between null runs stays within 0.03 of zero with or without a shared stream.
+alone, so two of one shape at one seed shared their start and all their numbers, and two holding
+one temperature, as two ramps do during their equilibration, were bit-identical. The sharing does
+not fade: one field of random numbers moves the uphill flips of every run on it together, even
+after their lattices have parted. Measured replica by replica between null runs at eps_L 2, 4 and
+6, energy correlates at r = 0.22-0.29 at L = 16 and 0.27-0.33 at L = 32, and |m| at 0.02-0.05 and
+0.01-0.03; a slow ramp against a null run, sweep to sweep at L = 16, at 0.28 in energy and 0.06 in
+|m|. With a stream per run, all of these are within noise of zero. Signed M hides the effect.
 
 ### The pilot record: tau_c(L)
 

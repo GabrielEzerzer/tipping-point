@@ -5,7 +5,9 @@ bytes as a straight run; a different seed -> different bytes; another run at the
 another stream (run.stream_key), however alike their shapes.
 """
 
+import hashlib
 import itertools
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -123,6 +125,9 @@ def test_every_run_v1_makes_at_one_size_and_seed_draws_its_own_stream(
         keys[name] = params["rng"]["seed"]
         assert keys[name] == run.stream_key(spec, protocol.from_json(params["schedule"])), name
         assert 0 <= keys[name] < 2**63 and params["rng"]["derivation"] == run.STREAM_DERIVATION
+        identity = {key: params[key] for key in ("seed", "L", "replicas", "init", "schedule")}
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).digest()
+        assert keys[name] == int.from_bytes(digest[:8], "big") >> 1, name  # the rule, in its words
         gen = torch.Generator().manual_seed(keys[name])  # the key is what seeded the generator
         spins = torch.randint(0, 2, (64, 16, 16), generator=gen, dtype=torch.int8) * 2 - 1
         assert torch.equal(spins, started[name][0]), name
@@ -161,36 +166,72 @@ def test_the_stream_follows_the_runs_identity_and_nothing_else() -> None:
     assert len({key, *others}) == 1 + len(others), others
 
 
-def test_runs_of_one_shape_at_one_seed_do_not_share_their_noise(tmp_path: Path) -> None:
-    """The same, read off what the real loop writes, on cut-down v1 schedules of one shape. With
-    one stream, M after the first sweep correlates across replicas at r = 0.94-1.00 for any two
-    (one start, one sweep's numbers), and the two ramps, held at one T0, are bit-equal throughout
-    the hold; apart, r is at most 0.19 and 2% of those values agree, as M's even integers do by
-    chance. Long-run correlations cannot show this: runs at different T decorrelate within ~20
-    sweeps on one stream too."""
-    L, replicas, pre = 16, 64, 30
+HOLD = 30  # sweeps the cut-down v1 schedules below hold before they measure or cool
+
+
+@pytest.fixture(scope="module")
+def one_shape(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict[str, np.ndarray]]:
+    """M and E, (sweeps, replicas), from the real loop: cut-down v1 schedules of one shape, at one
+    seed, each read from its first sweep."""
+    L, replicas = 16, 64
+    root = tmp_path_factory.mktemp("one-shape")
     T0, T1 = (TC * (1 + eps / L) for eps in (12.0, -8.0))
     schedules: dict[str, protocol.Schedule] = {
         "staircase": protocol.Staircase(
-            [0.1, 0.1], (3.5, 2.5), warmup=0, min_therm=pre, min_meas=pre, saves=0
+            [0.1, 0.1], (3.5, 2.5), warmup=0, min_therm=HOLD, min_meas=HOLD, saves=0
         ),
-        "slow ramp": protocol.Ramp(40, L, T0=T0, T1=T1, pre=pre, hold=1),
-        "fast ramp": protocol.Ramp(20, L, T0=T0, T1=T1, pre=pre, hold=1),
+        "slow ramp": protocol.Ramp(100, L, T0=T0, T1=T1, pre=HOLD, hold=1),
+        "fast ramp": protocol.Ramp(20, L, T0=T0, T1=T1, pre=HOLD, hold=1),
     }
     for eps in protocol.NULL_EPSILON_L:
-        schedules[f"null {eps:g}"] = protocol.Fixed((TC * (1 + eps / L),), therm=pre, sweeps=pre)
+        schedules[f"null {eps:g}"] = protocol.Fixed((TC * (1 + eps / L),), therm=HOLD, sweeps=400)
     spec = run.Spec(L=L, replicas=replicas, seed=6)
-    magnetisation = {}
+    series = {}
     for name, schedule in schedules.items():
-        stats = io.read_table(run.start(spec, schedule, tmp_path / name, "t", "cpu"), "stats")
-        step, replica = stats["step"].to_numpy(), stats["replica"].to_numpy()
-        rows = np.lexsort((replica, step))
-        magnetisation[name] = stats["magnetisation"].to_numpy()[rows].reshape(-1, replicas)
-    for a, b in itertools.combinations(schedules, 2):
-        r = np.corrcoef(magnetisation[a][0], magnetisation[b][0])[0, 1]
+        stats = io.read_table(run.start(spec, schedule, root / name, "t", "cpu"), "stats")
+        rows = np.lexsort((stats["replica"].to_numpy(), stats["step"].to_numpy()))
+        series[name] = {
+            column: stats[column].to_numpy()[rows].reshape(-1, replicas).astype(np.float64)
+            for column in ("magnetisation", "energy")
+        }
+    return series
+
+
+def _paired(a: np.ndarray, b: np.ndarray) -> float:
+    """The correlation of two (sweeps, replicas) series, replica by replica, over the sweeps they
+    share, averaged over the replicas."""
+    n = min(len(a), len(b))
+    return float(np.mean([np.corrcoef(a[:n, j], b[:n, j])[0, 1] for j in range(a.shape[1])]))
+
+
+def test_runs_of_one_shape_at_one_seed_do_not_start_alike(
+    one_shape: dict[str, dict[str, np.ndarray]],
+) -> None:
+    """The same, read off what the real loop writes. On one stream, M after the first sweep
+    correlates across replicas at r = 0.94-1.00 for any two runs (one start, one sweep's numbers),
+    and the two ramps, held at one T0, are bit-equal throughout the hold. Apart, r is at most 0.28,
+    the noise of 64 replicas, and 1.6% of those values agree, as M's even integers do by chance."""
+    for a, b in itertools.combinations(one_shape, 2):
+        r = np.corrcoef(one_shape[a]["magnetisation"][0], one_shape[b]["magnetisation"][0])[0, 1]
         assert abs(r) < 0.5, (a, b, r)
-    slow, fast = magnetisation["slow ramp"][:pre], magnetisation["fast ramp"][:pre]
+    slow, fast = (one_shape[f"{speed} ramp"]["magnetisation"][:HOLD] for speed in ("slow", "fast"))
     assert (slow == fast).mean() < 0.2
+
+
+def test_runs_of_one_shape_at_one_seed_do_not_share_noise_however_long_they_run(
+    one_shape: dict[str, dict[str, np.ndarray]],
+) -> None:
+    """One field of random numbers moves the uphill flips of every run on it together, even once
+    their lattices have parted. On one stream the null runs' energies correlate at r = 0.23-0.30
+    at this L (0.27-0.33 at L = 32), and a slow ramp's sweep-to-sweep changes against a null run's
+    at 0.25-0.29: the AUC's positives and negatives, driven by one noise realisation. Apart, all
+    are within 0.02 of zero. Signed M shows none of it, either way: it is no check of this."""
+    nulls = [one_shape[f"null {eps:g}"]["energy"][HOLD:] for eps in protocol.NULL_EPSILON_L]
+    for a, b in itertools.combinations(nulls, 2):
+        assert abs(_paired(a, b)) < 0.1
+    ramp = np.diff(one_shape["slow ramp"]["energy"][HOLD:], axis=0)
+    for energy in nulls:
+        assert abs(_paired(ramp, np.diff(energy, axis=0))) < 0.1
 
 
 def test_different_seed_gives_different_bytes(tmp_path: Path) -> None:
