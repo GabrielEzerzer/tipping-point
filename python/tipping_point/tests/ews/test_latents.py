@@ -479,6 +479,24 @@ def test_every_judged_pairs_peak_is_reported_and_only_the_statistics_judged(
     }
 
 
+def test_the_dynamic_test_judges_the_statistics_beside_a_stale_key() -> None:
+    """Review, round 1: with a v1 fss.dynamic.indicators beside the statistics, _dynamic took the v1
+    list, which holds none of their keys, and judged nothing while _peaks read them all. The
+    validator refuses that key now, but a doc that never went through it (an exploratory call)
+    still has what was read judged, and a peak reported but not listed is still not."""
+    doc = tomllib.loads(DRAFT.read_text("utf-8"))
+    doc["scoring"]["bootstrap"] = 20
+    doc["fss"]["dynamic"]["indicators"] = ["variance", "ac"]
+    rng = np.random.default_rng(29)
+    at_eps = {L: [0.6 + 0.01 * rng.standard_normal(4) for _ in V1_SEEDS] for L in V1_SIZES}
+    judged = ["pc_1_variance", "surprise_variance", "surprise_slope"]
+    peaks = {(key, "matched"): at_eps for key in [*judged, "pc_1_ac"]}
+    rows = ising._dynamic(doc, peaks, rng)
+    assert [r["quantity"] for r in rows] == [f"inverse_nu_{key}" for key in judged]
+    assert [r["role"] for r in rows] == ["dynamic-pipeline-check", "dynamic-test", "dynamic-test"]
+    assert all(r["verdict"] == fss.PASS for r in rows), rows
+
+
 def test_the_twins_surprise_is_not_scored_as_scaling(scored: ising.Evaluation) -> None:
     """Hypothesis 5(c) needs a surprise statistic to pass for the trained checkpoint and for none of
     the twins. A flat surprise is noise: its slope's extremum falls anywhere in the band, and the

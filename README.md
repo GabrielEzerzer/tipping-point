@@ -525,7 +525,9 @@ and the scorer takes both through every table, once per checkpoint.
   collapses to one cell per window. The extremum of `slope` is the dynamic statistic of a channel
   with no interior peak: finite-size scaling puts the steepest change at a fixed eps_L, 1/nu = 1,
   and a feature anchored to a fixed T gives 1/nu = 0. The harness plants both, and the second is the
-  dynamic test's negative control.
+  dynamic test's negative control. Positions are read half the headline window late (0.2 eps_L),
+  and a read position within noise of 0, a true steepest change near +0.2 eps_L rather than at Tc,
+  is inconclusive.
 - **Rows.** Every row of every table has a `checkpoint` column, the table's folder name, and so does
   each line of `trials.jsonl`; a classic row's is `""`. The file pins each checkpoint's sha256 and
   role, and the result's manifest gives the sha256 of each table's `complete.json` per run.
@@ -542,7 +544,7 @@ and the scorer takes both through every table, once per checkpoint.
   accepts, with placeholders for what the exploratory pass sets, and the freeze refuses them all.
 
 Nothing here changes what ising-ews-v1 scores. `harness/ews_v1_golden.py` wrote every row and value
-of a v1 scoring on planted data from the commit its freeze tag is cut at, and
+of a v1 scoring on planted data from aa29cbc, the freeze lane's merge, and
 `python/tipping_point/tests/ews/test_v1_unchanged.py` holds later commits to them, RNG stream
 included.
 

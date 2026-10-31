@@ -250,6 +250,8 @@ role = "reference"                # compared with v1's one_minus_ac1 of |m| (abo
 tolerance = "<set before freeze>"
 
 [fss.dynamic]
+# Positions are read half the headline window late (0.2 eps_L), and a read position within noise of
+# 0, a true steepest change near +0.2 eps_L rather than at Tc, is inconclusive.
 search = [6.0, -4.0]
 cadence = "matched"
 expected_inverse_nu = 1.0

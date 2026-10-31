@@ -1135,9 +1135,11 @@ def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> lis
     dyn, sc = doc["fss"]["dynamic"], doc["scoring"]
     expected, tolerance = float(dyn["expected_inverse_nu"]), float(dyn["tolerance"])
     roles = {_statistic_key(entry): entry["role"] for entry in dyn.get("statistics", [])}
+    # dispatched as _peak_statistics is: what is read is judged, whatever else the section holds
+    named = roles if "statistics" in dyn else dyn["indicators"]
     rows = []
     for (name, cadence), samples in peaks.items():
-        if name not in dyn.get("indicators", roles):
+        if name not in named:
             continue  # reported in the peaks table, never judged
         fit = fss.peak_convergence(samples, int(sc["bootstrap"]), rng, float(sc["ci_level"]))
         judged = cadence == dyn["cadence"]

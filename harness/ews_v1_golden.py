@@ -1,5 +1,5 @@
-"""What the ising-ews v1 scorer gives on planted data at the commit its freeze tag is cut at, so
-that a later commit can be held to it: the same rows, the same values, in the same order.
+"""What the ising-ews v1 scorer gives on planted data at aa29cbc, the freeze lane's merge, so that
+a later commit can be held to it: the same rows, the same values, in the same order.
 
 score() runs ising.evaluate on the planted v1 dataset (fss mode) under the committed
 paper/prereg/ising-ews-v1.toml. The file's settings change only as far as the planted data need

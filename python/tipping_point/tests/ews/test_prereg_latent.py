@@ -14,7 +14,8 @@ from tipping_point.jepa import probes, train
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 DRAFT = FIXTURES / "ising_latent_draft.toml"
-V1 = Path(__file__).resolve().parents[4] / "paper" / "prereg" / "ising-ews-v1.toml"
+REPO = Path(__file__).resolve().parents[4]
+V1 = REPO / "paper" / "prereg" / "ising-ews-v1.toml"
 SHA = "a" * 64
 
 
@@ -230,6 +231,24 @@ def test_malformed_latent_files_are_named(draft: dict[str, Any], edit: Any, comp
     assert any(complaint in problem for problem in prereg.problems(draft)), prereg.problems(draft)
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("indicators", ["variance", "ac"]), ("statistic", "peak"), ("observable", "pc_1")],
+)
+def test_a_stale_v1_key_under_fss_dynamic_is_refused(
+    draft: dict[str, Any], key: str, value: Any
+) -> None:
+    """Review, round 1: these are ising-ews-v1's keys, and _check passes a key the schema does not
+    list. `indicators` beside the statistics went through draft and strict alike and froze, and the
+    scorer then judged nothing: no inverse_nu row and no error. A latent file with any of them is
+    refused now, draft or ready to freeze."""
+    filled = _filled(draft)
+    assert prereg.problems(filled, strict=True) == []
+    draft["fss"]["dynamic"][key] = filled["fss"]["dynamic"][key] = value
+    assert any(p.startswith(f"fss.dynamic.{key}: ") for p in prereg.problems(draft))
+    assert any(p.startswith(f"fss.dynamic.{key}: ") for p in prereg.problems(filled, strict=True))
+
+
 def test_every_enumerated_placeholder_is_a_choice_only_in_a_latent_file() -> None:
     """A file with no [latents] section is checked as v1 was: a placeholder in a direction is not a
     direction, and it may name neither a latent column nor a latent indicator, role or quantity. The
@@ -286,21 +305,51 @@ def test_a_training_that_names_the_draft_refuses_the_seeds_it_scores() -> None:
     assert train.prereg_record(DRAFT)["seeds"] == [6, 7, 8, 9, 10]
 
 
-def test_the_freeze_refuses_the_draft_as_it_is(tmp_path: Path) -> None:
-    """Through the path a freeze takes: committed as paper/prereg/ising-latent-v1.toml, the draft is
-    loaded, then refused for its placeholders, and no tag is made."""
+def _committed(repo: Path, text: bytes) -> Path:
+    """`text` committed as paper/prereg/ising-latent-v1.toml in a scratch repository."""
     for args in (
         ("init", "-q"),
         ("config", "user.name", "Test"),
         ("config", "user.email", "t@example.com"),
         ("config", "core.autocrlf", "false"),
     ):
-        _git(tmp_path, *args)
-    path = tmp_path / "paper" / "prereg" / "ising-latent-v1.toml"
+        _git(repo, *args)
+    path = repo / "paper" / "prereg" / "ising-latent-v1.toml"
     path.parent.mkdir(parents=True)
-    path.write_bytes(DRAFT.read_bytes())
-    _git(tmp_path, "add", ".")
-    _git(tmp_path, "commit", "-q", "-m", "draft")
+    path.write_bytes(text)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "draft")
+    return path
+
+
+def test_the_freeze_refuses_a_stale_v1_key_before_it_tags(tmp_path: Path) -> None:
+    """The file fails loudly as it loads, so a stale key never reaches a tag."""
+    header = b"[fss.dynamic]\n"
+    stale = DRAFT.read_bytes().replace(header, header + b'indicators = ["variance", "ac"]\n')
+    path = _committed(tmp_path, stale)
+    with pytest.raises(prereg.PreregError, match=r"fss\.dynamic\.indicators: "):
+        prereg.load(path)
+    with pytest.raises(prereg.PreregError, match=r"fss\.dynamic\.indicators: "):
+        prereg.freeze(tmp_path, "ising-latent")
+    assert not _git(tmp_path, "tag", "--list")
+
+
+def test_the_draft_and_the_readme_say_how_late_a_position_is_read(draft: dict[str, Any]) -> None:
+    """Review, round 1: a trailing window's extremum is read half a window late. That is v1's frozen
+    peak path, so positions are not corrected; a file says so instead, with the dead zone it puts
+    near a true steepest change of +0.2 eps_L. The figure follows from its window and ramp rate."""
+    window = draft["sensitivity"]["headline"]["window"]
+    assert window * draft["data"]["ramps"]["x"] / 2 == pytest.approx(0.2)
+    for path in (DRAFT, REPO / "README.md"):
+        text = " ".join(path.read_text("utf-8").replace("#", " ").split())
+        assert "read half the headline window late (0.2 eps_L)" in text, path
+        assert "a read position within noise of 0" in text, path
+
+
+def test_the_freeze_refuses_the_draft_as_it_is(tmp_path: Path) -> None:
+    """Through the path a freeze takes: committed as paper/prereg/ising-latent-v1.toml, the draft is
+    loaded, then refused for its placeholders, and no tag is made."""
+    path = _committed(tmp_path, DRAFT.read_bytes())
     assert prereg.load(path).name == "ising-latent-v1"
     with pytest.raises(prereg.PreregError, match="not ready to freeze") as refused:
         prereg.freeze(tmp_path, "ising-latent")

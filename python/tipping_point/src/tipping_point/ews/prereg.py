@@ -305,6 +305,9 @@ def _latent_problems(doc: dict[str, Any]) -> list[str]:
         found.append("scoring.surrogates.n_ablation: the surrogates per ablation checkpoint")
     if not _SLUG.fullmatch(doc["baseline"]["prereg"]):
         found.append("baseline.prereg: the <id>-v<k> whose runs this file reads")
+    for key in ("statistic", "indicators", "observable"):  # v1's, which statistics replaces
+        if key in dyn:
+            found.append(f"fss.dynamic.{key}: a file with [latents] judges fss.dynamic.statistics")
     if not dyn["statistics"]:
         found.append("fss.dynamic.statistics: at least one")
     for i, entry in enumerate(dyn["statistics"]):
