@@ -1,28 +1,44 @@
-"""In-process checks of notebooks/kaggle_ising_runs.py, run by its --self-test:
+"""Checks of notebooks/kaggle_ising_runs.py, run by its --self-test or directly:
 
     uv run --no-sync python notebooks/kaggle_ising_runs.py --self-test
+    uv run --no-sync python notebooks/kaggle_ising_runs_selftest.py
 
 Plan validation and the CLI's verdict on every run's arguments; dependency resolution; the queues
 (longest first, dependencies, pinning, a failure, the deadline, the output cap) with a stand-in for
 the simulator; the previous session's runs carried forward and reused or resumed; inputs found and
 checked against their sha256; the wheel and COMMIT.txt checks; run verification, judged by exit
-codes and files only. Nothing is simulated; one `jepa verify` runs in a child process. One line
-per check, then exit 1 if any failed.
+codes and files only; the kernel folder against what `kaggle kernels push` checks; invalid plans
+refused at every door; pilot-28.json, its stage ids and kernel sources, on stand-in mounts.
+
+Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
+(a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
+`jepa extract` of its final.pt and of its twin, each run checked with `jepa verify`) in a venv that
+prints Kaggle's sitecustomize errors on stderr from every child. No wheel is built: the venv holds
+a copy of the package stamped clean, so the outcome does not depend on this checkout's state.
+
+About five minutes on a laptop CPU. One line per check, then exit 1 if any failed.
 """
 
 from __future__ import annotations
 
+import ast
+import collections
 import copy
 import hashlib
+import inspect
+import itertools
 import json
 import os
+import re
 import runpy
 import shutil
+import site
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import tomllib
 import zipfile
 from pathlib import Path
 from types import ModuleType
@@ -1086,8 +1102,510 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
     )
 
 
+def push_problems(folder: Path) -> list[str]:
+    """What `kaggle kernels push` (CLI 2.2.5, KaggleApi.kernels_push) refuses in a folder before it
+    sends anything, plus the T4 x2 shape a plan's gpu pins and one queue per T4 need."""
+    problems = []
+    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    if len(meta.get("title") or "") < 5:
+        problems.append("the title is under five characters")
+    code = folder / str(meta.get("code_file") or "")
+    if not code.is_file():
+        problems.append(f"no source file {meta.get('code_file')!r}")
+    else:
+        ast.parse(code.read_text(encoding="utf-8"))
+    owner, _, slug = str(meta.get("id")).partition("/")
+    if not owner or not slug or "/" in slug:
+        problems.append(f"id {meta.get('id')!r} is not <owner>/<slug>")
+    if slug != meta.get("title"):  # the CLI warns of surprising behaviour when these differ
+        problems.append(f"the title {meta.get('title')!r} does not resolve to the slug {slug!r}")
+    if meta.get("language") not in ("python", "r", "rmarkdown"):
+        problems.append(f"language {meta.get('language')!r}")
+    if meta.get("kernel_type") not in ("script", "notebook"):
+        problems.append(f"kernel_type {meta.get('kernel_type')!r}")
+    for key in ("dataset_sources", "kernel_sources"):
+        problems += [
+            f"{key}: {s!r} is not <owner>/<slug>"
+            for s in meta.get(key, [])
+            if not re.fullmatch(r"[^/\s]+/[^/\s]+", s)
+        ]
+    if meta.get("machine_shape") != "NvidiaTeslaT4":  # the CLI's name for GPU T4 x2
+        problems.append(f"machine_shape {meta.get('machine_shape')!r}: not T4 x2")
+    if not (meta.get("enable_gpu") and meta.get("enable_internet") and meta.get("is_private")):
+        problems.append("a kernel needs a GPU and the internet, and stays private")
+    return problems
+
+
+def leaks(folder: Path) -> list[str]:
+    """Credentials, and data naming a person or a machine, in the files a push would send."""
+    secret = re.compile(
+        r"(?i)kaggle_key|kaggle_username|usersecrets|kaggle_secrets|github_token|ghp_|access_token"
+    )
+    email = re.compile(r"[\w.+-]+@[\w-]+\.[a-z]{2,}")
+    found = []
+    for path in folder.iterdir():
+        text = path.read_text(encoding="utf-8")
+        found += [f"{path.name}: {m[0]}" for m in secret.finditer(text)]
+        found += [f"{path.name}: {m[0]}" for m in email.finditer(text)]
+        if str(Path.home()) in text:
+            found.append(f"{path.name}: a local path")
+    return found
+
+
+def kernel_acceptance(k: ModuleType, root: Path) -> None:
+    for name in ("job-a", "pilot-28"):
+        source, folder = PLANS / f"{name}.json", root / name
+        plan = json.loads(source.read_text(encoding="utf-8"))
+        code = k.main(["--write-kernel", str(source), str(folder)])
+        problems = push_problems(folder)
+        check(
+            f"{name}: --write-kernel writes a folder `kaggle kernels push` would take",
+            code == 0 and not problems,
+            problems,
+        )
+        check(
+            f"{name}: the folder holds the kernel and its metadata alone",
+            sorted(p.suffix for p in folder.iterdir()) == [".json", ".py"],
+        )
+        script = folder / f"{plan['kernel']}.py"
+        loaded = runpy.run_path(str(script), run_name="tp_kernel_check")
+        check(f"{name}: the plan is embedded whole", json.loads(loaded["PLAN_JSON"]) == plan)
+        found = leaks(folder)
+        check(f"{name}: no credentials and nothing identifying in the folder", not found, found)
+    folder = root / "resumed"
+    code = k.main(["--write-kernel", str(PLANS / "pilot-28.json"), str(folder), "--resume"])
+    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    check(
+        "pilot-28 --resume: the same folder, with the kernel's own output attached last",
+        code == 0
+        and not push_problems(folder)
+        and meta["kernel_sources"][-1] == f"{k.OWNER}/tp-jepa-pilot-28",
+        meta,
+    )
+    install = inspect.getsource(k.ensure_env) + inspect.getsource(k.kernel_main)
+    check(
+        "the kernel's path installs the wheel: no clone, no token",
+        "git" not in install and "token" not in install.lower() and "wheel" in install,
+    )
+    lock = tomllib.loads((PLANS.parents[1] / "uv.lock").read_text(encoding="utf-8"))
+    locked = {(p["name"], p["version"]) for p in lock["package"]}
+    pins = [tuple(pin.split("==")) for pin in (k.TORCH, *k.PINNED)]
+    check("the kernel's pinned versions are uv.lock's", all(p in locked for p in pins), pins)
+
+
+def invalid_plans(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN_JSON
+    bad = copy.deepcopy(JEPA_PLAN)
+    bad["runs"][1]["args"][1] = {"dataset_run": "20261101T000000Z-L16-null-e2-s7"}
+    path = root / "bad.json"
+    root.mkdir(parents=True)
+    path.write_text(json.dumps(bad), encoding="utf-8")
+    dest = root / "never"
+    code = k.main(["--write-kernel", str(path), str(dest)])
+    check(
+        "--write-kernel refuses an invalid plan: exit 2, no folder", code == 2 and not dest.exists()
+    )
+    check(
+        "--dry-run refuses it too, before building anything", k.main(["--dry-run", str(path)]) == 2
+    )
+
+    saved, k.PLAN_JSON = k.PLAN_JSON, json.dumps(bad)
+    try:
+        ctx = ctx_at(k, root)
+        code = k.kernel_main(ctx)
+        said = (ctx.out / "STATUS").read_text(encoding="utf-8")
+        check(
+            "a kernel holding an invalid plan runs nothing: STATUS refused, exit 1",
+            code == 1 and said.startswith("refused:") and "seed 7" in said,
+            f"exit {code}: {said}",
+        )
+        k.PLAN_JSON = None
+        code = k.kernel_main(ctx)
+        said = (ctx.out / "STATUS").read_text(encoding="utf-8")
+        check("a kernel with no plan at all: refused", said.startswith("refused: no plan"), said)
+    finally:
+        k.PLAN_JSON = saved
+
+    def extract_args(args: list) -> str:
+        plan = copy.deepcopy(JEPA_PLAN)
+        plan["runs"][1]["args"] = args
+        return refused(k, plan)
+
+    both = {"dataset_run": NULL}
+    trained = {"run": "m3", "file": "final.pt"}
+    for what, args in (
+        ("no simulator run", [trained]),
+        ("no checkpoint", [both]),
+        ("a checkpoint given as a plain path", ["final.pt", both]),
+        ("a training with no file named", [{"run": "m3"}, both]),
+        ("two simulator runs", [trained, both, {"dataset_run": STAIRS[0]}]),
+    ):
+        why = extract_args(args)
+        check(f"refused: jepa extract with {what}", "one checkpoint" in why, why or "accepted")
+
+
+PILOT_RECORD = "20261025T194846Z-tauc-L16-32-64-128"  # #54's record
+PILOT_SHA256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698"
+DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
+KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
+
+
+def flag_ints(args: list, flag: str) -> list[int]:
+    """The integers a flag takes, up to the next flag."""
+    values = args[args.index(flag) + 1 :]
+    end = next((i for i, v in enumerate(values) if not isinstance(v, int)), len(values))
+    return values[:end]
+
+
+def stand_in_run(folder: Path, run_id: str) -> None:
+    """A simulator run as the library's readers see it: its L, seed and kind from its id."""
+    tag = DATASET_ID.fullmatch(run_id)
+    assert tag is not None, run_id
+    folder.mkdir(parents=True)
+    params = {"L": int(tag[1]), "seed": int(tag[3]), "schedule": {"kind": KINDS[tag[2]]}}
+    manifest = {"run_id": run_id, "params": params}
+    (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    done = {"clean": True, "files": {}, "checks": {}}
+    (folder / "complete.json").write_text(json.dumps(done), encoding="utf-8")
+
+
+def pilot_28(k: ModuleType, root: Path) -> None:
+    from tipping_point.jepa.data import find_staircases
+
+    plan = json.loads((PLANS / "pilot-28.json").read_text(encoding="utf-8"))
+    runs = {r["name"]: r for r in plan["runs"]}
+    trainings = {"timing": ([16, 32, 64], 99, 2000), "pilot": ([16, 32], 100, 10000)}
+    errors = k.cli_errors(plan)
+    check("pilot-28: the CLI itself takes every run's arguments", errors == [], errors)
+    extractions = [r for r in plan["runs"] if r["command"] == "jepa extract"]
+    check(
+        "pilot-28: its two trainings run on GPU 0, every extraction on GPU 1",
+        [r["name"] for r in plan["runs"] if r["command"] == "jepa train"] == list(trainings)
+        and all(runs[n]["gpu"] == 0 for n in trainings)
+        and all(r["gpu"] == 1 for r in extractions),
+    )
+    check(
+        "pilot-28: its kernel sources are Job A's output and the tau_c kernel's",
+        plan["kernel_sources"] == [f"{k.OWNER}/{job_a()['kernel']}", f"{k.OWNER}/tp-tauc-l64-l128"],
+        plan["kernel_sources"],
+    )
+    record = plan["inputs"]["record"]
+    check(
+        "pilot-28: its --pilot is #54's record, pinned by sha256",
+        (record["run"], record["file"], record["sha256"])
+        == (PILOT_RECORD, "pilot.json", PILOT_SHA256),
+        record,
+    )
+    for name, (sizes, seed, steps) in trainings.items():
+        args = runs[name]["args"]
+        seeds = [*flag_ints(args, "--train-seeds"), *flag_ints(args, "--val-seed")]
+        check(
+            f"pilot-28: {name} is the research pass's: its sizes, seeds 11-16, model seed, steps",
+            flag_ints(args, "--L") == sizes
+            and seeds == [11, 12, 13, 14, 15, 16]
+            and flag_ints(args, "--seed") == [seed]
+            and flag_ints(args, "--steps") == [steps]
+            and {"input": "record"} in args,
+            args,
+        )
+        tags = [DATASET_ID.fullmatch(s) for s in runs[name]["stage"]]
+        staged = sorted((int(t[1]), int(t[3])) for t in tags if t and t[2] == "qs")
+        check(
+            f"pilot-28: {name}'s stage ids are one staircase for each of its (L, seed)",
+            staged == sorted((L, s) for L in sizes for s in seeds)
+            and len(staged) == len(runs[name]["stage"]),
+            runs[name]["stage"],
+        )
+    made = {
+        tuple(flag_ints(r["args"], f)[0] for f in ("--L", "--seed"))
+        for r in job_a()["runs"]
+        if r["command"] == "staircase"
+    }
+    large = {
+        (int(t[1]), int(t[3]))
+        for t in map(DATASET_ID.fullmatch, runs["timing"]["stage"])
+        if t and t[1] == "64"
+    }
+    check("pilot-28: its L = 64 stage ids are the staircases Job A makes", large == made, large)
+    read = [(r["args"][0], r["args"][1]["dataset_run"], r["args"][2:]) for r in extractions]
+    untrained = all(c["file"] == k.TWIN for c, _, _ in read if c["run"] == "timing")
+    tagged = [DATASET_ID.fullmatch(d) for _, d, _ in read]
+    wrong = [
+        d
+        for (_, d, rest), t in zip(read, tagged, strict=True)
+        if t is None or (rest == ["--select", "tc-plus"]) != (t[2] == "qs")
+    ]
+    check("pilot-28: staircases are read as tc-plus, ramps and nulls whole", not wrong, wrong)
+    seeds = {int(t[3]) for t in tagged if t}
+    check(
+        "pilot-28: extraction reads the exploratory seeds and the validation seed alone",
+        seeds == {1, 2, 3, 4, 5, 16} and untrained,
+        seeds,
+    )
+    pairs = collections.Counter((c["run"], c["file"], d) for c, d, _ in read if c["run"] == "pilot")
+    exploratory = {d for c, d, _ in read if c["run"] == "pilot"}
+    check(
+        "pilot-28: the pilot's final.pt and twin each read all 60 exploratory runs, once",
+        len(exploratory) == 60
+        and all(pairs[("pilot", f, d)] == 1 for f in (k.TWIN, k.FINAL) for d in exploratory),
+        len(exploratory),
+    )
+    benched = {d for c, d, _ in read if c["run"] == "timing"}
+    check(
+        "pilot-28: the benchmark reads a null and a slow ramp per L, and the L = 64 staircase",
+        sorted(d.split("Z-", 1)[1] for d in benched)
+        == [
+            "L16-null-e2-s1",
+            "L16-ramp-x0p02-s1",
+            "L32-null-e2-s1",
+            "L32-ramp-x0p02-s1",
+            "L64-qs-s16",
+        ],
+        benched,
+    )
+
+    # the plan on the mounts Kaggle gives it, each run where its source holds it: only the record
+    # is a stand-in, since its bytes are on Kaggle and the runner checks them there
+    ctx = ctx_at(k, root)
+    ctx.py = sys.executable
+    ctx.helper.write_text(k.HELPER_SOURCE, encoding="utf-8")
+    trial = copy.deepcopy(plan)
+    folder = ctx.input / "tp-tauc-l64-l128" / "out" / "ising" / PILOT_RECORD
+    folder.mkdir(parents=True)
+    (folder / "pilot.json").write_text("{}", encoding="utf-8")
+    trial["inputs"]["record"]["sha256"] = hashlib.sha256(b"{}").hexdigest()
+    session = k.Session(ctx, trial, {}, COMMIT, TORCH, 2)
+    dataset_ids = k.dataset_runs(session.runs)
+    job_output = ctx.input / "tp-ising-job-a" / "out" / "ising"
+    dataset = ctx.input / "tipping-point-ising-l16-l32"
+    for run_id in dataset_ids:
+        stand_in_run((job_output if "-L64-" in run_id else dataset) / run_id, run_id)
+    session.locate_inputs()
+    session.locate_datasets()
+    check(
+        "pilot-28: all 78 dataset runs are found among the attached sources",
+        len(session.datasets) == 78 and set(session.datasets) == set(dataset_ids),
+        len(session.datasets),
+    )
+    errors = session.capture(session.runs)
+    check("pilot-28: the helper's capture, as on Kaggle, refuses nothing", errors == [], errors)
+    session.stage()
+    for name, (sizes, _, _) in trainings.items():
+        found = find_staircases(ctx.out, sizes, [11, 12, 13, 14, 15, 16])
+        check(
+            f"pilot-28: staged, the training's own lookup finds {name}'s runs, and only one each",
+            {r.run_id for r in found.values()} == set(runs[name]["stage"]),
+            sorted(r.run_id for r in found.values()),
+        )
+    for name in trainings:
+        training = session.by_name[name]
+        training.state, training.folder = "complete", f"jepa/{name}"
+        (ctx.out / training.folder / "ckpt").mkdir(parents=True)
+        (ctx.out / training.folder / k.FINAL).write_bytes(b"trained")
+        (ctx.out / training.folder / k.TWIN).write_bytes(b"untrained")
+    tail, _ = session.resolve(session.by_name["bench-L64-qs-s16"])
+    check(
+        "pilot-28: an extraction resolves to its staged run, tc-plus kept",
+        tail[0] == str(ctx.out / session.by_name["timing"].folder / k.TWIN)
+        and tail[1] == str(ctx.out / "ising" / "20261025T223231Z-L64-qs-s16")
+        and tail[2:] == ["--select", "tc-plus"],
+        tail,
+    )
+    refused_seeds = []
+    for r in session.runs:
+        if r.command == "jepa extract":
+            try:
+                session.refuse_seeds(r)
+            except k.RunError as exc:
+                refused_seeds.append(str(exc))
+    check(
+        "pilot-28: no extraction reads seeds 6-10, read from the runs' own manifests",
+        not refused_seeds,
+        refused_seeds,
+    )
+    session.unstage()
+    left = [p.name for p in (ctx.out / "ising").iterdir()]
+    check("pilot-28: staged copies that gain no latents leave the output", not left, left)
+
+
+def noisy_env(k: ModuleType, root: Path) -> str:
+    """An environment as the kernel's reads on Kaggle, with no wheel to build: a venv holding a copy
+    of the package stamped with COMMIT and clean (so no checkout's state shows through), this
+    environment's dependencies, and Kaggle's failing sitecustomize. Its python."""
+    import tipping_point
+
+    env = root / "env"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(env)], check=True)
+    python = env / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    where = k.kaggle_noise(python)
+    package = Path(tipping_point.__file__).parent
+    shutil.copytree(package, where / "tipping_point", ignore=shutil.ignore_patterns("__pycache__"))
+    stamp = f"commit = {COMMIT!r}\ndirty = False\nkernel_sha256 = None\nbuilt_at = None\n"
+    (where / "tipping_point" / "_build_info.py").write_text(stamp, encoding="utf-8")
+    deps = site.getsitepackages()[-1]
+    (where / "tp_deps.pth").write_text(
+        f"import site; site.addsitedir({deps!r})\n", encoding="utf-8"
+    )
+    return str(python)
+
+
+def real_runs(k: ModuleType, root: Path) -> None:
+    root.mkdir(parents=True)
+    python = noisy_env(k, root)
+    said = subprocess.run(
+        [python, "-I", "-c", "from tipping_point.ising import io; print(io.code_version())"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    check(
+        "the stand-in environment names the wheel's commit, clean",
+        said.returncode == 0 and f"'git_sha': '{COMMIT}', 'dirty': False" in said.stdout,
+        said.stdout + said.stderr,
+    )
+    check(
+        "... and its children print Kaggle's noise on stderr and exit 0",
+        said.returncode == 0 and all(line in said.stderr for line in NOISE),
+        said.stderr,
+    )
+    wheels = root / "input" / k.WHEEL_DATASET
+    wheels.mkdir(parents=True)
+    (wheels / "tipping_point-0.1.0-py3-none-any.whl").write_bytes(b"PK")
+    (wheels / "COMMIT.txt").write_text(f"{COMMIT}\n", encoding="utf-8")
+    plan = k.tiny_jepa_plan(root)
+    with open(root / "sessions.log", "w", encoding="utf-8") as sink:
+        code = k.rehearse(plan, root, python, 2, 1, sink)
+    tail = (root / "sessions.log").read_text(encoding="utf-8").splitlines()[-40:]
+    check("the written kernel's two sessions come out as they should", code == 0, "\n".join(tail))
+
+    out1, out2 = root / "input" / plan["kernel"] / "out", root / "working" / "out"
+    first, last = (json.loads((o / k.STATE).read_text(encoding="utf-8")) for o in (out1, out2))
+    by1, by2 = ({r["name"]: r for r in s["runs"]} for s in (first, last))
+    training = by1["tiny"]["folder"]
+    check(
+        "a real jepa train, stopped by the deadline: interrupted, its checkpoint kept",
+        by1["tiny"]["state"] == "interrupted"
+        and (out1 / training / "checkpoint.pt").is_file()
+        and not (out1 / training / "complete.json").exists(),
+        by1["tiny"],
+    )
+    check(
+        "... its dependants not started, STATUS incomplete and how to continue",
+        by1["x-final"]["state"] == by1["x-twin"]["state"] == "not started"
+        and (out1 / "STATUS").read_text(encoding="utf-8").startswith("incomplete:")
+        and "--resume" in first["status_detail"],
+        first["status_detail"],
+    )
+    status = (out2 / "STATUS").read_text(encoding="utf-8")
+    check("session 2: STATUS complete, all four verified", status.startswith("complete:"), status)
+    check(
+        "... the finished simulator run reused, the training resumed in its folder",
+        by2["quick"]["reused"]
+        and by2["tiny"]["resumed"]
+        and by2["tiny"]["exit"] == 0
+        and by2["tiny"]["folder"] == training,
+        by2["tiny"],
+    )
+    done = json.loads((out2 / training / "complete.json").read_text(encoding="utf-8"))
+    args = next(r for r in plan["runs"] if r["name"] == "tiny")["args"]
+    steps = flag_ints(args, "--steps")[0]
+    check(
+        "... resume lost and repeated no step: every step's row once, none stopped early",
+        done["rows"]["train"] == steps
+        and done["last_key"] == steps
+        and done["stopped_early"] is False,
+        done["rows"],
+    )
+    ledger = [
+        json.loads(line)
+        for line in (out2 / "jepa" / k.LEDGER).read_text(encoding="utf-8").splitlines()
+    ]
+    joins = sum(a["to_ns"] != b["from_ns"] for a, b in itertools.pairwise(ledger))
+    check(
+        "... the GPU-hour ledger came along and holds both sessions",
+        joins == 1 and {x["run_id"] for x in ledger} == {by2["tiny"]["run_id"]},
+        ledger,
+    )
+    for name, untrained, rule in (("x-twin", True, "tc-plus"), ("x-final", False, "all")):
+        table = out2 / by2[name]["folder"]
+        manifest = json.loads((table / "manifest.json").read_text(encoding="utf-8"))
+        rows = json.loads((table / "complete.json").read_text(encoding="utf-8"))["rows"]
+        check(
+            f"a real jepa extract, {name}: complete and verified, its checkpoint and rule named",
+            by2[name]["state"] == "complete"
+            and manifest["params"]["checkpoint"]["untrained"] is untrained
+            and manifest["params"]["checkpoint"]["run_id"] == by2["tiny"]["run_id"]
+            and manifest["params"]["selection"]["rule"] == rule
+            and manifest["producer"]["git_sha"] == COMMIT
+            and manifest["producer"]["dirty"] is False
+            and rows["latents"] > 0,
+            manifest["params"]["selection"],
+        )
+    rates = last["rates"]
+    check(
+        "STATUS gives the measured rates: seconds per step, microseconds per frame",
+        rates["train"]["tiny"]["s_per_step"] > 0
+        and rates["extract"][f"tiny {k.FINAL}"]["us_per_frame"] > 0
+        and "s/step" in status
+        and "us/frame" in status,
+        status,
+    )
+    for path in (out2 / "logs" / "tiny.log", out2 / "logs" / "x-final.log"):
+        text = path.read_text(encoding="utf-8")
+        check(
+            f"{path.name} holds Kaggle's noise: the runs above passed through it",
+            all(line in text for line in NOISE),
+            text[:300],
+        )
+    stage = next(r for r in plan["runs"] if r["name"] == "tiny")["stage"]
+    check(
+        "the training's staged runs have left the output, the extracted ones stayed",
+        not any((out2 / "ising" / s).exists() for s in stage)
+        and (out2 / by2["x-final"]["folder"]).is_dir(),
+        sorted(p.name for p in (out2 / "ising").iterdir()),
+    )
+
+    ctx = ctx_at(k, root)
+    ctx.py = python
+    session = k.Session(ctx, plan, {}, COMMIT, last["env"]["torch"], 2, {"runs": last["runs"]})
+    tiny = session.by_name["tiny"]
+    folder = out2 / training
+    state, note = session.settle(tiny, folder, 0, collections.deque(NOISE), "")
+    check("exit 0 and files that verify: complete, whatever stderr said", state == "complete", note)
+    state, note = session.settle(tiny, folder, 1, collections.deque(), "")
+    check(
+        "exit 1 with a complete.json in place: failed, the exit code decides",
+        state == "failed" and note.startswith("exit 1"),
+        note,
+    )
+    final = out2 / by2["x-final"]["folder"]
+    chunk = sorted(final.glob("*.parquet"))[0]
+    kept = chunk.read_bytes()
+    chunk.write_bytes(kept + b"x")
+    state, note = session.settle(session.by_name["x-final"], final, 0, collections.deque(), "")
+    chunk.write_bytes(kept)
+    check(
+        "exit 0 and a changed file: failed, jepa verify decides",
+        state == "failed" and "sha256 differs" in note,
+        (state, note),
+    )
+
+    missing = copy.deepcopy(plan)
+    entry = next(r for r in missing["runs"] if r["name"] == "tiny")
+    entry["args"][entry["args"].index("--train-seeds") + 1] = 999
+    entry["name"], entry["stage"] = "absent", []
+    missing["runs"] = [entry]
+    session = k.Session(ctx, missing, {}, COMMIT, last["env"]["torch"], 2)
+    session.locate_inputs()
+    state, note = session.execute(0, session.by_name["absent"])
+    check(
+        "a real child that exits 1: failed, with its own error, not the noise",
+        state == "failed" and "no complete staircase run" in note,
+        (state, note),
+    )
+
+
 def run_all(k: ModuleType) -> int:
-    with tempfile.TemporaryDirectory(prefix="tp-self-test-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="tp-self-test-", ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
         plans(k)
         refusals(k)
@@ -1101,5 +1619,15 @@ def run_all(k: ModuleType) -> int:
         verification(k, root / "verify")
         kernel_folder(k, root / "kernel")
         jepa_entries(k, root / "jepa")
+        kernel_acceptance(k, root / "acceptance")
+        invalid_plans(k, root / "invalid")
+        pilot_28(k, root / "pilot-28")
+        real_runs(k, root / "real")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1
+
+
+if __name__ == "__main__":
+    import kaggle_ising_runs
+
+    sys.exit(run_all(kaggle_ising_runs))

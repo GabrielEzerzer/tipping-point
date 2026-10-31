@@ -3,11 +3,11 @@ GPUs. A Kaggle script kernel.
 
 A plan is plain JSON: an ordered list of runs, each an `ising` or `jepa` subcommand with its
 arguments. --write-kernel embeds a plan in a copy of this file and writes kernel-metadata.json
-beside it, and `kaggle kernels push -p <dir>` runs it. The machinery is tp-tauc-l64-l128's (the
-kernel that ran on Kaggle's T4 x2, kept under .wf/kaggle/): the pinned environment from a wheel
-dataset with its COMMIT.txt check, the preflight benchmark, a queue per GPU through
-CUDA_VISIBLE_DEVICES, the stop at 8 h 15 min, checkpoints and resume across sessions, STATUS, and
-the exit-code policy.
+beside it (private, on GPU T4 x2), and `kaggle kernels push -p <dir>` runs it. The machinery is
+tp-tauc-l64-l128's (the kernel that ran on Kaggle's T4 x2, kept under .wf/kaggle/): the pinned
+environment from a wheel dataset with its COMMIT.txt check, the preflight benchmark, a queue per
+GPU through CUDA_VISIBLE_DEVICES, the stop at 8 h 15 min, checkpoints and resume across sessions,
+STATUS, and the exit-code policy.
 
     {"kernel": "tp-ising-job-a",                  the kernel slug: <owner>/<slug> and its title
      "description": "...",                        optional
@@ -48,6 +48,14 @@ From the repository root:
     uv run --no-sync python notebooks/kaggle_ising_runs.py --dry-run-jepa
     uv run --no-sync python notebooks/kaggle_ising_runs.py --self-test
 
+The wheel dataset holds one wheel and its COMMIT.txt. From a clean checkout of the commit to run:
+
+    uv build --package tipping-point --wheel --out-dir <dir>
+    rm <dir>/.gitignore
+    git rev-parse HEAD > <dir>/COMMIT.txt
+
+then `kaggle datasets version -p <dir> -m <note>`, with a dataset-metadata.json naming the dataset.
+
 --resume attaches the kernel's own previous output (kernel_sources). Push a version with it after
 a session stopped at the deadline, and that version reuses the finished runs and continues the
 unfinished ones (`ising resume`, `jepa resume`, or the same `jepa extract` again, which resumes).
@@ -56,15 +64,16 @@ each version's output holds the whole plan so far.
 
 --dry-run really executes the plan on the CPU in a temporary folder, with sizes divided by
 --shrink (8: L = 4 and 8 for Job A) and sweep counts by its square. It builds a wheel from HEAD in a
-clean clone (the code the Kaggle wheel would hold) and runs two sessions of the written kernel.
-The first is stopped by a simulated deadline at the first progress line after a run finishes. The
-second runs with the first's output attached, as Kaggle attaches it. --only keeps the named runs
-and the runs they read: a staircase takes at least 101,000 sweeps whatever its L, since every
-plateau holds 500 + 2,000, so a busy CPU wants one. --input SLUG=DIR attaches a folder as a
-dataset or kernel output. JEPA arguments are never shrunk: --dry-run-jepa rehearses a JEPA plan
-instead, on tiny simulator runs it writes (harness/jepa_ising.py's three-plateau staircase): a
-quick simulator run, a short training stopped by the simulated deadline and resumed, then its
-final.pt and step-0 twin extracted.
+clean clone (the code the Kaggle wheel would hold), in an environment whose children print Kaggle's
+sitecustomize errors, and runs two sessions of the written kernel. The first is stopped by a
+simulated deadline at the first progress line after a run finishes. The second runs with the
+first's output attached, as Kaggle attaches it, and a fresh `jepa verify` closes the rehearsal over
+every run's folder. --only keeps the named runs and the runs they read: a staircase takes at least
+101,000 sweeps whatever its L, since every plateau holds 500 + 2,000, so a busy CPU wants one.
+--input SLUG=DIR attaches a folder as a dataset or kernel output. JEPA arguments are never shrunk:
+--dry-run-jepa rehearses a JEPA plan instead, on tiny simulator runs it writes
+(harness/jepa_ising.py's three-plateau staircase): a quick simulator run, a short training stopped
+by the simulated deadline and resumed, then its final.pt and step-0 twin extracted.
 
 On Kaggle simulator runs land in /kaggle/working/out/ising/<run id>/, trainings in
 out/jepa/<run id>/ beside the GPU-hour ledger, latents inside their dataset run's folder, and each
@@ -126,7 +135,9 @@ SITE_NOISE = ("wrapt==1.17.3",)
 ISING_COMMANDS = ("pilot", "staircase", "ramp", "null")
 COMMANDS = (*ISING_COMMANDS, "jepa train", "jepa extract")
 RUNNER_FLAGS = ("--device", "--data-dir", "-h", "--help")
-NO_EXTRACT_SEEDS = range(6, 11)  # the confirmatory seeds: no latents of them before the freeze
+# shortcut: refuses the confirmatory seeds outright, lift it in the change that follows the
+# ising-latent-v1 freeze tag (#28 call 11), which slice 4's extraction needs
+NO_EXTRACT_SEEDS = range(6, 11)
 SEED_TAG = re.compile(r"-s(\d+)$")  # every run tag the CLI writes ends in -s<seed>
 # what tipping_point.jepa.train names (TWIN, FINAL, LEDGER); the self-test holds them to it
 TWIN, FINAL, LEDGER = "ckpt/step_0000000.pt", "final.pt", "gpu_hours.jsonl"
@@ -470,6 +481,32 @@ def extract_seeds(args: list, earlier: dict[str, dict]) -> list[tuple[object, in
     return found
 
 
+def extract_problems(args: list, earlier: dict[str, dict]) -> list[str]:
+    """A `jepa extract` reads one checkpoint and one simulator run, each a reference, and never
+    seeds 6-10 (#28: no latents of them before the freeze)."""
+    problems = []
+    runs = extract_seeds(args, earlier)
+    for target, seed in runs:
+        if seed is None:
+            problems.append(f"{target}: no seed to read, and jepa extract never reads 6-10")
+        elif seed in NO_EXTRACT_SEEDS:
+            problems.append(f"{target} has seed {seed}: jepa extract never reads seeds 6-10")
+    refs = [a for a in args if isinstance(a, dict)]
+    checkpoints = [
+        a
+        for a in refs
+        if "input" in a
+        or ("file" in a and earlier.get(str(a.get("run")), {}).get("command") == "jepa train")
+    ]
+    if len(runs) != 1 or len(checkpoints) != 1 or len(refs) != 2:
+        problems.append(
+            "jepa extract reads one checkpoint ({'run': <training>, 'file': <path>} or "
+            "{'input': <name>}) and one simulator run ({'dataset_run': <run id>} or "
+            "{'run': <simulator run>})"
+        )
+    return problems
+
+
 def run_problems(run: dict, earlier: dict[str, dict], inputs: dict, sourced: bool) -> list[str]:
     problems = []
     unknown = set(run) - {"name", "command", "args", "gpu", "stage"}
@@ -506,12 +543,8 @@ def run_problems(run: dict, earlier: dict[str, dict], inputs: dict, sourced: boo
             problems.append(f"argument {arg!r}: not a finite number")
         elif isinstance(arg, str) and arg.split("=", 1)[0] in RUNNER_FLAGS:
             problems.append(f"argument {arg}: the runner sets it")
-    if run.get("command") == "jepa extract":  # #28: no latents of seeds 6-10 before the freeze
-        for target, seed in extract_seeds(args, earlier):
-            if seed is None:
-                problems.append(f"{target}: no seed to read, and jepa extract never reads 6-10")
-            elif seed in NO_EXTRACT_SEEDS:
-                problems.append(f"{target} has seed {seed}: jepa extract never reads seeds 6-10")
+    if run.get("command") == "jepa extract":
+        problems += extract_problems(args, earlier)
     return problems
 
 
@@ -1502,7 +1535,7 @@ class Session:
             why = f"it holds neither complete.json nor {state}"
         else:
             why = None
-        if why is not None:
+        if why is not None or folder is None:
             log(f"[{run.name}] {prior['folder']} is not reused: {why}; starting afresh")
             if folder is not None:  # superseded: no place in this output
                 shutil.rmtree(folder, ignore_errors=True)
@@ -1947,6 +1980,7 @@ def write_kernel(plan: dict, dest: Path, resume: bool = False) -> Path:
         "enable_gpu": True,
         "enable_tpu": False,
         "enable_internet": True,
+        "machine_shape": "NvidiaTeslaT4",  # the CLI's name for GPU T4 x2: one queue per T4
         "dataset_sources": [plan.get("wheel", DEFAULT_WHEEL), *plan.get("datasets", [])],
         "competition_sources": [],
         "kernel_sources": [*plan.get("kernel_sources", []), *own],
@@ -1957,6 +1991,20 @@ def write_kernel(plan: dict, dest: Path, resume: bool = False) -> Path:
     text = json.dumps(metadata, indent=2) + "\n"
     (dest / "kernel-metadata.json").write_text(text, encoding="utf-8", newline="\n")
     return dest / f"{slug}.py"
+
+
+def kaggle_noise(python: Path) -> Path:
+    """Make a local environment's children print what every child prints on Kaggle's image (#54),
+    by the same means: a sitecustomize that fails, which -I does not skip. Its site-packages."""
+    site = subprocess.run(
+        [str(python), "-I", "-c", "import site; print(site.getsitepackages()[-1])"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    failing = "raise ModuleNotFoundError(\"No module named 'wrapt'\")\n"
+    (Path(site) / "sitecustomize.py").write_text(failing, encoding="utf-8")
+    return Path(site)
 
 
 def build_wheel_env(root: Path) -> str:
@@ -1996,7 +2044,9 @@ def build_wheel_env(root: Path) -> str:
         *("export", "--frozen", "--extra", "cpu", "--no-dev", "--no-emit-workspace"),
         *("--no-hashes", "--no-header", "--no-annotate", "--quiet", "-o", str(requirements)),
     )
-    return str(wp._venv(root / "env", wheel, requirements))
+    python = wp._venv(root / "env", wheel, requirements)
+    kaggle_noise(python)
+    return str(python)
 
 
 def dry_root(args: argparse.Namespace, prefix: str) -> Path:
@@ -2109,9 +2159,12 @@ def tiny_jepa_plan(root: Path) -> dict:
     )
 
 
-def rehearse(plan: dict, root: Path, python: str, gpus: int, shrink_by: int) -> int:
+def rehearse(
+    plan: dict, root: Path, python: str, gpus: int, shrink_by: int, sink: Any = None
+) -> int:
     """Two local sessions of the written kernel: the first stopped by a simulated deadline at the
-    first progress line after a run finishes, the second with the first's output attached."""
+    first progress line after a run finishes, the second with the first's output attached. Their
+    output goes to sink, or to this process's own."""
     script = write_kernel(plan, root / "kernel", resume=True)
     sessions = []
     for n in (1, 2):
@@ -2120,12 +2173,12 @@ def rehearse(plan: dict, root: Path, python: str, gpus: int, shrink_by: int) -> 
         log(f"== dry-run session {n}" + (", stopped by a simulated deadline" if n == 1 else ""))
         argv = [sys.executable, script, "--local-session", "--root", root, "--python", python]
         argv += ["--gpus", gpus, "--shrink", shrink_by, *(["--interrupt"] if n == 1 else [])]
-        code = subprocess.run([str(a) for a in argv], check=False).returncode
-        sessions.append((code, read_json(root / "working" / "out" / STATE) or {}))
-    return dry_run_report(sessions, root)
+        ran = subprocess.run([str(a) for a in argv], check=False, stdout=sink, stderr=sink)
+        sessions.append((ran.returncode, read_json(root / "working" / "out" / STATE) or {}))
+    return dry_run_report(sessions, root, python)
 
 
-def dry_run_report(sessions: list[tuple[int, dict]], root: Path) -> int:
+def dry_run_report(sessions: list[tuple[int, dict]], root: Path, python: str) -> int:
     print("\n" + "=" * 100)
     for n, (code, state) in enumerate(sessions, 1):
         print(
@@ -2146,6 +2199,9 @@ def dry_run_report(sessions: list[tuple[int, dict]], root: Path) -> int:
     ]
     needed = sum(len(r["deps"]) for r in last.get("runs", []))
     stopped = [r["name"] for r in first.get("runs", []) if r["state"] == "interrupted"]
+    dirs = [str(root / "working" / "out" / where) for where in folders.values() if where]
+    verify = [python, "-I", "-m", "tipping_point.jepa", "verify", *dirs]
+    fresh = subprocess.run(verify, capture_output=True, text=True, check=False)
     findings = {
         "session 1 finished a run": any(r["state"] == "complete" for r in first.get("runs", [])),
         "session 1 left a resumable run": bool(stopped),
@@ -2153,6 +2209,7 @@ def dry_run_report(sessions: list[tuple[int, dict]], root: Path) -> int:
         "session 2 reused a finished run": any(r["reused"] for r in runs.values()),
         "session 2 resumed every interrupted run": all(runs[n]["resumed"] for n in stopped),
         "every reference read its run's folder": len(reads) == needed,
+        f"a fresh jepa verify passes on all {len(dirs)} runs' folders": fresh.returncode == 0,
     }
     for what, ok in findings.items():
         print(f"{'PASS' if ok else 'FAIL'}  {what}")
@@ -2179,9 +2236,10 @@ def local_ctx(args: argparse.Namespace) -> Ctx:
 
 
 def self_test() -> int:
-    """Plan validation, dependency resolution, the queues, the previous session's runs, inputs,
-    the wheel checks and run verification, in-process: nothing is simulated. The checks live
-    beside this file (kaggle_ising_runs_selftest.py), so the pushed kernel stays lean."""
+    """Plan validation and refusal, dependency resolution, the queues, the previous session's
+    runs, inputs, the wheel checks, run verification and the plans in notebooks/plans, then real
+    jepa train, resume and extract runs through the written kernel. The checks live beside this
+    file (kaggle_ising_runs_selftest.py), so the pushed kernel stays lean."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from kaggle_ising_runs_selftest import run_all
 
