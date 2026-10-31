@@ -53,7 +53,7 @@ Tipping Point is released under the MIT licence; see [LICENSE](LICENSE).
 - `engine/` — Rust core, a member of the root Cargo workspace (`Cargo.toml`).
 - `python/tipping_point/` — the Python package (src layout), a member of the root uv workspace (`pyproject.toml`).
 - `app/` — the Tauri desktop app (not yet started).
-- `notebooks/` — Kaggle kernels (JEPA training on the GPUs).
+- `notebooks/` — the Kaggle kernel runner (`kaggle_ising_runs.py`) and the plans it runs (`plans/`).
 - `paper/` — the paper.
 - `harness/` — supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
   a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries, the
@@ -526,9 +526,12 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   through every test. `tipping_point.ews.margins.paired` judges one: the CI of the mean margin
   over model seeds (nested with paired data-bootstrap draws) must exclude 0 in the predicted
   direction, and every seed's margin must carry the predicted sign.
-- **Kaggle:** `notebooks/kaggle_train.py` clones a pinned commit with a read-only token from
-  Kaggle Secrets, installs with `--extra cu126`, checks the dataset's hashes, trains one model seed
-  per T4 and resumes from the previous version's output.
+- **Kaggle:** `notebooks/kaggle_ising_runs.py` runs a JSON plan from `notebooks/plans/` as a
+  kernel: simulator runs, `jepa train` and `jepa extract`, one queue per T4. It installs the
+  commit-stamped wheel from a wheel dataset (no clone and no token), stages the dataset runs a
+  plan reads, checks every run with `jepa verify`, and resumes from the previous version's output.
+  `--write-kernel <plan> <dir>` writes the folder `kaggle kernels push` takes; `--dry-run-jepa`
+  rehearses training, resume and extraction on the CPU. Its docstring is the manual.
 
 The harness trains a planted-stripe toy on the CPU (`harness/jepa_toy.py`: validation error 1.37
 to 0.34 in 150 steps; probes cannot tell it from its twin, prediction error can), breaks the loss
