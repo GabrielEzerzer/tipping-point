@@ -135,7 +135,11 @@ cargo run --release -p engine --bin store -- replay <run dir> [--parquet]   # re
 `store import` turns one downloaded archive day into a run: Bybit's free linear order-book
 archive (`<yyyy-mm-dd>_<SYMBOL>_ob200.data.zip`: 200 levels every 100 ms, 500 before 2025-08-21;
 the source of book features) or Binance's USD-M aggregated trades
-(`<SYMBOL>-aggTrades-<yyyy-mm-dd>.zip`: the source of labels). Each record goes through its
+(`<SYMBOL>-aggTrades-<yyyy-mm-dd>.zip`). These trades are not the source of labels: the regime
+labels and the cascade proxy read Binance's klines, metrics and funding through `market/` (see
+Regime labels below), with taker flow from the klines. Within `market/`, aggTrades appear only as
+the stability report's optional cross-check of the variance estimator, and no code there reads
+these files yet. Each record goes through its
 venue's adapter as the frame the live stream would have carried, into the same pipeline and
 sampler the live loop and rotate run, and out as Parquet in
 `<data dir>/market/<yyyymmdd>T000000Z-<venue>-<symbol>/`: book samples for a book and trades for
