@@ -336,6 +336,11 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     logged = [json.loads(line) for line in lines]
     assert len(logged) == 48 and {t["result"] for t in logged} == {run_dir.name}
     assert all(t["prereg"]["sha256"] == demo.sha256 for t in logged)
+    # a classic scoring reads no latents table: every row and trial says so, the inputs name none
+    assert {t["cell"]["checkpoint"] for t in logged} == {""}
+    for table in (auc, surrogate, alarms, rows, peaks):
+        assert {r["checkpoint"] for r in table} == {""}
+    assert not any("latents" in i for i in inputs.values())
 
 
 def test_null_rows_are_scored_and_surrogate_tested_once_per_pipeline(

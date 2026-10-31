@@ -507,6 +507,45 @@ uv run python -m tipping_point.ews calibrate                         # 2,000 nul
 Results land in `<data dir>/ews/<run_id>/`, and every evaluated cell is appended to
 `<data dir>/ews/trials.jsonl`.
 
+### Latent signals
+
+A pre-registration with a `[latents]` section scores a JEPA's readouts instead of |m| (#28). It
+names each training it scores, by its run id and the sha256 of `final.pt` and of its untrained twin,
+and the scorer takes both through every table, once per checkpoint.
+
+- **The join.** `ising.series(run, "matched", latents=<table>)` joins
+  `<run>/latents/<training>-step<step>/`, which `jepa extract` writes, onto the run's saved frames
+  with a plain Parquet reader, since `jepa.extract` imports the adapter. The six key columns must
+  equal those of the frames the table's own selection rule keeps, so a subsampled staircase reads
+  as the frames it holds. A key mismatch, a table without `complete.json`, or the dense cadence, for
+  which no latents exist, is refused with an error naming the run and the table.
+- **Two more indicators.** `level` (rolling mean) and `slope` (rolling OLS slope per sample) read
+  the raw series: the rolling mean of residuals is zero by construction, so `Pipeline` skips the
+  detrend for them. A level's rows carry the phase surrogate alone, and its bandwidth axis
+  collapses to one cell per window. The extremum of `slope` is the dynamic statistic of a channel
+  with no interior peak: finite-size scaling puts the steepest change at a fixed eps_L, 1/nu = 1,
+  and a feature anchored to a fixed T gives 1/nu = 0. The harness plants both, and the second is the
+  dynamic test's negative control.
+- **Rows.** Every row of every table has a `checkpoint` column, the table's folder name, and so does
+  each line of `trials.jsonl`; a classic row's is `""`. The file pins each checkpoint's sha256 and
+  role, and the result's manifest gives the sha256 of each table's `complete.json` per run.
+- **What a file holds.** `indicators.pairs` lists the (observable, indicator) pairs judged by AUC,
+  `indicators.direction_by_observable` overrides a direction for one observable, and
+  `fss.dynamic.statistics` lists the peak statistics judged by the dynamic test. A primary
+  checkpoint and its twin take the whole grid; an ablation's take the headline cell, with
+  `scoring.surrogates.n_ablation` surrogates. `prereg.cells` counts that. Static quantities are
+  `l2_var_<column>`, `mean_<column>` and `one_minus_ac1_<column>`, read from the matched cadence.
+- **The freeze.** A latent file reads the runs of the version its `[baseline]` names, so those runs
+  must come from that tag's commit, and each table from the file's own tag and the checkpoint it
+  pins: the freeze comes before any extraction on a scored seed. `ising-latent-v1` is not written
+  yet; `python/tipping_point/tests/fixtures/ising_latent_draft.toml` is the draft the schema
+  accepts, with placeholders for what the exploratory pass sets, and the freeze refuses them all.
+
+Nothing here changes what ising-ews-v1 scores. `harness/ews_v1_golden.py` wrote every row and value
+of a v1 scoring on planted data from the commit its freeze tag is cut at, and
+`python/tipping_point/tests/ews/test_v1_unchanged.py` holds later commits to them, RNG stream
+included.
+
 ## JEPA world model (Ising)
 
 `python/tipping_point/src/tipping_point/jepa/` is the JEPA of #27: one per-frame encoder shared by

@@ -1,0 +1,291 @@
+# The draft of ising-latent-v1 from the #28 research pass (2026-10-25), the schema prereg.py takes for
+# a file with a [latents] section, kept here as a test fixture. It is not the pre-registration:
+# paper/prereg/ising-latent-v1.toml is written from this by the exploratory pass (#28, slice 3),
+# which sets every "<set before freeze>" left here; the freeze refuses them all.
+#
+# Where it departs from the research pass's text, because the freeze lane came after it:
+#   [fss.dynamic]        band is now search, as in ising-ews-v1; cadence and min_draw_share added
+#   [[fss.static]]       a reference states its own tolerance (the freeze's rule); open here
+#   [data.ramps]         eps_L added: the window the runs this file reads were made over
+#   [data.staircase.tau_sha256]  added: the freeze refuses a staircase without it
+#   [disclosure]         added: every pre-registration says what was seen before its freeze
+# and because of the decisions on it: [scoring.surrogates] n_ablation (call 7, amended). The research
+# pass wrote out one checkpoint of the eleven; here they all are, which is what cells() counts.
+
+id = "ising-latent"
+version = 1
+supersedes = ""
+reason = ""
+question = "Do early-warning signals read from a JEPA's latents (prediction-error surprise, variance and lag-1 autocorrelation of the leading principal component) warn of the 2D Ising transition on a slow ramp and obey finite-size scaling, and does the trained encoder do so beyond what its untrained twin already gives?"
+
+[[hypotheses]]
+name = "latent-pipeline-check"
+statement = "A local pooled encoder's pc_1 is spin-coupled: at the Tc plateau L^2 Var(pc_1) scales as L^(7/4) for trained checkpoints and twins alike (locality, #27)."
+prediction = "kappa within 0.15 of 1.75 for every primary checkpoint and twin; a miss is a pipeline bug and no other latent row is read until it is fixed."
+direction = "match"
+
+[[hypotheses]]
+name = "latent-variance-rises"
+statement = "Var(pc_1) and AC1(pc_1) rise before the bath reaches Tc on the slow ramp, as |m|'s do."
+prediction = "Headline cell, matched cadence: AUC 95% CI above 0.5 for every L and h, trained and twin. Parity with |m| at the matched cadence under ising-ews-v1; not a margin."
+direction = "greater"
+
+[[hypotheses]]
+name = "surprise-trend"
+statement = "The level of surprise changes monotonically as the bath cools towards Tc."
+prediction = "Headline cell: AUC of the level trend has a 95% CI away from 0.5 in the pre-registered direction for every trained primary checkpoint at every L and h; twin rows reported."
+direction = "<greater|less, fixed by the seeds 1-5 pilot pass before the freeze>"
+
+[[hypotheses]]
+name = "latent-dynamic-fss"
+statement = "Latent indicators that track the transition take their extremum at a fixed scaled temperature: eps_L_peak of Var(pc_1), of Var(surprise) and of the steepest change of surprise is the same at every L."
+prediction = "1/nu within 0.5 of 1 with a CI excluding 0, per checkpoint (fss.dynamic). Var(pc_1) is expected to pass for trained and twin (pipeline). The two surprise statistics are the falsification test: a feature anchored to a fixed T gives 1/nu = 0."
+direction = "match"
+
+[[hypotheses]]
+name = "learned-beyond-random"
+statement = "Training adds physics a random local encoder lacks: energy becomes linearly readable at the frame level, and surprise obeys finite-size scaling where the twin's does not."
+prediction = "Paired by model seed, trained minus twin: (a) energy-probe R^2 margin, 95% CI over the 5 primary seeds excludes 0 and all 5 margins are positive; (b) energy-probe selectivity (R^2 minus the within-plateau-shuffle control's R^2) is larger for the trained checkpoint on all 5 seeds; (c) at least one surprise statistic of latent-dynamic-fss passes for >= 4 of 5 trained checkpoints and for none of the twins. 'Learned the physics' is claimed only if (a), (b) and (c) hold."
+direction = "greater"
+
+[[hypotheses]]
+name = "held-out-band"
+statement = "Dropping T in [2.0, 2.5] from training separates distribution shift from physics in the surprise curve."
+prediction = "Descriptive at 3 seeds: mean surprise on the band's plateaus and the peak-position table beside the primary's; no verdict."
+direction = "two-sided"
+
+[[hypotheses]]
+name = "ema-only"
+statement = "Without the VICReg terms the representation may partially collapse (C-JEPA)."
+prediction = "Descriptive at 3 seeds: collapse monitors, probe R^2 and the same tables; no verdict."
+direction = "two-sided"
+
+[data]
+domain = "ising"
+L = [16, 32, 64]
+seeds = [6, 7, 8, 9, 10]          # confirmatory, generated after the ising-ews-v1 freeze
+replicas = 64
+exclusions = []
+
+[data.tau_c]
+source = "pilot"
+pilot_run = "<the #54 record>"
+pilot_sha256 = "<sha256>"
+
+[data.ramps]
+kind = "ramp"
+x = 0.02
+eps_L = [12.0, -8.0]
+
+[data.nulls]
+kind = "fixed"
+eps_L = [2.0, 4.0, 6.0]
+
+[data.staircase]
+kind = "staircase"
+temperature = 2.269231
+
+[data.staircase.tau_sha256]
+16 = "<sha256>"
+32 = "<sha256>"
+64 = "<sha256>"
+
+[baseline]
+prereg = "ising-ews-v1"           # the matched-cadence |m| rows of its result on these runs are the parity reference
+result = "<ews result run_id, filled when v1 has been scored>"
+
+[latents]
+table = "latents"                 # <run>/latents/<training>-step<step>/, keyed like configs
+columns = ["surprise", "pc_1"]    # judged; pc_2..pc_8 are read and plotted, never judged
+training_seeds = [11, 12, 13, 14, 15]
+validation_seed = 16
+steps = 50000                     # replaced by the pilot's value before training; pinned by the checkpoints below
+extraction = "ramps and nulls in full; staircases: the T = 2.269231 plateau in full and one burst in eight elsewhere (primary and twins); ablation checkpoints: the Tc plateau, ramps and nulls only"
+spares = [6, 7]                   # a primary seed whose training collapses is replaced by the next spare, logged in deviations
+
+[[latents.checkpoints]]
+role = "primary"
+model_seed = 1
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]
+role = "primary"
+model_seed = 2
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]
+role = "primary"
+model_seed = 3
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]
+role = "primary"
+model_seed = 4
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]
+role = "primary"
+model_seed = 5
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]          # var_weight = 0, cov_weight = 0
+role = "ema-only"
+model_seed = 11
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]
+role = "ema-only"
+model_seed = 12
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]
+role = "ema-only"
+model_seed = 13
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]          # --held-out: plateaus in [2.0, 2.5] dropped
+role = "held-out"
+model_seed = 21
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]
+role = "held-out"
+model_seed = 22
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[[latents.checkpoints]]
+role = "held-out"
+model_seed = 23
+training = "<jepa run_id>"
+trained_sha256 = "<final.pt>"
+twin_sha256 = "<ckpt/step_0000000.pt>"
+
+[indicators]
+names = ["variance", "ac", "level"]
+observables = ["pc_1", "surprise"]
+pairs = [["pc_1", "variance"], ["pc_1", "ac"], ["surprise", "variance"], ["surprise", "level"]]
+cadences = ["matched"]
+thin = 0.1
+lag = 1
+detrend = "gaussian"              # variance and ac only; level and slope run on the raw series
+direction = { variance = "greater", ac = "greater", level = "<set before freeze>" }
+
+[indicators.direction_by_observable]
+surprise = { variance = "<set before freeze>", level = "<set before freeze>" }
+
+[event]
+definition = "The bath crosses the exact Tc = 2/ln(1 + sqrt 2), at step t_c in the run's manifest: the same for every replica, signal and checkpoint, fixed before any data exist."
+horizons = [0.0, 1.0, 2.0]
+segment = 6.0
+
+[scoring]
+positives = "s at the sample where each slow-ramp replica's bath first reaches eps_L = h: the pipeline on the segment from eps_L = h + 6 down to h, plus one window before it, detrended on its own (variance, ac) or raw (level)."
+negatives = "s at the end of equal-length, non-overlapping segments of the fixed-T null runs' saved frames."
+auc = "Mann-Whitney, ties count 1/2, per (checkpoint, observable, indicator, L, h, window, bandwidth)"
+alpha = 0.05
+ci_level = 0.95
+bootstrap = 2000
+
+[scoring.surrogates]
+primary = "phase"
+secondary = "ar1"                 # not applied to level (no detrending): level rows carry phase only
+n = 999                           # primary checkpoints and their twins, at the headline cell
+n_ablation = 199                  # ablation checkpoints, whose rows are descriptive (call 7, amended)
+cells = "headline"
+
+[scoring.alarms]
+far = 0.001                       # 1 per 1,000 tau_c, as the v1 freeze; a reported table, never a hypothesis
+report_per = 1000.0
+band = [2.0, -2.0]
+every = 1.0
+
+[scoring.margins]
+pairing = "trained minus twin, same model seed, same data bootstrap draws (shared RNG seed per quantity)"
+seeds = "percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws"
+sign_test = true                  # every paired margin must carry the predicted sign
+ablations = "descriptive"
+
+[[fss.static]]
+quantity = "l2_var_pc_1"
+role = "pipeline-check"           # judged like a positive control; a fail is a pipeline bug
+expected = 1.75
+tolerance = 0.15
+
+[[fss.static]]
+quantity = "mean_pc_1"
+role = "descriptive"              # expected -1/8-like for a spin-coupled channel
+
+[[fss.static]]
+quantity = "l2_var_surprise"
+role = "reference"                # kappa free; CI must exclude 0 to count as scaling; reported against 7/4 and 0
+tolerance = "<set before freeze>"
+
+[[fss.static]]
+quantity = "mean_surprise"
+role = "descriptive"              # does the error at Tc grow with L once L exceeds the predictor's 50-site range?
+
+[[fss.static]]
+quantity = "one_minus_ac1_pc_1"
+role = "reference"                # compared with v1's one_minus_ac1 of |m| (about -1.6), never with z
+tolerance = "<set before freeze>"
+
+[fss.dynamic]
+search = [6.0, -4.0]
+cadence = "matched"
+expected_inverse_nu = 1.0
+tolerance = 0.5
+min_draw_share = 0.95
+edge_rule = "inconclusive when more than half of an L's replicas take their extremum on an edge of the band"
+statistics = [
+  { observable = "pc_1", indicator = "variance", extremum = "max", role = "pipeline-check" },
+  { observable = "surprise", indicator = "variance", extremum = "max", role = "test" },
+  { observable = "surprise", indicator = "slope", extremum = "<min|max, set before freeze>", role = "test" },
+]
+
+[probes]
+targets = ["abs_m", "energy", "l2var"]
+controls = ["iid", "shuffle_within_T"]
+fit = "the staircase of simulator seed 16 at each L: 20000 frames drawn without replacement, probe seed 0"
+test = "the staircases of seeds 6-10 at each L: 20000 frames each, same rule"
+ridge_alpha = 0.001
+selectivity = "R^2(target) - R^2(shuffle_within_T)"
+per = "checkpoint x L; each twin beside its trained checkpoint"
+
+[sensitivity]
+window = [10.0, 20.0, 40.0]
+bandwidth = [5.0, 10.0, 20.0]     # level ignores it: 3 cells per (L, h)
+headline = { window = 20.0, bandwidth = 10.0 }
+
+[trials]
+budget = 3132                     # 10 x 270 (primary + twins, full grid) + 12 x 36 (ablations, headline cell)
+counted = "One trial per AUC evaluation of a (checkpoint, observable, indicator, L, h, window, bandwidth) cell; every scoring run appends its cells to ews/trials.jsonl. Judged non-AUC rows are listed in the result manifest and printed in the paper."
+
+[disclosure]
+exploratory = "<the seeds 1-5 pass with a pilot training at L = 16 and 32, before the freeze>"
+decisions = "<which choices were made with those results in view: surprise's directions, the slope's extremum>"
+confirmatory = "<which runs and checkpoints this version scores>"
+links = []
+
+[deviations]
+policy = "Any change after the freeze is a new version with a reason, frozen before it is scored; results scored under v1 stay bound to v1 and are reported. A collapsed primary seed is replaced by the next spare and the replacement is logged here."
+log = []

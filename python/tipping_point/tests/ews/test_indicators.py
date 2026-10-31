@@ -164,8 +164,65 @@ def test_burst_autocorrelation_of_ar1_is_phi() -> None:
     assert np.allclose(r, phi, atol=0.02)
 
 
+def test_a_line_gives_its_slope_exactly_and_its_mean_at_the_windows_middle() -> None:
+    """The closed forms of the raw indicators: on x = a + b t the rolling slope is b in every
+    window, per sample, whatever the level, and the rolling mean is the line at the window's middle.
+    Catches a slope normalised by the wrong sum of squares, or read per window instead of per
+    sample, and a window lined up off by one."""
+    window, t = 25, np.arange(200.0)
+    for level, b in ((0.0, 1.0), (3.0, 0.25), (-7.0, -0.003), (1e6, 2.5)):
+        x = level + b * t
+        slope, mean = ind.rolling_slope(x, window), ind.rolling_mean(x, window)
+        assert np.isnan(slope[: window - 1]).all() and np.isnan(mean[: window - 1]).all()
+        assert slope[window - 1 :] == pytest.approx(b, rel=1e-9)
+        middle = level + b * (t[window - 1 :] - (window - 1) / 2)
+        assert mean[window - 1 :] == pytest.approx(middle, rel=1e-9)
+
+
+@pytest.mark.parametrize("window", [2, 3, 40, 999])
+def test_rolling_slope_and_mean_match_a_direct_computation(window: int) -> None:
+    """On noise, in batches: each window's OLS slope (polyfit's, against its own sample index) and
+    mean, on a series whose level sits far above its spread, as a surprise near 1 does."""
+    x = np.random.default_rng(11).standard_normal((3, 1000)).cumsum(axis=1) + 50.0
+    view = np.lib.stride_tricks.sliding_window_view(x, window, axis=-1)
+    index = np.arange(window)
+    expected = np.stack([np.polyfit(index, row.T, 1)[0] for row in view])  # (rows, windows)
+    valid = slice(window - 1, None)
+    assert np.allclose(ind.rolling_slope(x, window)[:, valid], expected, rtol=1e-8, atol=1e-11)
+    assert np.allclose(ind.rolling_mean(x, window)[:, valid], view.mean(-1), rtol=1e-12)
+
+
+def test_flat_windows_have_no_slope_and_their_own_level() -> None:
+    """A frozen stretch must come out exactly flat, not as rounding that Kendall's tau would rank:
+    the same mean in every window and a slope of exactly 0, also after a long loud stretch, whose
+    running sums are large by then."""
+    x = np.random.default_rng(12).standard_normal(400)
+    x[150:300] = 0.7
+    mean, slope = ind.rolling_mean(x, 50), ind.rolling_slope(x, 50)
+    assert np.all(mean[199:300] == mean[199]) and mean[199] == pytest.approx(0.7, abs=1e-12)
+    assert np.all(slope[199:300] == 0.0)
+    y = np.concatenate([np.random.default_rng(13).standard_normal(100_000), np.full(200, 0.7)])
+    late = ind.rolling_mean(y, 100)[100_100:]
+    assert np.all(late == late[0]) and late[0] == pytest.approx(0.7, abs=1e-12)
+    assert np.all(ind.rolling_mean(np.full(80, 3.0), 10)[9:] == 3.0)
+
+
+def test_a_window_with_a_nan_has_no_slope() -> None:
+    """A NaN spoils only the windows that hold it: a Kendall's tau over them is undefined rather
+    than computed from a value that is not there."""
+    x = np.arange(50.0)
+    x[20] = np.nan
+    slope = ind.rolling_slope(x, 5)
+    assert np.isnan(slope[20:25]).all() and slope[25:] == pytest.approx(1.0)
+    assert np.isnan(ind.rolling_mean(np.full(30, np.nan), 5)).all()
+
+
 def test_windows_outside_the_series_are_refused() -> None:
     x = np.zeros(10)
+    with pytest.raises(ValueError):
+        ind.rolling_mean(x, 11)
+    with pytest.raises(ValueError):
+        ind.rolling_slope(x, 1)  # one sample has no slope
     with pytest.raises(ValueError):
         ind.rolling_variance(x, 11)
     with pytest.raises(ValueError):

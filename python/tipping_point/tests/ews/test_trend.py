@@ -78,6 +78,59 @@ def test_trailing_score_detrends_each_slice_on_its_own(monkeypatch: pytest.Monke
     assert np.array_equal(trend.trailing_score(x, p, every=7)[1], scores)
 
 
+def _ar1(phi: float, shape: tuple[int, int], rng: np.random.Generator) -> np.ndarray:
+    noise = rng.standard_normal(shape)
+    x = np.zeros(shape)
+    for t in range(1, shape[1]):
+        x[:, t] = phi * x[:, t - 1] + noise[:, t]
+    return x
+
+
+@pytest.mark.parametrize(("rise", "sign"), [(0.02, 1.0), (-0.02, -1.0)])
+def test_level_takes_the_sign_of_a_trend_through_ar1(rise: float, sign: float) -> None:
+    """AR(1) on a line: the rolling mean follows the line, so the score has the line's sign in every
+    row and sits near +-1, where the same noise without the trend scores on both sides. Run through
+    a detrend, the rolling mean of residuals has no trend to find, which is why level skips it."""
+    window, length = 50, 400
+    rng = np.random.default_rng(14)
+    noise = _ar1(0.5, (8, window + length - 1), rng)
+    x = noise + rise * np.arange(noise.shape[1])
+    score = Pipeline("level", window, length, bandwidth=None)(x)
+    assert np.all(sign * score > 0.8), score
+    alone = Pipeline("level", window, length, bandwidth=None)(noise)
+    assert np.abs(alone).mean() < 0.5, alone
+    residuals = ind.gaussian_detrend(x, 30.0)
+    detrended = trend.kendall_tau(ind.rolling_mean(residuals[:, -length:], window)[:, window - 1 :])
+    assert np.abs(detrended).mean() < 0.5, detrended
+
+
+def test_slope_takes_the_sign_of_a_steepening_trend_through_ar1() -> None:
+    """A parabola through AR(1): a rising slope scores near +1, a falling slope near -1."""
+    window, length = 80, 400
+    rng = np.random.default_rng(15)
+    noise = _ar1(0.5, (8, window + length - 1), rng)
+    t = np.arange(noise.shape[1])
+    for curve, sign in ((1e-3 * t**2, 1.0), (-1e-3 * t**2, -1.0)):
+        score = Pipeline("slope", window, length, bandwidth=None)(noise + curve)
+        assert np.all(sign * score > 0.8), score
+
+
+@pytest.mark.parametrize("name", sorted(trend.RAW))
+def test_a_raw_indicator_reads_the_series_whatever_the_bandwidth(name: str) -> None:
+    """The bypass is the indicator's: score, rolling values and residuals (what a surrogate test
+    draws from) are the raw series', with or without a bandwidth, and a detrended indicator's are
+    not."""
+    x = np.random.default_rng(16).standard_normal((3, 300)).cumsum(axis=1)
+    raw, given = (Pipeline(name, 40, 100, bandwidth=b) for b in (None, 25.0))
+    assert np.array_equal(given(x), raw(x))
+    assert np.array_equal(given.rolling(x), raw.rolling(x), equal_nan=True)
+    assert np.array_equal(given.residuals(x), x)
+    detrended = Pipeline("variance", 40, 100, bandwidth=25.0)
+    assert not np.array_equal(detrended.residuals(x), x)
+    rolling = {"level": ind.rolling_mean, "slope": ind.rolling_slope}[name]
+    assert np.array_equal(given.rolling(x), rolling(x, 40), equal_nan=True)
+
+
 def test_pipeline_refuses_unknown_indicators_and_short_inputs() -> None:
     with pytest.raises(ValueError):
         Pipeline("kurtosis", window=10, length=10)

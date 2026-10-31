@@ -12,6 +12,9 @@ The dataset (L = 16 and 32, seeds 1 and 2, 8 replicas):
 
 The ising-ews v1 dataset (v1_dataset, below the first) is the freeze's: L = 16, 32 and 64, ramps
 over the scaled window eps_L = 12 -> -8, and a spread of |m| that peaks where a mode plants it.
+
+write_latents (at the end) puts a latents table beside any of these runs, as `jepa extract` would,
+with columns whose steepest change is planted at a known place (#28).
 """
 
 import hashlib
@@ -26,6 +29,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+from tipping_point.ews.ising import KEY, LATENTS, kept
 from tipping_point.ising import io, protocol
 from tipping_point.ising import pilot as tauc
 from tipping_point.ising.exact import TC
@@ -569,3 +575,124 @@ def restamp_tau(run_dir: Path, sha256: str | None) -> None:
     manifest = io.read_json(run_dir / "manifest.json")
     manifest["params"]["schedule"]["params"]["tau_sha256"] = sha256
     io.write_json(run_dir / "manifest.json", manifest, replace=True)
+
+
+# ---------------------------------------------------------------- planted latents tables
+#
+# #28's answers planted in advance, in the layout `jepa extract` writes: one row per saved frame its
+# selection keeps, keyed like configs. Each frame's columns are, with noise of LATENT_NOISE:
+#   pc_1      its |m|: a spin-coupled channel, what locality predicts of a local encoder
+#   surprise  monotone in T, a logistic in eps_L whose steepest change is at LATENT_EPS at every L:
+#             what obeys finite-size scaling. On a cooling ramp it falls, so its rolling slope is
+#             most negative there, as read half a window later (V1_LAG at x = 0.02), 1/nu = 1
+#   pc_2      the same logistic in T, whose steepest change is at one temperature, eps_L =
+#             LATENT_FIXED_T at L = 16, twice that at 32 and four times at 64: what is merely
+#             monotone in T, the dynamic test's negative control, 1/nu near 0
+#   pc_3..8   noise
+# An `untrained` table (a twin) has no surprise or pc_2 to speak of: both are flat, surprise at the
+# 4/3 a twin's error sits at. Its pc_1 is the same, as locality says it is.
+
+LATENT_EPS = 0.8  # eps_L of surprise's steepest change, at every L
+LATENT_FIXED_T = 1.2  # eps_L at L = 16 of pc_2's steepest change, at one temperature
+LATENT_WIDTH = 0.3  # the logistic's scale in eps_L, for pc_2 at L = 16
+LATENT_RANGE = (0.6, 0.9)  # surprise far below and far above its steepest change
+LATENT_NOISE = 0.002
+TWIN_SURPRISE = 4.0 / 3.0
+
+
+def latent_surprise(eps_L: np.ndarray | float) -> np.ndarray:
+    """The planted surprise at eps_L, whatever L."""
+    low, high = LATENT_RANGE
+    u = (np.asarray(eps_L, dtype=np.float64) - LATENT_EPS) / LATENT_WIDTH
+    return low + (high - low) / (1.0 + np.exp(-u))
+
+
+def latent_fixed_T(temperature: np.ndarray | float) -> np.ndarray:
+    """The planted pc_2 at a temperature, whatever L: latent_surprise's shape at L = 16."""
+    eps_at_16 = V1_SIZES[0] * (np.asarray(temperature, dtype=np.float64) - TC) / TC
+    return latent_surprise(eps_at_16 - LATENT_FIXED_T + LATENT_EPS)
+
+
+def write_latents(
+    run_dir: Path,
+    name: str,
+    select: str = "all",
+    untrained: bool = False,
+    sha256: str = "0" * 64,
+    git_sha: str | None = None,
+    dirty: bool | None = None,
+) -> Path:
+    """The table `name` beside a planted run, as `jepa extract <checkpoint> <run> --select <select>`
+    leaves it: one chunk per configs chunk, its manifest naming the checkpoint (`sha256`, whether it
+    is `untrained`), the run, the rule and the commit that made it (`git_sha`, `dirty`), and
+    complete.json last. Each (run, name) draws its own noise, the same every time."""
+    manifest = io.read_json(run_dir / "manifest.json")
+    params = manifest["params"]
+    L, kind = int(params["L"]), params["schedule"]["kind"]
+    rule = {"rule": select, "tc_plateau": PLATEAU, "every": 8}
+    entropy = hashlib.sha256(f"{run_dir.name}/{name}".encode()).digest()
+    rng = np.random.default_rng(list(entropy[:8]))
+    out = run_dir / LATENTS / name
+    out.mkdir(parents=True)
+    training, step = name.rsplit("-step", 1)
+    io.write_json(
+        out / "manifest.json",
+        {
+            "format": 1,
+            "domain": "ising",
+            "run_id": name,
+            "producer": {"name": "planted", "version": "0", "git_sha": git_sha, "dirty": dirty},
+            "started_ns": 0,
+            "key": "step",
+            "tables": [LATENTS],
+            "params": {
+                "checkpoint": {
+                    "path": None,
+                    "sha256": sha256,
+                    "run_id": training,
+                    "step": int(step),
+                    "untrained": untrained,
+                },
+                "dataset": {
+                    "run_id": run_dir.name,
+                    "complete_sha256": hashlib.sha256(
+                        (run_dir / "complete.json").read_bytes()
+                    ).hexdigest(),
+                    "L": L,
+                    "kind": kind,
+                    "seed": params["seed"],
+                },
+                "selection": rule,
+            },
+        },
+    )
+    configs = io.schema("configs", L)
+    readouts = ["surprise", *(f"pc_{k}" for k in range(1, 9))]
+    schema = pa.schema(
+        [configs.field(key) for key in KEY] + [(column, pa.float32()) for column in readouts]
+    )
+    total = 0
+    for path in io.chunks(run_dir, "configs"):
+        table = pq.read_table(path, columns=[*KEY, "magnetisation"])
+        table = table.filter(kept(kind, table, rule))
+        T = table["temperature"].to_numpy()
+        values = LATENT_NOISE * rng.standard_normal((len(T), len(readouts)))
+        values[:, 0] += TWIN_SURPRISE if untrained else latent_surprise(L * (T - TC) / TC)
+        values[:, 1] += np.abs(table["magnetisation"].to_numpy()) / L**2
+        values[:, 2] += 0.0 if untrained else latent_fixed_T(T)
+        columns = [table[key] for key in KEY] + [
+            pa.array(values[:, k].astype(np.float32)) for k in range(len(readouts))
+        ]
+        written = pa.Table.from_arrays(columns, schema=schema)
+        io.write_file(
+            out / path.name, lambda f, t=written: pq.write_table(t, f, compression="zstd")
+        )
+        total += written.num_rows
+    files = {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(out.iterdir())
+        if p.is_file()
+    }
+    record = {"ended_ns": 0, "rows": {LATENTS: total}, "clean": True, "files": files}
+    io.write_json(out / "complete.json", record)
+    return out

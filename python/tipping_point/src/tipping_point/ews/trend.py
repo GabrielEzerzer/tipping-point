@@ -22,7 +22,10 @@ INDICATORS: dict[str, Callable[..., np.ndarray]] = {
     "variance": lambda x, window, lag: indicators.rolling_variance(x, window),
     "ac": lambda x, window, lag: indicators.rolling_autocorrelation(x, window, lag),
     "skewness": lambda x, window, lag: indicators.rolling_skewness(x, window),
+    "level": lambda x, window, lag: indicators.rolling_mean(x, window),
+    "slope": lambda x, window, lag: indicators.rolling_slope(x, window),
 }
+RAW = frozenset({"level", "slope"})  # read the raw series: residuals have no level to read
 CHUNK = 1 << 17  # elements per row chunk: small enough to stay in cache
 THREADS = min(8, os.cpu_count() or 1)
 SLICES = 1 << 23  # elements of s(t) slices held at once (64 MB)
@@ -105,8 +108,9 @@ def kendall_tau(x: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class Pipeline:
-    """Series -> score: detrend (Gaussian, or none), rolling indicator, Kendall's tau of the last
-    `length` indicator values. A score needs `span` = window + length - 1 samples."""
+    """Series -> score: detrend (Gaussian, or none; an indicator in RAW reads the raw series
+    whatever the bandwidth), rolling indicator, Kendall's tau of the last `length` indicator values.
+    A score needs `span` = window + length - 1 samples."""
 
     indicator: str  # a key of INDICATORS
     window: int  # samples per rolling window
@@ -126,7 +130,7 @@ class Pipeline:
 
     def residuals(self, x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=np.float64)
-        if self.bandwidth is None:
+        if self.bandwidth is None or self.indicator in RAW:
             return x
         return indicators.gaussian_detrend(x, self.bandwidth)
 

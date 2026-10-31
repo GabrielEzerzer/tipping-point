@@ -7,7 +7,10 @@
                        record is refused unless --allow-stale-pilot, and so is any scored run
                        not made by the freeze tag's commit from a clean tree, any ramp or null
                        run not made against the pilot record the prereg pins, or any staircase
-                       whose dwell was not read from the tau.json it pins at that L
+                       whose dwell was not read from the tau.json it pins at that L. A prereg with
+                       a [latents] section reads the runs of the version its [baseline] names, so
+                       they must come from that tag's commit, and scores each latents table it
+                       pins, made from the pinned checkpoint by its own tag's commit
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside
@@ -31,7 +34,17 @@ from .trend import Pipeline
 
 NULLS = ("ar1", "fast_slow")
 DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
-CELL = ("indicator", "observable", "cadence", "L", "h", "window_taus", "bandwidth_taus", "headline")
+CELL = (
+    "checkpoint",
+    "indicator",
+    "observable",
+    "cadence",
+    "L",
+    "h",
+    "window_taus",
+    "bandwidth_taus",
+    "headline",
+)
 
 
 def null_series(kind: str, length: int, n: int, rng: np.random.Generator) -> np.ndarray:
@@ -150,7 +163,12 @@ def _score(args: argparse.Namespace) -> int:
         raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
     rng = np.random.default_rng(args.seed)
     evaluation = ising.evaluate(
-        pre.doc, args.data_dir, rng, allow_stale=args.allow_stale_pilot, commit=ref.commit
+        pre.doc,
+        args.data_dir,
+        rng,
+        allow_stale=args.allow_stale_pilot,
+        commit=ref.commit,
+        runs_commit=prereg.baseline_commit(pre),
     )
     stamp = prereg.stamp(pre, ref)
     pilot = evaluation.pilot
@@ -173,6 +191,7 @@ def _score(args: argparse.Namespace) -> int:
             "run_id": r.run_id,
             "complete_sha256": r.complete_sha256,
             "pilot": r.params.get("pilot"),
+            **({"latents": tables} if (tables := evaluation.latents.get(r.run_id)) else {}),
         }
         for r in evaluation.inputs
     ]
