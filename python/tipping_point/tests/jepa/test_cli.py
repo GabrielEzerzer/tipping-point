@@ -44,12 +44,42 @@ def test_train_selects_runs_by_seed_and_records_its_calls(
     assert pilot["kernel_commit"] and recorded["id"] == "ising-jepa" and recorded["version"] == 1
 
 
-@pytest.mark.parametrize("seeds", [["1"], ["101", "3"]])
+@pytest.mark.parametrize(
+    "seeds",
+    [
+        *(["--train-seeds", str(seed)] for seed in range(1, 11)),  # the pilot's 1-5 and v1's 6-10
+        ["--train-seeds", "101", "3"],
+        ["--train-seeds", "101", "8"],
+        ["--train-seeds", "101", "--val-seed", "6"],
+    ],
+)
 def test_train_refuses_preregistered_seeds_before_reading_data(
-    ising: jepa_ising.Ising, seeds: list[str], capsys: pytest.CaptureFixture[str]
+    ising: jepa_ising.Ising,
+    seeds: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(_train_argv(ising, "--train-seeds", *seeds)) == 1
+    """Catches any seed of 1-10 getting through as a train or a validation seed. The harness holds
+    a real staircase at seed 6, so a refusal that lapsed would train on it: here that fails."""
+
+    def never(*_: object, **__: object) -> None:
+        raise AssertionError("a scored seed reached training")
+
+    monkeypatch.setattr(train, "start", never)
+    assert main(_train_argv(ising, *seeds)) == 1
     assert "scored by a pre-registration" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("seed", ["11", "16"])
+def test_train_leaves_the_seeds_past_the_scored_range_to_the_run_lookup(
+    ising: jepa_ising.Ising, seed: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Catches a refusal wider than the freeze's: #28's training staircases keep their own seeds,
+    11-16 (#26 decision 6). The harness has no such run, so the lookup answers instead."""
+    assert main(_train_argv(ising, "--train-seeds", seed)) == 1
+    err = capsys.readouterr().err
+    assert "scored by a pre-registration" not in err
+    assert f"no complete staircase run for (L, seed) [(16, {seed})]" in err
 
 
 def test_extract_verify_and_budget_commands(

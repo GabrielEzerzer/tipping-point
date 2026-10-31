@@ -3,11 +3,12 @@ values: real spins, real Parquet, real manifests), and a small model trained on 
 
 At L = 16 with 4 replicas, each staircase holds three plateaus (3.5, Tc + 4.5e-5 inside the
 held-out band, and 1.5) of eight bursts each, a multiple of 8 as extract's tc-plus needs (the
-real staircases save 200); seeds 101 and 102 train and validate, seed 1 is a scored seed
-(refused, never trained on), and a ramp and a fixed (null) run complete the set of kinds training
-must refuse. Runs flush every 250 sweeps, so a staircase's configs come in four chunks as a long
-run's come in many: the first holds no frame of the Tc plateau, the last only bursts 22 and 23.
-Everything runs on the CPU in seconds. PILOT is the committed pilot record, #54's.
+real staircases save 200); seeds 101 and 102 train and validate, seed 6 is one ising-ews-v1 scores
+(refused, never trained on; a pilot seed would not show v1's 6-10 lapsing from the refusal), and a
+ramp and a fixed (null) run complete the set of kinds training must refuse. Runs flush every 250
+sweeps, so a staircase's configs come in four chunks as a long run's come in many: the first holds
+no frame of the Tc plateau, the last only bursts 22 and 23. Everything runs on the CPU in seconds.
+PILOT is the committed pilot record, #54's.
 """
 
 from dataclasses import dataclass
@@ -53,7 +54,7 @@ def build(root: Path) -> Ising:
     plans: dict[str, tuple[int, protocol.Schedule]] = {
         "train": (101, staircase()),
         "val": (102, staircase()),
-        "scored": (1, staircase()),
+        "scored": (6, staircase()),
         "ramp": (101, protocol.Ramp(rate=100, L=L, pre=50, hold=50, save_dT=0.05)),
         "null": (103, protocol.Fixed((2.5,), therm=50, sweeps=100, saves=2)),
     }
