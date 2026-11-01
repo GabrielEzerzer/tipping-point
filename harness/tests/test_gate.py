@@ -1071,6 +1071,7 @@ SELF_TEST_SECTIONS = (
     "resolution",
     "previous",
     "inputs",
+    "input_checkpoints",
     "wheel",
     "verification",
     "kernel_folder",
@@ -1163,11 +1164,11 @@ SLOWEST = {
     "cargo-fmt": 55.15,  # .worktrees/gateprune.log, CPU 100% busy as it started
     "cargo-clippy": 833.48,  # .worktrees/gate-freeze3.log, 83.6%
     "cargo-test": 961.12,  # .worktrees/gateprune.log, 100%
-    "ruff-check": 15.63,  # the real leg through run_leg, 2026-11-01, 100%
+    "ruff-check": 25.78,  # .worktrees/gate-fix-runner.log, 100%
     "ruff-format": 16.94,  # the real leg through run_leg, 2026-11-01, 100%
-    "pyright": 416.48,  # the real leg through run_leg, 2026-11-01, 100%
+    "pyright": 419.37,  # .worktrees/gate-fix-runner.log, 100%
     "pytest": 2455.43,  # .worktrees/gater3.log, 54.3%
-    "self-test": 423.97,  # fix-runner's gate-20261101T062918.json, 95.5%
+    "self-test": 646.78,  # .worktrees/gate-fix-runner.log, 100%
 }
 # Seconds a stand-in holds on for: past every limit below, however long a starved kill takes (at
 # BelowNormal under load a bare python can take a minute to start), and over by itself, so that a
