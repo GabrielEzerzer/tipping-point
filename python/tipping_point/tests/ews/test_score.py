@@ -275,15 +275,19 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     auc = pq.read_table(run_dir / "auc" / f"{0:020d}.parquet").to_pylist()
     assert len(auc) == prereg.cells(demo.doc) == 48
     rise = {(r["cadence"], r["L"], r["h"]): r["auc"] for r in auc if r["indicator"] == "variance"}
-    assert all(v > (0.85 if h == 0 else 0.6) for (_, _, h), v in rise.items()), rise  # planted
+    # planted. One cell moves with the draw: over 30 draws of this dataset the lowest at h = 0 is
+    # 0.75-0.94 (0.79-0.91 with the streams its runs used to share, #110) and the mean of the four
+    # 0.84-0.94 either way. This draw: 0.82 and 0.88
+    assert all(v > (0.8 if h == 0 else 0.6) for (_, _, h), v in rise.items()), rise
+    assert np.mean([v for (_, _, h), v in rise.items() if h == 0]) > 0.85, rise
     surrogate = pq.read_table(run_dir / "surrogates" / f"{0:020d}.parquet").to_pylist()
     assert {(r["surrogate"], r["headline"]) for r in surrogate} == {("phase", True), ("ar1", True)}
     # with 19 surrogates p reaches alpha = 1/20 only for a series that beats every one of them
     assert len(surrogate) == 48 and {r["n_surrogates"] for r in surrogate} == {19}
     rising = [r["detected"] for r in surrogate if r["indicator"] == "variance" and r["h"] == 0]
-    assert min(rising) >= 0.25 and np.mean(rising) >= 0.4, rising  # planted rise: 0.44-0.69
+    assert min(rising) >= 0.25 and np.mean(rising) >= 0.4, rising  # planted rise: 0.25-0.81
     null = [r["false_positive"] for r in surrogate]
-    assert max(null) <= 0.25 and np.mean(null) <= 0.1, null  # about alpha: 0-0.11 planted
+    assert max(null) <= 0.25 and np.mean(null) <= 0.1, null  # about alpha: 0-0.09 planted
     falling = [r for r in surrogate if r["indicator"] == "skewness"]
     assert falling and all(r["direction"] == "less" and r["detected"] <= 0.25 for r in falling)
     alarms = pq.read_table(run_dir / "alarms" / f"{0:020d}.parquet").to_pylist()
@@ -291,10 +295,10 @@ def test_score_writes_stamped_results_and_logs_every_cell(
         (i, c, L) for i in ("variance", "ac") for c in ("dense", "matched") for L in (16, 32)
     }
     for r in alarms:
-        assert math.isfinite(r["theta"]), r  # a budget 8 times too loose puts it at -inf
+        assert math.isfinite(r["theta"]), r  # a budget 8 times too loose reaches no theta: NaN
         assert r["attainable"] is True and r["far_max"] >= r["far_set"], r
         # the rate theta was set at is at most the target of 2 per 100 tau_c, and close to it:
-        # 1.90-2.00 planted, 1.39-1.79 when the budget is counted per score instead of per tau_c
+        # 1.90-2.00 planted, 0.17-0.22 when the budget is counted per score instead of per tau_c
         assert 1.8 <= r["far_set"] <= 2.0 + 1e-9 and 0.5 < r["far_test"] < 6, r
         # inside the band [2, -1]; NaN, every replica censored or missed, fails. Where in the
         # band depends on the draw: the band-entry rule is pinned on designed s(t) below
@@ -417,9 +421,9 @@ def test_a_falling_direction_reaches_the_surrogate_test_and_the_alarms(planted: 
 def test_the_first_seed_sets_theta_and_the_second_tests_it(planted: Any) -> None:
     """#64: alternate seeds set theta and test its false-alarm rate. Swapped, every theta, rate
     and alarm position in the results moves while the planted ranges do not notice (one median
-    alarm eps_L goes from 1.30 to 0.97). With the second seed's null blocks blanked, theta still
+    alarm eps_L goes from 1.90 to 1.42). With the second seed's null blocks blanked, theta still
     comes from the first seed's and is finite, and the blank half raises no false alarm; set on
-    the blank half, theta would be -inf."""
+    the blank half, no theta reaches the target, so it would be NaN."""
     doc = tomllib.loads(_text(planted.root, "demo", PILOT_RUN))
     ind, top, event = doc["indicators"], doc["sensitivity"]["headline"], doc["event"]
     band = (max(event["horizons"]) + event["segment"], min(event["horizons"]))
