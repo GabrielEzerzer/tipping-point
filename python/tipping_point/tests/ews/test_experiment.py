@@ -395,6 +395,27 @@ def test_a_killed_scoring_leaves_no_complete_result_short_of_its_trials(
         assert prereg.charge(tmp_path, draft, 3132) == 0
 
 
+@pytest.mark.parametrize("entry", ["the runner", "ews score"])
+def test_a_torn_log_stops_a_scoring_as_a_refusal_not_a_traceback(
+    frozen: Frozen, tmp_path: Path, capsys: pytest.CaptureFixture[str], entry: str
+) -> None:
+    """#119 from the command line: both entries catch PreregError alone, so anything else was a
+    traceback at the operator. Exit 1, the file, the line and the repair, and nothing scored."""
+    copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
+    prereg.log_trial(copy.root, {"prereg": {"id": "ising-latent", "version": 1}})
+    log = prereg.trials_path(copy.root)
+    log.write_bytes(log.read_bytes() + b'{"auc": 0.5, "auc_ci": [0.')
+    if entry == "the runner":
+        code = _run(frozen.path, copy, "--no-figures")
+    else:
+        argv = ["score", "--prereg", str(frozen.path), "--data-dir", str(copy.root), "--cells-only"]
+        code = ews_main(argv)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert f"{log}, line 2:" in err and "count it as spent and amend the pre-registration" in err
+    assert not _results(copy)
+
+
 # ---------------------------------------------------------------- 4: the margins
 
 

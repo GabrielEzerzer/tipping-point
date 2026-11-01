@@ -765,17 +765,24 @@ def log_trial(data_dir: Path, record: dict[str, Any]) -> None:
 
 
 def trials(data_dir: Path, prereg: Prereg) -> int:
-    """Evaluations logged so far under this prereg's id and version."""
+    """Evaluations logged so far under this prereg's id and version. A line that is no whole record,
+    as a power cut inside log_trials' one write leaves, is refused: no count can rest on it."""
     path = trials_path(data_dir)
     if not path.exists():
         return 0
-    count = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
-        record = json.loads(line)
-        count += (record["prereg"]["id"], record["prereg"]["version"]) == (
-            prereg.id,
-            prereg.version,
-        )
+    own, count = (prereg.id, prereg.version), 0
+    for number, line in enumerate(path.read_bytes().splitlines(), start=1):
+        try:
+            stamp = json.loads(line)["prereg"]
+            count += (stamp["id"], stamp["version"]) == own
+        except (ValueError, KeyError, TypeError) as exc:  # ValueError: bad JSON, or bad UTF-8
+            raise PreregError(
+                f"{path}, line {number}: not a whole trial record, a write torn by a crash. The "
+                "run that was writing it has a folder with no complete.json and its tables on "
+                "disk: count it as spent and amend the pre-registration. Every count reads this "
+                "whole log, the amendment's too, so then cut this line out of the log, keeping a "
+                "copy"
+            ) from exc
     return count
 
 

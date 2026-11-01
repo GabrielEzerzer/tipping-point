@@ -329,3 +329,87 @@ def test_trials_append_and_count_per_version(tmp_path: Path) -> None:
     assert len(lines) == 5 and lines[-1] == b"" and b"\r" not in lines[0]
     assert all("logged_ns" in json.loads(line) for line in lines[:-1])
     assert prereg.trials(tmp_path, v1) == 3
+
+
+def _trial_log(data_dir: Path, whole: int = 4) -> list[bytes]:
+    """`whole` lines of ising-ews-v1's as log_trials writes them, each with its newline."""
+    for i in range(whole):
+        prereg.log_trial(data_dir, {"prereg": {"id": "ising-ews", "version": 1}, "cell": i})
+    return prereg.trials_path(data_dir).read_bytes().splitlines(keepends=True)
+
+
+@pytest.mark.parametrize(
+    ("line", "tear"),
+    [
+        # a power cut inside the one large append: the next line is the one that holds it
+        (4, lambda lines: [*lines[:3], lines[3][:40]]),
+        (4, lambda lines: [*lines[:3], lines[3][:-2]]),  # all but its closing brace and newline
+        (4, lambda lines: [*lines[:3], lines[3][:40], b"\x00" * 512]),  # a tail the disk zeroed
+        (4, lambda lines: [*lines[:3], b'{"cell": \xff\xfe\n']),  # not a JSON error: not UTF-8
+        # torn in the middle, by a later write on top of it, or on its own
+        (2, lambda lines: [lines[0], lines[1][:40], *lines[2:]]),
+        (2, lambda lines: [lines[0], lines[1][:40] + b"\n", *lines[2:]]),
+        # JSON, but no trial: nothing could say whose it is
+        (3, lambda lines: [*lines[:2], b"{}\n", *lines[2:]]),
+        (3, lambda lines: [*lines[:2], b"null\n", *lines[2:]]),
+        (3, lambda lines: [*lines[:2], b'{"prereg": 7}\n', *lines[2:]]),
+    ],
+    ids=[
+        "truncated last line",
+        "last line short of its brace",
+        "zeroed tail",
+        "not text",
+        "glued to the next line",
+        "torn middle line",
+        "an empty record",
+        "a JSON null",
+        "a stamp that is no stamp",
+    ],
+)
+def test_a_torn_trial_log_is_refused_by_file_line_and_repair(
+    tmp_path: Path, line: int, tear: Any
+) -> None:
+    """#119: a line that is no whole record stops the count as a PreregError, the refusal `ews
+    score` and the runner report, never a JSONDecodeError. It names the file, the line and the
+    repair, from the file's own count or a charge alike."""
+    v1 = prereg.load(V1)
+    lines = _trial_log(tmp_path)
+    prereg.trials_path(tmp_path).write_bytes(b"".join(tear(lines)))
+    for read in (lambda: prereg.trials(tmp_path, v1), lambda: prereg.charge(tmp_path, v1, 1)):
+        with pytest.raises(prereg.PreregError) as refused:
+            read()
+        message = str(refused.value)
+        assert f"{prereg.trials_path(tmp_path)}, line {line}:" in message
+        assert "no complete.json" in message and "tables on disk" in message
+        assert "count it as spent and amend the pre-registration" in message
+
+
+def test_the_amended_file_needs_the_torn_line_out_of_the_log(tmp_path: Path) -> None:
+    """The refusal's repair must finish. Every version shares the log and every count reads all of
+    it, so an amendment, whose trials are none of those, is stopped by the same line; which is why
+    the message goes on to say to cut it out. With it gone the amendment counts from 0, and the
+    version that tore it keeps every whole line against its budget."""
+    v1 = prereg.load(V1)
+    amended = prereg.Prereg(v1.path, v1.doc | {"version": 2}, v1.sha256)
+    lines = _trial_log(tmp_path)
+    log = prereg.trials_path(tmp_path)
+    log.write_bytes(b"".join([*lines[:3], lines[3][:40]]))
+    with pytest.raises(prereg.PreregError, match=r"line 4: .*cut this line out"):
+        prereg.charge(tmp_path, amended, 1)
+    log.write_bytes(b"".join(lines[:3]))
+    assert prereg.charge(tmp_path, amended, 1) == 0
+    assert prereg.trials(tmp_path, v1) == 3
+
+
+def test_a_log_with_nothing_torn_counts_as_it_did(tmp_path: Path) -> None:
+    """Refusing a torn line refuses nothing else: a whole last record short of its newline alone, a
+    log with CRLF line ends, as an editor on Windows leaves it, and an empty log all still count."""
+    v1 = prereg.load(V1)
+    lines = _trial_log(tmp_path)
+    log = prereg.trials_path(tmp_path)
+    log.write_bytes(b"".join(lines)[:-1])
+    assert prereg.trials(tmp_path, v1) == 4
+    log.write_bytes(b"".join(lines).replace(b"\n", b"\r\n"))
+    assert prereg.trials(tmp_path, v1) == 4
+    log.write_bytes(b"")
+    assert prereg.trials(tmp_path, v1) == 0
