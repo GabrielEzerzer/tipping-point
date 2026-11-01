@@ -9,8 +9,8 @@ extraction, the deadline, the output cap) with a stand-in for the simulator; the
 runs carried forward and reused or resumed; inputs found and checked against their sha256; the
 wheel and COMMIT.txt checks; run verification, judged by exit codes and files only; the rates STATUS
 gives, by checkpoint and L; the kernel folder against what `kaggle kernels push` checks; invalid
-plans refused at every door; pilot-28.json and primary-28.json, their stage ids and kernel sources,
-on stand-in mounts.
+plans refused at every door; pilot-28.json, primary-28.json and first-read-m1.json, their stage ids,
+inputs and kernel sources, on stand-in mounts.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
@@ -1361,7 +1361,7 @@ def leaks(folder: Path) -> list[str]:
 
 
 def kernel_acceptance(k: ModuleType, root: Path) -> None:
-    for name in ("job-a", "pilot-28", "primary-28"):
+    for name in ("job-a", "pilot-28", "primary-28", "first-read-m1"):
         source, folder = PLANS / f"{name}.json", root / name
         plan = json.loads(source.read_text(encoding="utf-8"))
         code = k.main(["--write-kernel", str(source), str(folder)])
@@ -1455,6 +1455,7 @@ PILOT_RECORD = "20261025T194846Z-tauc-L16-32-64-128"  # #54's record
 PILOT_SHA256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698"
 DRAFT = "ising-latent-v1.toml"
 DRAFT_RUN = "20261101T000000Z-ising-latent-v1-draft"  # its folder in tp-prereg-ising-latent
+M1_RUN = "20261101T051047Z-L16-32-64-m1"  # primary model seed 1, in tp-jepa-primary-28's output
 DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
 KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
 
@@ -1972,6 +1973,136 @@ def primary_28(k: ModuleType, root: Path) -> None:
     )
 
 
+def first_read_m1(k: ModuleType, root: Path) -> None:
+    plan = json.loads((PLANS / "first-read-m1.json").read_text(encoding="utf-8"))
+    pilot = json.loads((PLANS / "pilot-28.json").read_text(encoding="utf-8"))
+    errors = k.cli_errors(plan)
+    check("first-read-m1: the CLI itself takes every run's arguments", errors == [], errors)
+    checkpoints = {k.FINAL: "m1_final", k.TWIN: "m1_twin"}
+    mirrored = [
+        {
+            "name": r["name"],
+            "command": r["command"],
+            "args": [{"input": checkpoints[r["args"][0]["file"]]}, *r["args"][1:]],
+        }
+        for r in pilot["runs"]
+        if r["name"].startswith("x-")
+    ]
+    check(
+        "first-read-m1: pilot-28's own read and nothing else: its names, order and arguments, on "
+        "m1's two files, no run pinned so that each T4 takes the next",
+        plan["runs"] == mirrored,
+    )
+    entries = plan["inputs"]
+    check(
+        "first-read-m1: its checkpoints are m1's final.pt and twin, pinned, from primary-28",
+        plan["kernel_sources"] == [f"{k.OWNER}/tp-jepa-primary-28"]
+        and plan["datasets"] == pilot["datasets"]
+        and {n: (e["run"], e["file"]) for n, e in entries.items()}
+        == {"m1_final": (M1_RUN, k.FINAL), "m1_twin": (M1_RUN, k.TWIN)}
+        and entries["m1_final"]["sha256"] != entries["m1_twin"]["sha256"],
+        entries,
+    )
+    read = [
+        (r["args"][0]["input"], r["args"][1]["dataset_run"], r["args"][2:]) for r in plan["runs"]
+    ]
+    tagged = [DATASET_ID.fullmatch(d) for _, d, _ in read]
+    wrong = [
+        d
+        for (_, d, rest), t in zip(read, tagged, strict=True)
+        if t is None or rest != (["--select", "tc-plus"] if t[2] == "qs" else [])
+    ]
+    check("first-read-m1: staircases are read as tc-plus, ramps and nulls whole", not wrong, wrong)
+    check(
+        "first-read-m1: it reads seeds 1-5 at L = 16 and 32, and nothing else",
+        {int(t[3]) for t in tagged if t} == {1, 2, 3, 4, 5}
+        and {int(t[1]) for t in tagged if t} == {16, 32},
+    )
+    pairs = collections.Counter((name, d) for name, d, _ in read)
+    runs = {d for _, d in pairs}
+    check(
+        "first-read-m1: final.pt and the twin each read all 60 runs, once",
+        len(runs) == 60 and all(pairs[(n, d)] == 1 for n in entries for d in runs),
+        len(runs),
+    )
+    reaching = []
+    for seed in k.NO_EXTRACT_SEEDS:
+        variant = copy.deepcopy(plan)
+        variant["runs"][-1]["args"][1]["dataset_run"] = f"20261025T031229Z-L32-ramp-x2-s{seed}"
+        reaching.append(f"has seed {seed}: jepa extract never reads" in refused(k, variant))
+    check("first-read-m1: a run at any of seeds 6-10 would be refused at load", all(reaching))
+
+    # on the mounts Kaggle gives it: m1's bytes are stand-ins here, the runner checks the real ones
+    ctx = ctx_at(k, root)
+    ctx.py = sys.executable
+    ctx.helper.write_text(k.HELPER_SOURCE, encoding="utf-8")
+    trial = copy.deepcopy(plan)
+    output = ctx.input / "tp-jepa-primary-28" / "out"
+    held = output / "jepa" / M1_RUN
+    for name, entry in trial["inputs"].items():
+        (held / entry["file"]).parent.mkdir(parents=True, exist_ok=True)
+        (held / entry["file"]).write_text(name, encoding="utf-8")
+        entry["sha256"] = hashlib.sha256(name.encode()).hexdigest()
+    named = {"name": "x-twin-L16-qs-s1", "folder": "jepa/m1"}  # a name this plan has as well
+    state = {"kernel": "tp-jepa-primary-28", "runs": [named]}
+    (output / k.STATE).write_text(json.dumps(state), encoding="utf-8")
+    check(
+        "first-read-m1: the primary kernel's own state, attached with its output, is no previous "
+        "session of this kernel",
+        k.carry_forward(ctx, trial) is None,
+    )
+    session = k.Session(ctx, trial, {}, COMMIT, TORCH, 2)
+    dataset = ctx.input / "tipping-point-ising-l16-l32"
+    for run_id in k.dataset_runs(session.runs):
+        stand_in_run(dataset / run_id, run_id)
+    session.locate_inputs()
+    session.locate_datasets()
+    check(
+        "first-read-m1: m1's two files and the 60 runs are found among the attached sources",
+        set(session.inputs) == set(entries) and set(session.datasets) == runs,
+        len(session.datasets),
+    )
+    errors = session.capture(session.runs)
+    check(
+        "first-read-m1: the helper's capture, as on Kaggle, refuses nothing", errors == [], errors
+    )
+    session.stage()
+    staircase = next(d for d in runs if d.endswith("-L16-qs-s1"))
+    tail, key = session.resolve(session.by_name["x-final-L16-qs-s1"])
+    check(
+        "first-read-m1: an extraction resolves to m1's file and its staged run, tc-plus kept",
+        tail == [str(held / k.FINAL), str(ctx.out / "ising" / staircase), "--select", "tc-plus"]
+        and f"input/{M1_RUN}/{k.FINAL}" in key,
+        tail,
+    )
+    refused_seeds = []
+    for r in session.runs:
+        try:
+            session.refuse_seeds(r)
+        except k.RunError as exc:
+            refused_seeds.append(str(exc))
+    check(
+        "first-read-m1: no extraction reads seeds 6-10, read from the runs' own manifests",
+        not refused_seeds,
+        refused_seeds,
+    )
+    for name in ("x-twin-L16-qs-s1", "x-final-L16-qs-s1"):
+        table = ctx.out / "ising" / staircase / "latents" / name
+        table.mkdir(parents=True)
+        manifest = {"started_ns": 10**9, "params": {"dataset": {"L": 16}}}
+        (table / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        done = {"rows": {"latents": 1000}, "ended_ns": 2 * 10**9}
+        (table / "complete.json").write_text(json.dumps(done), encoding="utf-8")
+        run = session.by_name[name]
+        run.state, run.folder = "complete", table.relative_to(ctx.out).as_posix()
+    groups = session.measured()["extract"]
+    check(
+        "first-read-m1: STATUS keeps final.pt's rate and the twin's apart, by input",
+        sorted(groups) == ["m1_final L16", "m1_twin L16"],
+        sorted(groups),
+    )
+
+
 def run_all(k: ModuleType) -> int:
     with tempfile.TemporaryDirectory(prefix="tp-self-test-", ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -1993,6 +2124,7 @@ def run_all(k: ModuleType) -> int:
         invalid_plans(k, root / "invalid")
         pilot_28(k, root / "pilot-28")
         primary_28(k, root / "primary-28")
+        first_read_m1(k, root / "first-read-m1")
         real_runs(k, root / "real")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1

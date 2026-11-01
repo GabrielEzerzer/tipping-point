@@ -1743,7 +1743,9 @@ class Session:
                         "stopped_early": bool(done.get("stopped_early")),
                     }
             elif r.command == "jepa extract":
-                ckpt = next((a for a in r.args if isinstance(a, dict) and "file" in a), {})
+                ckpt = next(
+                    (a for a in r.args if isinstance(a, dict) and ("file" in a or "input" in a)), {}
+                )
                 manifest = read_json(self.ctx.out / r.folder / "manifest.json") or {}
                 size = ((manifest.get("params") or {}).get("dataset") or {}).get("L")
                 group = extract.setdefault(
@@ -1751,7 +1753,7 @@ class Session:
                         filter(
                             None,
                             (
-                                ckpt.get("run", "?"),
+                                ckpt.get("run", ckpt.get("input", "?")),
                                 ckpt.get("file"),
                                 f"L{size}" if size is not None else None,
                             ),
