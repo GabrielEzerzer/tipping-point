@@ -41,7 +41,7 @@ import math
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pyarrow as pa
@@ -50,6 +50,7 @@ import pyarrow.parquet as pq
 from ..ising import autocorr, io
 from ..ising.pilot import stale as _stale
 from . import fss, indicators, scoring, surrogates
+from .prereg import SELECTIONS
 from .trend import RAW, Pipeline, trailing_score
 
 PILOT = "pilot.json"
@@ -652,6 +653,45 @@ def _scored_as(doc: dict[str, Any], role: str) -> dict[str, Any]:
     }
 
 
+class Admitted(NamedTuple):
+    """What a pre-registration's scoring reads, once admit has let it through."""
+
+    pilot: Pilot
+    chosen: dict[int, Inputs]
+    scored: list[Run]
+    passes: list[Checkpoint]
+
+
+def admit(
+    doc: dict[str, Any],
+    data_dir: Path,
+    say: Callable[[str], None] = print,
+    allow_stale: bool = False,
+    commit: str | None = None,
+    runs_commit: str | None = None,
+) -> Admitted:
+    """Everything a scoring refuses before it reads a frame; evaluate's arguments say what. A
+    table extracted under another rule than latents.extraction gives its role is refused, frozen
+    or not (_same_selection)."""
+    data = doc["data"]
+    pinned = data["tau_c"]["pilot_sha256"]
+    pinned = pinned if len(pinned) == 64 else None
+    pilot = read_pilot(data_dir, data["tau_c"]["pilot_run"], pinned, allow_stale)
+    if pilot.stale:
+        say(f"warning: {pilot.path}: {pilot.stale}; scored anyway (--allow-stale-pilot)")
+    passes = checkpoints(doc)
+    read = {c.name: c.sha256 for c in passes if c.name}
+    chosen = select(*find_runs(data_dir), data, list(read))
+    scored = list({run.run_id: run for i in chosen.values() for run in i.runs()}.values())
+    _same_selection(scored, passes)
+    if commit is not None:
+        _same_commit(scored, runs_commit or commit)
+        if pinned is not None:  # always, once frozen: the freeze refuses an unpinned record
+            _same_record(chosen, pinned, data["staircase"].get("tau_sha256", {}))
+        _same_latents(scored, read, commit)
+    return Admitted(pilot, chosen, scored, passes)
+
+
 def evaluate(
     doc: dict[str, Any],
     data_dir: Path,
@@ -672,21 +712,8 @@ def evaluate(
     baseline's tag, the runs must come from that commit instead (a latent prereg reads the runs of
     the version it compares with), and each latents table from `commit` and the checkpoint the
     prereg pins (_same_latents). A prereg with a [latents] section is scored once per checkpoint."""
-    data = doc["data"]
-    pinned = data["tau_c"]["pilot_sha256"]
-    pinned = pinned if len(pinned) == 64 else None
-    pilot = read_pilot(data_dir, data["tau_c"]["pilot_run"], pinned, allow_stale)
-    if pilot.stale:
-        say(f"warning: {pilot.path}: {pilot.stale}; scored anyway (--allow-stale-pilot)")
-    passes = checkpoints(doc)
+    pilot, chosen, scored, passes = admit(doc, data_dir, say, allow_stale, commit, runs_commit)
     read = {c.name: c.sha256 for c in passes if c.name}
-    chosen = select(*find_runs(data_dir), data, list(read))
-    scored = list({run.run_id: run for i in chosen.values() for run in i.runs()}.values())
-    if commit is not None:
-        _same_commit(scored, runs_commit or commit)
-        if pinned is not None:  # always, once frozen: the freeze refuses an unpinned record
-            _same_record(chosen, pinned, data["staircase"].get("tau_sha256", {}))
-        _same_latents(scored, read, commit)
     tables: dict[str, list[Row]] = {name: [] for name in (*_CELL_TABLES, "fss")}
     plateaus_dropped = 0
     for checkpoint in passes:
@@ -715,6 +742,28 @@ def _digests(run: Run, names: Iterable[str]) -> dict[str, str]:
     """The sha256 of each named latents table's complete.json: what a result says it read."""
     done = (run.path / LATENTS / name / "complete.json" for name in names)
     return {p.parent.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in done}
+
+
+def _same_selection(runs: Sequence[Run], passes: Sequence[Checkpoint]) -> None:
+    """Refuse a latents table extracted under another rule than latents.extraction gives its role
+    (prereg.SELECTIONS): a staircase's table must carry that rule exactly, and a ramp's or a null
+    run's, which every rule reads whole, that rule's name or `all`."""
+    foreign = []
+    for run in runs:
+        for checkpoint in passes:
+            if not checkpoint.name:
+                continue
+            manifest = io.read_json(run.path / LATENTS / checkpoint.name / "manifest.json")
+            rule = manifest["params"].get("selection") or {"rule": "all"}
+            wanted = SELECTIONS[checkpoint.role]
+            same = rule["rule"] in ("all", wanted["rule"])
+            if not (rule == wanted if run.kind == "staircase" else same):
+                foreign.append(
+                    f"{run.run_id}/{LATENTS}/{checkpoint.name} (read under {rule['rule']}, "
+                    f"its {checkpoint.role} role takes {wanted['rule']})"
+                )
+    if foreign:
+        raise IsingDataError(f"latents tables not extracted as latents.extraction says: {foreign}")
 
 
 def _same_latents(runs: Sequence[Run], pinned: dict[str, str], commit: str) -> None:
@@ -810,7 +859,9 @@ def _cells(
     segment = float(doc["event"]["segment"])
     horizons = [float(h) for h in doc["event"]["horizons"]]
     band = (max(horizons) + segment, min(horizons))
-    prep = prepare(inputs, cadence, tau_c, float(ind["thin"]), band)
+    prep = prepare(
+        inputs, cadence, tau_c, float(ind.get("thin", 0.0)), band
+    )  # dense alone reads it
     headline = (float(sens["headline"]["window"]), float(sens["headline"]["bandwidth"]))
     null_scores: dict[tuple[str, Pipeline], list[np.ndarray]] = {}
     null_pvalues: dict[tuple[str, Pipeline], dict[str, np.ndarray]] = {}
@@ -856,9 +907,12 @@ def _cells(
                         tables["auc"].append(_auc_row(cell, pos, neg, sc, rng) | samples)
                         if top or sc["surrogates"]["cells"] == "all":
                             direction = cell["direction"]
+                            test = scoring.sequential_test if "latents" in doc else None
                             if key not in null_pvalues:
-                                null_pvalues[key] = _pvalues(neg_rows, pipe, sc, rng, direction)
-                            p_pos = _pvalues(pos_rows, pipe, sc, rng, direction)
+                                null_pvalues[key] = _pvalues(
+                                    neg_rows, pipe, sc, rng, direction, test
+                                )
+                            p_pos = _pvalues(pos_rows, pipe, sc, rng, direction, test)
                             rows = _surrogate_rows(cell, p_pos, null_pvalues[key], sc)
                             tables["surrogates"] += rows
             if top:
@@ -910,15 +964,25 @@ def _pvalues(
     sc: dict[str, Any],
     rng: np.random.Generator,
     direction: str,
+    sequential: Callable[..., tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> dict[str, np.ndarray]:
     """Per surrogate test of the prereg, the one-sided p-value of every row of every seed. A raw
-    series has no ar1 test: fitted to a trend, ar1 draws near-random walks with no trend."""
+    series has no ar1 test: fitted to a trend, ar1 draws near-random walks with no trend. With
+    `sequential` (a latent file: _surrogate_rows reads p at alpha alone, and 999 surrogates per
+    row of every checkpoint would take days) a row stops drawing once its decision is settled;
+    ising-ews-v1's frozen draws stay as they were."""
     s, x = sc["surrogates"], np.concatenate(rows)
     tests = {
         kind: surrogates.KINDS[kind]
         for kind in (s["primary"], s["secondary"])
         if not (kind == "ar1" and pipe.indicator in RAW)
     }
+    if sequential is not None:
+        alpha = float(sc["alpha"])
+        return {
+            kind: sequential(x, pipe, make, int(s["n"]), rng, direction, alpha)[1]
+            for kind, make in tests.items()
+        }
     return {
         kind: scoring.surrogate_test(x, pipe, make, int(s["n"]), rng, direction)[1]
         for kind, make in tests.items()
@@ -1042,8 +1106,9 @@ def _peaks(
     """Where each slow-ramp replica's indicator peaks (#98), for each one _peak_statistics names:
     the headline pipeline's detrend, window and lag along the whole ramp, and the eps_L of its
     extremum in the indicator's expected direction inside fss.dynamic.search (NaN on the band's
-    edge: not located). A descriptive row per indicator; the per-seed positions go to the dynamic
-    test. Only a position is read, so a slope's scale, per sample here, plays no part."""
+    edge, or as near it as _edge_margin says: not located). A descriptive row per indicator; the
+    per-seed positions go to the dynamic test. Only a position is read, so a slope's scale, per
+    sample here, plays no part."""
     dyn, ind = doc["fss"]["dynamic"], doc["indicators"]
     band = (float(dyn["search"][0]), float(dyn["search"][1]))
     rows, found = [], {}
@@ -1053,7 +1118,8 @@ def _peaks(
         for run, s in prep.ramps:
             ramp_segment(s, run, *band)  # refuses a ramp that does not cross the whole band
             values = pipe.rolling(s.observable(observable))
-            groups.append(fss.peak_position(values, run.eps(s.temperature), band, direction))
+            eps, margin = run.eps(s.temperature), _edge_margin(doc, prep, run, window)
+            groups.append(fss.peak_position(values, eps, band, direction, margin))
         peak = np.concatenate(groups)
         located = peak[np.isfinite(peak)]
         q1, median, q3 = np.quantile(located, [0.25, 0.5, 0.75]) if len(located) else [np.nan] * 3
@@ -1073,6 +1139,15 @@ def _peaks(
             }
         )
     return rows, found
+
+
+def _edge_margin(doc: dict[str, Any], prep: Prepared, run: Run, window: int) -> float:
+    """How far inside the search band, in eps_L, a peak still counts as not located: one headline
+    window of this ramp, sweeps of the window over sweeps per unit of eps_L, in a file that says so
+    (fss.dynamic.edge_margin, #115), and nothing in ising-ews-v1, which has no such key."""
+    if "edge_margin" not in doc["fss"]["dynamic"]:
+        return 0.0
+    return window * prep.sweeps / (float(run.schedule["params"]["rate"]) * run.Tc / run.L)
 
 
 def _peak_statistics(doc: dict[str, Any]) -> list[tuple[str, str, str, str]]:
@@ -1127,11 +1202,11 @@ def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> lis
     """1/nu from the median peak eps_L over L, per fss.dynamic indicator and cadence. Only
     fss.dynamic.cadence carries the pre-registered verdict (role dynamic); another cadence's row
     is a robustness check (role dynamic-robustness, no verdict). A fss.dynamic.statistics entry
-    is judged like an indicator, its row's role dynamic-<its role>. A peak on the search band's edge
-    was not located and is left out. The verdict, in this order: inconclusive when 1/nu has no
-    value, when more than half of an L's replicas were not located, or when fewer than
-    fss.dynamic.min_draw_share of the bootstrap draws give 1/nu a value (the CI would rest on a
-    sign-selected subset); otherwise fss.match and fss.excludes, combined."""
+    is judged like an indicator, its row's role dynamic-<its role>. A peak on the search band's
+    edge, or inside _edge_margin, was not located and is left out. The verdict, in this order:
+    inconclusive when 1/nu has no value, when more than half of an L's replicas were not located,
+    or when fewer than fss.dynamic.min_draw_share of the bootstrap draws give 1/nu a value (the CI
+    would rest on a sign-selected subset); otherwise fss.match and fss.excludes, combined."""
     dyn, sc = doc["fss"]["dynamic"], doc["scoring"]
     expected, tolerance = float(dyn["expected_inverse_nu"]), float(dyn["tolerance"])
     roles = {_statistic_key(entry): entry["role"] for entry in dyn.get("statistics", [])}

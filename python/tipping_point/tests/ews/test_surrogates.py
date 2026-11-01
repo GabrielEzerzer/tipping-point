@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from scipy.signal import lfilter
 from tipping_point.ews import surrogates as sur
+from tipping_point.ews import trend
 
 
 def _ar1(phi: float, rows: int, n: int, seed: int) -> np.ndarray:
@@ -78,3 +79,26 @@ def test_block_bootstrap_rebuilds_rows_from_contiguous_blocks() -> None:
             assert np.all((blocks >= x[row, 0]) & (blocks <= x[row, -1]))
     with pytest.raises(ValueError):
         sur.block_bootstrap(x, 101, 1, np.random.default_rng(0))
+
+
+@pytest.mark.parametrize("shape", [(20,), (3, 20), (2, 3, 21)])
+def test_phase_surrogates_are_the_same_on_the_thread_pool_or_off_it(
+    shape: tuple[int, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ising-ews-v1's scoring draws these: the same generator state gives the numbers the
+    whole-array formula gives, whatever the input's shape and however the rows are chunked and
+    threaded."""
+    x = np.random.default_rng(1).standard_normal(shape)
+    n, length = 5, shape[-1]
+    phases = np.random.default_rng(2).uniform(0.0, 2 * np.pi, (*shape[:-1], n, length // 2 + 1))
+    phases[..., 0] = 0.0
+    if length % 2 == 0:
+        phases[..., -1] = 0.0
+    expected = np.fft.irfft(
+        np.fft.rfft(x, axis=-1)[..., None, :] * np.exp(1j * phases), length, axis=-1
+    )
+    assert np.array_equal(sur.phase_randomised(x, n, np.random.default_rng(2)), expected)
+    monkeypatch.setattr(trend, "CHUNK", 8)
+    assert np.array_equal(sur.phase_randomised(x, n, np.random.default_rng(2)), expected)
+    monkeypatch.setattr(trend, "THREADS", 1)
+    assert np.array_equal(sur.phase_randomised(x, n, np.random.default_rng(2)), expected)

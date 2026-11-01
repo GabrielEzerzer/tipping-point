@@ -136,3 +136,28 @@ def test_pipeline_refuses_unknown_indicators_and_short_inputs() -> None:
         Pipeline("kurtosis", window=10, length=10)
     with pytest.raises(ValueError):
         Pipeline("variance", window=10, length=10).trend(np.zeros((2, 18)))
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 7, 8, 9, 15, 16, 17, 63, 64, 65, 100, 257, 1024, 1500])
+def test_the_inversion_count_is_the_brute_force_one(n: int) -> None:
+    """Every pair by definition, on rows where the block count's parts each matter: white noise
+    (most pairs cross blocks), a sorted row and a reversed one (none and all discordant), a walk
+    (long runs inside a block), rows with ties, a constant row. An off-by-one between blocks, a pad
+    that counts, or a tie counted discordant moves an integer here."""
+    rng = np.random.default_rng(n)
+    rows = np.stack(
+        [
+            rng.standard_normal(n),
+            np.arange(n, dtype=np.float64),
+            -np.arange(n, dtype=np.float64),
+            np.cumsum(rng.standard_normal(n)),
+            np.round(rng.standard_normal(n)),
+            np.round(np.cumsum(rng.standard_normal(n))),
+            np.ones(n),
+        ]
+    )
+    discordant, tied = trend._discordant(rows)
+    i, j = np.triu_indices(n, 1)
+    assert np.array_equal(discordant, (rows[:, i] > rows[:, j]).sum(axis=1))
+    assert np.array_equal(tied, (rows[:, i] == rows[:, j]).sum(axis=1))
+    assert discordant[1] == 0 and discordant[2] == n * (n - 1) // 2 and tied[6] == n * (n - 1) // 2
