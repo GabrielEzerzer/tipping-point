@@ -609,10 +609,16 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   a GPU: surrogates 22 h, alarms 15 h, probe embeddings 18 h on the CPU (19 ms a frame at L = 64), AUC,
   static fits and reading the tables 4 h. It was about 125 hours before the sequential test and the
   faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. The runner has no
-  resume: an interrupted run starts again. Its trials are logged in one write after its tables and
-  before `complete.json`, so a crash leaves a folder with no `complete.json`, its trials logged or
-  not, or a complete result with all of them. A crash in between spends the budget: the tables are
-  there, and scoring again means amending the file.
+  resume: a run interrupted before it writes its result starts again. Its trials are logged in one
+  write after its tables and before `complete.json`, so a crash in that write leaves a folder with no
+  `complete.json`, its trials logged or not, or a complete result with all of them. `prereg.charge`,
+  for any file, `ews score` included, refuses to score past a folder stamped with the file's id and
+  version and with no `complete.json`, since its tables can be read whether or not their cells were
+  logged: delete it or amend the file. Deleting it gives back no trial the log holds, so a crash after
+  the log spends the budget: the tables are there, and scoring again means amending the file. A crash
+  inside the log's one write leaves a line that is no whole record, which `prereg.trials` refuses by
+  file and line: count that run as spent, amend the file, and cut the line out of the log, keeping a
+  copy, since every count reads all of it.
 
 ### The exploratory pipeline
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import ews_planted as planted
+import ews_v1_golden
 import ising_experiment as runner
 import numpy as np
 import pyarrow.parquet as pq
@@ -332,7 +333,7 @@ def test_a_scoring_that_evaluates_other_cells_than_counted_is_refused(
 
 
 KILLED = """
-import os, sys
+import json, os, sys
 from pathlib import Path
 from tipping_point.ews import ising, prereg
 from tipping_point.ews.__main__ import CELL, score
@@ -353,46 +354,150 @@ def before_complete(path, record, replace=False):
     write_json(path, record, replace)
 
 
+def half_a_write(data_dir, records):
+    text = "".join(json.dumps(record, sort_keys=True) + "\\n" for record in records)
+    with open(prereg.trials_path(data_dir), "ab") as f:
+        f.write(text[: len(text) // 2 + 7].encode())  # lines of one length: half is a whole one
+        f.flush()
+        os._exit(3)
+
+
 if where == "before the trials":
     prereg.log_trials = lambda *args: os._exit(3)
+elif where == "inside the trials":
+    prereg.log_trials = half_a_write
 elif where == "after the trials":
     io.write_json = before_complete
 score(pre, prereg.Frozen("", ""), root, 1)
 """
+SCORED_FILES = (planted.DRAFT, ews_v1_golden.V1_TOML)  # v1 goes through this code too
 
 
-@pytest.mark.parametrize(
-    ("where", "logged"),
-    [("before the trials", 0), ("after the trials", 3132), ("nowhere", 3132)],
-)
+def _scoring(path: Path, root: Path, where: str) -> subprocess.CompletedProcess[str]:
+    """A scoring of `path` in its own process, killed at `where`, or left to finish or refuse."""
+    command = [sys.executable, "-c", KILLED, str(path), str(root), where]
+    return subprocess.run(command, capture_output=True, text=True, timeout=120)
+
+
+@pytest.mark.parametrize("path", SCORED_FILES, ids=lambda path: path.stem)
+@pytest.mark.parametrize("where", ["before the trials", "after the trials", "nowhere"])
 def test_a_killed_scoring_leaves_no_complete_result_short_of_its_trials(
-    tmp_path: Path, where: str, logged: int
+    tmp_path: Path, path: Path, where: str
 ) -> None:
-    """The whole last step of a real scoring of the draft's 3,132 cells, in a process that dies by
-    os._exit, with nothing flushed for it, at either side of the trial log. Killed, it leaves its
-    tables and no complete.json, its trials all logged or none: never a complete-looking result with
-    1,200 of them charged. The log it leaves decides what comes next: none, and the file may be
-    scored again; all, and its budget is spent, the tables on disk, until it is amended. Unkilled,
-    complete.json comes last, over all of them."""
-    done = subprocess.run(
-        [sys.executable, "-c", KILLED, str(planted.DRAFT), str(tmp_path), where],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    """The whole last step of a real scoring of a file's cells, the draft's 3,132 and v1's 972, in a
+    process that dies by os._exit, with nothing flushed for it, at either side of the trial log.
+    Killed, it leaves its tables and no complete.json, its trials all logged or none: never a
+    complete-looking result with 1,200 of them charged. Unkilled, complete.json comes last, over all
+    of them. #120: the second attempt, on either side of the log, is refused as a torn result, not
+    by the budget, and adds nothing. With the folder deleted, none logged lets scoring go ahead, to
+    a result of its own, while all logged leaves the budget spent, the tables gone with the folder:
+    which is why the refusal says deleting gives back no trial."""
+    pre = prereg.load(path)
+    cells = prereg.cells(pre.doc)
+    logged = 0 if where == "before the trials" else cells
+    done = _scoring(path, tmp_path, where)
     assert done.returncode == (0 if where == "nowhere" else 3), done.stderr
-    (run_dir,) = (tmp_path / "ews").glob("*-ising-latent-v1")
+    results = (tmp_path / "ews").glob
+    (run_dir,) = results(f"*-{pre.name}")
     assert (run_dir / "auc" / f"{0:020d}.parquet").is_file()
     assert (run_dir / "complete.json").is_file() == (where == "nowhere")
-    draft = prereg.load(planted.DRAFT)
-    assert prereg.trials(tmp_path, draft) == logged
+    assert prereg.trials(tmp_path, pre) == logged
     if logged:
         lines = prereg.trials_path(tmp_path).read_text("utf-8").splitlines()
         assert {json.loads(line)["result"] for line in lines} == {run_dir.name}
-        with pytest.raises(prereg.PreregError, match="exceed its budget"):
-            prereg.charge(tmp_path, draft, 1)
-    else:
-        assert prereg.charge(tmp_path, draft, 3132) == 0
+    second = _scoring(path, tmp_path, "nowhere")
+    assert second.returncode == 1, second.stderr
+    assert list(results(f"*-{pre.name}")) == [run_dir] and prereg.trials(tmp_path, pre) == logged
+    if where == "nowhere":  # complete, and spent: no torn result to speak of
+        assert "exceed its budget" in second.stderr and "torn result" not in second.stderr
+        return
+    assert "exceed its budget" not in second.stderr
+    assert f"{pre.name}: {run_dir.name} in" in second.stderr
+    assert "has no complete.json: a torn result from a crash" in second.stderr
+    assert "delete it or amend" in second.stderr
+    shutil.rmtree(run_dir)
+    third = _scoring(path, tmp_path, "nowhere")
+    if logged:
+        assert third.returncode == 1 and "exceed its budget" in third.stderr, third.stderr
+        assert not list(results(f"*-{pre.name}"))
+        return
+    assert third.returncode == 0, third.stderr
+    (again_dir,) = results(f"*-{pre.name}")
+    assert (again_dir / "complete.json").is_file()
+    assert prereg.trials(tmp_path, pre) == cells
+
+
+def test_a_kill_inside_the_log_is_the_torn_log_not_the_torn_folder(tmp_path: Path) -> None:
+    """Half of the log's one write, as a power cut leaves it, and a folder with no complete.json:
+    both refusals could speak, and only #119's repair is right. Some of the folder's trials are
+    charged, so deleting it is no way out. It stays refused by the log with the folder gone too."""
+    draft = prereg.load(planted.DRAFT)
+    done = _scoring(planted.DRAFT, tmp_path, "inside the trials")
+    assert done.returncode == 3, done.stderr
+    (run_dir,) = (tmp_path / "ews").glob("*-ising-latent-v1")
+    assert not (run_dir / "complete.json").exists()
+    whole = prereg.trials_path(tmp_path).read_bytes().count(b"\n")
+    assert 0 < whole < prereg.cells(draft.doc)
+    second = _scoring(planted.DRAFT, tmp_path, "nowhere")
+    assert second.returncode == 1, second.stderr
+    assert f"{prereg.trials_path(tmp_path)}, line {whole + 1}:" in second.stderr
+    assert "count it as spent and amend the pre-registration" in second.stderr
+    assert "torn result" not in second.stderr
+    shutil.rmtree(run_dir)
+    with pytest.raises(prereg.PreregError, match=f"line {whole + 1}:"):
+        prereg.charge(tmp_path, draft, 1)
+
+
+def test_a_torn_result_refuses_its_own_file_and_version_alone(tmp_path: Path) -> None:
+    """How write_result stamps a folder, its manifest's params.prereg, decides. Another file's,
+    though its name ends the same, another version's, v10 among them, and a complete result of this
+    one are all no torn result of this file, and neither is a folder killed before its manifest,
+    which holds no table. A torn folder of its own is refused by name, and the others not named."""
+    draft = prereg.load(planted.DRAFT)
+
+    def result(prereg_id: str, version: int) -> Path:
+        stamped = prereg.Prereg(draft.path, {"id": prereg_id, "version": version}, "0" * 64)
+        ref = prereg.Frozen("", "")
+        return prereg.write_result(tmp_path, stamped, ref, {"auc": [{"L": 16}]}, [], {})
+
+    others = [result(*key) for key in (("x-ising-latent", 1), ("ising-latent", 2),
+                                       ("ising-latent", 10))]  # fmt: skip
+    for other in others:
+        (other / "complete.json").unlink()
+    complete = result("ising-latent", 1)
+    no_manifest = tmp_path / "ews" / f"no-manifest-{complete.name}"
+    no_manifest.mkdir()
+    (no_manifest / "manifest.json.tmp").write_bytes(b'{"format"')
+    assert prereg.charge(tmp_path, draft, 3132) == 0
+    torn = tmp_path / "ews" / f"torn-{complete.name}"
+    shutil.copytree(complete, torn)
+    (torn / "complete.json").unlink()
+    with pytest.raises(prereg.PreregError, match="a torn result from a crash") as refused:
+        prereg.charge(tmp_path, draft, 3132)
+    assert torn.name in str(refused.value)
+    named = [p.name for p in [*others, no_manifest] if p.name in str(refused.value)]
+    assert named == []
+    assert complete.name not in str(refused.value).replace(torn.name, "")
+
+
+def test_the_runner_refuses_a_torn_result_before_any_work(
+    frozen: Frozen, scored: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A whole result but for its complete.json, its trials unlogged: exit 1 and the refusal, with
+    no embedding asked for and nothing logged. The tables were readable, so the next scoring must
+    not stand beside them as if they had never been."""
+    copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
+    torn = copy.root / "ews" / scored.name
+    shutil.copytree(scored, torn)
+    (torn / "complete.json").unlink()
+
+    def embed(checkpoint: ising.Checkpoint, sets: Any) -> np.ndarray:
+        raise AssertionError("the refusal comes before any work")
+
+    assert _run(frozen.path, copy, "--no-figures", embed=embed) == 1
+    err = capsys.readouterr().err
+    assert f"{torn.name} in" in err and "a torn result from a crash" in err
+    assert not prereg.trials_path(copy.root).exists() and _results(copy) == [torn]
 
 
 @pytest.mark.parametrize("entry", ["the runner", "ews score"])

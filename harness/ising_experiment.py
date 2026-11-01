@@ -20,9 +20,10 @@ result folder and its figures.
             tables are written and logged first, the run exits 2, and it says how to draw them again
 
 Refused, before anything is read: a file not frozen, or short of a value (prereg.problems' strict
-check), and a scoring whose cells would take the file past its trial budget. Then what ising.admit
-refuses, a table extracted under another rule than latents.extraction gives its role among it, and a
-baseline result that is not the file's on these runs, and a checkpoint that is not the one it pins.
+check), a scoring whose cells would take the file past its trial budget, and one that would score
+past a torn result of this file (prereg.charge). Then what ising.admit refuses, a table extracted
+under another rule than latents.extraction gives its role among it, and a baseline result that is
+not the file's on these runs, and a checkpoint that is not the one it pins.
 Probes and curves run before the cells, so that a fault in either costs minutes rather than a night.
 
 --planted scores a file with no freeze behind it, for the harness alone: it refuses a data dir

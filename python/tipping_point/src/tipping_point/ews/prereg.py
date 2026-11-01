@@ -10,6 +10,7 @@ write_result  <data dir>/ews/<run_id>/ in #22's layout: manifest.json (stamped),
           complete.json, or one whose every trial is logged
 log_trials append evaluations to <data dir>/ews/trials.jsonl in one write; every evaluation counts
           as a trial, sensitivity cells included, and the count goes in the paper
+charge    refuse a scoring past the file's budget, or past a torn result of its own version
 
 An amendment is a new file, <id>-v<k+1>.toml, whose `supersedes` names the version it replaces
 and whose `reason` says why; results scored under an earlier version stay bound to it.
@@ -786,10 +787,35 @@ def trials(data_dir: Path, prereg: Prereg) -> int:
     return count
 
 
+def _torn_results(data_dir: Path, prereg: Prereg) -> list[str]:
+    """The folders of <data dir>/ews stamped with this prereg's id and version and with no
+    complete.json: scorings that died inside write_result. The manifest's stamp decides, since a
+    folder's name ends alike under another id (x-demo-v1, demo-v1). A folder with no manifest yet
+    holds no table either: write_result writes that first."""
+    own, found = (prereg.id, prereg.version), []
+    for manifest in sorted((Path(data_dir) / "ews").glob("*/manifest.json")):
+        stamp = io.read_json(manifest)["params"]["prereg"]
+        done = (manifest.parent / "complete.json").is_file()
+        if (stamp["id"], stamp["version"]) == own and not done:
+            found.append(manifest.parent.name)
+    return found
+
+
 def charge(data_dir: Path, prereg: Prereg, planned: int) -> int:
     """Refuse a scoring whose `planned` cells would take this version past its budget, so that
-    cell budget + 1 is never evaluated; returns the trials logged so far."""
+    cell budget + 1 is never evaluated, or that would score past a torn result of this version,
+    whose tables can be read with their cells unlogged; returns the trials logged so far. It runs
+    before write_result makes a folder, so a scoring never finds its own. A torn log speaks first:
+    its folder's trials are part charged, and deleting the folder is not its repair."""
     logged, budget = trials(data_dir, prereg), prereg.doc["trials"]["budget"]
+    torn = _torn_results(data_dir, prereg)
+    if torn:
+        raise PreregError(
+            f"{prereg.name}: {', '.join(torn)} in {Path(data_dir) / 'ews'} has no complete.json: "
+            "a torn result from a crash, or one being written right now. Its tables can be read "
+            "whether or not its trials were logged, so nothing scores past it: delete it or amend "
+            "the pre-registration. Deleting it gives back no trial already logged"
+        )
     if logged + planned > budget:
         raise PreregError(
             f"{prereg.name}: {logged} trials logged and {planned} more would exceed its budget of "
