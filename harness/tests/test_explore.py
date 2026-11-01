@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TRAINING = "20261101T000000Z-L16-32-m7"
 STEP = 1000
 TRAINED, TWIN = ising.latents_name(TRAINING, STEP), ising.latents_name(TRAINING, 0)
+AT_THE_EDGE = ising.latents_name("20261101T000000Z-L16-32-m8", STEP)
 SIZES = (16, 32)
 SEEDS = (1, 2)
 PLATEAUS = (3.0, 2.8, 2.6, 2.5, 2.45, 2.4, 2.3, ews_planted.PLATEAU)
@@ -100,7 +101,8 @@ def _fast_ramp(root: Path, L: int, seed: int) -> Path:
 @pytest.fixture(scope="module")
 def data(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The v1 planted dataset at L = 16 and 32 on seeds 1 and 2, the only seeds the pipeline reads,
-    with a fast ramp per (L, seed) and a trained table and its twin beside every run."""
+    with a fast ramp per (L, seed) and a trained table and its twin beside every run, and a table
+    whose surprise changes fastest just inside the search band's cold edge."""
     root = tmp_path_factory.mktemp("explore-data")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(ews_planted, "V1_SEEDS", SEEDS)
@@ -113,6 +115,9 @@ def data(tmp_path_factory: pytest.TempPathFactory) -> Path:
         for run in runs:
             write_latents(run, TRAINED, select="tc-plus")
             write_latents(run, TWIN, select="tc-plus", untrained=True)
+        patch.setattr(ews_planted, "LATENT_EPS", -3.6)
+        for run in runs:
+            write_latents(run, AT_THE_EDGE, select="tc-plus")
     return root
 
 
@@ -180,8 +185,9 @@ def test_surprise_reads_as_planted(data: Path, passed: Path, tmp_path: Path) -> 
     """Planted: surprise falls as the bath cools, steepest at a fixed eps_L, so the level's
     direction is "less" and the slope's extremum "min"; its median read position is half a window
     late, 1/nu near 1, and no replica near the search band's edge. The twin's is flat: no trend to
-    speak of. pc_3, whose spread only keeps growing towards the cold end, is what near_edge is for:
-    it reads about 1 there."""
+    speak of. near_edge reads about 1 where it should: on the same slope statistic with the change
+    planted just inside the cold edge, and on pc_3's variance, which only keeps growing towards it,
+    the channel the edge margin exists for."""
     answer = latent_report.directions(passed, TRAINED, list(SIZES))
     assert (answer["level"], answer["slope_extremum"]) == ("less", "min")
     combined = _json(passed, TRAINED, None, "peaks-combined.json")["indicators"]
@@ -191,16 +197,22 @@ def test_surprise_reads_as_planted(data: Path, passed: Path, tmp_path: Path) -> 
     for L in SIZES:
         assert slope["near_edge_shares"][str(L)] == pytest.approx(0.0, abs=0.1), L
     assert slope["inverse_nu"] == pytest.approx(1.0, abs=0.5)
+    where = [*_shared(data, tmp_path), "--bootstrap", "20"]
+    planted_at_edge = {"surprise_slope_min": peaks.LATENT["surprise_slope_min"]}
     rising = {"pc_3_variance": ("pc_3", "variance", True, "greater")}
-    where = ["--latents", TRAINED, *_shared(data, tmp_path), "--bootstrap", "20"]
-    for L in SIZES:
-        peaks.run_one(peaks.parsed(["--L", str(L), *where]), rising)
-    peaks.combine(peaks.parsed(where), list(SIZES), rising)
-    pushed = _json(tmp_path, TRAINED, None, "peaks-combined.json")["indicators"]["pc_3_variance"]
-    for L in SIZES:
-        assert pushed["near_edge_shares"][str(L)] >= 0.75, L
-    assert pushed["verdict_if_judged"] == "inconclusive"
-    assert pushed["without_edge_margin"]["verdict"] == "pass"  # the bug the margin closes (#115)
+    for table, specs, label in (
+        (AT_THE_EDGE, planted_at_edge, "surprise_slope_min"),
+        (TRAINED, rising, "pc_3_variance"),
+    ):
+        here = ["--latents", table, *where]
+        for L in SIZES:
+            peaks.run_one(peaks.parsed(["--L", str(L), *here]), specs)
+        peaks.combine(peaks.parsed(here), list(SIZES), specs)
+        pushed = _json(tmp_path, table, None, "peaks-combined.json")["indicators"][label]
+        for L in SIZES:
+            assert pushed["near_edge_shares"][str(L)] >= 0.75, (label, L)
+        assert pushed["verdict_if_judged"] == "inconclusive", label
+    assert pushed["without_edge_margin"]["verdict"] == "pass"  # pc_3: the bug the margin closes
     for L in SIZES:
         (level,) = [
             r
@@ -421,7 +433,7 @@ def test_the_join_links_runs_and_tables_and_skips_what_it_may_not_read(
     )
     into = tmp_path / "join"
     counted = join_pilot.join(local, output, into)
-    assert counted == {"runs": 1, "tables": 2, "records": 1}
+    assert counted == {"runs": 1, "tables": 3, "records": 1}
     assert not (into / "ising" / confirmatory.name).exists()
     (s,) = ising.series(ising.open_run(into / "ising" / run_id), "matched", TRAINED)
     assert s.latents["surprise"].shape == s.abs_m.shape
