@@ -14,6 +14,12 @@ under harness/ that is outside it, so app/src-tauri must join members and that c
 On a shared laptop (#61): the gate kills strays (strays.py) as it starts and ends, cargo builds
 on half the logical cores unless CARGO_BUILD_JOBS is set, every leg starts at BelowNormal priority
 on Windows, and the record says how busy the CPU was at the start.
+
+TP_GATE_PRIORITY=normal starts the legs at Normal instead (belownormal, the default, is the other
+value; anything else is refused; the classes are Windows', so elsewhere it changes nothing). Use it
+for a dedicated gate run on a machine you control: at BelowNormal, a data job or another session
+running at Normal can starve the gate's timing tests (api_load) red, while at Normal the gate
+takes its share from whatever else is running.
 """
 
 from __future__ import annotations
@@ -364,8 +370,17 @@ LEGS: list[Leg] = [
 
 TAIL_LINES = 200  # of each leg's output, kept in the record so a red leg reads without a re-run
 KILL_WAIT = 30.0  # seconds a killed leg gets to be gone before the gate goes on without it
-# What a leg starts (rustc, test binaries, the engine processes tests spawn) inherits this
-PRIORITY = subprocess.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 0
+# What a leg starts (rustc, test binaries, the engine processes tests spawn) inherits its class.
+# Normal is named, not 0: with no class given, a BelowNormal process's child is BelowNormal too
+PRIORITIES = (
+    {
+        "belownormal": subprocess.BELOW_NORMAL_PRIORITY_CLASS,
+        "normal": subprocess.NORMAL_PRIORITY_CLASS,
+    }
+    if sys.platform == "win32"
+    else {"belownormal": 0, "normal": 0}
+)
+DEFAULT_PRIORITY = "belownormal"
 
 
 def leg_env(environ: Mapping[str, str], cores: int | None) -> dict[str, str]:
@@ -453,7 +468,7 @@ def _kill_tree(proc: subprocess.Popen[Any]) -> str:
     return said
 
 
-def _run(leg: Leg) -> tuple[int, str]:
+def _run(leg: Leg, priority: str) -> tuple[int, str]:
     """A leg's exit code and everything it printed, or LegHung once it has been killed at its
     limit. The output goes to a file, not a pipe: whatever inherits it can hold a pipe open long
     after the leg is gone, and reading one to its end, on Windows in one blocking read, would wait
@@ -465,7 +480,7 @@ def _run(leg: Leg) -> tuple[int, str]:
             stdout=log,
             stderr=subprocess.STDOUT,  # one stream in write order: cargo's headers go to stderr
             env=leg_env(os.environ, os.cpu_count()),
-            creationflags=PRIORITY,
+            creationflags=PRIORITIES[priority],
             start_new_session=True,  # the process group _kill_tree kills where there is no taskkill
         )
         try:
@@ -481,13 +496,13 @@ def _run(leg: Leg) -> tuple[int, str]:
         return returncode, log.read()
 
 
-def run_leg(leg: Leg) -> LegResult:
+def run_leg(leg: Leg, priority: str = DEFAULT_PRIORITY) -> LegResult:
     start = time.perf_counter()
     output = ""
     try:
         if leg.name == "pytest":
             JUNIT.unlink(missing_ok=True)  # a stale report must never vouch for this run
-        returncode, output = _run(leg)
+        returncode, output = _run(leg, priority)
     except LegHung as hung:
         verdict, returncode, output = judge_hung(leg.limit, hung.killed), None, hung.output
     except FileNotFoundError:
@@ -516,14 +531,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--leg", action="append", choices=names, help="run only this leg")
     args = parser.parse_args(argv)
     selected = [leg for leg in LEGS if not args.leg or leg.name in args.leg]
+    priority = os.environ.get("TP_GATE_PRIORITY", DEFAULT_PRIORITY)
+    if priority not in PRIORITIES:
+        parser.error(f"TP_GATE_PRIORITY must be one of {list(PRIORITIES)}, not {priority!r}")
 
     OUT.mkdir(parents=True, exist_ok=True)
     swept = {"start": sweep_strays("start")}  # before the load sample: a stray's CPU is not load
     load = machine()
-    print(f"machine at start: {', '.join(f'{k} {v}' for k, v in load.items())}", flush=True)
+    said = ", ".join(f"{k} {v}" for k, v in load.items())
+    print(f"machine at start: {said}, priority {priority}", flush=True)
     results = []
     for leg in selected:
-        result = run_leg(leg)
+        result = run_leg(leg, priority)
         results.append(result)
         print(
             f"{result.leg:<13} {result.verdict:<5} {result.duration:>7.2f}s  "
@@ -535,7 +554,10 @@ def main(argv: list[str] | None = None) -> int:
     record = OUT / f"gate-{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"
     legs = [asdict(r) for r in results]
     record.write_text(
-        json.dumps({"machine": load, "strays": swept, "legs": legs}, indent=2), encoding="utf-8"
+        json.dumps(
+            {"machine": load, "priority": priority, "strays": swept, "legs": legs}, indent=2
+        ),
+        encoding="utf-8",
     )
     red = [r.leg for r in results if r.verdict != "GREEN"]
     skips = [(r.leg, len(r.evidence["skipped"])) for r in results if r.evidence.get("skipped")]

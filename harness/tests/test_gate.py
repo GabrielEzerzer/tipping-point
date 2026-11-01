@@ -808,13 +808,94 @@ def test_every_leg_runs_with_the_capped_build_jobs(monkeypatch) -> None:
     assert gate.run_leg(leg).output_tail == [str(max(1, (os.cpu_count() or 2) // 2))]
 
 
+# (HANDLE)-1 is the process's own pseudo-handle, whole: GetCurrentProcess() through ctypes'
+# default int return comes back truncated, and GetPriorityClass then fails with 0
+PRIORITY_CLASS = (
+    "import ctypes; print(ctypes.windll.kernel32.GetPriorityClass(ctypes.c_void_p(-1)))"
+)
+BELOW_NORMAL, NORMAL = 0x4000, 0x20
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="priority classes are Windows'")
 def test_every_leg_starts_at_below_normal_priority() -> None:
-    # (HANDLE)-1 is the process's own pseudo-handle, whole: GetCurrentProcess() through ctypes'
-    # default int return comes back truncated, and GetPriorityClass then fails with 0
-    code = "import ctypes; print(ctypes.windll.kernel32.GetPriorityClass(ctypes.c_void_p(-1)))"
-    below_normal = 0x4000
-    assert gate.run_leg(_python_leg("priority", code)).output_tail == [str(below_normal)]
+    assert gate.run_leg(_python_leg("priority", PRIORITY_CLASS)).output_tail == [str(BELOW_NORMAL)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="priority classes are Windows'")
+@pytest.mark.parametrize(
+    ("choice", "expected"), [("normal", NORMAL), ("belownormal", BELOW_NORMAL)], ids=str
+)
+def test_a_leg_runs_at_the_priority_asked_for_even_from_a_below_normal_gate(
+    choice: str, expected: int
+) -> None:
+    # with no class given, a BelowNormal process's child is BelowNormal: a gate whose own process
+    # runs there (this test, in the gate's pytest leg) must still start a leg at Normal when told
+    leg = f"gate.Leg('priority', [sys.executable, '-c', {PRIORITY_CLASS!r}], gate.judge_ruff_check)"
+    code = f"import gate, sys; print(gate.run_leg({leg}, {choice!r}).output_tail)"
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=gate.ROOT / "harness",
+        capture_output=True,
+        text=True,
+        check=True,
+        creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS,
+    )
+    assert done.stdout.strip() == str([str(expected)])
+
+
+@pytest.mark.parametrize(
+    ("set_to", "priority"),
+    [(None, "belownormal"), ("belownormal", "belownormal"), ("normal", "normal")],
+    ids=["default", "belownormal", "normal"],
+)
+def test_the_priority_is_on_the_machine_line_and_in_the_record(
+    tmp_path, monkeypatch, capsys, set_to: str | None, priority: str
+) -> None:
+    # a timing test that goes red under load must say which priority it starved at
+    if set_to is None:
+        monkeypatch.delenv("TP_GATE_PRIORITY", raising=False)
+    else:
+        monkeypatch.setenv("TP_GATE_PRIORITY", set_to)
+    code = PRIORITY_CLASS if sys.platform == "win32" else "pass"
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", f"{code}; print('All checks passed!')")])
+    assert gate.main([]) == 0
+    record = _record(tmp_path)
+    assert record["priority"] == priority
+    assert f"machine at start: cores 8, cpu_busy_percent 12.5, priority {priority}\n" in (
+        capsys.readouterr().out
+    )
+    if sys.platform == "win32":
+        expected = {"normal": NORMAL, "belownormal": BELOW_NORMAL}[priority]
+        assert record["legs"][0]["output_tail"][0] == str(expected)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["high", "", "Normal", "BelowNormal", "below normal", " normal"],
+    ids=["high", "empty", "capital", "camel", "a-space", "padded"],
+)
+def test_an_invalid_priority_is_refused_before_anything_runs(
+    tmp_path, monkeypatch, capsys, value: str
+) -> None:
+    # ignored, it would run the gate at a priority nobody chose and record that as if chosen
+    def never(root: Path) -> None:
+        raise AssertionError("swept strays for a gate it should have refused")
+
+    ran = tmp_path / "leg-ran"
+    monkeypatch.setenv("TP_GATE_PRIORITY", value)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate.strays, "sweep", never)
+    code = f"open({str(ran)!r}, 'w').close(); print('All checks passed!')"
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", code)])
+    with pytest.raises(SystemExit) as refused:
+        gate.main([])
+    assert refused.value.code == 2
+    message = capsys.readouterr().err
+    assert "TP_GATE_PRIORITY must be one of ['belownormal', 'normal']" in message
+    assert repr(value) in message
+    assert not ran.exists()
+    assert not list(tmp_path.glob("gate-*.json"))
 
 
 def test_the_record_says_how_busy_the_cpu_was_and_what_was_swept(
