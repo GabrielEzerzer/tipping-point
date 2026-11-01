@@ -71,13 +71,13 @@ const PROFILE: &str = if cfg!(debug_assertions) {
 };
 /// Sleeps 1 ms at a time on a thread of its own until `stop`, and returns how late each sleep
 /// woke: the scheduler delay each of a message's two or three wakeups also waits through,
-/// measured apart from the engine's code, so a slow engine cannot excuse itself. Past a quarter
-/// of `LATENCY_BOUND` at p99, where waiting for a core could spend most of the bound, the machine
-/// counts as loaded, and a latency p99 over the bound is excused rather than failed, as long as
-/// it stays under the bound plus three times that p99, no more than those wakeups could have
-/// waited; past that it fails, loaded or not. On the development laptop on 2026-10-24, with other
-/// jobs running, it read 17.1 ms at p99 while the latency p99s sat at 34 to 40 ms, and 44.8 ms
-/// under heavier load while they rose to 38 to 88 ms.
+/// measured apart from the engine's code, so a slow engine cannot inflate the slack it is given.
+/// Past a quarter of `LATENCY_BOUND` at p99, where waiting for a core could spend most of the
+/// bound, the machine counts as loaded, and a latency p99 over the bound is excused rather than
+/// failed, as long as it stays under the bound plus three times that p99, no more than those
+/// wakeups could have waited; past that it fails, loaded or not. On the development laptop on
+/// 2026-10-24, with other jobs running, it read 17.1 ms at p99 while the latency p99s sat at 34 to
+/// 40 ms, and 44.8 ms under heavier load while they rose to 38 to 88 ms.
 fn wake_probe(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<Duration>> {
     std::thread::spawn(move || {
         let mut late = Vec::new();
@@ -88,6 +88,48 @@ fn wake_probe(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<Duration>> {
         }
         late
     })
+}
+
+/// The wake p99 past which the machine counts as loaded.
+fn loaded_above_wake() -> Duration {
+    LATENCY_BOUND / 4
+}
+
+/// The share of its target rate under which the generator counts the machine as loaded.
+const LOADED_BELOW_SHARE: f64 = 0.5;
+
+/// Whether the machine was loaded, by either signal, and the p99 a latency must stay under: the
+/// bound, or on a loaded machine the ceiling `wake_probe` describes. The generator shares the
+/// machine with the engine: beside a data job on 2026-10-25 it reached 21% and 43% of its target
+/// while the probe's own thread still woke within 28.7 and 17.2 ms, under its threshold (#106). It
+/// also runs through the engine's code, so a slow engine starves it too: that is why the ceiling
+/// stays the probe's alone, whichever signal fired, and a slow engine gains no more than the
+/// wakeups the probe measured.
+fn judge(wake_p99: Duration, generator_share: f64) -> (bool, Duration) {
+    let loaded = wake_p99 > loaded_above_wake() || generator_share < LOADED_BELOW_SHARE;
+    let excused_below = if loaded {
+        LATENCY_BOUND + 3 * wake_p99
+    } else {
+        LATENCY_BOUND
+    };
+    (loaded, excused_below)
+}
+
+/// #106's run: 41.9 depth/s of 200, the wake probe under its threshold. It counts as loaded, and
+/// its book p99 of 635 ms is still over the ceiling: being loaded excuses only so much.
+#[test]
+fn a_generator_under_half_its_target_counts_as_loaded_under_the_same_ceiling() {
+    let us = Duration::from_micros;
+    let (loaded, excused_below) = judge(us(28_700), 41.9 / 200.0);
+    assert!(loaded);
+    assert_eq!(excused_below, us(206_100));
+    assert!(us(635_000) >= excused_below);
+    // A slow engine on a quiet machine starves the generator too, and gains a few ms at most.
+    assert_eq!(judge(us(2_000), 0.21), (true, us(126_000)));
+    // At half its target or over, the probe decides, as at #60's 60%.
+    assert_eq!(judge(us(28_700), 0.5), (false, LATENCY_BOUND));
+    assert_eq!(judge(us(28_700), 0.6), (false, LATENCY_BOUND));
+    assert_eq!(judge(us(44_800), 1.0), (true, us(254_400)));
 }
 
 /// What one app client got: book messages and trades with when they arrived, and gaps.
@@ -352,8 +394,9 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
     probing.store(true, Ordering::Relaxed);
     let mut wake_late = probe.join().map_err(|_| "the wake probe panicked")?;
     let wake_p99 = percentile(&mut wake_late, 99.0);
-    let loaded_above = LATENCY_BOUND / 4;
-    let loaded = wake_p99 > loaded_above;
+    let loaded_above = loaded_above_wake();
+    let generator_share = depth as f64 / elapsed.as_secs_f64() / DEPTH_PER_S;
+    let (loaded, excused_below) = judge(wake_p99, generator_share);
     let cores = std::thread::available_parallelism().map_or(0, NonZeroUsize::get);
     let apps_at_end = hub.counters.ws_clients.load(Ordering::Relaxed);
     let arrows_at_end = hub.arrow_subscribers();
@@ -462,6 +505,8 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
             "cores": cores,
             "wake_late_ms": {"p50": millis(percentile(&mut wake_late, 50.0)), "p99": millis(wake_p99), "max": millis(wake_late.last().copied().unwrap_or_default()), "n": wake_late.len()},
             "loaded_above_wake_p99_ms": millis(loaded_above),
+            "generator_share_of_target": generator_share,
+            "loaded_below_generator_share": LOADED_BELOW_SHARE,
             "loaded": loaded,
         },
         "live_path_ms_per_input": {"p50": millis(percentile(&mut per_input, 50.0)), "p99": millis(percentile(&mut per_input, 99.0)), "max": millis(per_input.iter().copied().max().unwrap_or_default())},
@@ -477,8 +522,9 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
     println!("{}", serde_json::to_string_pretty(&report)?);
 
     // The feed did not wait: waiting on a stalled client costs a push the whole stall timeout.
-    // The rates achieved stay in the report only: on a shared machine they measure the CPU this
-    // test got, not the engine (60% of target under load, every other check holding, #60).
+    // The rates achieved are never asserted: on a shared machine they measure the CPU this test
+    // got, not the engine (60% of target under load, every other check holding, #60). Under half
+    // the target they only count the machine as loaded (#106).
     assert!(
         per_input
             .iter()
@@ -551,10 +597,19 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
     // The bound is checked on every run. A p99 over it on a loaded machine, by less than three
     // wakeups' lateness, measures the machine, so it is excused on a line the gate counts: a skip
     // means the bound was missed under load. Past that it fails, loaded or not.
-    let excused_below = if loaded {
-        LATENCY_BOUND + 3 * wake_p99
+    let shortfall = if generator_share < LOADED_BELOW_SHARE {
+        format!(
+            "the generator reached {:.0}% of its target rate (under {:.0}%) and ",
+            generator_share * 100.0,
+            LOADED_BELOW_SHARE * 100.0
+        )
     } else {
-        LATENCY_BOUND
+        String::new()
+    };
+    let over = if wake_p99 > loaded_above {
+        "over"
+    } else {
+        "under"
     };
     for (name, values) in [
         ("book", &book_latency),
@@ -567,9 +622,9 @@ async fn ten_times_the_live_load_never_waits_on_a_client() -> Outcome {
         if p99 >= LATENCY_BOUND && p99 < excused_below {
             skipped(&format!(
                 "api_load's {name} p99 {p99:?} over its {LATENCY_BOUND:?} bound, excused: the \
-                 machine was loaded, a 1 ms sleep woke {wake_p99:?} late at p99 (over \
-                 {loaded_above:?}) on {cores} cores, and the p99 is under {excused_below:?}, \
-                 the bound plus three such wakeups; see {file}",
+                 machine was loaded, {shortfall}a 1 ms sleep woke {wake_p99:?} late at p99 \
+                 ({over} {loaded_above:?}) on {cores} cores, and the p99 is under \
+                 {excused_below:?}, the bound plus three such wakeups; see {file}",
                 file = out.file_name().unwrap_or_default().to_string_lossy()
             ));
             continue;

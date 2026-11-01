@@ -1205,12 +1205,10 @@ async fn the_status_goes_out_every_second_unchanged() -> Outcome {
             while publishing.load(Ordering::Relaxed) {
                 let mut sample = catalog_sample();
                 sample.sample_ts_ns += i * 100_000_000;
-                let captured_ns = sample.sample_ts_ns;
                 let sample = Arc::new(sample);
                 hub.publish_sample(Published {
                     sample,
                     ipc: Vec::new(),
-                    captured_ns,
                 });
                 i += 1;
                 std::thread::sleep(Duration::from_millis(1));

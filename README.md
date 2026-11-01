@@ -313,12 +313,14 @@ each kind, and writes its measurements, the live path's time per depth frame amo
 `harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
 default 5 s. It fails if any input takes the live path half the stall timeout or longer; the rates
 achieved are recorded, not asserted, since on a shared machine they measure the CPU the test got.
-The report also holds the cores and how late a 1 ms sleep woke through the load: past a quarter of
-the latency bound at p99 the machine counts as loaded. The latency bound is checked on every run;
-only on a loaded machine is a p99 over it excused, and only while it stays under the bound plus
-three times that lateness (a message's two or three wakeups), with a `SKIPPED:` line the gate
-counts, so a skip means the bound was missed under load. Past that it fails, loaded or not. The
-Python round trip (`api_python`) runs the repository's `.venv` Python, or `$TP_PYTHON`.
+The report also holds the cores, how late a 1 ms sleep woke through the load and the share of its
+target rate the generator reached: the machine counts as loaded when the sleep's p99 passes a quarter
+of the latency bound or the generator falls under half its target (#106). The latency bound is
+checked on every run; only on a loaded machine is a p99 over it excused, and only while it stays
+under the bound plus three times the sleep's p99 (a message's two or three wakeups), with a
+`SKIPPED:` line the gate counts, so a skip means the bound was missed under load. Past that it
+fails, loaded or not. The Python round trip (`api_python`) runs the repository's `.venv` Python,
+or `$TP_PYTHON`.
 
 ## Ising simulator
 
