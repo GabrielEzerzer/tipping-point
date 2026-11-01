@@ -1,7 +1,8 @@
 """The gate must not lie: every lie case judges RED, the honest case judges GREEN.
 
 Fixtures in fixtures/ are real tool output captured on this repo (green = clean tree,
-red = deliberately broken files; any other name = files deliberately edited into that shape).
+red = deliberately broken files; any other name = files deliberately edited into that shape). The
+self-test-* ones have their local repo and temp prefixes replaced, because the repo is public.
 """
 
 import json
@@ -44,6 +45,7 @@ TEXT_LEGS = [
     (gate.judge_ruff_check, "ruff-check"),
     (gate.judge_ruff_format, "ruff-format"),
     (gate.judge_pyright, "pyright"),
+    (gate.judge_self_test, "self-test"),
 ]
 IDS = [stem for _, stem in TEXT_LEGS]
 
@@ -74,6 +76,9 @@ def test_green_evidence_is_the_judged_line() -> None:
     )
     assert gate.judge_pyright(0, fixture("pyright-green.txt")).source == (
         "0 errors, 0 warnings, 0 informations"
+    )
+    assert gate.judge_self_test(0, fixture("self-test-green.txt")).source == (
+        "245/245 checks passed"
     )
 
 
@@ -531,8 +536,13 @@ def test_pyright_without_summary_line_is_red() -> None:
 
 @pytest.mark.parametrize(
     ("judge", "output"),
-    [(gate.judge_ruff_check, ""), (gate.judge_ruff_format, ""), (gate.judge_clippy, "")],
-    ids=["ruff-check", "ruff-format", "clippy"],
+    [
+        (gate.judge_ruff_check, ""),
+        (gate.judge_ruff_format, ""),
+        (gate.judge_clippy, ""),
+        (gate.judge_self_test, ""),
+    ],
+    ids=["ruff-check", "ruff-format", "clippy", "self-test"],
 )
 def test_silent_success_without_positive_evidence_is_red(judge, output: str) -> None:
     assert not judge(0, output).green
@@ -695,7 +705,7 @@ def test_the_record_keeps_the_last_lines_of_a_long_output(tmp_path, monkeypatch)
     (row,) = _record(tmp_path)["legs"]
     assert len(row["output_tail"]) == gate.TAIL_LINES == 200
     assert row["output_tail"][-2:] == ["499", "All checks passed!"]
-    assert row["evidence"] == {}  # only cargo-test reads extra evidence from its output
+    assert row["evidence"] == {}  # a leg with no evidence function keeps only its tail
 
 
 # ---------- a check a test skipped is counted, never passed silently (#60)
@@ -819,6 +829,116 @@ def test_the_machine_sample_is_cores_and_cpu_load() -> None:
     load = sample["cpu_busy_percent" if sys.platform == "win32" else "load_average_1m"]
     assert isinstance(load, float) and load >= 0
     assert sys.platform != "win32" or load <= 100
+
+
+# ---------- the Kaggle runner's self-test: the gate runs it, and it must have run (#116)
+
+
+def _self_test_leg() -> gate.Leg:
+    (leg,) = [leg for leg in gate.LEGS if leg.name == "self-test"]
+    return leg
+
+
+def _run_self_test_leg(root: Path, monkeypatch, selftest: str) -> gate.LegResult:
+    """The real leg on a copy of the real runner, with `selftest` as its checks: the whole path
+    from the leg's argv to its verdict, in a second rather than five minutes."""
+    (root / "notebooks").mkdir()
+    shutil.copy(gate.ROOT / "notebooks" / "kaggle_ising_runs.py", root / "notebooks")
+    (root / "notebooks" / "kaggle_ising_runs_selftest.py").write_text(selftest, encoding="utf-8")
+    monkeypatch.setattr(gate, "ROOT", root)
+    return gate.run_leg(_self_test_leg())
+
+
+@pytest.mark.parametrize(
+    ("selftest", "verdict", "source"),
+    [
+        ("import no_such_module_tp116\n", "RED", "(exit 1): ModuleNotFoundError"),
+        (
+            "def run_all(k):\n    raise RuntimeError('died')\n",
+            "RED",
+            "(exit 1): RuntimeError: died",
+        ),
+        ("def run_all(k):\n    return 0\n", "RED", "no 'N/M checks passed' line (exit 0)"),
+        ("def run_all(k):\n    print('0/0 checks passed')\n    return 0\n", "RED", "zero checks"),
+        (
+            "def run_all(k):\n    print('FAIL  a plan')\n    print('1/2 checks passed')\n"
+            "    return 1\n",
+            "RED",
+            "1/2 checks passed; first: FAIL  a plan",
+        ),
+        (
+            "def run_all(k):\n    print('PASS  a plan')\n    print('1/1 checks passed')\n"
+            "    return 0\n",
+            "GREEN",
+            "1/1 checks passed",
+        ),
+    ],
+    ids=["crash-at-import", "crash-in-a-section", "silent", "no-checks", "a-failed-check", "green"],
+)
+def test_the_self_test_leg_from_argv_to_verdict(
+    tmp_path, monkeypatch, selftest: str, verdict: str, source: str
+) -> None:
+    result = _run_self_test_leg(tmp_path, monkeypatch, selftest)
+    assert result.verdict == verdict, result.verdict_source
+    assert source in result.verdict_source
+
+
+def test_a_runner_that_crashes_at_import_is_red(tmp_path, monkeypatch) -> None:
+    (tmp_path / "notebooks").mkdir()
+    runner = tmp_path / "notebooks" / "kaggle_ising_runs.py"
+    runner.write_text("import no_such_module_tp116\n", encoding="utf-8")
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    result = gate.run_leg(_self_test_leg())
+    assert result.verdict == "RED"
+    assert "(exit 1): ModuleNotFoundError" in result.verdict_source
+
+
+def test_a_runner_that_is_not_there_is_red(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    result = gate.run_leg(_self_test_leg())
+    assert result.verdict == "RED"
+    assert "no 'N/M checks passed' line (exit 2)" in result.verdict_source
+
+
+def test_the_self_test_leg_runs_the_real_runner_on_this_interpreter() -> None:
+    # a bare "python" finds the base install beside a venv's interpreter, without tipping_point
+    argv = _self_test_leg().argv
+    assert argv[0] == sys.executable
+    assert (gate.ROOT / argv[1]).is_file()
+    assert argv[2:] == ["--self-test"]
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["PASS  1/1 checks passed\n", "[2026-11-01 05:00:00 UTC +0s] 1/1 checks passed\n"],
+    ids=["a-check-name", "a-log-line"],
+)
+def test_only_the_self_tests_own_closing_line_counts(output: str) -> None:
+    verdict = gate.judge_self_test(0, output)
+    assert not verdict.green
+    assert "no 'N/M checks passed' line" in verdict.source
+
+
+def test_the_last_summary_line_decides() -> None:
+    assert not gate.judge_self_test(0, "1/1 checks passed\nFAIL  x\n1/2 checks passed\n").green
+
+
+def test_a_failed_check_stays_in_the_record_after_it_leaves_the_tail(tmp_path, monkeypatch) -> None:
+    # the plans are checked first and a re-run takes minutes, so the record must name the plan
+    real = _self_test_leg()
+    path = FIXTURES / "self-test-red.txt"
+    code = f"import sys; sys.stdout.buffer.write(open({str(path)!r}, 'rb').read())"
+    fake = gate.Leg("self-test", [sys.executable, "-c", code], real.judge, real.evidence)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [fake])
+    assert gate.main([]) == 1
+    (row,) = _record(tmp_path)["legs"]
+    assert row["verdict"] == "RED"
+    (first, *_) = row["evidence"]["failures"]
+    assert first.startswith("FAIL  plan primary-28.json loads:")
+    assert "no-such-input" in first
+    assert first not in row["output_tail"]
+    assert first in row["verdict_source"]
 
 
 # ---------- lie: a tool that cannot start, a judge that crashes
