@@ -175,26 +175,24 @@ def list_processes() -> list[Process] | None:
     return processes
 
 
-def kill(process: Process) -> str:
-    """Kill a stray and every process it started; taskkill's own words for what happened. The
-    image-name filter spares a process that took the PID over since the listing."""
+def kill_tree(pid: int, *only: str) -> str:
+    """Kill a process and every process it started; taskkill's own words for what happened."""
     done = subprocess.run(
-        [
-            "taskkill",
-            "/F",
-            "/T",
-            "/PID",
-            str(process.pid),
-            "/FI",
-            f"IMAGENAME eq {process.exe.name}",
-        ],
+        ["taskkill", "/F", "/T", "/PID", str(pid), *only],
         capture_output=True,
         text=True,
         errors="replace",
         check=False,
+        timeout=300,  # the gate must outlive a taskkill that hangs too (#125); it can be starved
     )
     words = (done.stdout + done.stderr).split("\n")
     return "; ".join(w.strip() for w in words if w.strip()) or f"taskkill exit {done.returncode}"
+
+
+def kill(process: Process) -> str:
+    """Kill a stray and every process it started. The image-name filter spares a process that took
+    the PID over since the listing."""
+    return kill_tree(process.pid, "/FI", f"IMAGENAME eq {process.exe.name}")
 
 
 def sweep(root: Path = ROOT, dry_run: bool = False) -> list[dict[str, object]] | None:

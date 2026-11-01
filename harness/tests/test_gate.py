@@ -11,7 +11,9 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import gate
@@ -863,14 +865,17 @@ def _self_test_leg() -> gate.Leg:
     return leg
 
 
-def _run_self_test_leg(root: Path, monkeypatch, selftest: str) -> gate.LegResult:
+def _run_self_test_leg(
+    root: Path, monkeypatch, selftest: str, limit: float | None = None
+) -> gate.LegResult:
     """The real leg on a copy of the real runner, with `selftest` as its checks: the whole path
     from the leg's argv to its verdict, in a second rather than five minutes."""
     (root / "notebooks").mkdir()
     shutil.copy(gate.ROOT / "notebooks" / "kaggle_ising_runs.py", root / "notebooks")
     (root / "notebooks" / "kaggle_ising_runs_selftest.py").write_text(selftest, encoding="utf-8")
     monkeypatch.setattr(gate, "ROOT", root)
-    return gate.run_leg(_self_test_leg())
+    leg = _self_test_leg()
+    return gate.run_leg(leg if limit is None else replace(leg, limit=limit))
 
 
 @pytest.mark.parametrize(
@@ -963,6 +968,131 @@ def test_a_failed_check_stays_in_the_record_after_it_leaves_the_tail(tmp_path, m
     assert "no-such-input" in first
     assert first not in row["output_tail"]
     assert first in row["verdict_source"]
+
+
+# ---------- a hung leg ends in a red row, a last line and a record (#125)
+
+
+# The slowest each leg has taken on this laptop under load, in seconds: every record and gate log
+# across the checkouts, to 2026-11-01. A new leg has to bring its own.
+SLOWEST = {
+    "cargo-fmt": 55.15,  # .worktrees/gateprune.log, CPU 100% busy as it started
+    "cargo-clippy": 833.48,  # .worktrees/gate-freeze3.log, 83.6%
+    "cargo-test": 961.12,  # .worktrees/gateprune.log, 100%
+    "ruff-check": 6.07,  # .worktrees/gater3.log, 54.3%
+    "ruff-format": 1.54,  # fix-runner's gate-20261101T061917.json, 94.3%
+    "pyright": 298.25,  # fix-runner's gate-20261101T061917.json, 94.3%
+    "pytest": 2455.43,  # .worktrees/gater3.log, 54.3%
+    "self-test": 423.97,  # fix-runner's gate-20261101T062918.json, 95.5%
+}
+# Seconds a stand-in holds on for: past every limit below, however long a starved kill takes (at
+# BelowNormal under load a bare python can take a minute to start), and over by itself, so that a
+# gate that has lost its limit fails these tests instead of hanging them
+HOLD = 900
+
+
+def _hanging(name: str, limit: float, code: str = f"import time; time.sleep({HOLD})") -> gate.Leg:
+    return gate.Leg(name, [sys.executable, "-c", code], gate.judge_ruff_check, limit=limit)
+
+
+def _gone(pid: int, within: float = 120.0) -> bool:
+    """Whether the process has left the system's list, soon: a kill takes effect a moment after
+    taskkill says so, and longer on a starved laptop."""
+    deadline = time.monotonic() + within
+    while any(p.pid == pid for p in gate.strays.list_processes() or []):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def test_every_limit_sits_well_above_the_slowest_that_leg_has_taken() -> None:
+    assert [leg.name for leg in gate.LEGS if leg.limit < 3 * SLOWEST[leg.name]] == []
+
+
+def test_a_hung_leg_is_red_and_the_gate_still_reports(tmp_path, monkeypatch, capsys) -> None:
+    # #125: run_leg waited with no timeout, so a gate in a background shell never reported at all
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    last = _python_leg("last", "print('All checks passed!')")
+    monkeypatch.setattr(gate, "LEGS", [_hanging("hung", 2.0), last])
+    assert gate.main([]) == 1
+    rows = _record(tmp_path)["legs"]
+    assert [(r["leg"], r["verdict"]) for r in rows] == [("hung", "RED"), ("last", "GREEN")]
+    assert rows[0]["returncode"] is None
+    assert "hung: still running at its 2s limit" in rows[0]["verdict_source"]
+    assert 2.0 <= rows[0]["duration"] < HOLD
+    printed = capsys.readouterr().out.splitlines()
+    assert printed[-1].startswith("gate RED: hung  (record: ")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="lists processes on Windows alone")
+def test_a_hung_leg_takes_its_whole_tree_and_keeps_what_it_printed(tmp_path) -> None:
+    # killing only the leg leaves the process doing the work: a venv's python.exe and pytest.exe
+    # are launchers, cargo sits above the test binary, and subprocess.run(timeout=) kills the leg
+    # alone, then on Windows reads what the survivors hold open until they end. This stand-in has
+    # that shape: leg -> grandchild, each through the venv's launcher
+    pid_file = tmp_path / "grandchild.pid"
+    grandchild = (
+        "import os, time\n"
+        "print('grandchild up', flush=True)\n"
+        f"open({f'{pid_file}.tmp'!r}, 'w').write(str(os.getpid()))\n"
+        f"os.replace({f'{pid_file}.tmp'!r}, {str(pid_file)!r})\n"
+        f"time.sleep({HOLD})\n"
+    )
+    code = (
+        "import subprocess, sys\n"
+        "print('leg started', flush=True)\n"
+        f"subprocess.run([sys.executable, '-c', {grandchild!r}])\n"
+    )
+    for limit in (2.0, 8.0, 32.0, 128.0, 512.0):  # seconds alone, unless starting it takes minutes
+        result = gate.run_leg(_hanging("hung", limit, code))
+        if pid_file.is_file():
+            break
+    assert pid_file.is_file(), "the limit fell every time before the tree was up"
+    assert result.verdict == "RED"
+    assert result.duration < HOLD
+    assert f"hung: still running at its {limit:g}s limit" in result.verdict_source
+    assert result.output_tail == ["leg started", "grandchild up"]
+    assert _gone(int(pid_file.read_text())), result.verdict_source
+
+
+def test_a_leg_that_ended_is_judged_though_a_process_it_started_lives_on() -> None:
+    # that process inherited the leg's output: reading a pipe to its end would wait for it, so a
+    # finished leg sat there until the stray ended, and with no limit for ever
+    code = (
+        "import subprocess, sys\n"
+        f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({HOLD})'])\n"
+        "print(child.pid)\n"
+        "print('All checks passed!')\n"
+    )
+    result = gate.run_leg(_python_leg("leaves-one-behind", code))
+    if sys.platform == "win32":  # elsewhere it ends by itself, in HOLD seconds
+        gate.strays.kill_tree(int(result.output_tail[0]))
+    assert result.verdict == "GREEN", result.verdict_source
+    assert result.returncode == 0
+    assert result.duration < HOLD
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="taskkill is Windows'")
+def test_a_tree_kill_that_fails_is_said_and_the_gate_goes_on(monkeypatch) -> None:
+    def denied(pid: int) -> str:
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(gate.strays, "kill_tree", denied)
+    result = gate.run_leg(_hanging("hung", 1.0, "import time; time.sleep(10)"))
+    assert result.verdict == "RED"
+    assert "hung" in result.verdict_source and "access denied" in result.verdict_source
+
+
+def test_the_self_test_leg_hung_in_a_section_is_red(tmp_path, monkeypatch) -> None:
+    # #125's failing case, on the leg's own argv: a runner edit that stops Scheduler.stop setting
+    # halt makes the hold loop in the self-test's drive spin for ever
+    selftest = f"def run_all(k):\n    import time\n    time.sleep({HOLD})\n    return 0\n"
+    result = _run_self_test_leg(tmp_path, monkeypatch, selftest, limit=2.0)
+    assert result.verdict == "RED"
+    assert result.returncode is None
+    assert "hung" in result.verdict_source
+    assert result.duration < HOLD
 
 
 # ---------- lie: a tool that cannot start, a judge that crashes
