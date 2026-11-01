@@ -767,22 +767,32 @@ def log_trial(data_dir: Path, record: dict[str, Any]) -> None:
 
 def trials(data_dir: Path, prereg: Prereg) -> int:
     """Evaluations logged so far under this prereg's id and version. A line that is no whole record,
-    as a power cut inside log_trials' one write leaves, is refused: no count can rest on it."""
+    as a power cut inside log_trials' one write leaves, is refused: no count can rest on it. Its
+    repair replaces it, never cuts it: a cut would leave a version whose first record tore with no
+    line and its budget back, and with its folder deleted, as charge offers, it could be scored
+    again. A blank line is skipped, since that repair is a hand edit; a zeroed tail is not blank."""
     path = trials_path(data_dir)
     if not path.exists():
         return 0
     own, count = (prereg.id, prereg.version), 0
     for number, line in enumerate(path.read_bytes().splitlines(), start=1):
+        if not line.strip():
+            continue
         try:
             stamp = json.loads(line)["prereg"]
             count += (stamp["id"], stamp["version"]) == own
         except (ValueError, KeyError, TypeError) as exc:  # ValueError: bad JSON, or bad UTF-8
             raise PreregError(
                 f"{path}, line {number}: not a whole trial record, a write torn by a crash. The "
-                "run that was writing it has a folder with no complete.json and its tables on "
-                "disk: count it as spent and amend the pre-registration. Every count reads this "
-                "whole log, the amendment's too, so then cut this line out of the log, keeping a "
-                "copy"
+                f"run that was writing it is the newest folder in {path.parent} with no "
+                "complete.json, its tables on disk: count it as spent and amend the "
+                "pre-registration. Every count reads this whole log, the amendment's too, so "
+                "first, keeping a copy of the log, replace this line with one whole record ending "
+                'in a newline: {"prereg": <params.prereg from the manifest.json of that folder>}. '
+                "Do not cut the line: a version with no line left would get its budget back. If "
+                "no such folder is left, nothing here says whose line it was: write "
+                '{"prereg": {"id": "<id>", "version": <k>}} for the file that was being scored, '
+                "or, if that cannot be told, one such record for each file it could have been"
             ) from exc
     return count
 

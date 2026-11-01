@@ -353,6 +353,12 @@ def _trial_log(data_dir: Path, whole: int = 4) -> list[bytes]:
         (3, lambda lines: [*lines[:2], b"{}\n", *lines[2:]]),
         (3, lambda lines: [*lines[:2], b"null\n", *lines[2:]]),
         (3, lambda lines: [*lines[:2], b'{"prereg": 7}\n', *lines[2:]]),
+        # zeros are not whitespace, whatever surrounds them: a disk's tail, never an editor's
+        (5, lambda lines: [*lines, b"\x00" * 512]),
+        (5, lambda lines: [*lines, b"\x00\n"]),
+        (5, lambda lines: [*lines, b" \x00 \n"]),
+        # a blank line above it still counts as a line: the number is the one an editor shows
+        (3, lambda lines: [lines[0], b"\n", lines[1][:40]]),
     ],
     ids=[
         "truncated last line",
@@ -364,6 +370,10 @@ def _trial_log(data_dir: Path, whole: int = 4) -> list[bytes]:
         "an empty record",
         "a JSON null",
         "a stamp that is no stamp",
+        "a tail of zeros alone",
+        "one zero on its line",
+        "a zero between spaces",
+        "torn under a blank line",
     ],
 )
 def test_a_torn_trial_log_is_refused_by_file_line_and_repair(
@@ -384,21 +394,80 @@ def test_a_torn_trial_log_is_refused_by_file_line_and_repair(
         assert "count it as spent and amend the pre-registration" in message
 
 
-def test_the_amended_file_needs_the_torn_line_out_of_the_log(tmp_path: Path) -> None:
+def test_the_amended_file_needs_the_torn_line_replaced(tmp_path: Path) -> None:
     """The refusal's repair must finish. Every version shares the log and every count reads all of
     it, so an amendment, whose trials are none of those, is stopped by the same line; which is why
-    the message goes on to say to cut it out. With it gone the amendment counts from 0, and the
-    version that tore it keeps every whole line against its budget."""
+    the message goes on to say to replace it. With a whole record there the amendment counts from
+    0, and the version that tore it keeps every whole line against its budget and that record too.
+    The blank line an editor leaves behind it stops neither."""
     v1 = prereg.load(V1)
     amended = prereg.Prereg(v1.path, v1.doc | {"version": 2}, v1.sha256)
     lines = _trial_log(tmp_path)
     log = prereg.trials_path(tmp_path)
     log.write_bytes(b"".join([*lines[:3], lines[3][:40]]))
-    with pytest.raises(prereg.PreregError, match=r"line 4: .*cut this line out"):
+    with pytest.raises(prereg.PreregError, match=r"line 4: .*replace this line"):
         prereg.charge(tmp_path, amended, 1)
-    log.write_bytes(b"".join(lines[:3]))
+    stamp = {"id": v1.id, "version": v1.version, "sha256": v1.sha256, "tag": "", "commit": ""}
+    record = json.dumps({"prereg": stamp}).encode()
+    log.write_bytes(b"".join([*lines[:3], record, b"\n\n"]))
     assert prereg.charge(tmp_path, amended, 1) == 0
-    assert prereg.trials(tmp_path, v1) == 3
+    assert prereg.trials(tmp_path, v1) == 4
+
+
+def test_with_no_folder_left_the_repair_names_the_file_being_scored(tmp_path: Path) -> None:
+    """A first record torn and its run's folder gone: there is no manifest to take a stamp from, and
+    no line beside it says whose it was, since the one above is another scoring's. The message says
+    so, and that a record of id and version for the file being scored will do, one per file it could
+    have been if that cannot be told: a version spent is the safe mistake, a version scored twice is
+    not. Filled in as it stands, that record is counted and the budget refuses by itself."""
+    v1 = prereg.load(V1)
+    budget = v1.doc["trials"]["budget"]
+    log = prereg.trials_path(tmp_path)
+    log.parent.mkdir(parents=True)
+    log.write_bytes(b'{"auc": 0.5, "auc_ci": [0.')
+    with pytest.raises(prereg.PreregError) as refused:
+        prereg.charge(tmp_path, v1, budget)
+    message = str(refused.value)
+    assert "If no such folder is left, nothing here says whose line it was" in message
+    assert "one such record for each file it could have been" in message
+    template = '{"prereg": {"id": "<id>", "version": <k>}}'
+    assert template in message
+    record = template.replace("<id>", v1.id).replace("<k>", str(v1.version))
+    log.write_text(record + "\n", encoding="utf-8")
+    assert [p.name for p in log.parent.iterdir()] == [log.name]  # no folder, only the log
+    assert prereg.trials(tmp_path, v1) == 1
+    with pytest.raises(prereg.PreregError, match="exceed its budget"):
+        prereg.charge(tmp_path, v1, budget)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda lines: [*lines, b"\n"],
+        lambda lines: [*lines, b"\n", b"\n"],
+        lambda lines: [lines[0], b"\n", *lines[1:]],
+        lambda lines: [*lines, b" \t \n"],
+        lambda lines: [*lines, b"\r\n"],
+        lambda lines: [b"\n", *lines],
+    ],
+    ids=[
+        "a trailing blank line",
+        "two of them",
+        "one in the middle",
+        "only spaces and a tab",
+        "a CRLF alone",
+        "one at the top",
+    ],
+)
+def test_a_blank_line_is_no_torn_line(tmp_path: Path, edit: Any) -> None:
+    """The torn line's repair is a hand edit, and an editor can leave a blank line behind it. Told
+    "a write torn by a crash" for that, someone who has just amended would look for a crash that
+    never happened. The count and the charge skip it, and every whole line still counts."""
+    v1 = prereg.load(V1)
+    log = prereg.trials_path(tmp_path)
+    log.write_bytes(b"".join(edit(_trial_log(tmp_path))))
+    assert prereg.trials(tmp_path, v1) == 4
+    assert prereg.charge(tmp_path, v1, 1) == 4
 
 
 def test_a_log_with_nothing_torn_counts_as_it_did(tmp_path: Path) -> None:

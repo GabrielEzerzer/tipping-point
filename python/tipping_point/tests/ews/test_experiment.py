@@ -363,18 +363,20 @@ def before_complete(path, record, replace=False):
     write_json(path, record, replace)
 
 
-def half_a_write(data_dir, records):
+def a_torn_write(data_dir, records):
     text = "".join(json.dumps(record, sort_keys=True) + "\\n" for record in records)
+    # lines of one length: half of them alone would end on a whole one
+    keep = 40 if where == "inside the first record" else len(text) // 2 + 7
     with open(prereg.trials_path(data_dir), "ab") as f:
-        f.write(text[: len(text) // 2 + 7].encode())  # lines of one length: half is a whole one
+        f.write(text[:keep].encode())
         f.flush()
         os._exit(3)
 
 
 if where == "before the trials":
     prereg.log_trials = lambda *args: os._exit(3)
-elif where == "inside the trials":
-    prereg.log_trials = half_a_write
+elif where.startswith("inside"):
+    prereg.log_trials = a_torn_write
 elif where == "after the trials":
     io.write_json = before_complete
 score(pre, prereg.Frozen("", ""), root, 1)
@@ -455,6 +457,46 @@ def test_a_kill_inside_the_log_is_the_torn_log_not_the_torn_folder(tmp_path: Pat
     shutil.rmtree(run_dir)
     with pytest.raises(prereg.PreregError, match=f"line {whole + 1}:"):
         prereg.charge(tmp_path, draft, 1)
+
+
+@pytest.mark.parametrize("path", SCORED_FILES, ids=lambda path: path.stem)
+def test_the_torn_log_repair_to_the_letter_leaves_no_second_scoring(
+    tmp_path: Path, path: Path
+) -> None:
+    """A kill inside the first record of the one write, so no whole line of this version is in the
+    log. Two literal repairs must not add up to a rescoring: the torn log's, then, once that speaks,
+    the torn folder's. The record here is the message's own template, filled from the run's
+    manifest. Then the folder is deleted as offered, and the budget refuses by itself. The end shows
+    what the old repair, cutting the line, let through: 0 trials and nothing torn, so twice the
+    evaluations, once logged, with the first result's tables gone."""
+    pre = prereg.load(path)
+    cells = prereg.cells(pre.doc)
+    assert pre.doc["trials"]["budget"] == cells  # one record leaves no room for a whole scoring
+    done = _scoring(path, tmp_path, "inside the first record")
+    assert done.returncode == 3, done.stderr
+    (run_dir,) = (tmp_path / "ews").glob(f"*-{pre.name}")
+    log = prereg.trials_path(tmp_path)
+    assert b"\n" not in log.read_bytes()
+    second = _scoring(path, tmp_path, "nowhere")
+    assert second.returncode == 1, second.stderr
+    assert f"{log}, line 1:" in second.stderr and "Do not cut the line" in second.stderr
+    source = "<params.prereg from the manifest.json of that folder>"
+    template = '{"prereg": ' + source + "}"
+    assert f"replace this line with one whole record ending in a newline: {template}" in (
+        second.stderr
+    )
+    stamp = io.read_json(run_dir / "manifest.json")["params"]["prereg"]
+    log.write_text(template.replace(source, json.dumps(stamp)) + "\n", encoding="utf-8")
+    assert prereg.trials(tmp_path, pre) == 1
+    third = _scoring(path, tmp_path, "nowhere")
+    assert third.returncode == 1 and "delete it or amend" in third.stderr, third.stderr
+    shutil.rmtree(run_dir)
+    fourth = _scoring(path, tmp_path, "nowhere")
+    assert fourth.returncode == 1 and "exceed its budget" in fourth.stderr, fourth.stderr
+    assert not list((tmp_path / "ews").glob(f"*-{pre.name}"))
+    assert prereg.trials(tmp_path, pre) == 1
+    log.write_bytes(b"")
+    assert prereg.charge(tmp_path, pre, cells) == 0
 
 
 def test_a_torn_result_refuses_its_own_file_and_version_alone(tmp_path: Path) -> None:

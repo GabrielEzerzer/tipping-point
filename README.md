@@ -623,8 +623,13 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   logged: delete it or amend the file. Deleting it gives back no trial the log holds, so a crash after
   the log spends the budget: the tables are there, and scoring again means amending the file. A crash
   inside the log's one write leaves a line that is no whole record, which `prereg.trials` refuses by
-  file and line: count that run as spent, amend the file, and cut the line out of the log, keeping a
-  copy, since every count reads all of it.
+  file and line: count that run as spent and amend the file. Every count reads the whole log, so first,
+  keeping a copy, replace the line with one whole record holding the `params.prereg` stamp from that
+  run's manifest. Cutting it instead could leave the version no line at all, and with its folder
+  deleted it could be scored again. With the record in place the budget refuses it, folder or no
+  folder, wherever `trials.budget` equals the file's cells, as both files' do. If no folder is left,
+  the record gives the id and version of the file that was being scored, or there is one for each file
+  it could have been. A blank line in the log is skipped.
 
 ### The exploratory pipeline
 
