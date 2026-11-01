@@ -15,9 +15,10 @@ inputs and kernel sources, on stand-in mounts.
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
 `jepa extract` of its final.pt and of its twin, each run checked with `jepa verify`), then a real
-extraction fails with another behind it on its queue, all in a venv that prints Kaggle's
-sitecustomize errors on stderr from every child. No wheel is built: the venv holds a copy of the
-package stamped clean, so the outcome does not depend on this checkout's state.
+extraction fails with another behind it on its queue, then one reads its final.pt out of a kernel
+output, all in a venv that prints Kaggle's sitecustomize errors on stderr from every child. No wheel
+is built: the venv holds a copy of the package stamped clean, so the outcome does not depend on this
+checkout's state.
 
 About five minutes on a laptop CPU. One line per check, then exit 1 if any failed. The gate's
 self-test leg (harness/gate.py) runs this and reads its closing "N/M checks passed" and exit code.
@@ -67,6 +68,8 @@ NOISE = [  # what every child printed on Kaggle's image (tp-tauc-l64-l128's log)
     "Error in sitecustomize; set PYTHONVERBOSE for traceback:",
     "ModuleNotFoundError: No module named 'wrapt'",
 ]
+# written out, not k.NO_EXTRACT_SEEDS: a slip in the runner's constant must turn these red (#126)
+CONFIRMATORY_SEEDS = range(6, 11)
 results: list[bool] = []
 
 
@@ -950,18 +953,27 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         plan["runs"][1]["args"][1] = target
         return refused(k, plan)
 
-    seven = {"dataset_run": "20261101T000000Z-L16-null-e2-s7"}
-    check("refused: jepa extract on a seed 7 dataset run", "seed 7" in extract_on(seven))
+    reached = [
+        seed
+        for seed in CONFIRMATORY_SEEDS
+        if f"has seed {seed}:"
+        not in extract_on({"dataset_run": f"20261101T000000Z-L16-null-e2-s{seed}"})
+    ]
+    check("refused: jepa extract on a dataset run at any of seeds 6-10", not reached, reached)
     untagged = {"dataset_run": "20261101T000000Z-train"}
     check(
         "refused: jepa extract on a run whose seed it cannot read",
         "no seed" in extract_on(untagged),
     )
-    made8 = [{"name": "sim8", "command": "null", "args": ["--L", 16, "--seed", 8]}]
     plan = copy.deepcopy(JEPA_PLAN)
-    plan["runs"].insert(1, made8[0])
-    plan["runs"][2]["args"][1] = {"run": "sim8"}
-    check("refused: jepa extract on this plan's own seed 8 run", "seed 8" in refused(k, plan))
+    plan["runs"].insert(1, {"name": "sim", "command": "null", "args": []})
+    plan["runs"][2]["args"][1] = {"run": "sim"}
+    reached = []
+    for seed in CONFIRMATORY_SEEDS:
+        plan["runs"][1]["args"] = ["--L", 16, "--seed", seed]
+        if f"has seed {seed}:" not in refused(k, plan):
+            reached.append(seed)
+    check("refused: jepa extract on this plan's own run at any of seeds 6-10", not reached, reached)
     plan["runs"][1]["args"] = ["--L", 16]  # no --seed: the CLI's seed 1
     check("... and accepted at the CLI's default seed 1", not refused(k, plan), refused(k, plan))
     for what, change, needle in (
@@ -1075,14 +1087,18 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
     check("... not the twin's", session.latents(twin) is None)
     session.refuse_seeds(final)
     check("seed 1 may be extracted", True)
-    seven = ctx.out / "ising" / NULL / "manifest.json"
-    seven.write_text(json.dumps({"params": {"seed": 7}}), encoding="utf-8")
-    try:
-        session.refuse_seeds(final)
-        check("seed 7 is refused again from the run's own manifest", False)
-    except k.RunError as exc:
-        check("seed 7 is refused again from the run's own manifest", "seed 7" in str(exc), exc)
-    seven.write_text(json.dumps({"params": {"seed": 1}}), encoding="utf-8")
+    own = ctx.out / "ising" / NULL / "manifest.json"
+    reached = []
+    for seed in CONFIRMATORY_SEEDS:
+        own.write_text(json.dumps({"params": {"seed": seed}}), encoding="utf-8")
+        try:
+            session.refuse_seeds(final)
+            reached.append(seed)
+        except k.RunError as exc:
+            if f"has seed {seed}:" not in str(exc):
+                reached.append(seed)
+    check("each of seeds 6-10 is refused again from the run's own manifest", not reached, reached)
+    own.write_text(json.dumps({"params": {"seed": 1}}), encoding="utf-8")
 
     session.prior = {
         "x-final": {"name": "x-final", "folder": f"ising/{NULL}", "key": key},
@@ -1456,6 +1472,8 @@ PILOT_SHA256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698
 DRAFT = "ising-latent-v1.toml"
 DRAFT_RUN = "20261101T000000Z-ising-latent-v1-draft"  # its folder in tp-prereg-ising-latent
 M1_RUN = "20261101T051047Z-L16-32-64-m1"  # primary model seed 1, in tp-jepa-primary-28's output
+M1_FINAL_SHA256 = "3f251147a5072964176cab40122cbf855755d7a7dd77bf946eaaef661b43d149"
+M1_TWIN_SHA256 = "5e076a53e61d8c359d55c13738f8a2619e4af1002843de0c10b3ca33bc6d4224"
 DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
 KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
 
@@ -1635,7 +1653,7 @@ def pilot_28(k: ModuleType, root: Path) -> None:
             except k.RunError as exc:
                 refused_seeds.append(str(exc))
     check(
-        "pilot-28: no extraction reads seeds 6-10, read from the runs' own manifests",
+        "pilot-28: every extraction passes refuse_seeds, on stand-ins built from their ids",
         not refused_seeds,
         refused_seeds,
     )
@@ -1870,6 +1888,41 @@ def real_runs(k: ModuleType, root: Path) -> None:
         [(r.name, r.state, r.note) for r in session.runs],
     )
 
+    # a checkpoint read out of an input mount, as first-read-m1 reads m1's: the training's folder
+    # attached as a kernel output, where jepa extract needs complete.json beside final.pt (#127)
+    source = "tp-tiny-primary"
+    attached = root / "input" / source / "out" / "jepa" / by2["tiny"]["run_id"]
+    shutil.copytree(out2 / training, attached)
+    digest = hashlib.sha256((attached / k.FINAL).read_bytes()).hexdigest()
+    mounted = k.load_plan(
+        dict(
+            plan,
+            kernel_sources=[f"{k.OWNER}/{source}"],
+            inputs={"tiny_final": {"run": attached.name, "file": k.FINAL, "sha256": digest}},
+            runs=[
+                {
+                    "name": "x-input",
+                    "command": "jepa extract",
+                    "args": [{"input": "tiny_final"}, *specs["x-twin"]["args"][1:]],
+                }
+            ],
+        )
+    )
+    session = k.Session(ctx, mounted, {}, COMMIT, last["env"]["torch"], 1)
+    session.locate_inputs()
+    session.scheduler.run(session.tick, 0.05)
+    run = session.by_name["x-input"]
+    table = k.read_json(out2 / str(run.folder) / "manifest.json") or {}
+    named = (table.get("params") or {}).get("checkpoint") or {}
+    check(
+        "a real jepa extract of an {'input'} checkpoint in a kernel output: complete and verified, "
+        "its sha256 and step named, no local path, STATUS's rate by input",
+        run.state == "complete"
+        and (named.get("sha256"), named.get("step"), named.get("path")) == (digest, steps, None)
+        and "extract tiny_final L16" in k.rates_text(session.measured()),
+        (run.state, run.note, named),
+    )
+
 
 def primary_28(k: ModuleType, root: Path) -> None:
     from tipping_point.jepa.data import find_staircases
@@ -1998,10 +2051,18 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         "first-read-m1: its checkpoints are m1's final.pt and twin, pinned, from primary-28",
         plan["kernel_sources"] == [f"{k.OWNER}/tp-jepa-primary-28"]
         and plan["datasets"] == pilot["datasets"]
-        and {n: (e["run"], e["file"]) for n, e in entries.items()}
-        == {"m1_final": (M1_RUN, k.FINAL), "m1_twin": (M1_RUN, k.TWIN)}
-        and entries["m1_final"]["sha256"] != entries["m1_twin"]["sha256"],
+        and {n: (e["run"], e["file"], e["sha256"]) for n, e in entries.items()}
+        == {
+            "m1_final": (M1_RUN, k.FINAL, M1_FINAL_SHA256),
+            "m1_twin": (M1_RUN, k.TWIN, M1_TWIN_SHA256),
+        },
         entries,
+    )
+    check(
+        "first-read-m1: its wheel is the project's wheel dataset, by name: Kaggle attaches the "
+        "dataset's latest version",
+        plan["wheel"] == f"{k.OWNER}/{k.WHEEL_DATASET}",
+        plan["wheel"],
     )
     read = [
         (r["args"][0]["input"], r["args"][1]["dataset_run"], r["args"][2:]) for r in plan["runs"]
@@ -2026,7 +2087,7 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         len(runs),
     )
     reaching = []
-    for seed in k.NO_EXTRACT_SEEDS:
+    for seed in CONFIRMATORY_SEEDS:
         variant = copy.deepcopy(plan)
         variant["runs"][-1]["args"][1]["dataset_run"] = f"20261025T031229Z-L32-ramp-x2-s{seed}"
         reaching.append(f"has seed {seed}: jepa extract never reads" in refused(k, variant))
@@ -2082,7 +2143,7 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         except k.RunError as exc:
             refused_seeds.append(str(exc))
     check(
-        "first-read-m1: no extraction reads seeds 6-10, read from the runs' own manifests",
+        "first-read-m1: every run passes refuse_seeds, on stand-ins built from their ids",
         not refused_seeds,
         refused_seeds,
     )
@@ -2095,11 +2156,11 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         (table / "complete.json").write_text(json.dumps(done), encoding="utf-8")
         run = session.by_name[name]
         run.state, run.folder = "complete", table.relative_to(ctx.out).as_posix()
-    groups = session.measured()["extract"]
+    text = k.rates_text(session.measured())
     check(
         "first-read-m1: STATUS keeps final.pt's rate and the twin's apart, by input",
-        sorted(groups) == ["m1_final L16", "m1_twin L16"],
-        sorted(groups),
+        "extract m1_final L16" in text and "extract m1_twin L16" in text,
+        text,
     )
 
 
