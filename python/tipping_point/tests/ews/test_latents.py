@@ -46,7 +46,7 @@ from ews_planted import (
     v1_dataset,
     write_latents,
 )
-from tipping_point.ews import fss, ising, prereg
+from tipping_point.ews import fss, indicators, ising, prereg
 from tipping_point.ews.__main__ import main
 from tipping_point.ising import io
 
@@ -823,11 +823,25 @@ def test_what_the_planted_answers_assume_of_the_draft(doc: dict[str, Any]) -> No
 # ---------------------------------------------------------------- a channel with no peak (#115)
 
 
+Plant = Callable[[int, np.ndarray, np.ndarray], np.ndarray]  # L, a ramp's eps_L, its rows -> rows
+
+
+def _planted(L: int, run: ising.Run, s: ising.Series, plant: dict[str, Plant]) -> ising.Series:
+    eps = run.eps(s.temperature)
+    new = {column: rows(L, eps, s.latents[column]) for column, rows in plant.items()}
+    return replace(s, latents=s.latents | new)
+
+
 def _peaks_alone(
-    data: V1, doc: dict[str, Any], table: str, seed: int = 115
+    data: V1,
+    doc: dict[str, Any],
+    table: str,
+    seed: int = 115,
+    plant: dict[str, Plant] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[int, float]]:
     """What the edge rule touches of a pass, and nothing else of it: the peaks rows of one table at
-    the headline cell, its dynamic rows, and per L what _edge_margin took as one window of ramp."""
+    the headline cell, its dynamic rows, and per L what _edge_margin took as one window of ramp.
+    `plant` replaces a column's rows on every ramp, once the table is read."""
     chosen = ising.select(*ising.find_runs(data.root), doc["data"], TABLES)
     pilot = ising.read_pilot(data.root, V1_PILOT_RUN)
     head = doc["sensitivity"]["headline"]
@@ -841,6 +855,8 @@ def _peaks_alone(
         prep = ising.prepare(replace(inputs, latents=table), "matched", tau_c, 0.0, band)
         window = prep.samples(head["window"], tau_c)
         bandwidth = head["bandwidth"] * tau_c / prep.sweeps
+        if plant:
+            prep = replace(prep, ramps=[(r, _planted(L, r, s, plant)) for r, s in prep.ramps])
         found_rows, found = ising._peaks(doc, prep, L, window, bandwidth)
         rows += found_rows
         for key, groups in found.items():
@@ -928,6 +944,128 @@ def test_a_genuine_peak_near_the_middle_of_the_band_still_passes(
         if pair in (("pc_1", "variance"), ("surprise", "slope"), ("pc_2", "slope")):
             assert row["edge_fraction"] == old["edge_fraction"] == 0.0, row
             assert row["peak_eps_median"] == old["peak_eps_median"], row
+
+
+# ---------------------------------------------------------------- which way a peak was lost (#121)
+
+
+def _emptied(L: int, eps: np.ndarray, own: np.ndarray) -> np.ndarray:
+    """A bug that emptied the channel: NaN for every replica, along the whole ramp."""
+    return np.full_like(own, np.nan)
+
+
+def _rising_to_the_cold_edge(L: int, eps: np.ndarray, own: np.ndarray) -> np.ndarray:
+    """A spread that keeps growing past the cold edge of the band, its variance by e^4 per eps_L
+    with nothing to blur it: every replica's maximum sits within a window of that edge."""
+    return np.exp(-2.0 * eps) * np.random.default_rng(L).standard_normal(own.shape)
+
+
+def _steepest_at_the_hot_edge(L: int, eps: np.ndarray, own: np.ndarray) -> np.ndarray:
+    """A fall that is steepest at the hot edge of the band and past it: where a slope's minimum goes
+    when a channel has no steepest change inside the band."""
+    return np.tile(np.exp(eps), (len(own), 1))
+
+
+def _row(rows: list[dict[str, Any]], column: str, indicator: str, L: int) -> dict[str, Any]:
+    (row,) = [
+        r for r in rows if (r["observable"], r["indicator"], r["L"]) == (column, indicator, L)
+    ]
+    return row
+
+
+def _verdict(dynamic: list[dict[str, Any]], quantity: str) -> dict[str, Any]:
+    (row,) = [r for r in dynamic if r["quantity"] == quantity]
+    return row
+
+
+@pytest.mark.parametrize(
+    ("plant", "undefined", "edge"),
+    [(_emptied, 1.0, 0.0), (_rising_to_the_cold_edge, 0.0, 1.0)],
+    ids=["an all-NaN channel", "a channel rising to an edge"],
+)
+def test_the_peaks_table_tells_an_emptied_channel_from_an_edge_bound_one(
+    data: V1, doc: dict[str, Any], plant: Plant, undefined: float, edge: float
+) -> None:
+    """#121: a bug that empties a channel and a channel with no peak in the band were one number,
+    edge_fraction 1.0. A file with edge_margin says which, at every L, every replica counted. Both
+    stay inconclusive, as neither can pass; a channel left as planted, beside them, has neither."""
+    rows, dynamic, _ = _peaks_alone(data, doc, TWIN_A, plant={"pc_3": plant})
+    for L in V1_SIZES:
+        row = _row(rows, "pc_3", "variance", L)
+        assert (row["undefined"], row["edge_fraction"]) == (undefined, edge), row
+        assert row["n"] == len(V1_SEEDS) * V1_REPLICAS, row
+        assert np.isnan(row["peak_eps_median"]), row
+        other = _row(rows, "pc_1", "variance", L)
+        assert (other["undefined"], other["edge_fraction"]) == (0.0, 0.0), other
+    assert _verdict(dynamic, "inverse_nu_pc_3_variance")["verdict"] == fss.INCONCLUSIVE
+
+
+def test_a_channel_with_no_value_in_the_band_is_undefined_whatever_is_outside(
+    data: V1, doc: dict[str, Any]
+) -> None:
+    """A slope is read window by window, so a stretch of NaN frames leaves its row finite on either
+    side, unlike a variance, where one NaN empties the row: a row that is NaN only across the whole
+    band still has no peak to lose to an edge. peak_position gives it NaN for having no value there,
+    and that is the share `undefined` counts."""
+
+    def holed(L: int, eps: np.ndarray, own: np.ndarray) -> np.ndarray:
+        return np.where((eps <= V1_SEARCH[0]) & (eps >= V1_SEARCH[1]), np.nan, own)
+
+    rows, dynamic, _ = _peaks_alone(data, doc, TRAINED_A, plant={"surprise": holed})
+    for L in V1_SIZES:
+        slope = _row(rows, "surprise", "slope", L)
+        assert (slope["undefined"], slope["edge_fraction"]) == (1.0, 0.0), slope
+    assert _verdict(dynamic, "inverse_nu_surprise_slope")["verdict"] == fss.INCONCLUSIVE
+    # it is the band that is empty, not the row, which a test of the whole row would miss
+    run = ising.open_run(data.runs["ramp", V1_SIZES[0], V1_SEEDS[0]])
+    (s,) = ising.series(run, "matched", TRAINED_A)
+    values = indicators.rolling_slope(holed(16, run.eps(s.temperature), s.latents["surprise"]), 10)
+    assert not np.isnan(values).all(axis=1).any()
+
+
+def test_an_undefined_share_counts_against_locating(data: V1, doc: dict[str, Any]) -> None:
+    """The verdict reads the peak positions, not the table, so `undefined` taking replicas out of
+    edge_fraction takes none out of the edge rule. Six replicas a seed at L = 32: a third emptied, a
+    third on an edge, a third with the planted peak, every seed keeping two located so that
+    draws_used does not decide it. Neither share is over half, together they are, and it is
+    inconclusive. The same rows with a peak in place of the emptied ones pass, so it is that third
+    alone that decides."""
+    mid = V1_SIZES[1]
+
+    def mixed(gone: Callable[[np.ndarray], np.ndarray]) -> dict[str, Plant]:
+        def rows(L: int, eps: np.ndarray, own: np.ndarray) -> np.ndarray:
+            if mid != L:
+                return own
+            return np.vstack([gone(own), _steepest_at_the_hot_edge(L, eps, own), own])
+
+        return {"surprise": rows}
+
+    table, dynamic, _ = _peaks_alone(
+        data, doc, TRAINED_A, plant=mixed(lambda own: np.full_like(own, np.nan))
+    )
+    row = _row(table, "surprise", "slope", mid)
+    assert row["n"] == 12, row
+    assert row["undefined"] == pytest.approx(1 / 3), row
+    assert row["edge_fraction"] == pytest.approx(1 / 3), row
+    judged = _verdict(dynamic, "inverse_nu_surprise_slope")
+    assert judged["verdict"] == fss.INCONCLUSIVE, judged
+    assert abs(judged["estimate"] - 1.0) < 0.2 and judged["draws_used"] >= 0.95, judged
+    table, dynamic, _ = _peaks_alone(data, doc, TRAINED_A, plant=mixed(lambda own: own))
+    row = _row(table, "surprise", "slope", mid)
+    assert row["undefined"] == 0.0 and row["edge_fraction"] == pytest.approx(1 / 3), row
+    assert _verdict(dynamic, "inverse_nu_surprise_slope")["verdict"] == fss.PASS
+
+
+def test_v1_keeps_its_one_edge_fraction(data: V1, doc: dict[str, Any]) -> None:
+    """A file with no edge_margin, as ising-ews-v1 is, keeps the table it froze: no `undefined`
+    column, and an emptied channel in edge_fraction as before. The golden holds v1's columns but no
+    such channel, so it cannot tell a count that moved. The verdict is the same either way."""
+    old = _without_the_margin(doc)
+    rows, dynamic, _ = _peaks_alone(data, old, TWIN_A, plant={"pc_3": _emptied})
+    assert all("undefined" not in row for row in rows), rows[0]
+    for L in V1_SIZES:
+        assert _row(rows, "pc_3", "variance", L)["edge_fraction"] == 1.0
+    assert _verdict(dynamic, "inverse_nu_pc_3_variance")["verdict"] == fss.INCONCLUSIVE
 
 
 def test_one_headline_window_of_ramp_is_0p4_eps_L_at_every_L(data: V1, doc: dict[str, Any]) -> None:

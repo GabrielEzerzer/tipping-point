@@ -255,6 +255,15 @@ def test_the_baseline_rows_are_the_named_results_and_read_nothing_else(scored: P
     assert math.isnan(margins["auc_surprise_level"]["reference"])
 
 
+def test_a_latent_results_peaks_table_says_undefined_on_every_row(scored: Path) -> None:
+    """#121 through the whole run: a column of its own beside edge_fraction, in the Parquet and the
+    CSV the figures read, at 0 where nothing is emptied."""
+    rows = _rows(scored, "peaks")
+    assert rows and all(r["undefined"] == 0.0 for r in rows), rows[0]
+    header = (scored / "csv" / "peaks.csv").read_text("utf-8").splitlines()[0].split(",")
+    assert header[header.index("edge_fraction") + 1] == "undefined"
+
+
 # ---------------------------------------------------------------- 2: the bytes
 
 

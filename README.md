@@ -536,7 +536,10 @@ and the scorer takes both through every table, once per checkpoint.
   with no peak there (#115): so `fss.dynamic.edge_margin = "window"`, which every latent file holds,
   counts an extremum within one headline window of either edge as not located, and over half of an
   L's replicas not located is inconclusive. ising-ews-v1 refuses the key and reads the band's first
-  and last samples alone.
+  and last samples alone. The `peaks` table of a file with the key says which way a peak was lost:
+  `edge_fraction` for an edge, `undefined` for a replica with no value in the band, as a bug that
+  empties a channel leaves. Both count as not located. v1's table keeps one `edge_fraction`, which
+  holds both.
 - **Rows.** Every row of every table has a `checkpoint` column, the table's folder name, and so does
   each line of `trials.jsonl`; a classic row's is `""`. The file pins each checkpoint's sha256 and
   role, and the result's manifest gives the sha256 of each table's `complete.json` per run.
