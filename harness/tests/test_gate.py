@@ -5,6 +5,7 @@ red = deliberately broken files; any other name = files deliberately edited into
 self-test-* ones have their local repo and temp prefixes replaced, because the repo is public.
 """
 
+import ast
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -1049,6 +1051,105 @@ def test_a_failed_check_stays_in_the_record_after_it_leaves_the_tail(tmp_path, m
     assert "no-such-input" in first
     assert first not in row["output_tail"]
     assert first in row["verdict_source"]
+
+
+# ---------- a section deleted from the self-test must not read as green (#124)
+
+
+# run_all's sections. The leg trusts the closing "N/M checks passed" line, which counts only the
+# checks that ran: delete real_runs, the only real train, resume and extract path and most of the
+# leg's time, and it reads 223/223, exit 0. A minimum count would need bumping on nearly every
+# change and could not say which section went. A new section joins this list.
+SELF_TEST = gate.ROOT / "notebooks" / "kaggle_ising_runs_selftest.py"
+SELF_TEST_SECTIONS = (
+    "plans",
+    "refusals",
+    "cli",
+    "shrinking",
+    "queues",
+    "failed_extractions",
+    "resolution",
+    "previous",
+    "inputs",
+    "wheel",
+    "verification",
+    "kernel_folder",
+    "jepa_entries",
+    "extraction_rates",
+    "kernel_acceptance",
+    "invalid_plans",
+    "pilot_28",
+    "primary_28",
+    "first_read_m1",
+    "real_runs",
+)
+
+
+def _calls_that_always_run(body: list[ast.stmt]) -> Iterator[str]:
+    """The name each bare call among these statements and through their `with` blocks calls. A call
+    behind an `if`, in a loop or in a function defined here may never run."""
+    for statement in body:
+        if isinstance(statement, ast.With):
+            yield from _calls_that_always_run(statement.body)
+        elif (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+        ):
+            yield statement.value.func.id
+
+
+def _sections_missing(source: str) -> list[str]:
+    bodies = [
+        node.body
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_all"
+    ]
+    called = {name for body in bodies for name in _calls_that_always_run(body)}
+    return [section for section in SELF_TEST_SECTIONS if section not in called]
+
+
+def test_run_all_calls_every_named_section() -> None:
+    assert _sections_missing(SELF_TEST.read_text("utf-8")) == []
+
+
+# run_all's shape with every section in it: what the check can catch, whatever the real one holds
+WHOLE_RUN_ALL = (
+    "def run_all(k):\n"
+    "    with tempfile.TemporaryDirectory() as tmp:\n"
+    "        root = Path(tmp)\n"
+    + "".join(f"        {section}(k, root)\n" for section in SELF_TEST_SECTIONS)
+    + "    return 0\n"
+)
+
+
+def test_a_run_all_with_every_section_has_none_missing() -> None:
+    assert _sections_missing(WHOLE_RUN_ALL) == []
+
+
+@pytest.mark.parametrize("section", SELF_TEST_SECTIONS)
+def test_a_section_deleted_from_run_all_is_named(section: str) -> None:
+    deleted = WHOLE_RUN_ALL.replace(f"        {section}(k, root)\n", "")
+    assert _sections_missing(deleted) == [section]
+
+
+@pytest.mark.parametrize(
+    "guarded",
+    [
+        "        if os.environ.get('TP_FULL'):\n            real_runs(k, root)\n",
+        "        for _ in ():\n            real_runs(k, root)\n",
+        "        def later():\n            real_runs(k, root)\n",
+        "        later = lambda: real_runs(k, root)\n",
+    ],
+    ids=["behind-an-if", "in-a-loop", "in-a-function", "in-a-lambda"],
+)
+def test_a_section_that_may_never_run_counts_as_deleted(guarded: str) -> None:
+    source = WHOLE_RUN_ALL.replace("        real_runs(k, root)\n", guarded)
+    assert _sections_missing(source) == ["real_runs"]
+
+
+def test_no_run_all_leaves_every_section_missing() -> None:
+    assert _sections_missing("def something_else(k):\n    plans(k)\n") == list(SELF_TEST_SECTIONS)
 
 
 # ---------- a hung leg ends in a red row, a last line and a record (#125)
