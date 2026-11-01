@@ -330,7 +330,7 @@ def _judge_pytest_from_disk(returncode: int, _output: str) -> Verdict:
 
 
 LEGS: list[Leg] = [
-    Leg("cargo-fmt", ["cargo", "fmt", "--all", "--check"], judge_cargo_fmt, limit=300.0),
+    Leg("cargo-fmt", ["cargo", "fmt", "--all", "--check"], judge_cargo_fmt, limit=600.0),
     Leg(
         "cargo-clippy",
         ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
@@ -345,16 +345,16 @@ LEGS: list[Leg] = [
         cargo_test_evidence,
         limit=3600.0,
     ),
-    Leg("ruff-check", ["ruff", "check"], judge_ruff_check, limit=300.0),
-    Leg("ruff-format", ["ruff", "format", "--check"], judge_ruff_format, limit=300.0),
-    Leg("pyright", ["pyright"], judge_pyright, limit=1200.0),
+    Leg("ruff-check", ["ruff", "check"], judge_ruff_check, limit=600.0),
+    Leg("ruff-format", ["ruff", "format", "--check"], judge_ruff_format, limit=600.0),
+    Leg("pyright", ["pyright"], judge_pyright, limit=1800.0),
     # -c pins the config pytest_dirs reads: a pytest.toml or pytest.ini would otherwise
     # outrank pyproject.toml, and pytest would collect from dirs the floor never checks
     Leg(
         "pytest",
         ["pytest", "-c", "pyproject.toml", f"--junitxml={JUNIT}", "-q"],
         _judge_pytest_from_disk,
-        limit=9000.0,
+        limit=14400.0,
     ),
     # sys.executable, not "python": Windows looks beside the running interpreter before PATH, and
     # a venv's python.exe runs the base install's, which has no tipping_point
@@ -363,7 +363,7 @@ LEGS: list[Leg] = [
         [sys.executable, "notebooks/kaggle_ising_runs.py", "--self-test"],
         judge_self_test,
         self_test_evidence,
-        limit=1800.0,
+        limit=3600.0,
     ),
 ]
 

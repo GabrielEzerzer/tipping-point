@@ -1156,14 +1156,16 @@ def test_no_run_all_leaves_every_section_missing() -> None:
 
 
 # The slowest each leg has taken on this laptop under load, in seconds: every record and gate log
-# across the checkouts, to 2026-11-01. A new leg has to bring its own.
+# across the checkouts, to 2026-11-01. A new leg has to bring its own. The limits allow for more
+# than three times these where a leg's time is mostly CPU: on 2026-11-01, at BelowNormal with every
+# core taken, pyright took nine times its median and a bare python stand-in over a minute.
 SLOWEST = {
     "cargo-fmt": 55.15,  # .worktrees/gateprune.log, CPU 100% busy as it started
     "cargo-clippy": 833.48,  # .worktrees/gate-freeze3.log, 83.6%
     "cargo-test": 961.12,  # .worktrees/gateprune.log, 100%
-    "ruff-check": 6.07,  # .worktrees/gater3.log, 54.3%
-    "ruff-format": 1.54,  # fix-runner's gate-20261101T061917.json, 94.3%
-    "pyright": 298.25,  # fix-runner's gate-20261101T061917.json, 94.3%
+    "ruff-check": 15.63,  # the real leg through run_leg, 2026-11-01, 100%
+    "ruff-format": 16.94,  # the real leg through run_leg, 2026-11-01, 100%
+    "pyright": 416.48,  # the real leg through run_leg, 2026-11-01, 100%
     "pytest": 2455.43,  # .worktrees/gater3.log, 54.3%
     "self-test": 423.97,  # fix-runner's gate-20261101T062918.json, 95.5%
 }
