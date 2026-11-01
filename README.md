@@ -543,9 +543,22 @@ and the scorer takes both through every table, once per checkpoint.
   `l2_var_<column>`, `mean_<column>` and `one_minus_ac1_<column>`, read from the matched cadence.
 - **The freeze.** A latent file reads the runs of the version its `[baseline]` names, so those runs
   must come from that tag's commit, and each table from the file's own tag and the checkpoint it
-  pins: the freeze comes before any extraction on a scored seed. `ising-latent-v1` is not written
-  yet; `python/tipping_point/tests/fixtures/ising_latent_draft.toml` is the draft the schema
-  accepts, with placeholders for what the exploratory pass sets, and the freeze refuses them all.
+  pins: the freeze comes before any extraction on a scored seed. `paper/prereg/ising-latent-v1.toml`
+  is the draft, set by the exploratory pass, with its checkpoints and `baseline.result` still
+  placeholders, which the freeze refuses. `python/tipping_point/tests/fixtures/ising_latent_draft.toml`
+  is the schema's fixture, with every value the pass was to set left open.
+
+The exploratory pipeline, `harness/explore/`, scores the seeds 1-5 datasets, which neither
+pre-registration scores: on |m|, or on a latents table with `--latents <table>`, one size at a time,
+through this adapter. It refuses any seed outside 1-5 and cannot log a trial, so nothing it prints
+counts as one. `join_pilot` links a Kaggle output's tables onto the local runs in a new data dir, and
+`latent_pass` runs every step for a training, its trained checkpoint beside its twin:
+
+```sh
+uv run --no-sync python harness/explore join_pilot --output <kaggle out> --into <folder>
+uv run --no-sync python harness/explore latent_pass --training <run id> --step <step> \
+    --data-dir <folder> --out <outputs>
+```
 
 Nothing here changes what ising-ews-v1 scores. `harness/ews_v1_golden.py` wrote every row and value
 of a v1 scoring on planted data from aa29cbc, the freeze lane's merge, and
