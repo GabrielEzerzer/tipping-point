@@ -224,6 +224,42 @@ def test_strict_wants_a_checkpoint_pinned_by_its_sha256(draft: dict[str, Any], k
         (lambda d: d["probes"].update(targets=["susceptibility"]), "probes.targets"),
         (lambda d: d["probes"].update(controls=["iid"]), "probes.controls"),
         (lambda d: d.pop("disclosure"), "disclosure: missing"),
+        (lambda d: d["latents"].update(extraction="every frame"), "latents.extraction: "),
+        (lambda d: d["data"]["staircase"].update(temperature=2.3), "data.staircase.temperature"),
+        (lambda d: d["scoring"]["margins"].update(sign_test=False), "sign_test: true"),
+        (lambda d: d["scoring"]["margins"].update(ablations="judged"), "margins.ablations"),
+        (lambda d: d["scoring"]["margins"].update(sizes="max"), "margins.sizes"),
+        (lambda d: d["scoring"]["margins"].update(tolerance=0.0), "margins.tolerance: positive"),
+        (lambda d: d["scoring"]["margins"].pop("tolerance"), "margins.tolerance: missing"),
+        (lambda d: d["scoring"]["margins"].pop("sizes"), "margins.sizes: missing"),
+        (lambda d: d["hypotheses"].pop(4), "learned-beyond-random"),
+        (lambda d: d["hypotheses"][4].update(direction="match"), "learned-beyond-random"),
+        (lambda d: d["probes"].update(fit="some frames"), "probes.fit: "),
+        (
+            lambda d: d["probes"].update(fit=d["probes"]["fit"].replace("seed 16", "seed 15")),
+            "probes.fit: ",
+        ),
+        (lambda d: d["probes"].update(test="all of them"), "probes.test: "),
+        (
+            lambda d: d["probes"].update(test=d["probes"]["test"].replace("20000", "10000")),
+            "probes.test: ",
+        ),
+        (lambda d: d["data"].update(seeds=[6, 7, 9]), "data.seeds: consecutive"),
+        (lambda d: d["probes"].update(selectivity="R^2"), "probes.selectivity"),
+        (lambda d: d["probes"].update(targets=["abs_m"]), "must hold energy"),
+        (
+            lambda d: d["indicators"].update(names=["variance", "ac", "level", "skewness"]),
+            "indicators.names: exactly",
+        ),
+        (lambda d: d["indicators"]["direction"].update(skewness="less"), "direction.skewness"),
+        (
+            lambda d: d["indicators"]["direction_by_observable"]["surprise"].update(ac="less"),
+            "direction_by_observable.surprise.ac: no pair",
+        ),
+        (lambda d: d["latents"].update(columns=["surprise", "pc_1", "pc_3"]), "scored by nothing"),
+        (lambda d: d["fss"]["static"][1].update(tolerance=0.1), "a descriptive row"),
+        (lambda d: d["fss"]["static"][1].update(expected=-0.125), "a descriptive row"),
+        (lambda d: d["fss"]["static"][2].update(expected=1.75), "a reference is judged"),
     ],
 )
 def test_malformed_latent_files_are_named(draft: dict[str, Any], edit: Any, complaint: str) -> None:
@@ -372,3 +408,124 @@ def test_log_trial_keeps_the_checkpoint_it_is_given(tmp_path: Path) -> None:
     assert prereg.trials(tmp_path, latent) == 2
     lines = prereg.trials_path(tmp_path).read_text("utf-8")
     assert '"checkpoint": "t-step0050000"' in lines and '"checkpoint": "t-step0000000"' in lines
+
+
+@pytest.mark.parametrize(
+    ("where", "value"),
+    [
+        (("scoring", "alarms", "indicators"), ["variance", "ac"]),  # v1's: pairs says which
+        (("fss", "dynamic", "band"), [6.0, -4.0]),  # the research pass's name for search
+        (("fss", "dynamic", "statistic"), "peak"),
+        (("indicators", "thin"), 0.1),  # the dense cadence's, which a latents table has not
+        (("latents", "subsample"), "tc-plus"),
+        (("probes", "limit"), 20000),
+        (("probes", "seed"), 0),
+        (("scoring", "margins", "rounds"), 2000),
+        (("scoring", "surrogates", "kinds"), ["phase"]),
+        (("sensitivity", "steps"), 3),
+        (("data", "nulls", "seeds"), [6]),
+        (("baseline", "commit"), "abc"),
+        (("notes",), "anything"),
+    ],
+)
+def test_a_key_nothing_reads_is_refused_draft_or_ready_to_freeze(
+    draft: dict[str, Any], where: tuple[str, ...], value: Any
+) -> None:
+    """Frozen text must not claim what the scorer ignores, and _check passes a key the schema does
+    not list: a latent file holding one is refused, wherever it stands and whatever its name, by the
+    path _latent_problems takes. The keys a latent file may leave out stay allowed."""
+    filled = _filled(draft)
+    assert prereg.problems(filled, strict=True) == []
+    named = ".".join(where)
+    for doc in (draft, filled):
+        table = doc
+        for key in where[:-1]:
+            table = table[key]
+        table[where[-1]] = value
+    found = prereg.problems(draft)
+    assert any(p.startswith(f"{named}: nothing reads") for p in found), found
+    assert any(
+        p.startswith(f"{named}: nothing reads") for p in prereg.problems(filled, strict=True)
+    )
+
+
+def test_a_key_inside_a_list_of_tables_is_found_too(draft: dict[str, Any]) -> None:
+    draft["latents"]["checkpoints"][3]["device"] = "cuda"
+    draft["fss"]["dynamic"]["statistics"][1]["band"] = [6.0, -4.0]
+    draft["fss"]["static"][0]["band"] = [6.0, -4.0]
+    found = prereg.problems(draft)
+    for where in (
+        "latents.checkpoints[3].device",
+        "fss.dynamic.statistics[1].band",
+        "fss.static[0].band",
+    ):
+        assert any(p.startswith(f"{where}: nothing reads") for p in found), (where, found)
+
+
+def test_the_keys_a_latent_file_may_leave_out_are_not_taken_for_stale(
+    draft: dict[str, Any],
+) -> None:
+    """data.ramps.eps_L, data.staircase.tau_sha256, direction_by_observable and a static row's
+    expected and tolerance are read where they stand: the check knows them, and any key under a
+    table the schema leaves open."""
+    assert prereg.problems(draft) == []
+    for key in ("eps_L",):
+        assert key in draft["data"]["ramps"]
+    assert "tau_sha256" in draft["data"]["staircase"]
+    assert "direction_by_observable" in draft["indicators"]
+    assert {"expected", "tolerance"} <= draft["fss"]["static"][0].keys()
+
+
+def test_a_v1_file_keeps_its_own_keys_and_is_never_held_to_the_latent_rule() -> None:
+    """scoring.alarms.indicators, fss.dynamic.statistic and indicators.thin are v1's own, and an
+    extra key is not refused there: its frozen bytes must keep passing as they are."""
+    v1 = tomllib.loads(V1.read_text("utf-8"))
+    assert prereg.problems(v1, strict=True) == []
+    assert "indicators" in v1["scoring"]["alarms"] and "thin" in v1["indicators"]
+    v1["notes"] = "anything"
+    assert prereg.problems(v1) == []
+
+
+def test_the_hypothesis_and_the_level_must_state_one_direction(draft: dict[str, Any]) -> None:
+    """The level's direction stands twice: the hypothesis's words and the key the scorer reads, and
+    indicators.direction beside its override reads as a third. A file whose texts disagree is
+    refused; while they are placeholders there is nothing to compare."""
+    assert prereg.problems(draft) == []
+    doc = _filled(draft)
+    assert prereg.problems(doc, strict=True) == []
+    doc["hypotheses"][2]["direction"] = "greater"
+    assert any("surprise-trend says greater" in p for p in prereg.problems(doc))
+    doc = _filled(draft)
+    doc["indicators"]["direction"]["level"] = "greater"
+    assert any(p.startswith("indicators.direction.level: no pair") for p in prereg.problems(doc))
+
+
+def test_the_extraction_sentence_is_the_one_the_scorer_holds_tables_to(
+    draft: dict[str, Any],
+) -> None:
+    """The draft's words, and each word's rule: a primary and its twin keep the plateau and one
+    burst in 8 of a staircase, an ablation the plateau, each at the file's own plateau."""
+    assert draft["latents"]["extraction"] == prereg.EXTRACTION
+    assert set(prereg.SELECTIONS) == prereg.CHECKPOINT_ROLES
+    assert prereg.SELECTIONS["primary"]["rule"] == "tc-plus"
+    assert {prereg.SELECTIONS[role]["rule"] for role in ("ema-only", "held-out")} == {"tc-only"}
+    assert {s["tc_plateau"] for s in prereg.SELECTIONS.values()} == {
+        draft["data"]["staircase"]["temperature"]
+    }
+    assert "2.269231" in prereg.EXTRACTION and "one burst in eight" in prereg.EXTRACTION
+    assert prereg.SELECTIONS["primary"]["every"] == 8
+
+
+def test_the_probe_protocol_is_read_from_the_files_sentence(draft: dict[str, Any]) -> None:
+    """The runner's frame limit and probe seed are the numbers the frozen sentence states."""
+    assert prereg.probe_protocol(draft) == (20000, 0)
+    fit = draft["probes"]["fit"].replace("20000", "500").replace("probe seed 0", "probe seed 7")
+    draft["probes"] |= {
+        "fit": fit,
+        "test": draft["probes"]["test"].replace("20000", "500"),
+    }
+    assert prereg.problems(draft) == []
+    assert prereg.probe_protocol(draft) == (500, 7)
+    draft["probes"]["fit"] = "something else"
+    with pytest.raises(prereg.PreregError, match=r"probes\.fit"):
+        prereg.probe_protocol(draft)

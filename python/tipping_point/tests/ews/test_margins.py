@@ -2,11 +2,18 @@
 nested bootstrap's CI and its coverage, the sign test, the verdicts, and the refusal of
 misaligned draws."""
 
+from typing import Any
+
 import numpy as np
 import pytest
 from tipping_point.ews import fss, margins
+from tipping_point.ews.ising import latents_name
 
 SEEDS, DRAWS = 5, 400
+
+
+def _rng() -> np.random.Generator:
+    return np.random.default_rng(28)
 
 
 def _draws(
@@ -186,3 +193,233 @@ def test_an_undefined_margin_is_inconclusive() -> None:
     assert margins.paired(trained, twin, "greater", 0.1, np.random.default_rng(0))["verdict"] == (
         fss.FAIL
     )
+
+
+# ---------------------------------------------------------------- the table
+
+
+def _doc(primaries: int = SEEDS, ablations: int = 0) -> dict[str, Any]:
+    """What margins.table reads of a latent file."""
+    entries = [("primary", s, f"p{s}") for s in range(primaries)]
+    entries += [("held-out", 100 + s, f"h{s}") for s in range(ablations)]
+    return {
+        "scoring": {"bootstrap": 400, "ci_level": 0.95, "margins": {"tolerance": 0.01}},
+        "latents": {
+            "steps": 50,
+            "checkpoints": [
+                {"role": role, "model_seed": seed, "training": name} for role, seed, name in entries
+            ],
+        },
+        "hypotheses": [{"name": "learned-beyond-random", "direction": "greater"}],
+        "fss": {
+            "dynamic": {
+                "statistics": [
+                    {"observable": "pc_1", "indicator": "variance", "role": "pipeline-check"},
+                    {"observable": "surprise", "indicator": "variance", "role": "test"},
+                    {"observable": "surprise", "indicator": "slope", "role": "test"},
+                ]
+            }
+        },
+    }
+
+
+def _names(doc: dict[str, Any], role: str = "primary") -> tuple[list[str], list[str]]:
+    entries = [e["training"] for e in doc["latents"]["checkpoints"] if e["role"] == role]
+    return [latents_name(e, 50) for e in entries], [latents_name(e, 0) for e in entries]
+
+
+def _verdicts(doc: dict[str, Any], slope: tuple[int, int, int], variance: tuple[int, int, int]):
+    """FSS rows: how many trained checkpoints pass and are inconclusive, how many twins pass, per
+    surrogate statistic; pc_1's always passes, and must not count for anything here."""
+    rows = []
+    for role in ("primary", "held-out"):
+        trained, twin = _names(doc, role)
+        for statistic, (passes, unclear, twins) in (("slope", slope), ("variance", variance)):
+            verdicts = (
+                [fss.PASS] * passes + [fss.INCONCLUSIVE] * unclear + [fss.FAIL] * len(trained)
+            )
+            quantity = f"inverse_nu_surprise_{statistic}"
+            rows += [
+                {"checkpoint": n, "quantity": quantity, "verdict": v}
+                for n, v in zip(trained, verdicts, strict=False)
+            ]
+            twin_verdicts = [fss.PASS] * twins + [fss.FAIL] * len(twin)
+            rows += [
+                {"checkpoint": n, "quantity": quantity, "verdict": v}
+                for n, v in zip(twin, twin_verdicts, strict=False)
+            ]
+        rows += [
+            {"checkpoint": n, "quantity": "inverse_nu_pc_1_variance", "verdict": fss.PASS}
+            for n in [*trained, *twin]
+        ]
+    return rows
+
+
+def _quantity(
+    doc: dict[str, Any],
+    name: str,
+    margin: np.ndarray,
+    role: str = "primary",
+    scope: str = margins.ALL,
+    noise: float = 0.0,
+) -> margins.Quantity:
+    """Q per checkpoint, each trained checkpoint `margin` over its twin, with data draws."""
+    rng = np.random.default_rng(len(name))
+    trained, twin = _names(doc, role)
+    level = rng.normal(0.3, 0.1, len(trained))
+    values = dict(zip(trained, level + margin, strict=True)) | dict(zip(twin, level, strict=True))
+    shared = rng.normal(0.0, noise, 200)
+    draws = {
+        n: values[n] + (shared if n in trained else 0.0) + rng.normal(0.0, 0.001, 200)
+        for n in values
+    }
+    return margins.Quantity(name, scope, values, draws)
+
+
+def _judged(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {r["quantity"]: r for r in rows if r["judged"]}
+
+
+def test_the_table_judges_the_energy_probe_and_the_surprise_verdicts_and_nothing_else() -> None:
+    """A planted positive margin passes on all three; the same large margin on anything else, on one
+    L, or read off AUC and the chi alignment has no verdict, whatever it carries."""
+    doc = _doc()
+    gain = np.array([0.3, 0.25, 0.35, 0.28, 0.32])
+    quantities = [
+        _quantity(doc, "energy_r2", gain),
+        _quantity(doc, "energy_selectivity", gain),
+        _quantity(doc, "energy_r2", gain, scope="L=16"),
+        _quantity(doc, "l2var_r2", gain),
+        _quantity(doc, "abs_m_selectivity", gain),
+        _quantity(doc, "auc_pc_1_variance", gain),
+        _quantity(doc, "chi_alignment", gain),
+    ]
+    rows = margins.table(doc, quantities, _verdicts(doc, (5, 0, 0), (0, 0, 0)), _rng())
+    judged = _judged(rows)
+    assert set(judged) == {"energy_r2", "energy_selectivity", "surprise_fss"}
+    assert all(row["verdict"] == fss.PASS and row["role"] == "primary" for row in judged.values())
+    for row in rows:
+        assert row["judged"] or row["verdict"] == "", row["quantity"]
+        assert row["checkpoint"].split(";") == _names(doc)[0]
+        assert row["twin"].split(";") == _names(doc)[1]
+    assert judged["energy_r2"]["margins"] == pytest.approx(gain.tolist())
+    assert judged["energy_r2"]["n_draws"] == 200 and judged["energy_r2"]["lo"] > 0
+
+
+def test_a_planted_null_passes_nothing() -> None:
+    """No margin at all, no statistic that passes: nothing is judged a pass."""
+    doc = _doc()
+    none = np.array([0.002, -0.001, 0.0015, -0.002, 0.001])
+    rows = margins.table(
+        doc,
+        [_quantity(doc, "energy_r2", none), _quantity(doc, "energy_selectivity", none)],
+        _verdicts(doc, (0, 0, 0), (0, 0, 0)),
+        _rng(),
+    )
+    assert all(row["verdict"] != fss.PASS for row in _judged(rows).values())
+
+
+def test_one_seed_against_the_sign_fails_a_judged_row() -> None:
+    """Four of five model seeds gain and the mean is clearly positive; the rule asks all five."""
+    doc = _doc()
+    rows = margins.table(
+        doc,
+        [_quantity(doc, "energy_r2", np.array([0.3, 0.3, 0.3, 0.3, -0.01]))],
+        _verdicts(doc, (5, 0, 0), (0, 0, 0)),
+        _rng(),
+    )
+    row = _judged(rows)["energy_r2"]
+    assert row["sign_test"] == fss.FAIL and row["verdict"] == fss.FAIL
+
+
+def test_a_margin_the_data_cannot_resolve_is_inconclusive_through_the_draws() -> None:
+    """Every seed's margin carries the sign, but the data's noise, shared across seeds through the
+    draws, is far wider: the row reads the draws, so its CI holds 0, and no pass."""
+    doc = _doc()
+    gain = np.full(SEEDS, 0.02)
+    rows = margins.table(
+        doc,
+        [_quantity(doc, "energy_r2", gain, noise=0.2)],
+        _verdicts(doc, (5, 0, 0), (0, 0, 0)),
+        _rng(),
+    )
+    row = _judged(rows)["energy_r2"]
+    assert row["sign_test"] == fss.PASS and row["lo"] < 0 < row["hi"]
+    assert row["verdict"] == fss.INCONCLUSIVE
+
+
+@pytest.mark.parametrize(
+    ("slope", "variance", "expected"),
+    [
+        ((5, 0, 0), (0, 0, 0), fss.PASS),
+        ((4, 0, 0), (0, 0, 0), fss.PASS),  # at least 4 of 5
+        ((3, 0, 0), (0, 0, 0), fss.FAIL),
+        ((3, 1, 0), (0, 0, 0), fss.INCONCLUSIVE),  # the fourth could still come
+        ((2, 1, 0), (0, 0, 0), fss.FAIL),
+        ((5, 0, 1), (0, 0, 0), fss.FAIL),  # and for none of their twins
+        ((5, 0, 1), (4, 0, 0), fss.PASS),  # at least one statistic
+        ((3, 0, 0), (0, 0, 2), fss.FAIL),
+        ((3, 1, 0), (5, 0, 0), fss.PASS),
+    ],
+)
+def test_the_surprise_rule_of_the_hypothesis(
+    slope: tuple[int, int, int], variance: tuple[int, int, int], expected: str
+) -> None:
+    """(c) as the file states it, not the margin rule's all-five sign test: an inconclusive twin is
+    no pass, and the row counts what decided it. Only surprise statistics of role test count."""
+    doc = _doc()
+    rows = margins.table(doc, [], _verdicts(doc, slope, variance), _rng())
+    row = _judged(rows)["surprise_fss"]
+    assert row["verdict"] == expected
+    each = {r["quantity"]: r for r in rows if not r["judged"]}
+    assert set(each) == {"surprise_fss_surprise_slope", "surprise_fss_surprise_variance"}
+    assert each["surprise_fss_surprise_slope"]["trained_passes"] == slope[0]
+    assert each["surprise_fss_surprise_slope"]["twin_passes"] == slope[2]
+    assert all(r["verdict"] == "" for r in each.values())
+
+
+def test_an_ablation_reports_its_margin_and_its_ci_without_a_verdict() -> None:
+    """Three seeds, a margin that would pass: Delta and its CI, no verdict, and no surprise row
+    judged for its role. Each row reads its own role's checkpoints."""
+    doc = _doc(ablations=3)
+    gain = np.array([0.3, 0.3, 0.3])
+    quantities = [
+        margins.Quantity(
+            "energy_r2",
+            margins.ALL,
+            {
+                **_quantity(doc, "energy_r2", np.full(SEEDS, 0.3)).values,
+                **_quantity(doc, "energy_r2", gain, role="held-out").values,
+            },
+        )
+    ]
+    rows = margins.table(doc, quantities, _verdicts(doc, (5, 0, 0), (0, 0, 0)), _rng())
+    ablation = [r for r in rows if r["role"] == "held-out"]
+    assert {r["quantity"] for r in ablation} == {
+        "energy_r2",
+        "surprise_fss_surprise_slope",
+        "surprise_fss_surprise_variance",
+    }
+    assert all(not r["judged"] and r["verdict"] == "" for r in ablation)
+    row = next(r for r in ablation if r["quantity"] == "energy_r2")
+    assert row["checkpoint"].split(";") == _names(doc, "held-out")[0] and row["n_seeds"] == 3
+    assert row["margin"] == pytest.approx(0.3) and np.isfinite([row["lo"], row["hi"]]).all()
+    assert _judged(rows)["energy_r2"]["verdict"] == fss.PASS  # the primaries' are still judged
+
+
+def test_a_role_with_one_checkpoint_has_no_rows() -> None:
+    """A margin needs a spread between seeds to bootstrap over."""
+    doc = _doc(primaries=1)
+    assert margins.table(doc, [], _verdicts(doc, (1, 0, 0), (0, 0, 0)), _rng()) == []
+
+
+def test_the_table_reads_the_predicted_sign_from_the_file() -> None:
+    """A file that predicts the margin falls judges it that way, draw for draw."""
+    doc = _doc()
+    doc["hypotheses"][0]["direction"] = "less"
+    loss = np.array([-0.3, -0.25, -0.35, -0.28, -0.32])
+    rows = margins.table(
+        doc, [_quantity(doc, "energy_r2", loss)], _verdicts(doc, (5, 0, 0), (0, 0, 0)), _rng()
+    )
+    assert _judged(rows)["energy_r2"]["verdict"] == fss.PASS
+    assert _judged(rows)["energy_r2"]["direction"] == "less"

@@ -2,9 +2,9 @@
 into the score s(t) of Bury et al. 2021 (PNAS): detrend, rolling indicator, then Kendall's tau of
 the indicator over the trailing segment that ends at t.
 
-kendall_tau is tau-b, scipy.stats.kendalltau(time, x), batched over rows and O(n log n) per row:
-the discordant pairs are the row's inversions, counted by a merge sort run top-down on its ranks.
-Large batches run in row chunks on a thread pool (numpy releases the GIL inside its loops).
+kendall_tau is tau-b, scipy.stats.kendalltau(time, x), batched over rows: the discordant pairs are
+the row's inversions, counted in O(n^1.5) by blocks of sqrt(n) (_discordant). Large batches run in
+row chunks on a thread pool (numpy releases the GIL inside its loops).
 """
 
 from __future__ import annotations
@@ -31,12 +31,17 @@ THREADS = min(8, os.cpu_count() or 1)
 SLICES = 1 << 23  # elements of s(t) slices held at once (64 MB)
 
 
-def rowwise(fn: Callable[[np.ndarray], np.ndarray], rows: np.ndarray) -> np.ndarray:
-    """fn over chunks of the rows of a 2D array, in parallel, outputs stacked in row order."""
-    step = max(1, CHUNK // max(1, rows.shape[1]))
+def rowwise(
+    fn: Callable[[np.ndarray], np.ndarray], rows: np.ndarray, width: int | None = None
+) -> np.ndarray:
+    """fn over chunks of the rows of a 2D array, in parallel, outputs stacked in row order. `width`
+    is the elements fn handles per row, when that is not the row's own length."""
+    step = max(1, CHUNK // max(1, width or rows.shape[1]))
     starts = range(0, len(rows), step)
-    if len(starts) <= 1 or THREADS == 1:
+    if len(starts) <= 1:
         return fn(rows)
+    if THREADS == 1:  # no pool, but chunks still keep each pass in cache
+        return np.concatenate([fn(rows[s : s + step]) for s in starts])
     with ThreadPoolExecutor(THREADS) as pool:
         parts = list(pool.map(lambda s: fn(rows[s : s + step]), starts))
     return np.concatenate(parts)
@@ -45,47 +50,57 @@ def rowwise(fn: Callable[[np.ndarray], np.ndarray], rows: np.ndarray) -> np.ndar
 def _discordant(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Per row of finite values: (discordant pairs, tied pairs) against time.
 
-    Rows are padded with +inf to M = 2^k; pads rank last, so they pair with nothing discordantly.
-    Ranks break ties by position, so a tied pair is never counted discordant. At each level the
-    row is a sequence of groups of S positions (one aligned block each) in rank order; a position
-    in the block's right half is discordant with every left-half position ranked above it. The
-    groups are then split stably by that bit, which gives the next level's groups."""
+    Ranks break ties by position, so a tied pair is never counted discordant. Positions are cut
+    into blocks of about sqrt(n). A pair inside one block is discordant when its values say so,
+    compared directly. A pair across two is discordant when the later block comes first in rank
+    order: an inversion of the block ids read in rank order, which are cut the same way, into
+    buckets of ranks. A pair inside one bucket is compared directly again, and pairs across two
+    are counted from a table of how many of each block each bucket holds. The comparisons run with
+    time along the first axis, as contiguous loops of whole rows."""
     b, m = rows.shape
-    M = 1 << (m - 1).bit_length()
-    small = np.int16 if M < 1 << 15 else np.int32  # indices and group offsets reach M
-    padded = rows
-    if m < M:
-        padded = np.full((b, M), np.inf)
-        padded[:, :m] = rows
-    order = np.argsort(padded, axis=1, kind="stable")
-    ordered = np.take_along_axis(padded, order, axis=1)[:, :m]
+    order = np.argsort(rows, axis=1)
+    same = np.take_along_axis(rows, order, axis=1)
+    same = same[:, 1:] == same[:, :-1]
     tied = np.zeros(b, dtype=np.int64)
-    same = ordered[:, 1:] == ordered[:, :-1]
-    if same.any():  # a run of t equal values holds t(t-1)/2 tied pairs
+    if same.any():  # a run of t equal values holds t(t-1)/2 tied pairs, in position order
+        ties = same.any(axis=1)
+        order[ties] = np.argsort(rows[ties], axis=1, kind="stable")
         index = np.arange(m)
         first = np.ones((b, m), dtype=bool)
         first[:, 1:] = ~same
         start = np.maximum.accumulate(np.where(first, index, 0), axis=1)
         tied = (index - start).sum(axis=1)
-    seq = order.astype(small)
-    discordant = np.zeros(b, dtype=np.int64)
-    base = (np.arange(b, dtype=np.intp) * M)[:, None]
-    S = M
-    while S >= 2:
-        half, groups = S // 2, M // S
-        left = ((seq & half) == 0).reshape(b, groups, S)
-        seen = np.cumsum(left, axis=2, dtype=small)  # left positions ranked at or below each
-        # sum over right positions of (half - seen); the left ones' seen sum to half(half+1)/2
-        right_seen = seen.sum(axis=(1, 2), dtype=np.int64) - groups * half * (half + 1) // 2
-        discordant += half * (M // 2) - right_seen
-        if S > 2:
-            within = np.where(left, seen - 1, half + np.arange(S, dtype=small) - seen)
-            within += (np.arange(groups, dtype=small) * S)[:, None]
-            split = np.empty_like(seq)
-            split.ravel()[(within.reshape(b, M) + base).ravel()] = seq.ravel()
-            seq = split
-        S = half
-    return discordant, tied
+    shift = m.bit_length() // 2
+    size, count = 1 << shift, -(-m // (1 << shift))
+    width, symbols = count * size, count + 1  # pads: +inf and a last block, above all that precedes
+    values = np.full((b, width), np.inf)
+    values[:, :m] = rows
+    blocks = np.full((b, width), count, dtype=np.int32)
+    blocks[:, :m] = order >> shift
+    cells = np.arange(b)[:, None] * count * symbols + (np.arange(width) >> shift) * symbols + blocks
+    held = np.bincount(cells.ravel(), minlength=b * count * symbols).reshape(b, count, symbols)
+    earlier = np.zeros_like(held)
+    earlier[:, 1:] = np.cumsum(held[:, :-1], axis=1)
+    above = np.zeros_like(held)
+    above[:, :, :-1] = np.cumsum(earlier[:, :, :0:-1], axis=2)[:, :, ::-1]
+    discordant = (held * above).sum(axis=(1, 2))
+
+    def flat(a: np.ndarray) -> np.ndarray:
+        return a.reshape(b, count, size).transpose(2, 0, 1).reshape(size, b * count)
+
+    values, ids = flat(values), flat(blocks.astype(np.int16 if symbols < 1 << 15 else np.int32))
+    kind = np.uint8 if size <= 1 << 8 else np.uint32  # counts per position: at most size - 1
+    seen, passed = np.zeros((2, size, b * count), dtype=kind)
+    mask = np.empty((size, b * count), dtype=bool)
+    counts = mask.view(np.uint8)
+    for d in range(1, size):
+        r = size - d
+        np.greater(values[:r], values[d:], out=mask[:r])
+        np.add(seen[d:], counts[:r], out=seen[d:])
+        np.greater(ids[:r], ids[d:], out=mask[:r])
+        np.add(passed[d:], counts[:r], out=passed[d:])
+    inside = seen.sum(axis=0, dtype=np.int64) + passed.sum(axis=0, dtype=np.int64)
+    return discordant + inside.reshape(b, count).sum(axis=1), tied
 
 
 def kendall_tau(x: np.ndarray) -> np.ndarray:
@@ -130,9 +145,11 @@ class Pipeline:
 
     def residuals(self, x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=np.float64)
-        if self.bandwidth is None or self.indicator in RAW:
+        bandwidth = self.bandwidth
+        if bandwidth is None or self.indicator in RAW:
             return x
-        return indicators.gaussian_detrend(x, self.bandwidth)
+        rows = x.reshape(-1, x.shape[-1])
+        return rowwise(lambda r: indicators.gaussian_detrend(r, bandwidth), rows).reshape(x.shape)
 
     def rolling(self, x: np.ndarray) -> np.ndarray:
         """The indicator along each whole row of x, detrended as a score's input is: value t

@@ -4,6 +4,7 @@ alarms, and how sure we are.
 auc                     Mann-Whitney AUC, P(positive > negative) + 1/2 P(tie); NaN scores dropped
 surrogate_pvalue        (1 + #{surrogate >= observed}) / (1 + N): exact for exchangeable draws
 surrogate_test          each series' score against N surrogates of its own residuals
+sequential_test         the same decisions at alpha, drawing surrogates only until one is settled
 alarms                  an alarm is s(t) rising above theta: s(t) > theta after s(t - 1) <= theta
 false_alarm_rate        alarms per unit of time on null series
 threshold_at_far        the lowest theta whose false-alarm rate, and every higher theta's, stays
@@ -76,6 +77,43 @@ def surrogate_test(
         observed[start : start + rows] = scores[:, 0]
         p[start : start + rows] = surrogate_pvalue(sign * scores[:, 0], sign * scores[:, 1:])
     return observed, p
+
+
+def sequential_test(
+    x: np.ndarray,
+    pipeline: Pipeline,
+    surrogate: Surrogate,
+    n: int,
+    rng: np.random.Generator,
+    direction: str = "greater",
+    alpha: float = 0.05,
+) -> tuple[np.ndarray, np.ndarray]:
+    """surrogate_test at a fraction of its cost, for a caller that reads only p <= alpha (Besag and
+    Clifford 1991). p <= alpha holds when at most `allowed` of the n surrogates reach a row's score,
+    so the draw that takes a row past `allowed` settles it and the row draws no more: on the same
+    surrogates, every decision at alpha is the one surrogate_test gives. A null row, its p uniform,
+    draws about a fifth of n. A row that ran all n has surrogate_test's p; a stopped row has
+    (1 + reached) / (1 + drawn), above alpha."""
+    sign = _sign(direction)
+    x = np.atleast_2d(np.asarray(x, dtype=np.float64))
+    residuals = pipeline.residuals(x)
+    observed = pipeline.trend(residuals)
+    allowed = int(np.sum((1.0 + np.arange(n + 1)) / (1.0 + n) <= alpha)) - 1
+    step = max(1, allowed + 1)  # the fewest draws that can settle a row
+    rows = max(1, SURROGATE_BYTES // (8 * step * x.shape[-1]))
+    reached, drawn = np.zeros(len(x)), np.zeros(len(x))
+    live = np.flatnonzero(~np.isnan(observed))
+    for done in range(0, n, step):
+        count = min(step, n - done)
+        for start in range(0, len(live), rows):
+            own = live[start : start + rows]
+            scores = sign * pipeline.trend(surrogate(residuals[own], count, rng))
+            at_least = sign * observed[own, None]
+            reached[own] += np.sum((scores >= at_least) | np.isnan(scores), axis=1)
+        drawn[live] = done + count
+        live = live[reached[live] <= allowed]
+    p = (1.0 + reached) / (1.0 + drawn)
+    return observed, np.where(np.isnan(observed), np.nan, p)
 
 
 def _sign(direction: str) -> float:

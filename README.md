@@ -546,6 +546,63 @@ and the scorer takes both through every table, once per checkpoint.
   pins: the freeze comes before any extraction on a scored seed. `ising-latent-v1` is not written
   yet; `python/tipping_point/tests/fixtures/ising_latent_draft.toml` is the draft the schema
   accepts, with placeholders for what the exploratory pass sets, and the freeze refuses them all.
+- **What a file may say.** Frozen text must not claim what the scorer ignores, so a key outside the
+  latent schema is refused, wherever it stands: v1's `scoring.alarms.indicators` and
+  `indicators.thin`, the research pass's `fss.dynamic.band`, anything else. So is a value the scorer
+  would not act on: a name, observable or direction no pair of `indicators.pairs` reads, a column
+  nothing scores, a tolerance on a descriptive row, `sign_test = false`. `latents.extraction`,
+  `probes.fit`, `probes.test` and `probes.selectivity` are held to their sentence, word for word
+  where they state a rule: the scorer takes the frame limit and the probe seed from `probes.fit`,
+  and holds each table's manifest to the rule `latents.extraction` gives its checkpoint's role
+  (`prereg.SELECTIONS`), refusing a table extracted under another.
+
+### The latent experiment
+
+A latent file is scored whole by one runner, from the frozen file to the result and its figures:
+
+```sh
+uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml [--device cuda]
+```
+
+`ews score` refuses such a file without `--cells-only`, since it would spend the whole trial budget on
+a result with no probes or margins, and the budget is spent once. The runner refuses a file that is not
+frozen or still holds a placeholder, and a scoring whose cells would pass `trials.budget`
+(`prereg.charge`: cell 3,133 of `ising-latent-v1` is never evaluated), before it reads anything.
+
+- **Tables.** `auc`, `surrogates`, `alarms`, `peaks`, `fss` as `ews score` writes them; `probes`, per
+  checkpoint, L, target and column, fitted on the validation seed and scored on the scored seeds;
+  `margins`; `curves`, each column's mean and L^2 Var per plateau, with the classic |m| on every saved
+  frame as checkpoint `""`; and `baseline`, the rows read from the result `baseline.result` names,
+  which must be that version's, on these runs. Every row has its checkpoint. All of them are also in
+  `csv/`, from the Parquet.
+- **Margins.** Paired by model seed, with a percentile bootstrap over the seeds nested in one data
+  resample per replicate, and the sign test. Three rows are judged, over the primary checkpoints: the
+  energy probe's R^2 and its selectivity, each checkpoint's value being the mean over L
+  (`scoring.margins.sizes`), and the surprise FSS verdicts, by the hypothesis's own rule: a surprise
+  statistic passing for at least 4 of 5 trained checkpoints and for none of their twins. Each L's
+  value, AUC (parity, with |m|'s beside it as `reference`), the chi alignment and all of an ablation's
+  rows report a margin and its CI with no verdict.
+- **Figures.** `figures/` holds `scaling.png`, `peaks.png`, `curves.png`, `collapse.png` and
+  `probes.png`, primary checkpoints only, drawn by `harness/ising_figures.py` from the CSV tables
+  alone, in a throwaway environment (matplotlib is no dependency of the project). The tables are
+  written and logged first: if the figures fail the run exits 2 and prints the command to draw them.
+  A latent variance is divided by a per-checkpoint number before anything is drawn together, because
+  a PCA basis is per checkpoint and raw latent magnitudes do not compare.
+- **Planted runs.** `--planted` scores a file with no freeze behind it and refuses a data dir holding
+  any run the planted generator did not write, so it can never read the confirmatory data early.
+  `harness/ews_planted.py` plants the rest (`latent_doc`, `write_experiment_tables`,
+  `planted_embedding`, `write_baseline`), and two runs on a planted dataset give byte-identical
+  tables and figures.
+- **Surrogates in a latent file** stop drawing once a row's decision at alpha is settled
+  (`scoring.sequential_test`, Besag and Clifford 1991): the surrogate table reads only p <= alpha, and
+  on the same surrogates every decision is the one a full N_s gives. A null row draws about a quarter
+  of N_s. ising-ews-v1 keeps its whole test and its draws.
+- **Run time.** On the project's laptop (i7-1185G7, 4 cores, other work running), the 22 checkpoints
+  of `ising-latent-v1` are projected to take about 59 hours, or about 41 with the probes' embeddings on
+  a GPU: surrogates 22 h, alarms 15 h, probe embeddings 18 h on the CPU (19 ms a frame at L = 64), AUC,
+  static fits and reading the tables 4 h. It was about 125 hours before the sequential test and the
+  faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. The runner has no
+  resume: an interrupted run starts again, and no trial is logged until its tables are written.
 
 Nothing here changes what ising-ews-v1 scores. `harness/ews_v1_golden.py` wrote every row and value
 of a v1 scoring on planted data from aa29cbc, the freeze lane's merge, and

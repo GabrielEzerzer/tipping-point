@@ -108,6 +108,7 @@ def _planted_doc(data: V1) -> dict[str, Any]:
     doc["scoring"]["alarms"]["every"] = 200.0
     doc["sensitivity"] |= {"window": [10.0, 20.0], "bandwidth": [5.0, 10.0]}
     doc["trials"]["budget"] = prereg.cells(doc)
+    doc["probes"]["test"] = "the staircases of seeds 6-7 at each L: 20000 frames each, same rule"
     doc["disclosure"] |= {"exploratory": "none", "decisions": "none", "confirmatory": "planted"}
     return doc
 
@@ -705,7 +706,7 @@ def test_a_frozen_latent_prereg_scores_stamps_and_logs_its_checkpoints(
     complete.json, and log_trial's line for each AUC cell names its checkpoint, cells() of them."""
     path, data_, _, _ = frozen_latent
     root = data_.root
-    assert main(["score", "--prereg", str(path), "--data-dir", str(root)]) == 0
+    assert main(["score", "--prereg", str(path), "--data-dir", str(root), "--cells-only"]) == 0
     (run_dir,) = (root / "ews").glob("*-ising-latent-v1")
     pre = prereg.load(path)
     for name in ("auc", "surrogates", "alarms", "peaks", "fss"):
@@ -766,7 +767,8 @@ def test_a_frozen_latent_prereg_refuses_what_it_does_not_pin(
         restamp(run_dir, commit, False)
     if named == "latents":
         io.write_json(out / "manifest.json", manifest, replace=True)
-    assert main(["score", "--prereg", str(path), "--data-dir", str(copy.root)]) == 1
+    argv = ["score", "--prereg", str(path), "--data-dir", str(copy.root), "--cells-only"]
+    assert main(argv) == 1
     err = capsys.readouterr().err
     assert run_dir.name in err, err
     assert {r.name for r in copy.runs.values() if r.name in err} == {run_dir.name}, err

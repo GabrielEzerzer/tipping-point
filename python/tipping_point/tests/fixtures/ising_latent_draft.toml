@@ -10,7 +10,10 @@
 #   [data.staircase.tau_sha256]  added: the freeze refuses a staircase without it
 #   [disclosure]         added: every pre-registration says what was seen before its freeze
 # and because of the decisions on it: [scoring.surrogates] n_ablation (call 7, amended). The research
-# pass wrote out one checkpoint of the eleven; here they all are, which is what cells() counts.
+# pass wrote out one checkpoint of the eleven; here they all are, which is what cells() counts. And
+# because of the runner (slice 5), which reads what this file says:
+#   [indicators]         thin gone: it is the dense cadence's, which a latents table does not have
+#   [scoring.margins]    sizes and tolerance added: what the judged rows read, and fail or inconclusive
 
 id = "ising-latent"
 version = 1
@@ -185,7 +188,6 @@ names = ["variance", "ac", "level"]
 observables = ["pc_1", "surprise"]
 pairs = [["pc_1", "variance"], ["pc_1", "ac"], ["surprise", "variance"], ["surprise", "level"]]
 cadences = ["matched"]
-thin = 0.1
 lag = 1
 detrend = "gaussian"              # variance and ac only; level and slope run on the raw series
 direction = { variance = "greater", ac = "greater", level = "<set before freeze>" }
@@ -222,7 +224,9 @@ every = 1.0
 [scoring.margins]
 pairing = "trained minus twin, same model seed, same data bootstrap draws (shared RNG seed per quantity)"
 seeds = "percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws"
+sizes = "mean"                    # a checkpoint's judged R^2 and selectivity: the mean over L; rows per L are reported, never judged
 sign_test = true                  # every paired margin must carry the predicted sign
+tolerance = 0.01                  # in R^2: a CI holding 0 inside this band is a fail (no margin), wider it is inconclusive
 ablations = "descriptive"
 
 [[fss.static]]

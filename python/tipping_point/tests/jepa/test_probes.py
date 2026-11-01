@@ -177,3 +177,68 @@ def test_probe_command_prints_both_checkpoints(
     for label in [*probes.COLUMNS, "selectivity"]:
         assert printed.count(f" {label} ") == len(probes.TARGETS), label
     assert len(out.read_text()) > 0
+
+
+def test_replica_sums_hold_what_r2_reads_and_a_resample_counts_each_replica_as_drawn() -> None:
+    """r2_of on all a probe's test frames is r2, and on replicas drawn twice it is r2 on the frames
+    written out twice: the data bootstrap needs no frame at hand. Catches frames attributed to the
+    wrong run or replica, and a total that forgets the resample's weights."""
+    rng = np.random.default_rng(9)
+    test = [_planted(rng, 40)[0], _planted(rng, 40)[0]]
+    y = np.concatenate([f.targets["energy"] for f in test])
+    pred = y + rng.normal(0.0, 0.1, len(y))
+    sums = probes.replica_sums(test, y, pred)
+    assert [s.shape for s in sums] == [(4, 4), (4, 4)]
+    assert probes.r2_of(np.concatenate(sums)) == pytest.approx(probes.r2(y, pred))
+    first, second = test[0], test[1]
+    offset = len(first.replica)
+    rows = np.concatenate(
+        [
+            *[np.flatnonzero(first.replica == 1)] * 2,
+            np.flatnonzero(second.replica == 3) + offset,
+        ]
+    )
+    drawn = np.concatenate([sums[0][[1, 1]], sums[1][[3]]])
+    assert probes.r2_of(drawn) == pytest.approx(probes.r2(y[rows], pred[rows]))
+
+
+def test_scored_rows_are_score_rows_from_the_predictions() -> None:
+    """The runner asks for predictions and rows apart, not to solve twice: they must be score's."""
+    rng = np.random.default_rng(10)
+    (fit, fit_noise), (test, test_noise) = _planted(rng, 100), _planted(rng, 100)
+    targets = probes.controls([fit], [test], seed=0)
+    x_fit, x_test = _embedding(fit, fit_noise, rng, True), _embedding(test, test_noise, rng, True)
+    assert probes.scored(probes.fitted(x_fit, x_test, targets), targets) == probes.score(
+        x_fit, x_test, targets
+    )
+
+
+def test_the_runner_embeds_the_checkpoint_the_prereg_pins(
+    ising: jepa_ising.Ising, tmp_path: Path
+) -> None:
+    """The seam's real side: a checkpoint's table name finds its file under <data dir>/jepa/,
+    final.pt or the twin, and gives what readout.embed gives on those frames; a file that is not the
+    sha256 the prereg pins is refused before anything is scored, and so is one that is not there."""
+    from ising_experiment import checkpoint_embedder
+    from tipping_point.ews.ising import Checkpoint, IsingDataError, latents_name
+    from tipping_point.jepa import readout
+
+    run_id, steps = ising.training.name, jepa_ising.CONFIG.steps
+    pins = {
+        step: hashlib.sha256((ising.training / path).read_bytes()).hexdigest()
+        for step, path in ((steps, train.FINAL), (0, train.TWIN))
+    }
+    passes = [Checkpoint(latents_name(run_id, step), pins[step], "primary") for step in (steps, 0)]
+    embed = checkpoint_embedder(ising.root, passes, "cpu")
+    frames = probes.frames(open_run(ising.runs["val"]), limit=16, seed=0)
+    for checkpoint, path in zip(passes, (train.FINAL, train.TWIN), strict=True):
+        model = train.load_model(ising.training / path, "cpu").model
+        direct = readout.embed(model, frames.packed, frames.L, torch.device("cpu"), 65_536).numpy()
+        assert np.array_equal(embed(checkpoint, [frames, frames]), np.concatenate([direct, direct]))
+    wrong = [Checkpoint(passes[0].name, "0" * 64, "primary"), passes[1]]
+    with pytest.raises(IsingDataError, match="not the sha256 the prereg pins") as refused:
+        checkpoint_embedder(ising.root, wrong, "cpu")
+    assert "final.pt" in str(refused.value) and "step_0000000" not in str(refused.value)
+    absent = [Checkpoint("no-such-training-step0000008", "0" * 64, "primary")]
+    with pytest.raises(IsingDataError, match="not the sha256 the prereg pins"):
+        checkpoint_embedder(ising.root, absent, "cpu")

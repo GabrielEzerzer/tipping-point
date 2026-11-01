@@ -13,8 +13,10 @@ The dataset (L = 16 and 32, seeds 1 and 2, 8 replicas):
 The ising-ews v1 dataset (v1_dataset, below the first) is the freeze's: L = 16, 32 and 64, ramps
 over the scaled window eps_L = 12 -> -8, and a spread of |m| that peaks where a mode plants it.
 
-write_latents (at the end) puts a latents table beside any of these runs, as `jepa extract` would,
-with columns whose steepest change is planted at a known place (#28).
+write_latents puts a latents table beside any of these runs, as `jepa extract` would, with columns
+whose steepest change is planted at a known place (#28). The end of the file plants the rest of what
+harness/ising_experiment.py reads: the probes' fit runs, their embeddings, a baseline result and the
+draft of ising-latent-v1 set to score all of it.
 """
 
 import hashlib
@@ -23,7 +25,8 @@ import json
 import math
 import os
 import shutil
-from collections.abc import Callable
+import tomllib
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,7 +34,8 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from tipping_point.ews.ising import KEY, LATENTS, kept
+from tipping_point.ews import prereg
+from tipping_point.ews.ising import KEY, LATENTS, kept, latents_name
 from tipping_point.ising import io, protocol
 from tipping_point.ising import pilot as tauc
 from tipping_point.ising.exact import TC
@@ -696,3 +700,187 @@ def write_latents(
     record = {"ended_ns": 0, "rows": {LATENTS: total}, "clean": True, "files": files}
     io.write_json(out / "complete.json", record)
     return out
+
+
+# ---------------------------------------------------------------- the whole experiment, planted
+#
+# What harness/ising_experiment.py reads, on the v1 dataset (fss mode) and with answers planted:
+#   tables      write_latents': each training's trained table holds a surprise that obeys
+#               finite-size scaling, its twin's a flat one. With `null`, the trained tables are
+#               twins as well
+#   embeddings  planted_embedding: any checkpoint's features read |m| and T. A trained one's also
+#               read the frame's energy, blurred by its own amount, so energy's R^2 and selectivity
+#               carry a planted margin over the twin, whose energy feature is noise. With `null`,
+#               no margin
+#   fit runs    the validation seed's staircases, which nothing else reads
+#   baseline    a result of ising-ews-v1 on these runs: the rows a latent file reads from it
+#   latent_doc  the draft in tests/fixtures with its placeholders set and, to score in seconds, 40
+#               bootstrap draws, a few surrogates, one horizon, the headline cell alone, alarm
+#               scores every 200 tau_c
+
+EXPERIMENT_STEPS = 50_000
+FIT_SEED = 16
+DRAFT = (
+    Path(__file__).resolve().parents[1]
+    / "python"
+    / "tipping_point"
+    / "tests"
+    / "fixtures"
+    / "ising_latent_draft.toml"
+)
+PLANTED_KAPPA = (1.75, 1.7, 1.8)  # the baseline's |m|, estimate and CI
+PLANTED_AUC = {"variance": 0.95, "ac": 0.9}  # its matched-cadence AUC per indicator
+Training = tuple[str, int, str]  # role, model seed, the training's run id
+
+
+def experiment_trainings(primaries: int = 5, ablations: int = 1) -> list[Training]:
+    return [
+        *(("primary", seed, f"train-p{seed}") for seed in range(1, primaries + 1)),
+        *(("held-out", seed, f"train-h{seed}") for seed in range(21, 21 + ablations)),
+    ]
+
+
+def checkpoint_sha256(name: str) -> str:
+    """The sha256 a planted checkpoint's table names and a planted prereg pins."""
+    return hashlib.sha256(name.encode()).hexdigest()
+
+
+def add_fit_runs(data: V1) -> None:
+    """The validation seed's staircase at each L, which probes fit on: no scoring reads it."""
+    for L in V1_SIZES:
+        data.runs["fit", L, FIT_SEED] = write_run(
+            data.root, f"L{L}-qs-s{FIT_SEED}", v1_staircase(L), L, FIT_SEED, plateau_values(L),
+            replicas=V1_REPLICAS, rng=np.random.default_rng([FIT_SEED, L, _STREAMS["qs"]]),
+        )  # fmt: skip
+
+
+def write_experiment_tables(data: V1, trainings: Sequence[Training], null: bool = False) -> None:
+    """Each training's trained table and twin beside every scored run, under the rule the file gives
+    its role: what `jepa extract --select` leaves once the plan has run."""
+    for key, run_dir in data.runs.items():
+        if key[0] == "fit":
+            continue
+        for role, _, training in trainings:
+            rule = prereg.SELECTIONS[role]["rule"]
+            for step, untrained in ((EXPERIMENT_STEPS, null), (0, True)):
+                name = latents_name(training, step)
+                write_latents(run_dir, name, rule, untrained, checkpoint_sha256(name), None, None)
+
+
+def planted_embedding(null: bool = False) -> Callable[[Any, Sequence[Any]], np.ndarray]:
+    """harness/ising_experiment.py's embedding seam on planted frames, which hold no real spins."""
+
+    def embed(checkpoint: Any, sets: Sequence[Any]) -> np.ndarray:
+        rng = np.random.default_rng(list(hashlib.sha256(checkpoint.name.encode()).digest()[:8]))
+        trained = not null and not checkpoint.name.endswith(f"-step{0:07d}")
+        blur = 0.004 + 0.008 * rng.random()
+        out = []
+        for f in sets:
+            noise = rng.standard_normal((len(f.temperature), 4))
+            energy = f.targets["energy"] if trained else 0.0
+            out.append(
+                np.column_stack(
+                    [
+                        f.targets["abs_m"] + 0.002 * noise[:, 0],
+                        f.temperature,
+                        energy + blur * noise[:, 1],
+                        noise[:, 2],
+                        noise[:, 3],
+                    ]
+                )
+            )
+        return np.concatenate(out)
+
+    return embed
+
+
+def write_baseline(data: V1, commit: str = "0" * 40) -> str:
+    """A result of ising-ews-v1 on data's scored runs, in the layout `ews score` leaves, holding the
+    rows a latent file reads, and dense rows of |m| the matched ones must not be taken for; its
+    run id."""
+    estimate, lo, hi = PLANTED_KAPPA
+    fss_rows = [
+        {"checkpoint": "", "quantity": "mean_abs_m", "estimate": -0.1, "lo": -0.2, "hi": 0.0},
+        {"checkpoint": "", "quantity": "l2_var_abs_m", "estimate": estimate, "lo": lo, "hi": hi},
+    ]
+    auc = [
+        {"checkpoint": "", "observable": "abs_m", "cadence": cadence, "headline": True, "L": L,
+         "h": 0.0, "indicator": name, "auc": value if cadence == "matched" else 0.5, "auc_lo": 0.0,
+         "auc_hi": 1.0}
+        for L in V1_SIZES
+        for name, value in PLANTED_AUC.items()
+        for cadence in ("dense", "matched")
+    ]  # fmt: skip
+    pre = prereg.Prereg(Path("ising-ews-v1.toml"), {"id": "ising-ews", "version": 1}, "0" * 64)
+    inputs = [
+        {
+            "domain": "ising",
+            "run_id": run_dir.name,
+            "complete_sha256": hashlib.sha256((run_dir / "complete.json").read_bytes()).hexdigest(),
+        }
+        for key, run_dir in data.runs.items()
+        if key[0] != "fit"
+    ]
+    ref = prereg.Frozen("prereg/ising-ews-v1", commit)
+    return prereg.write_result(data.root, pre, ref, {"fss": fss_rows, "auc": auc}, inputs, {}).name
+
+
+def latent_doc(data: V1, trainings: Sequence[Training], result: str) -> dict[str, Any]:
+    """The draft of ising-latent-v1, set to score `data` as the comment above says."""
+    doc = tomllib.loads(DRAFT.read_text("utf-8"))
+    pilot_sha = hashlib.sha256(data.pilot.read_bytes()).hexdigest()
+    doc["data"] |= {"seeds": list(V1_SEEDS), "replicas": V1_REPLICAS}
+    doc["data"]["tau_c"] |= {"pilot_run": V1_PILOT_RUN, "pilot_sha256": pilot_sha}
+    doc["data"]["staircase"]["tau_sha256"] = {str(L): tau_source(L) for L in V1_SIZES}
+    doc["baseline"]["result"] = result
+    doc["hypotheses"][2]["direction"] = "less"
+    doc["latents"] |= {
+        "steps": EXPERIMENT_STEPS,
+        "checkpoints": [
+            {
+                "role": role,
+                "model_seed": seed,
+                "training": training,
+                "trained_sha256": checkpoint_sha256(latents_name(training, EXPERIMENT_STEPS)),
+                "twin_sha256": checkpoint_sha256(latents_name(training, 0)),
+            }
+            for role, seed, training in trainings
+        ],
+    }
+    doc["indicators"]["direction"]["level"] = "less"
+    doc["indicators"]["direction_by_observable"]["surprise"] = {
+        "variance": "greater",
+        "level": "less",
+    }
+    for row in doc["fss"]["static"]:
+        if row["role"] == "reference":
+            row["tolerance"] = 0.1
+    doc["fss"]["dynamic"]["statistics"][2]["extremum"] = "min"
+    doc["event"]["horizons"] = [0.0]
+    doc["scoring"]["bootstrap"] = 40
+    doc["scoring"]["surrogates"] |= {"n": 2, "n_ablation": 1}
+    doc["scoring"]["alarms"]["every"] = 200.0
+    doc["sensitivity"] |= {"window": [20.0], "bandwidth": [10.0]}
+    doc["trials"]["budget"] = prereg.cells(doc)
+    seeds = f"{V1_SEEDS[0]}-{V1_SEEDS[-1]}"
+    doc["probes"]["test"] = (
+        f"the staircases of seeds {seeds} at each L: 20000 frames each, same rule"
+    )
+    doc["disclosure"] |= {"exploratory": "none", "decisions": "none", "confirmatory": "planted"}
+    return doc
+
+
+def _toml(value: Any) -> str:
+    """A TOML literal: JSON's for strings, numbers and arrays, an inline table for a table."""
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k} = {_toml(v)}" for k, v in value.items()) + "}"
+    if isinstance(value, list):
+        return "[" + ", ".join(map(_toml, value)) + "]"
+    return json.dumps(value)
+
+
+def latent_toml(doc: dict[str, Any]) -> str:
+    """A planted document as the file a freeze commits."""
+    text = "\n".join(f"{key} = {_toml(value)}" for key, value in doc.items()) + "\n"
+    assert tomllib.loads(text) == doc
+    return text
