@@ -1260,6 +1260,26 @@ def extraction_rates(k: ModuleType, root: Path) -> None:
         and "extract m final.pt L64 8000.0 us/frame readout" in text,
         text,
     )
+    # a hand-made manifest may stop at any level above params.dataset.L; extract always writes it
+    for name, manifest in (
+        ("a", {"started_ns": 10**9}),
+        ("b", {"started_ns": 10**9, "params": {}}),
+        ("c", {"started_ns": 10**9, "params": {"dataset": {}}}),
+    ):
+        path = ctx.out / session.by_name[name].folder / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+    rates = session.measured()
+    check(
+        "a table with no params.dataset.L groups without a size, not as LNone",
+        sorted(rates["extract"]) == ["m ckpt/step_0000000.pt L16", "m final.pt"],
+        sorted(rates["extract"]),
+    )
+    text = k.rates_text(rates)
+    check(
+        "... and STATUS gives its rate under that group",
+        "extract m final.pt 2000.0 us/frame readout" in text and "LNone" not in text,
+        text,
+    )
 
 
 def push_problems(folder: Path) -> list[str]:
