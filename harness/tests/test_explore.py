@@ -254,7 +254,9 @@ def test_pc_1_reads_m_on_trained_and_twin_alike(passed: Path) -> None:
     """Planted: pc_1 is |m| plus noise on both; pc_3 is noise; e follows |m| at the FSS plateau. So
     L^2 Var(pc_1) goes as L^1.75 at Tc, and follows L^2 Var(|m|) across T where pc_3's does not; and
     given e, r(pc_1, |m|) is what it was, while r(pc_1, e) is large and given |m| none of it is
-    left. Each r has a percentile CI and says so."""
+    left. pc_1's mean and variance curves both follow |m|'s, so its across-T r cannot tell them
+    apart: pc_3's, read against static_tc's own curves on the same frames, must. Each r has a
+    percentile CI and says so."""
     for table in (TRAINED, TWIN):
         (scaled,) = [
             row
@@ -275,6 +277,11 @@ def test_pc_1_reads_m_on_trained_and_twin_alike(passed: Path) -> None:
             assert pc_1["energy"]["partial_at_fss_plateau"]["value"] == pytest.approx(0.0, abs=0.1)
             assert pc_1["abs_m"]["l2_var_across_T"]["value"] == pytest.approx(1.0, abs=0.02)
             assert found["columns"]["pc_3"]["abs_m"]["l2_var_across_T"]["value"] < 0.9
+            curves = _json(passed, table, L, "static.json")["equilibrium"]
+            for key, read in (("l2_var", "l2_var_across_T"), ("mean", "means_across_T")):
+                expected = np.corrcoef(curves["pc_3"][key], curves["abs_m"][key])[0, 1]
+                value = found["columns"]["pc_3"]["abs_m"][read]["value"]
+                assert value == pytest.approx(expected, abs=1e-6), read
 
 
 def test_probes_score_the_planted_targets_beside_their_floors(passed: Path) -> None:
