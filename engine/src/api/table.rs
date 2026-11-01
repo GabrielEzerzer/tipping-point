@@ -62,7 +62,6 @@ pub struct Table {
     pub domain: String,
     pub run: String,
     pub name: String,
-    pub run_dir: PathBuf,
     /// The run's key column: `seq` (market) or `step` (Ising).
     pub key: String,
     /// Its Parquet files in key order.
@@ -119,7 +118,6 @@ pub fn locate(data_dir: &Path, domain: &str, run: &str, name: &str) -> Result<Ta
         domain: domain.to_owned(),
         run: run.to_owned(),
         name: name.to_owned(),
-        run_dir,
         key: manifest.key,
         files,
         venue,

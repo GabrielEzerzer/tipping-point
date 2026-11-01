@@ -801,7 +801,6 @@ mod tests {
             hub.publish_sample(Published {
                 sample: Arc::new(sample_at(i)),
                 ipc: Vec::new(),
-                captured_ns: T0 + i * STEP,
             });
         }
         for i in [1025, 1125, 1225, 1325, 1425] {

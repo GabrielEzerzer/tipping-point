@@ -102,9 +102,6 @@ pub struct Published {
     pub sample: Arc<Sample>,
     /// The instant as one Arrow IPC record batch message, shared by every Arrow subscriber.
     pub ipc: Vec<u8>,
-    /// The capture time of the input that moved the clock past the instant: the moment the
-    /// sample could first be made.
-    pub captured_ns: i64,
 }
 
 /// What an Arrow subscriber receives.
@@ -541,7 +538,7 @@ impl LiveTap {
         }
     }
 
-    fn publish_sample(&mut self, sample: Sample, captured_ns: i64) {
+    fn publish_sample(&mut self, sample: Sample) {
         let Some(encoder) = self.encoder.as_mut() else {
             return;
         };
@@ -558,7 +555,6 @@ impl LiveTap {
         self.hub.publish_sample(Published {
             sample: Arc::new(sample),
             ipc,
-            captured_ns,
         });
     }
 
@@ -659,7 +655,7 @@ impl Observer for LiveTap {
         let before = i64::try_from(seq).unwrap_or(i64::MAX) - 1;
         for t in instants {
             match Sample::of_feed(feed, t, before, self.sampler.levels()) {
-                Ok(sample) => self.publish_sample(sample, entry.capture_ts_ns),
+                Ok(sample) => self.publish_sample(sample),
                 Err(_) => {
                     self.hub.counters.errors.fetch_add(1, Ordering::Relaxed);
                 }
