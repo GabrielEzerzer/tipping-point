@@ -48,7 +48,11 @@ LATENT = {
     "surprise_slope_max": ("surprise", "slope", False, "greater"),
     "surprise_level_min": ("surprise", "level", False, "less"),
     "surprise_level_max": ("surprise", "level", False, "greater"),
+    "surprise_level_min_narrow": ("surprise", "level", False, "less"),
 }
+# not in any file: a look at the trained surprise's dip, whose minimum the whole band loses at L =
+# 16 to the fall below T = 2, which the narrow band stops short of at both sizes
+BANDS = {"surprise_level_min_narrow": (6.0, -2.0)}
 
 
 def nanmedian(a: np.ndarray) -> float:
@@ -87,12 +91,13 @@ def run_one(args: Any) -> None:
         LATENT if args.latents else CLASSIC
     ).items():
         pipe = Pipeline(name, window, 2, bandwidth if detrended else None, lag)
+        band = BANDS.get(label, BAND)
         groups, curves = [], []
         for run, s in prep.ramps:
-            ising.ramp_segment(s, run, *BAND)  # refuses a ramp that does not cross the whole band
+            ising.ramp_segment(s, run, *band)  # refuses a ramp that does not cross the whole band
             values = pipe.rolling(s.observable(observable))
             eps = run.eps(s.temperature)
-            groups.append(fss.peak_position(values, eps, BAND, direction))
+            groups.append(fss.peak_position(values, eps, band, direction))
             curves.append((values, eps))
         peaks = np.concatenate(groups)
         draws = scoring.hierarchical_bootstrap(nanmedian, [groups], args.bootstrap, rng)
@@ -101,20 +106,21 @@ def run_one(args: Any) -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)  # the first window has no value yet
             curve = np.nanmean(np.concatenate([v for v, _ in curves]), axis=0)[None, :]
-        ensemble = fss.peak_position(curve, eps0, BAND, direction)[0]
-        inside = (eps0 <= BAND[0]) & (eps0 >= BAND[1])
+        ensemble = fss.peak_position(curve, eps0, band, direction)[0]
+        inside = (eps0 <= band[0]) & (eps0 >= band[1])
         at = curve[0][inside]
         extreme = np.nanargmax(at) if direction == "greater" else np.nanargmin(at)
         located = peaks[np.isfinite(peaks)]
         q1, med, q3 = np.quantile(located, [0.25, 0.5, 0.75]) if len(located) else (np.nan,) * 3
         reach = window * prep.sweeps / (float(ramp.schedule["params"]["rate"]) * ramp.Tc / args.L)
-        beside = (located >= BAND[0] - reach) | (located <= BAND[1] + reach)
+        beside = (located >= band[0] - reach) | (located <= band[1] + reach)
         near_edge = (np.isnan(peaks).sum() + beside.sum()) / len(peaks)
         out["indicators"][label] = {
             "observable": observable,
             "indicator": name,
             "detrended": detrended,
             "direction": direction,
+            "band": band,
             "median": float(med),
             "iqr": [float(q1), float(q3)],
             "median_ci": scoring.percentile_interval(draws),

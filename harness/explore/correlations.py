@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 from tipping_point.ews import ising
+from tipping_point.ising import io
 
 from explore import common
 
@@ -130,7 +131,9 @@ def analyse(args: Any, inputs: ising.Inputs) -> dict[str, Any]:
 
     fss_at = temps.index(T_fss)
     m_with_e = pairs.index(("abs_m", "energy"))
+    table = inputs.staircases[0].path / ising.LATENTS / args.latents
     out: dict[str, Any] = {
+        "pca": io.read_json(table / "manifest.json")["params"].get("pca"),
         "T": temps,
         "eps_L": [float(inputs.staircases[0].eps(T)) for T in temps],
         "T_fss": T_fss,

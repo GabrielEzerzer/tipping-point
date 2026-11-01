@@ -11,8 +11,8 @@ at exactly Tc (its replicas bootstrapped).
 
 Over every plateau, for each column: L^2 Var and the mean against eps_L, from one joint bootstrap
 (the same seeds and replicas drawn at every temperature), summed from per-replica power sums, with
-the interpolated peak of L^2 Var, and the shape of the mean, whether it is monotone or has an
-interior extremum (shape, below). A latents table holds the frames its selection kept, one burst in
+the interpolated peak of L^2 Var, and the shape of the mean, whether it is monotone or turns
+(shape, below). A latents table holds the frames its selection kept, one burst in
 8 away from the FSS plateau under tc-plus, so each of those points rests on 1/8 of the plateau's
 frames. The bootstrap draws at Tc go to static-draws.npz for scaling.py; the first equilibrium curve
 is what fast_ramps.py reads.
@@ -153,38 +153,53 @@ def peak(eps: np.ndarray, values: np.ndarray) -> float:
     return float(-b / (2 * a)) if a < 0 else float(eps[k])
 
 
+def _turn(curve: np.ndarray) -> tuple[float, int, float, int]:
+    """The most prominent interior valley and peak of a curve: (prominence, index) of each, 0 and -1
+    where it has none. A valley's prominence is how far it lies below the lower of the highest
+    points on its two sides, a peak's how far above the higher of the lowest: so a shallow dip
+    counts even beside a steep fall elsewhere, and a monotone curve has neither."""
+    valley, valley_at, top, top_at = 0.0, -1, 0.0, -1
+    for k in range(1, len(curve) - 1):
+        left, right = curve[:k], curve[k + 1 :]
+        if curve[k] <= curve[k - 1] and curve[k] <= curve[k + 1]:
+            depth = float(min(left.max(), right.max()) - curve[k])
+            if depth > valley:
+                valley, valley_at = depth, k
+        if curve[k] >= curve[k - 1] and curve[k] >= curve[k + 1]:
+            height = float(curve[k] - max(left.min(), right.min()))
+            if height > top:
+                top, top_at = height, k
+    return valley, valley_at, top, top_at
+
+
 def shape(eps: np.ndarray, point: np.ndarray, draws: np.ndarray) -> dict[str, Any]:
-    """Is a curve monotone, or does it turn? The prominence of an interior peak is how far the
-    curve's maximum rises above the higher of its two ends, and of a valley how far its minimum
-    falls below the lower: exactly 0 where the extremum sits at an end. A percentile CI that
-    excludes 0 says the data hold that turn, and the curve is not monotone. The positions are where
-    the curve has them, with the same draws' CI. eps runs hot to cold, the order of a cooling
-    ramp."""
+    """Is a curve monotone, or does it turn? Kendall's tau over the plateaus says how nearly
+    monotone it is; each interior turn's prominence (_turn) and position come with the same draws'
+    CIs. Noise alone gives every draw small turns, so a turn is real when its CI clears `noise`, the
+    median half-width of the curve's own CI. eps runs hot to cold, the order of a cooling ramp."""
+    found = [_turn(row) for row in draws]
+    noise = float(np.median(np.diff(np.quantile(draws, [0.025, 0.975], axis=0), axis=0)) / 2)
+    valley, valley_at, top, top_at = _turn(point)
 
-    def prominence(curve: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        ends = curve[..., [0, -1]]
-        return curve.max(-1) - ends.max(-1), ends.min(-1) - curve.min(-1)
+    def entry(prominence: float, at: int, column: int) -> dict[str, Any]:
+        depths = np.array([row[column] for row in found])
+        spots = np.array([int(row[column + 1]) for row in found])
+        where = np.where(spots >= 0, eps[spots], np.nan)
+        lo, hi = scoring.percentile_interval(depths)
+        return {
+            "prominence": prominence,
+            "prominence_ci": [lo, hi],
+            "turns": bool(lo > noise),
+            "eps_L": float(eps[at]) if at >= 0 else float("nan"),
+            "eps_L_ci": scoring.percentile_interval(where) if (spots >= 0).any() else (np.nan,) * 2,
+        }
 
-    peak_p, valley_p = prominence(point)
-    peak_d, valley_d = prominence(draws)
-    highest, lowest = draws.argmax(1), draws.argmin(1)
     return {
         "kendall_tau_cooling": float(kendall_tau(point)),
         "kendall_tau_cooling_ci": scoring.percentile_interval(kendall_tau(draws)),
-        "peak": {
-            "prominence": float(peak_p),
-            "prominence_ci": scoring.percentile_interval(peak_d),
-            "eps_L": float(eps[int(point.argmax())]),
-            "eps_L_ci": scoring.percentile_interval(eps[highest]),
-            "share_of_draws_at_an_end": float(np.mean((highest == 0) | (highest == len(eps) - 1))),
-        },
-        "valley": {
-            "prominence": float(valley_p),
-            "prominence_ci": scoring.percentile_interval(valley_d),
-            "eps_L": float(eps[int(point.argmin())]),
-            "eps_L_ci": scoring.percentile_interval(eps[lowest]),
-            "share_of_draws_at_an_end": float(np.mean((lowest == 0) | (lowest == len(eps) - 1))),
-        },
+        "noise": noise,
+        "valley": entry(valley, valley_at, 0),
+        "peak": entry(top, top_at, 2),
     }
 
 

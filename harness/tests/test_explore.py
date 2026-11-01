@@ -1,8 +1,6 @@
 """The exploratory pipeline on planted data (harness/ews_planted.py): every script runs, on a
 latents table and on |m|, and the planted answers come back; seeds 6-10 are refused at every door,
-nothing can log a trial, and the data dir is joined without touching what it joins. Also the draft
-pre-registration the pass wrote: its placeholders are the ones it says, and its numbers are the
-plan's.
+nothing can log a trial, and the data dir is joined without touching what it joins.
 """
 
 import ast
@@ -166,19 +164,24 @@ def test_surprise_reads_as_planted(passed: Path) -> None:
 
 
 def test_the_curve_says_where_a_plateau_mean_turns() -> None:
-    """A curve with a dip has a valley whose CI excludes 0, a monotone one neither turn."""
-    eps = np.linspace(8.0, -5.0, 27)
+    """The curve the real surprise draws: flat, a shallow dip and a hump near Tc, then a steep fall
+    far larger than either. The dip counts as a turn though the curve's minimum is elsewhere; a
+    monotone curve with the same noise turns nowhere."""
+    eps = np.linspace(8.0, -5.0, 40)
     rng = np.random.default_rng(1)
-    dip = np.abs(eps - 1.0)
-    draws = dip + 0.01 * rng.standard_normal((200, len(eps)))
-    shape = static_tc.shape(eps, dip, draws)
-    assert shape["valley"]["prominence_ci"][0] > 0
-    assert shape["valley"]["eps_L"] == pytest.approx(1.0, abs=0.3)
-    assert shape["peak"]["prominence"] == 0.0
-    falling = eps.copy()
-    draws = falling + 0.001 * rng.standard_normal((200, len(eps)))
+    fall = 0.3 * np.clip(-eps - 1.0, 0.0, None)
+    curve = (
+        0.8 - 0.01 * np.exp(-((eps - 0.7) ** 2) / 1.5) + 0.01 * np.exp(-((eps + 1.0) ** 2)) - fall
+    )
+    draws = curve + 0.0005 * rng.standard_normal((200, len(eps)))
+    shape = static_tc.shape(eps, curve, draws)
+    assert shape["valley"]["turns"] and shape["peak"]["turns"]
+    assert shape["valley"]["eps_L"] == pytest.approx(0.7, abs=0.4)
+    assert shape["peak"]["eps_L"] == pytest.approx(-1.0, abs=0.5)
+    falling = 0.8 + 0.05 * eps
+    draws = falling + 0.0005 * rng.standard_normal((200, len(eps)))
     shape = static_tc.shape(eps, falling, draws)
-    assert shape["peak"]["prominence_ci"][0] == 0.0 and shape["valley"]["prominence_ci"][0] == 0.0
+    assert not shape["valley"]["turns"] and not shape["peak"]["turns"]
     assert shape["kendall_tau_cooling"] == pytest.approx(-1.0)
 
 

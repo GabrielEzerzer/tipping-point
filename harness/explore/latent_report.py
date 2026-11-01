@@ -64,21 +64,57 @@ def directions(out: Path, trained: str, sizes: list[int]) -> dict[str, str]:
 def _shape(c: dict[str, Any]) -> str:
     m = c["mean_shape"]
     parts = []
-    for name in ("peak", "valley"):
-        s = m[name]
-        lo, hi = s["prominence_ci"]
-        turns = lo > 0
+    for name in ("valley", "peak"):
+        t = m[name]
+        lo, hi = t["prominence_ci"]
+        where, near = t["eps_L"], t["eps_L_ci"]
+        reading = "a turn" if t["turns"] else "within the noise"
         parts.append(
-            f"{name}: prominence {s['prominence']:.4f} [{lo:.4f}, {hi:.4f}], at eps_L "
-            f"{s['eps_L']:+.2f} [{s['eps_L_ci'][0]:+.2f}, {s['eps_L_ci'][1]:+.2f}], "
-            f"{'interior' if turns else 'no interior turn'}"
+            f"{name}: prominence {t['prominence']:.4f} [{lo:.4f}, {hi:.4f}], at eps_L {where:+.2f} "
+            f"[{near[0]:+.2f}, {near[1]:+.2f}], {reading}"
         )
     tau = m["kendall_tau_cooling"]
     lo, hi = m["kendall_tau_cooling_ci"]
     return (
-        f"Kendall's tau over the plateaus, cooling: {tau:+.3f} [{lo:+.3f}, {hi:+.3f}]; "
-        + "; ".join(parts)
+        f"Kendall's tau over the plateaus, cooling: {tau:+.3f} [{lo:+.3f}, {hi:+.3f}]; noise "
+        f"{m['noise']:.4f}; " + "; ".join(parts)
     )
+
+
+def _pcs(out: Path, tables: dict[str, str], sizes: list[int]) -> list[str]:
+    """Every pc at the FSS plateau, and each checkpoint's PCA spectrum: is any pc |m|'s channel?"""
+    lines = [
+        "| column | who | r with \\|m\\| per L | r with e per L | L^2 Var per L | kappa, point |",
+        "|---|---|---|---|---|---|",
+    ]
+    for k in range(1, 9):
+        column = f"pc_{k}"
+        for who, table in tables.items():
+            r_m, r_e, var = [], [], []
+            for L in sizes:
+                cor = _load(out, table, L, "correlations.json")
+                at = cor["columns"][column]
+                r_m.append(f"{at['abs_m']['at_fss_plateau']['value']:+.3f}")
+                r_e.append(f"{at['energy']['at_fss_plateau']['value']:+.3f}")
+                curve = _load(out, table, L, "static.json")["equilibrium"][column]
+                var.append(curve["l2_var"][cor["T"].index(cor["T_fss"])])
+            kappa = np.polyfit(np.log(sizes), np.log(var), 1)[0]
+            shown = " / ".join(f"{v:.2f}" for v in var)
+            lines.append(
+                f"| {column} | {who} | {' / '.join(r_m)} | {' / '.join(r_e)} | {shown} "
+                f"| {kappa:+.2f} |"
+            )
+    lines.append("")
+    for who, table in tables.items():
+        pca = _load(out, table, sizes[0], "correlations.json").get("pca")
+        if pca:
+            shares = " ".join(f"{v / pca['total']:.3f}" for v in pca["variance"])
+            lines.append(
+                f"- PCA of {who}, on {pca['frames']} training frames: total variance "
+                f"{pca['total']:.3f}, share per component {shares}."
+            )
+    lines.append("")
+    return lines
 
 
 def _curve_rows(
@@ -206,7 +242,8 @@ def render(out: Path, training: str, step: int, sizes: list[int]) -> str:
                     f"| {_v(a[t]['l2_var_across_T'], 3, True)} "
                     f"| {_v(b[t]['l2_var_across_T'], 3, True)} |"
                 )
-    lines += ["", "## Exponents over the sizes (a slope, not a test)", ""]
+    lines += ["", "## Every pc at the FSS plateau", "", *_pcs(out, tables, sizes)]
+    lines += ["## Exponents over the sizes (a slope, not a test)", ""]
     lines += [
         "CI: percentile, independent hierarchical bootstraps per size, paired. kappa of log|I| "
         "on log L.",
