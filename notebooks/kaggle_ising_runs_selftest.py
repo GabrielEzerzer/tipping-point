@@ -1919,7 +1919,7 @@ def real_runs(k: ModuleType, root: Path) -> None:
         "its sha256 and step named, no local path, STATUS's rate by input",
         run.state == "complete"
         and (named.get("sha256"), named.get("step"), named.get("path")) == (digest, steps, None)
-        and "tiny_final L16" in session.measured()["extract"],
+        and "extract tiny_final L16" in k.rates_text(session.measured()),
         (run.state, run.note, named),
     )
 
@@ -2156,11 +2156,11 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         (table / "complete.json").write_text(json.dumps(done), encoding="utf-8")
         run = session.by_name[name]
         run.state, run.folder = "complete", table.relative_to(ctx.out).as_posix()
-    groups = session.measured()["extract"]
+    text = k.rates_text(session.measured())
     check(
         "first-read-m1: STATUS keeps final.pt's rate and the twin's apart, by input",
-        sorted(groups) == ["m1_final L16", "m1_twin L16"],
-        sorted(groups),
+        "extract m1_final L16" in text and "extract m1_twin L16" in text,
+        text,
     )
 
 
