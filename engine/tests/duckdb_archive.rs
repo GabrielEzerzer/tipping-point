@@ -69,6 +69,13 @@ fn a_build_with_nothing_to_check_says_so_where_the_gate_reads_it() -> Result<(),
     Ok(())
 }
 
+/// A build that had to download but checked no archive fails, before `skipped` reaches the gate.
+#[test]
+#[should_panic(expected = "checked no DuckDB archive")]
+fn a_windows_x64_build_with_no_checked_archive_fails() {
+    archive_to_check(true, None, None);
+}
+
 #[test]
 fn only_the_pinned_archive_passes() -> Result<(), Box<dyn Error>> {
     let Some(archive) = archive_to_check(

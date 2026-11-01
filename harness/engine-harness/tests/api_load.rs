@@ -71,13 +71,13 @@ const PROFILE: &str = if cfg!(debug_assertions) {
 };
 /// Sleeps 1 ms at a time on a thread of its own until `stop`, and returns how late each sleep
 /// woke: the scheduler delay each of a message's two or three wakeups also waits through,
-/// measured apart from the engine's code, so a slow engine cannot excuse itself. Past a quarter
-/// of `LATENCY_BOUND` at p99, where waiting for a core could spend most of the bound, the machine
-/// counts as loaded, and a latency p99 over the bound is excused rather than failed, as long as
-/// it stays under the bound plus three times that p99, no more than those wakeups could have
-/// waited; past that it fails, loaded or not. On the development laptop on 2026-10-24, with other
-/// jobs running, it read 17.1 ms at p99 while the latency p99s sat at 34 to 40 ms, and 44.8 ms
-/// under heavier load while they rose to 38 to 88 ms.
+/// measured apart from the engine's code, so a slow engine cannot inflate the slack it is given.
+/// Past a quarter of `LATENCY_BOUND` at p99, where waiting for a core could spend most of the
+/// bound, the machine counts as loaded, and a latency p99 over the bound is excused rather than
+/// failed, as long as it stays under the bound plus three times that p99, no more than those
+/// wakeups could have waited; past that it fails, loaded or not. On the development laptop on
+/// 2026-10-24, with other jobs running, it read 17.1 ms at p99 while the latency p99s sat at 34 to
+/// 40 ms, and 44.8 ms under heavier load while they rose to 38 to 88 ms.
 fn wake_probe(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<Duration>> {
     std::thread::spawn(move || {
         let mut late = Vec::new();
