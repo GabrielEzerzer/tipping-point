@@ -262,12 +262,14 @@ def render(out: Path, training: str, step: int, sizes: list[int]) -> str:
     lines += ["", "## Peak positions along the slow ramps, and 1/nu over the sizes", ""]
     lines += [
         "CI: percentile, hierarchical bootstrap. Near the edge: on the search band's edge or "
-        "within one window of it. The verdict is what ising._dynamic's rules give, read at two "
-        "sizes, 80 replicas.",
+        "within one window of it, which edge_margin leaves not located. Verdicts are what "
+        "ising._dynamic's rules give, read at two sizes, 80 replicas: with the margin "
+        "(ising-latent-v1's rule) and without it (the rule as first written, ising-ews-v1's).",
         "",
         "| statistic | who | median eps_L per L | near the edge per L | ensemble extremum per L "
-        "| 1/nu [95% CI] | verdict if judged |",
-        "|---|---|---|---|---|---|---|",
+        "| 1/nu with the margin [95% CI] | verdict with the margin | 1/nu without it | "
+        "verdict without it |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     a, b = (
         _load(out, trained, None, "peaks-combined.json"),
@@ -279,11 +281,13 @@ def render(out: Path, training: str, step: int, sizes: list[int]) -> str:
             med = " / ".join(f"{v['medians'][str(L)]:+.2f}" for L in sizes)
             near = " / ".join(f"{v['near_edge_shares'][str(L)]:.0%}" for L in sizes)
             ens = " / ".join(f"{v['ensemble'][str(L)]:+.2f}" for L in sizes)
-            ci = v["inverse_nu_ci"]
+            on, off = v["with_edge_margin"], v["without_edge_margin"]
             lines.append(
                 f"| {key} | {who} | {med} | {near} | {ens} "
-                f"| {v['inverse_nu']:+.2f} [{ci[0]:+.2f}, {ci[1]:+.2f}] "
-                f"| {v['verdict_if_judged']} |"
+                f"| {on['inverse_nu']:+.2f} [{on['inverse_nu_ci'][0]:+.2f}, "
+                f"{on['inverse_nu_ci'][1]:+.2f}] | {on['verdict']} "
+                f"| {off['inverse_nu']:+.2f} [{off['inverse_nu_ci'][0]:+.2f}, "
+                f"{off['inverse_nu_ci'][1]:+.2f}] | {off['verdict']} |"
             )
     lines += [
         "",

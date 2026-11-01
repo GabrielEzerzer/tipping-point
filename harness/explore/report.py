@@ -312,7 +312,7 @@ def fast_tables(fr: dict[str, Any], st: dict[str, Any]) -> list[str]:
 
 def peaks_table(pk: dict[str, Any]) -> list[str]:
     lines = [
-        "| statistic | median eps_L [95% CI] | IQR | on the band's edge | within a window of it "
+        "| statistic | median eps_L [95% CI] | IQR | on the band's edge | on it or within a window "
         "| ensemble extremum |",
         "|---|---|---|---|---|---|",
     ]

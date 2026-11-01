@@ -15,7 +15,7 @@ import ews_planted
 import numpy as np
 import pytest
 from ews_planted import LATENT_EPS, V1_LAG, V1_PILOT_RUN, V1_REPLICAS, V1_TAU_C, write_latents
-from explore import common, fast_ramps, join_pilot, latent_pass, latent_report, static_tc
+from explore import common, fast_ramps, join_pilot, latent_pass, latent_report, peaks, static_tc
 from explore.__main__ import SCRIPTS
 from tipping_point.ews import ising, prereg
 from tipping_point.ising import protocol
@@ -27,10 +27,46 @@ STEP = 1000
 TRAINED, TWIN = ising.latents_name(TRAINING, STEP), ising.latents_name(TRAINING, 0)
 SIZES = (16, 32)
 SEEDS = (1, 2)
+PLATEAUS = (3.0, 2.8, 2.6, 2.5, 2.45, 2.4, 2.3, ews_planted.PLATEAU)
+PLANTED_VALUES = ews_planted.plateau_values
 
 
 def _import(name: str) -> Any:
     return importlib.import_module(f"explore.{name}")
+
+
+def _staircase(L: int) -> protocol.Staircase:
+    """v1_staircase with eight plateaus: an L^2 Var across T can only align or not over more than
+    two, since any two points lie on a line."""
+    return protocol.Staircase(
+        [2.0] * len(PLATEAUS),
+        temperatures=PLATEAUS,
+        warmup=0,
+        min_therm=50,
+        min_meas=500,
+        saves=40,
+        tau_sha256=ews_planted.tau_source(L),
+    )
+
+
+def _plateau_values(L: int) -> ews_planted.Values:
+    """plateau_values with a spread of |m| that peaks at T = 2.45 away from the FSS plateau, which
+    it leaves alone: L^2 Var(|m|) still goes as L^1.75 there. At that plateau e follows |m| as well
+    as its own noise, r about 0.7 as in real frames, so a partial correlation has something to take
+    out: r(pc_1, e) is large, and nothing of it is left given |m|."""
+    planted = PLANTED_VALUES(L)
+
+    def values(
+        steps: np.ndarray, temps: np.ndarray, rng: np.random.Generator
+    ) -> tuple[np.ndarray, np.ndarray]:
+        abs_m, e = planted(steps, temps, rng)
+        spread = 0.2 + 2.0 * np.exp(-(((temps - 2.45) / 0.15) ** 2))
+        away = ~np.isclose(temps, ews_planted.PLATEAU)
+        centre, sd = 0.8 * L**-0.125, 0.06 * L**-0.125
+        e = np.where(away, e, e + 0.02 * (abs_m - centre) / sd)
+        return np.where(away, 0.2 + (abs_m - 0.2) * spread, abs_m), e
+
+    return values
 
 
 def _fast_ramp(root: Path, L: int, seed: int) -> Path:
@@ -69,6 +105,8 @@ def data(tmp_path_factory: pytest.TempPathFactory) -> Path:
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(ews_planted, "V1_SEEDS", SEEDS)
         patch.setattr(ews_planted, "V1_SIZES", SIZES)
+        patch.setattr(ews_planted, "v1_staircase", _staircase)
+        patch.setattr(ews_planted, "plateau_values", _plateau_values)
         planted = ews_planted.v1_dataset(root, "fss")
         runs = [*planted.runs.values()]
         runs += [_fast_ramp(root, L, seed) for L in SIZES for seed in SEEDS]
@@ -98,7 +136,7 @@ def _shared(root: Path, out: Path) -> list[str]:
 
 @pytest.fixture(scope="module")
 def passed(data: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The latent pass's core steps, with log_trial wired to fail."""
+    """The latent pass's core steps, with the trial log wired to fail."""
     out = tmp_path_factory.mktemp("explore-out")
 
     def refused(*args: Any, **kwargs: Any) -> None:
@@ -106,6 +144,7 @@ def passed(data: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(prereg, "log_trial", refused)
+        patch.setattr(prereg, "log_trials", refused)
         latent_pass.main(
             [
                 "--training",
@@ -137,17 +176,31 @@ def test_the_pass_writes_its_report_and_logs_no_trial(data: Path, passed: Path) 
     assert _json(passed, TRAINED, 16, "static.json")["provenance"]["exploratory"] is True
 
 
-def test_surprise_reads_as_planted(passed: Path) -> None:
+def test_surprise_reads_as_planted(data: Path, passed: Path, tmp_path: Path) -> None:
     """Planted: surprise falls as the bath cools, steepest at a fixed eps_L, so the level's
     direction is "less" and the slope's extremum "min"; its median read position is half a window
-    late, and 1/nu near 1. The twin's is flat: no trend to speak of."""
+    late, 1/nu near 1, and no replica near the search band's edge. The twin's is flat: no trend to
+    speak of. pc_3, whose spread only keeps growing towards the cold end, is what near_edge is for:
+    it reads about 1 there."""
     answer = latent_report.directions(passed, TRAINED, list(SIZES))
     assert (answer["level"], answer["slope_extremum"]) == ("less", "min")
     combined = _json(passed, TRAINED, None, "peaks-combined.json")["indicators"]
     slope = combined["surprise_slope_min"]
     for L in SIZES:
         assert slope["medians"][str(L)] == pytest.approx(LATENT_EPS - V1_LAG, abs=0.25), L
+    for L in SIZES:
+        assert slope["near_edge_shares"][str(L)] == pytest.approx(0.0, abs=0.1), L
     assert slope["inverse_nu"] == pytest.approx(1.0, abs=0.5)
+    rising = {"pc_3_variance": ("pc_3", "variance", True, "greater")}
+    where = ["--latents", TRAINED, *_shared(data, tmp_path), "--bootstrap", "20"]
+    for L in SIZES:
+        peaks.run_one(peaks.parsed(["--L", str(L), *where]), rising)
+    peaks.combine(peaks.parsed(where), list(SIZES), rising)
+    pushed = _json(tmp_path, TRAINED, None, "peaks-combined.json")["indicators"]["pc_3_variance"]
+    for L in SIZES:
+        assert pushed["near_edge_shares"][str(L)] >= 0.75, L
+    assert pushed["verdict_if_judged"] == "inconclusive"
+    assert pushed["without_edge_margin"]["verdict"] == "pass"  # the bug the margin closes (#115)
     for L in SIZES:
         (level,) = [
             r
@@ -186,20 +239,35 @@ def test_the_curve_says_where_a_plateau_mean_turns() -> None:
 
 
 def test_pc_1_reads_m_on_trained_and_twin_alike(passed: Path) -> None:
-    """Planted: pc_1 is |m| plus noise on both; pc_3 is noise. Each r has a percentile CI and says
-    so."""
+    """Planted: pc_1 is |m| plus noise on both; pc_3 is noise; e follows |m| at the FSS plateau. So
+    L^2 Var(pc_1) goes as L^1.75 at Tc, and follows L^2 Var(|m|) across T where pc_3's does not; and
+    given e, r(pc_1, |m|) is what it was, while r(pc_1, e) is large and given |m| none of it is
+    left. Each r has a percentile CI and says so."""
     for table in (TRAINED, TWIN):
+        (scaled,) = [
+            row
+            for row in _json(passed, table, None, "scaling.json")["rows"]
+            if row["quantity"] == "l2_var_pc_1"
+        ]
+        assert scaled["kappa"]["value"] == pytest.approx(1.75, abs=0.25)
         for L in SIZES:
             found = _json(passed, table, L, "correlations.json")
             assert "hierarchical bootstrap" in found["ci_method"]
-            at = found["columns"]["pc_1"]["abs_m"]["at_fss_plateau"]
+            pc_1 = found["columns"]["pc_1"]
+            at = pc_1["abs_m"]["at_fss_plateau"]
             assert at["value"] > 0.8 and at["ci"][0] <= at["value"] <= at["ci"][1]
             assert abs(found["columns"]["pc_3"]["abs_m"]["at_fss_plateau"]["value"]) < 0.5
+            given_e = pc_1["abs_m"]["partial_at_fss_plateau"]["value"]
+            assert given_e == pytest.approx(at["value"], abs=0.05)
+            assert pc_1["energy"]["at_fss_plateau"]["value"] > 0.4
+            assert pc_1["energy"]["partial_at_fss_plateau"]["value"] == pytest.approx(0.0, abs=0.1)
+            assert pc_1["abs_m"]["l2_var_across_T"]["value"] == pytest.approx(1.0, abs=0.02)
+            assert found["columns"]["pc_3"]["abs_m"]["l2_var_across_T"]["value"] < 0.9
 
 
 def test_probes_score_the_planted_targets_beside_their_floors(passed: Path) -> None:
-    """Planted: |m| is pc_1, so its R^2 is high, and e is plain noise on every frame, so its R^2
-    sits on the floor. The controls behave: selectivity is the difference, as stated."""
+    """Planted: |m| is pc_1, so its R^2 is high, and e is mostly noise, so its R^2 stays low. The
+    controls behave: selectivity is the difference, as stated."""
     for table in (TRAINED, TWIN):
         found = _json(passed, table, 16, "probes.json")
         targets = found["targets"]
@@ -298,7 +366,7 @@ def test_a_run_at_a_confirmatory_seed_cannot_be_opened_through_the_pipeline(tmp_
 def test_no_script_can_log_a_trial_or_write_a_result() -> None:
     """By the code, not by the run: no script names what would make a number count as a trial, and
     none imports the module that holds them."""
-    banned = {"log_trial", "write_result", "freeze", "trials_path", "stamp", "frozen"}
+    banned = {"log_trial", "log_trials", "write_result", "freeze", "trials_path", "stamp", "frozen"}
     for path in (ROOT / "harness" / "explore").glob("*.py"):
         tree = ast.parse(path.read_text("utf-8"))
         for node in ast.walk(tree):
