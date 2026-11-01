@@ -536,7 +536,10 @@ and the scorer takes both through every table, once per checkpoint.
   with no peak there (#115): so `fss.dynamic.edge_margin = "window"`, which every latent file holds,
   counts an extremum within one headline window of either edge as not located, and over half of an
   L's replicas not located is inconclusive. ising-ews-v1 refuses the key and reads the band's first
-  and last samples alone.
+  and last samples alone. The `peaks` table of a file with the key says which way a peak was lost:
+  `edge_fraction` for an edge, `undefined` for a replica with no value in the band, as a bug that
+  empties a channel leaves. Both count as not located. v1's table keeps one `edge_fraction`, which
+  holds both.
 - **Rows.** Every row of every table has a `checkpoint` column, the table's folder name, and so does
   each line of `trials.jsonl`; a classic row's is `""`. The file pins each checkpoint's sha256 and
   role, and the result's manifest gives the sha256 of each table's `complete.json` per run.
@@ -593,7 +596,10 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   `probes.png`, primary checkpoints only, drawn by `harness/ising_figures.py` from the CSV tables
   alone, in a throwaway environment (matplotlib is no dependency of the project). The tables are
   written and logged first: if the figures fail the run exits 2 and prints the command to draw them.
-  A latent variance is divided by a per-checkpoint number before anything is drawn together, because
+  A run that dies with its result complete but its CSV not has spent its budget and left that command
+  nothing to read: `harness/ising_experiment.py --figures-only <result folder>` writes `csv/` again,
+  over what is there, then draws the figures, charging nothing and logging no trial. It refuses a
+  folder with no `complete.json`, whose cells may be unlogged. A latent variance is divided by a per-checkpoint number before anything is drawn together, because
   a PCA basis is per checkpoint and raw latent magnitudes do not compare.
 - **Planted runs.** `--planted` scores a file with no freeze behind it and refuses a data dir holding
   any run the planted generator did not write, so it can never read the confirmatory data early.
@@ -609,10 +615,21 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   a GPU: surrogates 22 h, alarms 15 h, probe embeddings 18 h on the CPU (19 ms a frame at L = 64), AUC,
   static fits and reading the tables 4 h. It was about 125 hours before the sequential test and the
   faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. The runner has no
-  resume: an interrupted run starts again. Its trials are logged in one write after its tables and
-  before `complete.json`, so a crash leaves a folder with no `complete.json`, its trials logged or
-  not, or a complete result with all of them. A crash in between spends the budget: the tables are
-  there, and scoring again means amending the file.
+  resume: a run interrupted before it writes its result starts again. Its trials are logged in one
+  write after its tables and before `complete.json`, so a crash in that write leaves a folder with no
+  `complete.json`, its trials logged or not, or a complete result with all of them. `prereg.charge`,
+  for any file, `ews score` included, refuses to score past a folder stamped with the file's id and
+  version and with no `complete.json`, since its tables can be read whether or not their cells were
+  logged: delete it or amend the file. Deleting it gives back no trial the log holds, so a crash after
+  the log spends the budget: the tables are there, and scoring again means amending the file. A crash
+  inside the log's one write leaves a line that is no whole record, which `prereg.trials` refuses by
+  file and line: count that run as spent and amend the file. Every count reads the whole log, so first,
+  keeping a copy, replace the line with one whole record holding the `params.prereg` stamp from that
+  run's manifest. Cutting it instead could leave the version no line at all, and with its folder
+  deleted it could be scored again. With the record in place the budget refuses it, folder or no
+  folder, wherever `trials.budget` equals the file's cells, as both files' do. If no folder is left,
+  the record gives the id and version of the file that was being scored, or there is one for each file
+  it could have been. A blank line in the log is skipped.
 
 ### The exploratory pipeline
 

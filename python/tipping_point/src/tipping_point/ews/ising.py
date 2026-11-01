@@ -1106,38 +1106,47 @@ def _peaks(
     """Where each slow-ramp replica's indicator peaks (#98), for each one _peak_statistics names:
     the headline pipeline's detrend, window and lag along the whole ramp, and the eps_L of its
     extremum in the indicator's expected direction inside fss.dynamic.search (NaN on the band's
-    edge, or as near it as _edge_margin says: not located). A descriptive row per indicator; the
-    per-seed positions go to the dynamic test. Only a position is read, so a slope's scale, per
-    sample here, plays no part."""
+    edge, as near it as _edge_margin says, or with no value in the band: not located). A descriptive
+    row per indicator; the per-seed positions go to the dynamic test, which counts every one not
+    located. edge_fraction is their share, but a file with edge_margin (#121) keeps the replicas
+    with no value apart, in `undefined`: a bug that empties a channel reads differently from a
+    channel with no peak in the band. ising-ews-v1's table holds both in edge_fraction, as it froze
+    them. Only a position is read, so a slope's scale, per sample here, plays no part."""
     dyn, ind = doc["fss"]["dynamic"], doc["indicators"]
     band = (float(dyn["search"][0]), float(dyn["search"][1]))
     rows, found = [], {}
     for key, observable, name, direction in _peak_statistics(doc):
         pipe = Pipeline(name, window, 2, bandwidth, int(ind["lag"]))  # rolling ignores length
-        groups = []
+        groups, empty = [], []
         for run, s in prep.ramps:
             ramp_segment(s, run, *band)  # refuses a ramp that does not cross the whole band
             values = pipe.rolling(s.observable(observable))
             eps, margin = run.eps(s.temperature), _edge_margin(doc, prep, run, window)
             groups.append(fss.peak_position(values, eps, band, direction, margin))
+            empty.append(np.isnan(values[:, (eps <= band[0]) & (eps >= band[1])]).all(axis=1))
         peak = np.concatenate(groups)
         located = peak[np.isfinite(peak)]
         q1, median, q3 = np.quantile(located, [0.25, 0.5, 0.75]) if len(located) else [np.nan] * 3
         found[(key, prep.cadence)] = groups
-        rows.append(
-            {
-                "indicator": name,
-                "observable": observable,
-                "cadence": prep.cadence,
-                "L": L,
-                "direction": direction,
-                "peak_eps_median": float(median),
-                "peak_eps_q1": float(q1),
-                "peak_eps_q3": float(q3),
-                "n": len(peak),
-                "edge_fraction": float(np.mean(np.isnan(peak))),
+        row = {
+            "indicator": name,
+            "observable": observable,
+            "cadence": prep.cadence,
+            "L": L,
+            "direction": direction,
+            "peak_eps_median": float(median),
+            "peak_eps_q1": float(q1),
+            "peak_eps_q3": float(q3),
+            "n": len(peak),
+            "edge_fraction": float(np.mean(np.isnan(peak))),
+        }
+        if "edge_margin" in dyn:  # ising-ews-v1's rows keep their columns and their count
+            undefined = np.concatenate(empty)
+            row |= {
+                "edge_fraction": float(np.mean(np.isnan(peak) & ~undefined)),
+                "undefined": float(np.mean(undefined)),
             }
-        )
+        rows.append(row)
     return rows, found
 
 

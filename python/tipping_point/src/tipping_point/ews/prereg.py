@@ -10,6 +10,7 @@ write_result  <data dir>/ews/<run_id>/ in #22's layout: manifest.json (stamped),
           complete.json, or one whose every trial is logged
 log_trials append evaluations to <data dir>/ews/trials.jsonl in one write; every evaluation counts
           as a trial, sensitivity cells included, and the count goes in the paper
+charge    refuse a scoring past the file's budget, or past a torn result of its own version
 
 An amendment is a new file, <id>-v<k+1>.toml, whose `supersedes` names the version it replaces
 and whose `reason` says why; results scored under an earlier version stay bound to it.
@@ -765,24 +766,66 @@ def log_trial(data_dir: Path, record: dict[str, Any]) -> None:
 
 
 def trials(data_dir: Path, prereg: Prereg) -> int:
-    """Evaluations logged so far under this prereg's id and version."""
+    """Evaluations logged so far under this prereg's id and version. A line that is no whole record,
+    as a power cut inside log_trials' one write leaves, is refused: no count can rest on it. Its
+    repair replaces it, never cuts it: a cut would leave a version whose first record tore with no
+    line and its budget back, and with its folder deleted, as charge offers, it could be scored
+    again. A blank line is skipped, since that repair is a hand edit; a zeroed tail is not blank."""
     path = trials_path(data_dir)
     if not path.exists():
         return 0
-    count = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
-        record = json.loads(line)
-        count += (record["prereg"]["id"], record["prereg"]["version"]) == (
-            prereg.id,
-            prereg.version,
-        )
+    own, count = (prereg.id, prereg.version), 0
+    for number, line in enumerate(path.read_bytes().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            stamp = json.loads(line)["prereg"]
+            count += (stamp["id"], stamp["version"]) == own
+        except (ValueError, KeyError, TypeError) as exc:  # ValueError: bad JSON, or bad UTF-8
+            raise PreregError(
+                f"{path}, line {number}: not a whole trial record, a write torn by a crash. The "
+                f"run that was writing it is the newest folder in {path.parent} with no "
+                "complete.json, its tables on disk: count it as spent and amend the "
+                "pre-registration. Every count reads this whole log, the amendment's too, so "
+                "first, keeping a copy of the log, replace this line with one whole record ending "
+                'in a newline: {"prereg": <params.prereg from the manifest.json of that folder>}. '
+                "Do not cut the line: a version with no line left would get its budget back. If "
+                "no such folder is left, nothing here says whose line it was: write "
+                '{"prereg": {"id": "<id>", "version": <k>}} for the file that was being scored, '
+                "or, if that cannot be told, one such record for each file it could have been"
+            ) from exc
     return count
+
+
+def _torn_results(data_dir: Path, prereg: Prereg) -> list[str]:
+    """The folders of <data dir>/ews stamped with this prereg's id and version and with no
+    complete.json: scorings that died inside write_result. The manifest's stamp decides, since a
+    folder's name ends alike under another id (x-demo-v1, demo-v1). A folder with no manifest yet
+    holds no table either: write_result writes that first."""
+    own, found = (prereg.id, prereg.version), []
+    for manifest in sorted((Path(data_dir) / "ews").glob("*/manifest.json")):
+        stamp = io.read_json(manifest)["params"]["prereg"]
+        done = (manifest.parent / "complete.json").is_file()
+        if (stamp["id"], stamp["version"]) == own and not done:
+            found.append(manifest.parent.name)
+    return found
 
 
 def charge(data_dir: Path, prereg: Prereg, planned: int) -> int:
     """Refuse a scoring whose `planned` cells would take this version past its budget, so that
-    cell budget + 1 is never evaluated; returns the trials logged so far."""
+    cell budget + 1 is never evaluated, or that would score past a torn result of this version,
+    whose tables can be read with their cells unlogged; returns the trials logged so far. It runs
+    before write_result makes a folder, so a scoring never finds its own. A torn log speaks first:
+    its folder's trials are part charged, and deleting the folder is not its repair."""
     logged, budget = trials(data_dir, prereg), prereg.doc["trials"]["budget"]
+    torn = _torn_results(data_dir, prereg)
+    if torn:
+        raise PreregError(
+            f"{prereg.name}: {', '.join(torn)} in {Path(data_dir) / 'ews'} has no complete.json: "
+            "a torn result from a crash, or one being written right now. Its tables can be read "
+            "whether or not its trials were logged, so nothing scores past it: delete it or amend "
+            "the pre-registration. Deleting it gives back no trial already logged"
+        )
     if logged + planned > budget:
         raise PreregError(
             f"{prereg.name}: {logged} trials logged and {planned} more would exceed its budget of "

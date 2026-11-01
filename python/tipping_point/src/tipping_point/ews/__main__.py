@@ -12,7 +12,9 @@
                        they must come from that tag's commit, and scores each latents table it
                        pins, made from the pinned checkpoint by its own tag's commit; it is scored
                        whole by harness/ising_experiment.py, so here it is refused without
-                       --cells-only, which would spend its trial budget on a partial result
+                       --cells-only, which would spend its trial budget on a partial result. A
+                       result of the same version with no complete.json, torn by a crash, refuses
+                       the scoring until it is deleted or the file amended (prereg.charge)
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside
