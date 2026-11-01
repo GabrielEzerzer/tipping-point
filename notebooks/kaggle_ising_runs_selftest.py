@@ -106,8 +106,10 @@ def refused(k: ModuleType, plan: dict) -> str:
 
 
 def unwritten_reads(k: ModuleType, plan: dict) -> list[str]:
-    """Each file a run reads from an earlier run that the earlier run's command never writes.
-    load_plan takes any path inside the folder, so such a run first fails on Kaggle as it starts."""
+    """Each file a run reads from an earlier run that the earlier run's command never writes, and
+    each earlier run read with no file, which hands the CLI a folder where it wants a file. Only a
+    `jepa extract` reads a run that way: its simulator run is a folder. load_plan takes any path
+    inside the folder and no path at all, so such a run first fails on Kaggle as it starts."""
     writes = {"pilot": {"tau.json"}, "jepa train": {k.FINAL, k.TWIN}}
     written = {r["name"]: writes.get(r["command"], ()) for r in plan["runs"]}
     return [
@@ -117,6 +119,12 @@ def unwritten_reads(k: ModuleType, plan: dict) -> list[str]:
         if isinstance(arg, dict)
         and "file" in arg
         and arg["file"] not in written.get(arg.get("run"), ())
+    ] + [
+        f"{r['name']} reads {arg['run']} with no file"
+        for r in plan["runs"]
+        if r["command"] != "jepa extract"
+        for arg in r["args"]
+        if isinstance(arg, dict) and "run" in arg and "file" not in arg
     ]
 
 
@@ -135,6 +143,19 @@ def plans(k: ModuleType) -> None:
         wrong == ["qs-L64-s12 reads taus.json of grid-L64"],
         wrong,
     )
+    misread = job_a()
+    next(r for r in misread["runs"] if r["name"] == "qs-L64-s12")["args"][-1] = {"run": "grid-L64"}
+    wrong = unwritten_reads(k, misread)
+    check(
+        "... and a run read with no file is caught: --tau would get a folder",
+        wrong == ["qs-L64-s12 reads grid-L64 with no file"],
+        wrong,
+    )
+    extraction = copy.deepcopy(JEPA_PLAN)
+    extraction["runs"].insert(1, {"name": "sim", "command": "null", "args": []})
+    extraction["runs"][2]["args"][1] = {"run": "sim"}
+    wrong = refused(k, extraction) or unwritten_reads(k, extraction)
+    check("... unless a jepa extract reads it: its simulator run is a folder", not wrong, wrong)
     runs = {r.name: r for r in k.make_runs(job_a())}
     pilots = [r for r in runs.values() if r.command == "pilot"]
     stairs = [r for r in runs.values() if r.command == "staircase"]
@@ -1985,6 +2006,11 @@ def primary_28(k: ModuleType, root: Path) -> None:
             and large == made,
             run["stage"],
         )
+    # the stand-ins below are built from these ids, so only another plan's list catches a wrong one
+    pilot = json.loads((PLANS / "pilot-28.json").read_text(encoding="utf-8"))
+    timing = next(r["stage"] for r in pilot["runs"] if r["name"] == "timing")
+    apart = [name for name, run in runs.items() if sorted(run["stage"]) != sorted(timing)]
+    check("primary-28: each model's stage ids are pilot-28's timing stage ids", not apart, apart)
 
     # on the mounts Kaggle gives it: the record's and the draft's bytes are stand-ins here, the
     # runner checks the real ones there, so only their sha256 change
