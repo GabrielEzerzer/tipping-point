@@ -6,11 +6,12 @@
 Plan validation, the files a run reads from another and the CLI's verdict on every run's arguments;
 dependency resolution; the queues (longest first, dependencies, pinning, a failure, a failed
 extraction, the deadline, the output cap) with a stand-in for the simulator; the previous session's
-runs carried forward and reused or resumed; inputs found and checked against their sha256; the
-wheel and COMMIT.txt checks; run verification, judged by exit codes and files only; the rates STATUS
-gives, by checkpoint and L; the kernel folder against what `kaggle kernels push` checks; invalid
-plans refused at every door; pilot-28.json, primary-28.json and first-read-m1.json, their stage ids,
-inputs and kernel sources, on stand-in mounts.
+runs carried forward and reused or resumed; inputs found and checked against their sha256, and a
+final.pt against the complete.json beside it; the wheel and COMMIT.txt checks; run verification,
+judged by exit codes and files only; the rates STATUS gives, by checkpoint and L; the kernel folder
+against what `kaggle kernels push` checks; invalid plans refused at every door; pilot-28.json,
+primary-28.json and first-read-m1.json, their stage ids, inputs and kernel sources, on stand-in
+mounts.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
@@ -28,9 +29,11 @@ from __future__ import annotations
 
 import ast
 import collections
+import contextlib
 import copy
 import hashlib
 import inspect
+import io
 import itertools
 import json
 import os
@@ -106,8 +109,10 @@ def refused(k: ModuleType, plan: dict) -> str:
 
 
 def unwritten_reads(k: ModuleType, plan: dict) -> list[str]:
-    """Each file a run reads from an earlier run that the earlier run's command never writes.
-    load_plan takes any path inside the folder, so such a run first fails on Kaggle as it starts."""
+    """Each file a run reads from an earlier run that the earlier run's command never writes, and
+    each earlier run read with no file, which hands the CLI a folder where it wants a file. Only a
+    `jepa extract` reads a run that way: its simulator run is a folder. load_plan takes any path
+    inside the folder and no path at all, so such a run first fails on Kaggle as it starts."""
     writes = {"pilot": {"tau.json"}, "jepa train": {k.FINAL, k.TWIN}}
     written = {r["name"]: writes.get(r["command"], ()) for r in plan["runs"]}
     return [
@@ -117,6 +122,12 @@ def unwritten_reads(k: ModuleType, plan: dict) -> list[str]:
         if isinstance(arg, dict)
         and "file" in arg
         and arg["file"] not in written.get(arg.get("run"), ())
+    ] + [
+        f"{r['name']} reads {arg['run']} with no file"
+        for r in plan["runs"]
+        if r["command"] != "jepa extract"
+        for arg in r["args"]
+        if isinstance(arg, dict) and "run" in arg and "file" not in arg
     ]
 
 
@@ -135,6 +146,19 @@ def plans(k: ModuleType) -> None:
         wrong == ["qs-L64-s12 reads taus.json of grid-L64"],
         wrong,
     )
+    misread = job_a()
+    next(r for r in misread["runs"] if r["name"] == "qs-L64-s12")["args"][-1] = {"run": "grid-L64"}
+    wrong = unwritten_reads(k, misread)
+    check(
+        "... and a run read with no file is caught: --tau would get a folder",
+        wrong == ["qs-L64-s12 reads grid-L64 with no file"],
+        wrong,
+    )
+    extraction = copy.deepcopy(JEPA_PLAN)
+    extraction["runs"].insert(1, {"name": "sim", "command": "null", "args": []})
+    extraction["runs"][2]["args"][1] = {"run": "sim"}
+    wrong = refused(k, extraction) or unwritten_reads(k, extraction)
+    check("... unless a jepa extract reads it: its simulator run is a folder", not wrong, wrong)
     runs = {r.name: r for r in k.make_runs(job_a())}
     pilots = [r for r in runs.values() if r.command == "pilot"]
     stairs = [r for r in runs.values() if r.command == "staircase"]
@@ -708,6 +732,86 @@ def inputs(k: ModuleType, root: Path) -> None:
         check("a missing input is refused", "found none" in str(exc), exc)
 
 
+def input_checkpoints(k: ModuleType, root: Path) -> None:
+    """A final.pt input with no complete.json beside it is refused at session start, since jepa
+    extract refuses it in every run that reads it (#128). Its untrained twin needs none."""
+    ctx = ctx_at(k, root)
+    trained, untrained = b"trained", b"untrained"
+
+    def entry(run_id: str, file: str, payload: bytes) -> dict:
+        return {"run": run_id, "file": file, "sha256": hashlib.sha256(payload).hexdigest()}
+
+    def located(entries: dict, *slugs: str) -> tuple[dict, str]:
+        """What locate_inputs finds in these attached sources, and its refusal."""
+        plan = copy.deepcopy(BASE)
+        plan.update(kernel_sources=[f"o/{slug}" for slug in slugs], inputs=entries)
+        session = k.Session(ctx, plan, {}, COMMIT, TORCH, 2)
+        try:
+            session.locate_inputs()
+        except k.Refused as exc:
+            return session.inputs, str(exc)
+        return session.inputs, ""
+
+    def training(slug: str, done: bool) -> Path:
+        """A training's folder in a kernel output, complete.json beside final.pt once it is done."""
+        folder = ctx.input / slug / "out" / "jepa" / M1_RUN
+        (folder / "ckpt").mkdir(parents=True)
+        (folder / k.FINAL).write_bytes(trained)
+        (folder / k.TWIN).write_bytes(untrained)
+        if done:
+            (folder / "complete.json").write_text("{}", encoding="utf-8")
+        return folder
+
+    final = {"final": entry(M1_RUN, k.FINAL, trained)}
+    twin = {"twin": entry(M1_RUN, k.TWIN, untrained)}
+    bare = training("tp-bare", done=False)
+    _, why = located(final, "tp-bare")
+    check(
+        "a final.pt of the right sha256 with no complete.json beside it is refused before any run",
+        f"input final: {bare / k.FINAL} has no complete.json" in why,
+        why or "accepted",
+    )
+    found, why = located(twin, "tp-bare")
+    check("... and the untrained twin beside it needs none", found == {"twin": bare / k.TWIN}, why)
+    held = training("tp-held", done=True)
+    found, why = located({**final, **twin}, "tp-held")
+    check(
+        "a final.pt with its complete.json is found, and the twin with it",
+        found == {"final": held / k.FINAL, "twin": held / k.TWIN},
+        why or found,
+    )
+    found, why = located(final, "tp-bare", "tp-held")
+    check(
+        "... over a copy with none, in a source listed first",
+        found == {"final": held / k.FINAL},
+        why or found,
+    )
+
+    # out of a <run id>.zip, each its own run id since a session unpacks a run id once
+    zipped = {"20261101T051047Z-L16-m-bare": False, "20261101T051047Z-L16-m-held": True}
+    archives = ctx.input / "tp-zips"
+    archives.mkdir()
+    for run_id, done in zipped.items():
+        with zipfile.ZipFile(archives / f"{run_id}.zip", "w") as z:
+            z.writestr("manifest.json", "{}")
+            z.writestr(k.FINAL, trained)
+            if done:
+                z.writestr("complete.json", "{}")
+    no_file, with_file = zipped
+    _, why = located({"final": entry(no_file, k.FINAL, trained)}, "tp-zips")
+    check(
+        "a final.pt unpacked from a <run id>.zip with no complete.json is refused",
+        "has no complete.json" in why,
+        why or "accepted",
+    )
+    found, why = located({"final": entry(with_file, k.FINAL, trained)}, "tp-zips")
+    check(
+        "... and found when the zip holds one",
+        "final" in found and (found["final"].parent / "complete.json").is_file(),
+        why or found,
+    )
+
+
 def wheel(k: ModuleType, root: Path) -> None:
     ctx = ctx_at(k, root)
     folder = ctx.input / k.WHEEL_DATASET
@@ -936,7 +1040,17 @@ def dataset_run(folder: Path, seed: int, payload: bytes = b"rows") -> None:
     (folder / "complete.json").write_text(json.dumps(done), encoding="utf-8")
 
 
+def seed_spellings(seed: int) -> list[list]:
+    """Each way a plan can give `ising` this seed (#129): --seed N and --seed=N, any prefix of the
+    flag for either, since argparse takes one, and after another --seed, since it keeps the last.
+    `ising null` and `ising ramp` take even --s: no other flag of theirs starts with it."""
+    flags = ("--seed", "--see", "--se", "--s")
+    spelt = [form for f in flags for form in ([f, seed], [f, str(seed)], [f"{f}={seed}"])]
+    return [*spelt, ["--seed", 1, "--seed", seed], ["--seed=1", f"--see={seed}"]]
+
+
 def jepa_entries(k: ModuleType, root: Path) -> None:
+    from tipping_point.ising.__main__ import _parser as ising_parser
     from tipping_point.jepa import train
 
     names = (k.TWIN, k.FINAL, k.LEDGER)
@@ -970,12 +1084,43 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
     plan["runs"][2]["args"][1] = {"run": "sim"}
     reached = []
     for seed in CONFIRMATORY_SEEDS:
-        plan["runs"][1]["args"] = ["--L", 16, "--seed", seed]
-        if f"has seed {seed}:" not in refused(k, plan):
-            reached.append(seed)
-    check("refused: jepa extract on this plan's own run at any of seeds 6-10", not reached, reached)
+        for given in seed_spellings(seed):
+            plan["runs"][1]["args"] = ["--L", 16, *given]
+            if f"has seed {seed}:" not in refused(k, plan):
+                reached.append(given)
+    check(
+        "refused: jepa extract on this plan's own run at any of seeds 6-10, in any spelling",
+        not reached,
+        reached,
+    )
+
+    def cli_reads(given: list) -> int | None:
+        """The seed `ising null`'s own parser reads from these arguments; None if it refuses."""
+        argv = ["null", "--L", "16", "--epsilon-L", "2", "--pilot", "pilot.json", *map(str, given)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                return ising_parser().parse_args(argv).seed
+            except SystemExit:
+                return None
+
+    misread = [(g, cli_reads(g)) for g in seed_spellings(7) if cli_reads(g) != 7]
+    check("... each of those spellings being one the CLI itself reads so", not misread, misread)
     plan["runs"][1]["args"] = ["--L", 16]  # no --seed: the CLI's seed 1
     check("... and accepted at the CLI's default seed 1", not refused(k, plan), refused(k, plan))
+    plan["runs"][1]["args"] = ["--L", 16, "--seed", 7, "--seed", 1]
+    check("... and when seed 1 is given last", not refused(k, plan), refused(k, plan))
+    taken = []
+    for given in (["--sweeps", 7], ["--saves=7"], ["--", 7], ["-s", 7], ["", 7]):
+        plan["runs"][1]["args"] = ["--L", 16, *given]
+        if refused(k, plan):
+            taken.append(given)
+    check("... and a flag that only starts alike is not taken for --seed", not taken, taken)
+    unread = []
+    for given in (["--seed=x"], ["--seed="], ["--see"], ["--seed", {"run": "m3"}]):
+        plan["runs"][1]["args"] = ["--L", 16, *given]
+        if "no seed to read" not in refused(k, plan):
+            unread.append(given)
+    check("refused: jepa extract on this plan's own run with no seed to read", not unread, unread)
     for what, change, needle in (
         ("a stage entry that is no run id", {"stage": ["L16-qs-s11"]}, "stage: a list of run ids"),
         ("a staged run listed twice", {"stage": [STAIRS[0], STAIRS[0]]}, "listed twice"),
@@ -1985,6 +2130,11 @@ def primary_28(k: ModuleType, root: Path) -> None:
             and large == made,
             run["stage"],
         )
+    # the stand-ins below are built from these ids, so only another plan's list catches a wrong one
+    pilot = json.loads((PLANS / "pilot-28.json").read_text(encoding="utf-8"))
+    timing = next(r["stage"] for r in pilot["runs"] if r["name"] == "timing")
+    apart = [name for name, run in runs.items() if sorted(run["stage"]) != sorted(timing)]
+    check("primary-28: each model's stage ids are pilot-28's timing stage ids", not apart, apart)
 
     # on the mounts Kaggle gives it: the record's and the draft's bytes are stand-ins here, the
     # runner checks the real ones there, so only their sha256 change
@@ -2116,6 +2266,17 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
     dataset = ctx.input / "tipping-point-ising-l16-l32"
     for run_id in k.dataset_runs(session.runs):
         stand_in_run(dataset / run_id, run_id)
+    try:
+        session.locate_inputs()
+        why = ""
+    except k.Refused as exc:
+        why = str(exc)
+    check(
+        "first-read-m1: with no complete.json beside m1's final.pt, the session is refused",
+        "input m1_final:" in why and "has no complete.json" in why,
+        why or "accepted",
+    )
+    (held / "complete.json").write_text("{}", encoding="utf-8")  # m1's folder holds it (#128)
     session.locate_inputs()
     session.locate_datasets()
     check(
@@ -2176,6 +2337,7 @@ def run_all(k: ModuleType) -> int:
         resolution(k, root / "resolve")
         previous(k, root / "previous")
         inputs(k, root / "inputs")
+        input_checkpoints(k, root / "input-checkpoints")
         wheel(k, root / "wheel")
         verification(k, root / "verify")
         kernel_folder(k, root / "kernel")
