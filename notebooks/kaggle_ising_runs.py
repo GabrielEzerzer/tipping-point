@@ -469,7 +469,8 @@ def ref_problems(ref: dict, earlier: dict[str, dict], inputs: dict, sourced: boo
 
 def extract_seeds(args: list, earlier: dict[str, dict]) -> list[tuple[object, int | None]]:
     """The seeds of the simulator runs a `jepa extract` reads: a dataset run's from its run id's
-    -s<seed> tag, an earlier simulator run's from its --seed (the CLI's 1 when it gives none)."""
+    -s<seed> tag, an earlier simulator run's from its --seed as argparse reads it: --seed N or
+    --seed=N, any prefix of the flag, the last one given, the CLI's 1 when it gives none."""
     found: list[tuple[object, int | None]] = []
     for arg in args:
         if not isinstance(arg, dict):
@@ -478,9 +479,12 @@ def extract_seeds(args: list, earlier: dict[str, dict]) -> list[tuple[object, in
             tag = SEED_TAG.search(str(arg["dataset_run"]))
             found.append((arg["dataset_run"], int(tag[1]) if tag else None))
         elif earlier.get(str(arg.get("run")), {}).get("command") in ISING_COMMANDS:
-            given = earlier[arg["run"]]["args"]
-            seed = next((given[i + 1] for i in range(len(given) - 1) if given[i] == "--seed"), 1)
-            found.append((arg["run"], int(seed) if str(seed).isdigit() else None))
+            seed = "1"
+            for item, after in itertools.pairwise([*earlier[arg["run"]]["args"], None]):
+                flag, equals, value = str(item).partition("=")
+                if len(flag) > 2 and "--seed".startswith(flag):
+                    seed = value if equals else str(after)
+            found.append((arg["run"], int(seed) if seed.isdecimal() else None))
     return found
 
 

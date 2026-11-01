@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import ast
 import collections
+import contextlib
 import copy
 import hashlib
 import inspect
+import io
 import itertools
 import json
 import os
@@ -957,7 +959,17 @@ def dataset_run(folder: Path, seed: int, payload: bytes = b"rows") -> None:
     (folder / "complete.json").write_text(json.dumps(done), encoding="utf-8")
 
 
+def seed_spellings(seed: int) -> list[list]:
+    """Each way a plan can give `ising` this seed (#129): --seed N and --seed=N, any prefix of the
+    flag for either, since argparse takes one, and after another --seed, since it keeps the last.
+    `ising null` and `ising ramp` take even --s: no other flag of theirs starts with it."""
+    flags = ("--seed", "--see", "--se", "--s")
+    spelt = [form for f in flags for form in ([f, seed], [f, str(seed)], [f"{f}={seed}"])]
+    return [*spelt, ["--seed", 1, "--seed", seed], ["--seed=1", f"--see={seed}"]]
+
+
 def jepa_entries(k: ModuleType, root: Path) -> None:
+    from tipping_point.ising.__main__ import _parser as ising_parser
     from tipping_point.jepa import train
 
     names = (k.TWIN, k.FINAL, k.LEDGER)
@@ -991,12 +1003,43 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
     plan["runs"][2]["args"][1] = {"run": "sim"}
     reached = []
     for seed in CONFIRMATORY_SEEDS:
-        plan["runs"][1]["args"] = ["--L", 16, "--seed", seed]
-        if f"has seed {seed}:" not in refused(k, plan):
-            reached.append(seed)
-    check("refused: jepa extract on this plan's own run at any of seeds 6-10", not reached, reached)
+        for given in seed_spellings(seed):
+            plan["runs"][1]["args"] = ["--L", 16, *given]
+            if f"has seed {seed}:" not in refused(k, plan):
+                reached.append(given)
+    check(
+        "refused: jepa extract on this plan's own run at any of seeds 6-10, in any spelling",
+        not reached,
+        reached,
+    )
+
+    def cli_reads(given: list) -> int | None:
+        """The seed `ising null`'s own parser reads from these arguments; None if it refuses."""
+        argv = ["null", "--L", "16", "--epsilon-L", "2", "--pilot", "pilot.json", *map(str, given)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                return ising_parser().parse_args(argv).seed
+            except SystemExit:
+                return None
+
+    misread = [(g, cli_reads(g)) for g in seed_spellings(7) if cli_reads(g) != 7]
+    check("... each of those spellings being one the CLI itself reads so", not misread, misread)
     plan["runs"][1]["args"] = ["--L", 16]  # no --seed: the CLI's seed 1
     check("... and accepted at the CLI's default seed 1", not refused(k, plan), refused(k, plan))
+    plan["runs"][1]["args"] = ["--L", 16, "--seed", 7, "--seed", 1]
+    check("... and when seed 1 is given last", not refused(k, plan), refused(k, plan))
+    taken = []
+    for given in (["--sweeps", 7], ["--saves=7"], ["--", 7], ["-s", 7], ["", 7]):
+        plan["runs"][1]["args"] = ["--L", 16, *given]
+        if refused(k, plan):
+            taken.append(given)
+    check("... and a flag that only starts alike is not taken for --seed", not taken, taken)
+    unread = []
+    for given in (["--seed=x"], ["--seed="], ["--see"], ["--seed", {"run": "m3"}]):
+        plan["runs"][1]["args"] = ["--L", 16, *given]
+        if "no seed to read" not in refused(k, plan):
+            unread.append(given)
+    check("refused: jepa extract on this plan's own run with no seed to read", not unread, unread)
     for what, change, needle in (
         ("a stage entry that is no run id", {"stage": ["L16-qs-s11"]}, "stage: a list of run ids"),
         ("a staged run listed twice", {"stage": [STAIRS[0], STAIRS[0]]}, "listed twice"),
