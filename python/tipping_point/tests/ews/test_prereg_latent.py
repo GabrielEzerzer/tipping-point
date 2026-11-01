@@ -3,6 +3,8 @@ tests/fixtures is accepted with its placeholders, each named at the freeze, and 
 3,132; a file without the section is checked exactly as ising-ews-v1 was."""
 
 import copy
+import json
+import os
 import subprocess
 import tomllib
 from pathlib import Path
@@ -45,6 +47,7 @@ def _filled(doc: dict[str, Any]) -> dict[str, Any]:
         if row["role"] == "reference":
             row["tolerance"] = 0.1
     doc["fss"]["dynamic"]["statistics"][2]["extremum"] = "min"
+    doc["scoring"]["margins"]["tolerance"] = 0.01
     doc["disclosure"] |= {"exploratory": "seeds 1-5", "decisions": "those", "confirmatory": "6-10"}
     return doc
 
@@ -76,6 +79,8 @@ def test_the_draft_holds_the_decisions_on_the_research_pass(draft: dict[str, Any
     tests = draft["scoring"]["surrogates"]
     assert (tests["n"], tests["n_ablation"], tests["cells"]) == (999, 199, "headline")
     assert (dyn["expected_inverse_nu"], dyn["tolerance"]) == (1.0, 0.5)
+    assert (dyn["edge_margin"], dyn["edge_rule"]) == ("window", prereg.EDGE_RULE)
+    assert "or within one headline window of it" in dyn["edge_rule"]
     static = {row["quantity"]: row for row in draft["fss"]["static"]}
     assert (static["l2_var_pc_1"]["expected"], static["l2_var_pc_1"]["tolerance"]) == (1.75, 0.15)
     assert static["l2_var_pc_1"]["role"] == "pipeline-check"
@@ -132,6 +137,7 @@ def test_strict_names_every_placeholder(draft: dict[str, Any]) -> None:
         "fss.static[2].tolerance",
         "fss.static[4].tolerance",
         "fss.dynamic.statistics[2].extremum",
+        "scoring.margins.tolerance",
         "disclosure.exploratory",
     ):
         assert where in named, (where, named)
@@ -231,6 +237,18 @@ def test_strict_wants_a_checkpoint_pinned_by_its_sha256(draft: dict[str, Any], k
         (lambda d: d["scoring"]["margins"].update(sizes="max"), "margins.sizes"),
         (lambda d: d["scoring"]["margins"].update(tolerance=0.0), "margins.tolerance: positive"),
         (lambda d: d["scoring"]["margins"].pop("tolerance"), "margins.tolerance: missing"),
+        (lambda d: d["scoring"]["margins"].update(tolerance="a tenth"), "margins.tolerance: pos"),
+        (lambda d: d["scoring"]["margins"].update(tolerance=True), "margins.tolerance: expected"),
+        (lambda d: d["fss"]["dynamic"].pop("edge_margin"), "fss.dynamic.edge_margin: missing"),
+        (lambda d: d["fss"]["dynamic"].update(edge_margin="none"), "edge_margin: 'window'"),
+        (lambda d: d["fss"]["dynamic"].update(edge_margin=0.4), "edge_margin: expected str"),
+        (
+            lambda d: d["fss"]["dynamic"].update(
+                edge_rule="inconclusive when more than half of an L's replicas take their extremum "
+                "on an edge of the band"
+            ),
+            "fss.dynamic.edge_rule: ",
+        ),
         (lambda d: d["scoring"]["margins"].pop("sizes"), "margins.sizes: missing"),
         (lambda d: d["hypotheses"].pop(4), "learned-beyond-random"),
         (lambda d: d["hypotheses"][4].update(direction="match"), "learned-beyond-random"),
@@ -529,3 +547,58 @@ def test_the_probe_protocol_is_read_from_the_files_sentence(draft: dict[str, Any
     draft["probes"]["fit"] = "something else"
     with pytest.raises(prereg.PreregError, match=r"probes\.fit"):
         prereg.probe_protocol(draft)
+
+
+def test_the_margins_tolerance_is_a_placeholder_until_the_freeze(draft: dict[str, Any]) -> None:
+    """Typed as a static row's tolerance is: the draft holds the choice still open, a number or the
+    placeholder both load, and only the freeze's check refuses the placeholder. Words that are
+    neither are refused by any load."""
+    assert draft["scoring"]["margins"]["tolerance"] == "<set before freeze>"
+    assert prereg.problems(draft) == []
+    assert any(
+        p.startswith("scoring.margins.tolerance: placeholder")
+        for p in prereg.problems(draft, strict=True)
+    )
+    filled = _filled(draft)
+    assert prereg.problems(filled, strict=True) == []
+    filled["scoring"]["margins"]["tolerance"] = -0.01
+    assert any("margins.tolerance: positive" in p for p in prereg.problems(filled))
+
+
+def test_edge_margin_is_a_latent_files_alone(draft: dict[str, Any]) -> None:
+    """Required in a latent file, and refused in a file without [latents], whatever it says: v1's
+    frozen file has no such key and passes as it did, and its dynamic path can never read one."""
+    v1 = tomllib.loads(V1.read_text("utf-8"))
+    assert "edge_margin" not in v1["fss"]["dynamic"]
+    assert prereg.problems(v1, strict=True) == []
+    v1["fss"]["dynamic"]["edge_margin"] = "window"
+    found = prereg.problems(v1)
+    assert len(found) == 1 and found[0].startswith("fss.dynamic.edge_margin: "), found
+    filled = _filled(draft)
+    del filled["fss"]["dynamic"]["edge_margin"]
+    assert "fss.dynamic.edge_margin: missing" in prereg.problems(filled, strict=True)
+
+
+def test_trials_go_in_one_write_in_the_lines_log_trial_always_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bytes v1's scoring logs per trial, sorted keys and NaN as JSON has it, whatever came
+    before them in the file, under one clock and one sync: one write is what a crash cannot split
+    between trials the way one line at a time could."""
+    records = [
+        {"prereg": {"id": "x", "version": 1}, "cell": {"L": 16, "bandwidth": float("nan")}, "a": i}
+        for i in range(3)
+    ]
+    path = prereg.trials_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"{}\n")
+    synced: list[int] = []
+    real = os.fsync
+    monkeypatch.setattr(prereg.os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    monkeypatch.setattr(prereg.time, "time_ns", lambda: 7)
+    prereg.log_trials(tmp_path, records)
+    expected = [json.dumps({"logged_ns": 7, **r}, sort_keys=True) + "\n" for r in records]
+    assert path.read_bytes() == b"{}\n" + "".join(expected).encode()
+    assert len(synced) == 1
+    prereg.log_trial(tmp_path, records[0])
+    assert path.read_bytes().endswith(expected[0].encode()) and len(synced) == 2

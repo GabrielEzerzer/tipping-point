@@ -9,15 +9,18 @@ the planted data, two trainings (a primary and an ablation) instead of eleven, a
 seconds, 40 bootstrap draws, a few surrogates, one horizon, and alarm scores every 200 tau_c."""
 
 import hashlib
+import itertools
 import json
 import shutil
 import subprocess
 import sys
 import tomllib
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import ews_v1_golden
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -54,6 +57,10 @@ TRAINED_B, TWIN_B = "train-b-step0050000", "train-b-step0000000"
 TABLES = (TRAINED_A, TWIN_A, TRAINED_B, TWIN_B)
 SHA256 = {name: hashlib.sha256(name.encode()).hexdigest() for name in TABLES}
 CONTROL = {"observable": "pc_2", "indicator": "slope", "extremum": "min", "role": "test"}
+RISING = [  # no peak in the band: a spread that keeps growing towards its cold edge, or its hot one
+    {"observable": column, "indicator": "variance", "extremum": "max", "role": "test"}
+    for column in ("pc_3", "pc_4")
+]
 CONTROL_READ = [LATENT_FIXED_T * L / V1_SIZES[0] - V1_LAG for L in V1_SIZES]  # half a window late
 CONTROL_INVERSE_NU = 1 - np.polyfit(np.log(V1_SIZES), np.log(CONTROL_READ), 1)[0]
 
@@ -79,7 +86,7 @@ def _planted_doc(data: V1) -> dict[str, Any]:
     doc["hypotheses"][2]["direction"] = "less"
     doc["latents"] |= {
         "steps": STEPS,
-        "columns": ["surprise", "pc_1", "pc_2"],
+        "columns": ["surprise", "pc_1", "pc_2", "pc_3", "pc_4"],
         "checkpoints": [
             {
                 "role": role,
@@ -101,11 +108,12 @@ def _planted_doc(data: V1) -> dict[str, Any]:
             row["tolerance"] = 0.1
     dynamic = doc["fss"]["dynamic"]
     dynamic["statistics"][2]["extremum"] = "min"
-    dynamic["statistics"].append(CONTROL)
+    dynamic["statistics"] += [CONTROL, *RISING]
     doc["event"]["horizons"] = [0.0]
     doc["scoring"]["bootstrap"] = 40
     doc["scoring"]["surrogates"] |= {"n": 2, "n_ablation": 1}
     doc["scoring"]["alarms"]["every"] = 200.0
+    doc["scoring"]["margins"]["tolerance"] = 0.01
     doc["sensitivity"] |= {"window": [10.0, 20.0], "bandwidth": [5.0, 10.0]}
     doc["trials"]["budget"] = prereg.cells(doc)
     doc["probes"]["test"] = "the staircases of seeds 6-7 at each L: 20000 frames each, same rule"
@@ -464,6 +472,8 @@ def test_every_judged_pairs_peak_is_reported_and_only_the_statistics_judged(
         ("pc_1", "ac"),
         ("pc_1", "variance"),
         ("pc_2", "slope"),
+        ("pc_3", "variance"),
+        ("pc_4", "variance"),
         ("surprise", "slope"),
         ("surprise", "variance"),
     ]
@@ -477,6 +487,8 @@ def test_every_judged_pairs_peak_is_reported_and_only_the_statistics_judged(
         "inverse_nu_surprise_variance": "dynamic-test",
         "inverse_nu_surprise_slope": "dynamic-test",
         "inverse_nu_pc_2_slope": "dynamic-test",
+        "inverse_nu_pc_3_variance": "dynamic-test",
+        "inverse_nu_pc_4_variance": "dynamic-test",
     }
 
 
@@ -804,4 +816,129 @@ def test_what_the_planted_answers_assume_of_the_draft(doc: dict[str, Any]) -> No
     assert doc["fss"]["dynamic"]["search"] == list(V1_SEARCH)
     assert doc["fss"]["dynamic"]["expected_inverse_nu"] == 1.0
     assert doc["fss"]["dynamic"]["tolerance"] == 0.5
+    assert doc["fss"]["dynamic"]["edge_margin"] == "window"
     assert doc["sensitivity"]["headline"] == {"window": 20.0, "bandwidth": 10.0}
+
+
+# ---------------------------------------------------------------- a channel with no peak (#115)
+
+
+def _peaks_alone(
+    data: V1, doc: dict[str, Any], table: str, seed: int = 115
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[int, float]]:
+    """What the edge rule touches of a pass, and nothing else of it: the peaks rows of one table at
+    the headline cell, its dynamic rows, and per L what _edge_margin took as one window of ramp."""
+    chosen = ising.select(*ising.find_runs(data.root), doc["data"], TABLES)
+    pilot = ising.read_pilot(data.root, V1_PILOT_RUN)
+    head = doc["sensitivity"]["headline"]
+    rows, peaks, reach = [], {}, {}
+    for L, inputs in chosen.items():
+        tau_c = pilot.tau(L)
+        band = (
+            doc["event"]["segment"] + max(doc["event"]["horizons"]),
+            min(doc["event"]["horizons"]),
+        )
+        prep = ising.prepare(replace(inputs, latents=table), "matched", tau_c, 0.0, band)
+        window = prep.samples(head["window"], tau_c)
+        bandwidth = head["bandwidth"] * tau_c / prep.sweeps
+        found_rows, found = ising._peaks(doc, prep, L, window, bandwidth)
+        rows += found_rows
+        for key, groups in found.items():
+            peaks.setdefault(key, {})[L] = groups
+        reach[L] = ising._edge_margin(doc, prep, prep.ramps[0][0], window)
+    return rows, ising._dynamic(doc, peaks, np.random.default_rng(seed)), reach
+
+
+def _without_the_margin(doc: dict[str, Any]) -> dict[str, Any]:
+    dynamic = {k: v for k, v in doc["fss"]["dynamic"].items() if k != "edge_margin"}
+    return doc | {"fss": doc["fss"] | {"dynamic": dynamic}}
+
+
+def _edge_share(rows: list[dict[str, Any]], column: str) -> dict[int, float]:
+    return {r["L"]: r["edge_fraction"] for r in rows if r["observable"] == column}
+
+
+@pytest.mark.parametrize(("column", "towards"), [("pc_3", -1.0), ("pc_4", 1.0)])
+def test_the_planted_rising_channels_keep_rising_past_the_band(
+    data: V1, column: str, towards: float
+) -> None:
+    """From the written table: at every L the spread, pooled over the replicas in units of eps_L,
+    only grows towards the end it is planted at, through the whole search band, and the rolling
+    variance has no interior peak to find. A channel that turned inside the band would test
+    nothing here."""
+    for L in V1_SIZES:
+        run = ising.open_run(data.runs["ramp", L, V1_SEEDS[0]])
+        (s,) = ising.series(run, "matched", TRAINED_A)
+        eps = run.eps(s.temperature)
+        edges = np.arange(V1_SEARCH[1], V1_SEARCH[0] + 0.5, 1.0)
+        spread = np.array(
+            [
+                s.observable(column)[:, (eps >= lo) & (eps < hi)].std()
+                for lo, hi in itertools.pairwise(edges)
+            ]
+        )
+        steps = np.diff(np.log(spread)) * towards
+        assert (steps > 0.1).all() and (steps < 0.4).all(), (column, L, steps)
+
+
+@pytest.mark.parametrize(("column", "edge"), [("pc_3", V1_SEARCH[1]), ("pc_4", V1_SEARCH[0])])
+def test_a_channel_rising_through_the_band_comes_out_inconclusive(
+    data: V1, doc: dict[str, Any], scored: ising.Evaluation, column: str, edge: float
+) -> None:
+    """#115: a spread that keeps growing towards an edge has its maximum a few noisy samples inside
+    it, not on it, at one eps_L at every L. Read as v1 reads it, that is located, and it passes with
+    1/nu near 1, the fixed-eps_L answer, on a channel with no peak at all: that is the bug this
+    guards, shown here on the twin's table, where no replica's noise happens to trip the edge rule.
+    Within one headline window of the edge it is not located, more than half of an L's replicas are
+    not, and the same statistic on the same table comes out inconclusive, in the full scoring too,
+    and for the trained table. The planted channel is the same in both."""
+    quantity = f"inverse_nu_{column}_variance"
+    rows, dynamic, _ = _peaks_alone(data, doc, TWIN_A)
+    (fixed,) = [r for r in dynamic if r["quantity"] == quantity]
+    assert fixed["verdict"] == fss.INCONCLUSIVE, fixed
+    assert max(_edge_share(rows, column).values()) > 0.5, rows
+    assert _dynamic(scored, TWIN_A, quantity)["verdict"] == fss.INCONCLUSIVE
+    assert _dynamic(scored, TRAINED_A, quantity)["verdict"] == fss.INCONCLUSIVE
+    old_rows, old_dynamic, reach = _peaks_alone(data, _without_the_margin(doc), TWIN_A)
+    assert set(reach.values()) == {0.0}
+    (bug,) = [r for r in old_dynamic if r["quantity"] == quantity]
+    assert bug["verdict"] == fss.PASS and abs(bug["estimate"] - 1.0) < 0.1, bug
+    assert max(_edge_share(old_rows, column).values()) <= 0.5, old_rows
+    for row in old_rows:
+        if row["observable"] == column:  # every L's read just inside that edge
+            assert abs(row["peak_eps_median"] - edge) < 0.4, row
+
+
+def test_a_genuine_peak_near_the_middle_of_the_band_still_passes(
+    data: V1, doc: dict[str, Any]
+) -> None:
+    """The margin takes nothing from a real peak: pc_1's variance peak and surprise's steepest
+    change sit at 0.6 eps_L as read, every replica located, the same positions with the margin as
+    without it, and both pass with 1/nu near 1. A pc_2 anchored to one T keeps failing: it walks up
+    the band with L, still clear of the hot edge, so the margin cannot have made it inconclusive."""
+    rows, dynamic, _ = _peaks_alone(data, doc, TRAINED_A)
+    old_rows, _, _ = _peaks_alone(data, _without_the_margin(doc), TRAINED_A)
+    judged = {r["quantity"]: r for r in dynamic}
+    for quantity in ("inverse_nu_pc_1_variance", "inverse_nu_surprise_slope"):
+        assert judged[quantity]["verdict"] == fss.PASS, judged[quantity]
+        assert abs(judged[quantity]["estimate"] - 1.0) < 0.2, judged[quantity]
+    assert judged["inverse_nu_pc_2_slope"]["verdict"] == fss.FAIL
+    for row, old in zip(rows, old_rows, strict=True):
+        pair = (row["observable"], row["indicator"])
+        if pair in (("pc_1", "variance"), ("surprise", "slope"), ("pc_2", "slope")):
+            assert row["edge_fraction"] == old["edge_fraction"] == 0.0, row
+            assert row["peak_eps_median"] == old["peak_eps_median"], row
+
+
+def test_one_headline_window_of_ramp_is_0p4_eps_L_at_every_L(data: V1, doc: dict[str, Any]) -> None:
+    """20 tau_c at 50 tau_c per unit of eps_L, whatever L: the number harness/explore/peaks.py read.
+    Catches sweeps per unit of T taken for sweeps per unit of eps_L, off by L / Tc. ising-ews-v1's
+    file has no edge_margin, so the same function gives it exactly 0, and fss.peak_position its old
+    path."""
+    _, _, reach = _peaks_alone(data, doc, TRAINED_A)
+    assert set(reach) == set(V1_SIZES)
+    for L, value in reach.items():
+        assert value == pytest.approx(0.4, rel=0.05), L
+    v1 = tomllib.loads(ews_v1_golden.V1_TOML.read_text("utf-8"))
+    assert "edge_margin" not in v1["fss"]["dynamic"]
+    assert ising._edge_margin(v1, None, None, 90) == 0.0  # type: ignore[arg-type]

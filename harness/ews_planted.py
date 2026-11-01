@@ -592,7 +592,14 @@ def restamp_tau(run_dir: Path, sha256: str | None) -> None:
 #   pc_2      the same logistic in T, whose steepest change is at one temperature, eps_L =
 #             LATENT_FIXED_T at L = 16, twice that at 32 and four times at 64: what is merely
 #             monotone in T, the dynamic test's negative control, 1/nu near 0
-#   pc_3..8   noise
+#   pc_3, 4   noise whose variance keeps growing, by a factor of e per 2 eps_L, towards the cold
+#             end of every ramp (pc_3) or its hot end (pc_4), through the whole search band and past
+#             it: no peak to locate, but a rolling variance whose maximum sits a few noisy samples
+#             inside the band's edge, at the same eps_L at every L (#115). As in the exploratory
+#             pass that found it, about one replica in eight lands on the edge itself and three
+#             in four within one headline window of it. The v1 dataset's edge mode cannot show
+#             this: its replicas land on the edge's last sample itself
+#   pc_5..8   noise
 # An `untrained` table (a twin) has no surprise or pc_2 to speak of: both are flat, surprise at the
 # 4/3 a twin's error sits at. Its pc_1 is the same, as locality says it is.
 
@@ -609,6 +616,12 @@ def latent_surprise(eps_L: np.ndarray | float) -> np.ndarray:
     low, high = LATENT_RANGE
     u = (np.asarray(eps_L, dtype=np.float64) - LATENT_EPS) / LATENT_WIDTH
     return low + (high - low) / (1.0 + np.exp(-u))
+
+
+def latent_rising(towards: np.ndarray | float) -> np.ndarray:
+    """The planted spread of pc_3 and pc_4, whose variance grows by a factor of e per 2 units of
+    `towards`, the eps_L a ramp has left to run towards the end it is planted at."""
+    return LATENT_NOISE * np.exp(0.25 * np.asarray(towards, dtype=np.float64))
 
 
 def latent_fixed_T(temperature: np.ndarray | float) -> np.ndarray:
@@ -681,9 +694,12 @@ def write_latents(
         table = table.filter(kept(kind, table, rule))
         T = table["temperature"].to_numpy()
         values = LATENT_NOISE * rng.standard_normal((len(T), len(readouts)))
-        values[:, 0] += TWIN_SURPRISE if untrained else latent_surprise(L * (T - TC) / TC)
+        eps = L * (T - TC) / TC
+        values[:, 0] += TWIN_SURPRISE if untrained else latent_surprise(eps)
         values[:, 1] += np.abs(table["magnetisation"].to_numpy()) / L**2
         values[:, 2] += 0.0 if untrained else latent_fixed_T(T)
+        values[:, 3] *= latent_rising(-eps) / LATENT_NOISE
+        values[:, 4] *= latent_rising(eps) / LATENT_NOISE
         columns = [table[key] for key in KEY] + [
             pa.array(values[:, k].astype(np.float32)) for k in range(len(readouts))
         ]
@@ -860,6 +876,7 @@ def latent_doc(data: V1, trainings: Sequence[Training], result: str) -> dict[str
     doc["scoring"]["bootstrap"] = 40
     doc["scoring"]["surrogates"] |= {"n": 2, "n_ablation": 1}
     doc["scoring"]["alarms"]["every"] = 200.0
+    doc["scoring"]["margins"]["tolerance"] = 0.01
     doc["sensitivity"] |= {"window": [20.0], "bandwidth": [10.0]}
     doc["trials"]["budget"] = prereg.cells(doc)
     seeds = f"{V1_SEEDS[0]}-{V1_SEEDS[-1]}"

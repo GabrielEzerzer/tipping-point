@@ -378,13 +378,22 @@ def run(
     csv_tables(run_dir)
     table = _table(run_dir, "margins")  # none when no role has two model seeds
     judged = [r for r in pq.read_table(table).to_pylist() if r["judged"]] if table.is_file() else []
-    failed = [r["checkpoint"] for r in evaluation.tables["fss"]
-              if r["role"] == "pipeline-check" and r["verdict"] != "pass"]  # fmt: skip
+    failed = pipeline_faults(evaluation.tables["fss"])
     if failed:
         print(
             f"pipeline check not passed, read nothing else until it is: {failed}", file=sys.stderr
         )
     return run_dir, judged, logged + planned
+
+
+def pipeline_faults(rows: Sequence[Row]) -> list[str]:
+    """Which pipeline checks did not pass, static (role pipeline-check) or dynamic
+    (dynamic-pipeline-check): hypothesis 1 says no other latent row is read until they do."""
+    return [
+        f"{r['checkpoint']}: {r['quantity']} {r['verdict']}"
+        for r in rows
+        if r["role"].endswith("pipeline-check") and r["verdict"] != "pass"
+    ]
 
 
 def _table(run_dir: Path, name: str) -> Path:

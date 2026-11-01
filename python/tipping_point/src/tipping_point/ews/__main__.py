@@ -165,10 +165,11 @@ def score(
     allow_stale: bool = False,
     more: Callable[[ising.Evaluation], dict[str, list[dict[str, Any]]]] | None = None,
 ) -> tuple[Path, ising.Evaluation, int]:
-    """One scoring run: refused past the trial budget, evaluated, written and logged. `more` adds
-    tables from the evaluation (harness/ising_experiment.py: a latent file's probes and margins). A
-    ref without a commit, a scoring of planted data only that runner allows, asks no commit of the
-    runs. Returns the result's folder, the evaluation and the trials logged before it."""
+    """One scoring run: refused past the trial budget, evaluated, then written and logged as one
+    (prereg.write_result, whose last step is complete.json). `more` adds tables from the evaluation
+    (harness/ising_experiment.py: a latent file's probes and margins). A ref without a commit, a
+    scoring of planted data only that runner allows, asks no commit of the runs. Returns the
+    result's folder, the evaluation and the trials logged before it."""
     planned = prereg.cells(pre.doc)
     logged = prereg.charge(data_dir, pre, planned)
     if pre.doc["data"]["domain"] != "ising":
@@ -212,20 +213,18 @@ def score(
         for r in evaluation.inputs
     ]
     tables = evaluation.tables | (more(evaluation) if more else {})
-    run_dir = prereg.write_result(data_dir, pre, ref, tables, inputs, params)
-    for row in evaluation.tables["auc"]:
-        prereg.log_trial(
-            data_dir,
-            {
-                "prereg": stamp,
-                "result": run_dir.name,
-                "cell": {key: row[key] for key in CELL},
-                "auc": row["auc"],
-                "auc_ci": [row["auc_lo"], row["auc_hi"]],
-                "n_pos": row["n_pos"],
-                "n_neg": row["n_neg"],
-            },
-        )
+    trials = [
+        {
+            "prereg": stamp,
+            "cell": {key: row[key] for key in CELL},
+            "auc": row["auc"],
+            "auc_ci": [row["auc_lo"], row["auc_hi"]],
+            "n_pos": row["n_pos"],
+            "n_neg": row["n_neg"],
+        }
+        for row in evaluation.tables["auc"]
+    ]
+    run_dir = prereg.write_result(data_dir, pre, ref, tables, inputs, params, trials)
     return run_dir, evaluation, logged
 
 

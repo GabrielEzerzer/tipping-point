@@ -6,9 +6,10 @@ freeze    refuse a file with placeholders, or one that is untracked or differs f
 frozen    the file's sha256 must equal that of the blob at its tag; scoring refuses otherwise
 stamp     what a result's manifest records: the prereg's id, version, sha256, tag and commit
 write_result  <data dir>/ews/<run_id>/ in #22's layout: manifest.json (stamped), one Parquet
-          file per table, complete.json last
-log_trial append one evaluation to <data dir>/ews/trials.jsonl; every evaluation counts as a
-          trial, sensitivity cells included, and the count goes in the paper
+          file per table, its trials logged, complete.json last: a crash leaves a folder with no
+          complete.json, or one whose every trial is logged
+log_trials append evaluations to <data dir>/ews/trials.jsonl in one write; every evaluation counts
+          as a trial, sensitivity cells included, and the count goes in the paper
 
 An amendment is a new file, <id>-v<k+1>.toml, whose `supersedes` names the version it replaces
 and whose `reason` says why; results scored under an earlier version stay bound to it.
@@ -31,6 +32,7 @@ import re
 import subprocess
 import time
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -78,6 +80,11 @@ SELECTIONS = {
     "ema-only": _TC_PLUS | {"rule": "tc-only"},
     "held-out": _TC_PLUS | {"rule": "tc-only"},
 }
+# fss.dynamic.edge_rule, word for word: what ising._dynamic does with what edge_margin leaves
+EDGE_RULE = (
+    "inconclusive when more than half of an L's replicas take their extremum on an edge of the "
+    "band or within one headline window of it"
+)
 LEARNED = "learned-beyond-random"  # the hypothesis whose direction is the margins' predicted sign
 TREND = "surprise-trend"  # the hypothesis that states the level's direction in words
 # "TBD", "<words>" as in TEMPLATE, or a choice still open, "<min|max, set before the freeze>"
@@ -219,7 +226,7 @@ _LATENT_SCHEMA: dict[str, Any] = _SCHEMA | {
             "seeds": str,
             "sizes": str,
             "sign_test": bool,
-            "tolerance": _NUMBER,
+            "tolerance": (*_NUMBER, str),  # a string only as a placeholder: _margin_problems
             "ablations": str,
         },
     },
@@ -232,6 +239,7 @@ _LATENT_SCHEMA: dict[str, Any] = _SCHEMA | {
             "expected_inverse_nu": _NUMBER,
             "tolerance": _NUMBER,
             "edge_rule": str,
+            "edge_margin": str,
             "min_draw_share": _NUMBER,
         },
     },
@@ -358,8 +366,9 @@ def _margin_problems(doc: dict[str, Any]) -> list[str]:
         found.append("scoring.margins.sizes: 'mean', each checkpoint's judged value over L")
     if margins["ablations"] != "descriptive":
         found.append("scoring.margins.ablations: 'descriptive', a margin with no verdict")
-    if margins["tolerance"] <= 0:
-        found.append("scoring.margins.tolerance: positive, in the margin's units")
+    tolerance = margins["tolerance"]
+    if not _placeholder(tolerance) and (isinstance(tolerance, str) or tolerance <= 0):
+        found.append("scoring.margins.tolerance: positive, a number in the margin's units")
     named = {h["name"]: h["direction"] for h in doc["hypotheses"]}
     if named.get(LEARNED) not in ("greater", "less"):
         found.append(f"hypotheses: {LEARNED} with 'greater' or 'less', the margins' predicted sign")
@@ -456,6 +465,10 @@ def _latent_problems(doc: dict[str, Any]) -> list[str]:
         found.append("baseline.prereg: the <id>-v<k> whose runs this file reads")
     if not dyn["statistics"]:
         found.append("fss.dynamic.statistics: at least one")
+    if dyn["edge_margin"] != "window":
+        found.append("fss.dynamic.edge_margin: 'window', one headline window of ramp (#115)")
+    if dyn["edge_rule"] != EDGE_RULE:
+        found.append(f"fss.dynamic.edge_rule: {EDGE_RULE!r}, the rule the scorer carries out")
     for i, entry in enumerate(dyn["statistics"]):
         where = f"fss.dynamic.statistics[{i}]"
         if entry["observable"] not in columns:
@@ -562,6 +575,11 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
             found.append("fss.dynamic.observable: must be a scored observable")
         if not set(doc["scoring"]["alarms"]["indicators"]) <= set(ind["names"]):
             found.append("scoring.alarms.indicators: must be scored indicators")
+        if "edge_margin" in dyn:
+            found.append(
+                "fss.dynamic.edge_margin: a file with no [latents] reads the band's first and last "
+                "samples alone, as ising-ews-v1 froze it"
+            )
     if dyn["cadence"] not in ind["cadences"]:
         found.append("fss.dynamic.cadence: one of indicators.cadences, the verdict's cadence")
     if not 0 < dyn["min_draw_share"] <= 1:
@@ -729,15 +747,21 @@ def trials_path(data_dir: Path) -> Path:
     return Path(data_dir) / "ews" / "trials.jsonl"
 
 
-def log_trial(data_dir: Path, record: dict[str, Any]) -> None:
-    """Append one evaluation, flushed and synced before returning; the log only ever grows."""
+def log_trials(data_dir: Path, records: Sequence[dict[str, Any]]) -> None:
+    """Append evaluations, one line each, in one write, flushed and synced before returning; the log
+    only ever grows."""
     path = trials_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps({"logged_ns": time.time_ns(), **record}, sort_keys=True) + "\n"
-    with open(path, "a", encoding="utf-8", newline="\n") as f:
-        f.write(line)
+    now = time.time_ns()
+    lines = [json.dumps({"logged_ns": now, **record}, sort_keys=True) + "\n" for record in records]
+    with open(path, "ab") as f:
+        f.write("".join(lines).encode("utf-8"))
         f.flush()
         os.fsync(f.fileno())
+
+
+def log_trial(data_dir: Path, record: dict[str, Any]) -> None:
+    log_trials(data_dir, [record])
 
 
 def trials(data_dir: Path, prereg: Prereg) -> int:
@@ -790,9 +814,12 @@ def write_result(
     tables: dict[str, list[dict[str, Any]]],
     inputs: list[dict[str, Any]],
     params: dict[str, Any],
+    records: Sequence[dict[str, Any]] = (),
 ) -> Path:
     """A scoring run's output in the shared layout: manifest.json first, each non-empty table as
-    <table>/00000000000000000000.parquet keyed by `cell`, and complete.json once all are synced."""
+    <table>/00000000000000000000.parquet keyed by `cell`, the trial `records` it evaluated logged
+    in one write, each naming this result, and complete.json once all are synced. A crash so leaves
+    a folder with no complete.json, its trials logged or not, or a complete one with all of them."""
     run_id = engine.run_id(prereg.name)
     run_dir = Path(data_dir) / "ews" / run_id
     run_dir.mkdir(parents=True)
@@ -815,6 +842,8 @@ def write_result(
         path.parent.mkdir()
         io.write_file(path, lambda f, table=table: pq.write_table(table, f, compression="zstd"))
         files[path.relative_to(run_dir).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if records:
+        log_trials(data_dir, [trial | {"result": run_id} for trial in records])
     record = {
         "ended_ns": time.time_ns(),
         "last_key": max((len(rows) - 1 for rows in filled.values()), default=-1),

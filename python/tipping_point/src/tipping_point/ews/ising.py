@@ -1106,8 +1106,9 @@ def _peaks(
     """Where each slow-ramp replica's indicator peaks (#98), for each one _peak_statistics names:
     the headline pipeline's detrend, window and lag along the whole ramp, and the eps_L of its
     extremum in the indicator's expected direction inside fss.dynamic.search (NaN on the band's
-    edge: not located). A descriptive row per indicator; the per-seed positions go to the dynamic
-    test. Only a position is read, so a slope's scale, per sample here, plays no part."""
+    edge, or as near it as _edge_margin says: not located). A descriptive row per indicator; the
+    per-seed positions go to the dynamic test. Only a position is read, so a slope's scale, per
+    sample here, plays no part."""
     dyn, ind = doc["fss"]["dynamic"], doc["indicators"]
     band = (float(dyn["search"][0]), float(dyn["search"][1]))
     rows, found = [], {}
@@ -1117,7 +1118,8 @@ def _peaks(
         for run, s in prep.ramps:
             ramp_segment(s, run, *band)  # refuses a ramp that does not cross the whole band
             values = pipe.rolling(s.observable(observable))
-            groups.append(fss.peak_position(values, run.eps(s.temperature), band, direction))
+            eps, margin = run.eps(s.temperature), _edge_margin(doc, prep, run, window)
+            groups.append(fss.peak_position(values, eps, band, direction, margin))
         peak = np.concatenate(groups)
         located = peak[np.isfinite(peak)]
         q1, median, q3 = np.quantile(located, [0.25, 0.5, 0.75]) if len(located) else [np.nan] * 3
@@ -1137,6 +1139,15 @@ def _peaks(
             }
         )
     return rows, found
+
+
+def _edge_margin(doc: dict[str, Any], prep: Prepared, run: Run, window: int) -> float:
+    """How far inside the search band, in eps_L, a peak still counts as not located: one headline
+    window of this ramp, sweeps of the window over sweeps per unit of eps_L, in a file that says so
+    (fss.dynamic.edge_margin, #115), and nothing in ising-ews-v1, which has no such key."""
+    if "edge_margin" not in doc["fss"]["dynamic"]:
+        return 0.0
+    return window * prep.sweeps / (float(run.schedule["params"]["rate"]) * run.Tc / run.L)
 
 
 def _peak_statistics(doc: dict[str, Any]) -> list[tuple[str, str, str, str]]:
@@ -1191,11 +1202,11 @@ def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> lis
     """1/nu from the median peak eps_L over L, per fss.dynamic indicator and cadence. Only
     fss.dynamic.cadence carries the pre-registered verdict (role dynamic); another cadence's row
     is a robustness check (role dynamic-robustness, no verdict). A fss.dynamic.statistics entry
-    is judged like an indicator, its row's role dynamic-<its role>. A peak on the search band's edge
-    was not located and is left out. The verdict, in this order: inconclusive when 1/nu has no
-    value, when more than half of an L's replicas were not located, or when fewer than
-    fss.dynamic.min_draw_share of the bootstrap draws give 1/nu a value (the CI would rest on a
-    sign-selected subset); otherwise fss.match and fss.excludes, combined."""
+    is judged like an indicator, its row's role dynamic-<its role>. A peak on the search band's
+    edge, or inside _edge_margin, was not located and is left out. The verdict, in this order:
+    inconclusive when 1/nu has no value, when more than half of an L's replicas were not located,
+    or when fewer than fss.dynamic.min_draw_share of the bootstrap draws give 1/nu a value (the CI
+    would rest on a sign-selected subset); otherwise fss.match and fss.excludes, combined."""
     dyn, sc = doc["fss"]["dynamic"], doc["scoring"]
     expected, tolerance = float(dyn["expected_inverse_nu"]), float(dyn["tolerance"])
     roles = {_statistic_key(entry): entry["role"] for entry in dyn.get("statistics", [])}

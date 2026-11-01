@@ -231,8 +231,10 @@ def hierarchical_bootstrap(
 
 
 def percentile_interval(values: np.ndarray, level: float = 0.95) -> tuple[float, float]:
-    """The central `level` interval of bootstrap values (NaN draws are ignored)."""
-    lo, hi = np.nanquantile(
-        np.asarray(values, dtype=np.float64), [(1 - level) / 2, (1 + level) / 2]
-    )
+    """The central `level` interval of bootstrap values (NaN draws are ignored; with no other, NaN:
+    a channel whose peak is located in no draw has no interval)."""
+    values = np.asarray(values, dtype=np.float64)
+    if np.isnan(values).all():
+        return float("nan"), float("nan")
+    lo, hi = np.nanquantile(values, [(1 - level) / 2, (1 + level) / 2])
     return float(lo), float(hi)

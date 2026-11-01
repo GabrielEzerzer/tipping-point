@@ -26,12 +26,14 @@ from tipping_point.ising import io
 
 TABLES = ("auc", "surrogates", "alarms", "peaks", "fss", "margins", "probes", "curves", "baseline")
 FIGURES = ("scaling.png", "peaks.png", "curves.png", "collapse.png", "probes.png")
-TRAININGS = planted.experiment_trainings()
+TRAININGS = planted.experiment_trainings(ablations=2)
 STEPS = planted.EXPERIMENT_STEPS
 TRAINED = [ising.latents_name(t, STEPS) for _, _, t in TRAININGS]
 TWINS = [ising.latents_name(t, 0) for _, _, t in TRAININGS]
 CHECKPOINTS = {*TRAINED, *TWINS}
 PRIMARY = [ising.latents_name(t, STEPS) for role, _, t in TRAININGS if role == "primary"]
+ABLATIONS = [ising.latents_name(t, STEPS) for role, _, t in TRAININGS if role != "primary"]
+ABLATION_TWINS = [ising.latents_name(t, 0) for role, _, t in TRAININGS if role != "primary"]
 
 
 def _git(root: Path, *args: str) -> str:
@@ -169,8 +171,9 @@ def test_every_table_is_written_each_row_with_its_checkpoint(scored: Path) -> No
     assert {r["checkpoint"] for r in _rows(scored, "curves")} == {"", *CHECKPOINTS}
     assert {r["checkpoint"] for r in _rows(scored, "baseline")} == {""}
     for row in _rows(scored, "margins"):
-        assert set(row["checkpoint"].split(";")) == set(PRIMARY), row["quantity"]
-        assert len(row["margins"]) == len(row["model_seeds"]) == len(PRIMARY)
+        names = PRIMARY if row["role"] == "primary" else ABLATIONS
+        assert row["checkpoint"].split(";") == names, row["quantity"]
+        assert len(row["margins"]) == len(row["model_seeds"]) == len(names)
     for name in TABLES:
         lines = (scored / "csv" / f"{name}.csv").read_text("utf-8").splitlines()
         assert len(lines) == 1 + len(_rows(scored, name)), name
@@ -325,6 +328,73 @@ def test_a_scoring_that_evaluates_other_cells_than_counted_is_refused(
     assert not (tmp_path / "ews").exists()
 
 
+# ---------------------------------------------------------------- 3b: a crash and the counter
+
+
+KILLED = """
+import os, sys
+from pathlib import Path
+from tipping_point.ews import ising, prereg
+from tipping_point.ews.__main__ import CELL, score
+from tipping_point.ising import io
+
+draft, root, where = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+pre = prereg.load(draft)
+row = dict.fromkeys(CELL, "x") | {"auc": 0.5, "auc_lo": 0.0, "auc_hi": 1.0, "n_pos": 1, "n_neg": 1}
+pilot = ising.Pilot(root / "pilot" / "pilot.json", "0" * 64, "k", None, {16: 1.0}, {})
+evaluation = ising.Evaluation({"auc": [row] * prereg.cells(pre.doc)}, [], pilot, {})
+ising.evaluate = lambda *args, **kwargs: evaluation
+write_json = io.write_json
+
+
+def before_complete(path, record, replace=False):
+    if path.name == "complete.json":
+        os._exit(3)
+    write_json(path, record, replace)
+
+
+if where == "before the trials":
+    prereg.log_trials = lambda *args: os._exit(3)
+elif where == "after the trials":
+    io.write_json = before_complete
+score(pre, prereg.Frozen("", ""), root, 1)
+"""
+
+
+@pytest.mark.parametrize(
+    ("where", "logged"),
+    [("before the trials", 0), ("after the trials", 3132), ("nowhere", 3132)],
+)
+def test_a_killed_scoring_leaves_no_complete_result_short_of_its_trials(
+    tmp_path: Path, where: str, logged: int
+) -> None:
+    """The whole last step of a real scoring of the draft's 3,132 cells, in a process that dies by
+    os._exit, with nothing flushed for it, at either side of the trial log. Killed, it leaves its
+    tables and no complete.json, its trials all logged or none: never a complete-looking result with
+    1,200 of them charged. The log it leaves decides what comes next: none, and the file may be
+    scored again; all, and its budget is spent, the tables on disk, until it is amended. Unkilled,
+    complete.json comes last, over all of them."""
+    done = subprocess.run(
+        [sys.executable, "-c", KILLED, str(planted.DRAFT), str(tmp_path), where],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == (0 if where == "nowhere" else 3), done.stderr
+    (run_dir,) = (tmp_path / "ews").glob("*-ising-latent-v1")
+    assert (run_dir / "auc" / f"{0:020d}.parquet").is_file()
+    assert (run_dir / "complete.json").is_file() == (where == "nowhere")
+    draft = prereg.load(planted.DRAFT)
+    assert prereg.trials(tmp_path, draft) == logged
+    if logged:
+        lines = prereg.trials_path(tmp_path).read_text("utf-8").splitlines()
+        assert {json.loads(line)["result"] for line in lines} == {run_dir.name}
+        with pytest.raises(prereg.PreregError, match="exceed its budget"):
+            prereg.charge(tmp_path, draft, 1)
+    else:
+        assert prereg.charge(tmp_path, draft, 3132) == 0
+
+
 # ---------------------------------------------------------------- 4: the margins
 
 
@@ -347,10 +417,9 @@ def test_a_planted_positive_margin_passes(scored: Path) -> None:
 
 def test_every_other_margin_is_descriptive(scored: Path) -> None:
     """AUC is parity and the chi alignment descriptive, each L's a reading of the judged value, and
-    each statistic's rule a reading of the judged row: none has a verdict, however large its margin.
-    An ablation with a single seed has nothing to bootstrap over, and no rows."""
-    rows = _rows(scored, "margins")
-    assert {r["role"] for r in rows} == {"primary"}
+    each statistic's rule a reading of the judged row: none has a verdict, however large its
+    margin."""
+    rows = [r for r in _rows(scored, "margins") if r["role"] == "primary"]
     others = [r for r in rows if not r["judged"]]
     assert all(r["verdict"] == "" for r in others)
     names = {r["quantity"] for r in others}
@@ -371,6 +440,30 @@ def test_every_other_margin_is_descriptive(scored: Path) -> None:
     assert (
         level["margin"] < -0.1
     )  # surprise falls as planted, a twin's stays flat: no verdict either
+
+
+def test_an_ablations_margins_report_their_ci_with_no_verdict_end_to_end(scored: Path) -> None:
+    """Two held-out seeds through the whole run: every quantity the primaries have and each surprise
+    statistic, reading its own checkpoints in order, a planted margin large and its CI nested in the
+    data draws, and nothing judged, for its role has no verdict. Its tc-only tables hold one
+    plateau, so the chi alignment has no value, said as NaN."""
+    rows = [r for r in _rows(scored, "margins") if r["role"] == "held-out"]
+    assert rows and not any(r["judged"] or r["verdict"] for r in rows)
+    primary = {(r["quantity"], r["scope"]) for r in _rows(scored, "margins") if not r["judged"]}
+    assert {(r["quantity"], r["scope"]) for r in rows} == {
+        key for key in primary if key[0] != "surprise_fss"
+    }
+    for row in rows:
+        assert row["checkpoint"].split(";") == ABLATIONS, row["quantity"]
+        assert row["twin"].split(";") == ABLATION_TWINS, row["quantity"]
+        assert row["model_seeds"] == [21, 22] and row["n_seeds"] == 2, row["quantity"]
+    energy = next(r for r in rows if (r["quantity"], r["scope"]) == ("energy_r2", "all"))
+    assert energy["margin"] > 0.5 and 0.0 < energy["lo"] <= energy["hi"], energy
+    assert energy["n_draws"] == 40 and len(energy["margins"]) == 2, energy
+    chi = next(r for r in rows if (r["quantity"], r["scope"]) == ("chi_alignment", "all"))
+    assert math.isnan(chi["margin"]) and math.isnan(chi["lo"]), chi
+    slope = next(r for r in rows if r["quantity"] == "surprise_fss_surprise_slope")
+    assert slope["trained_passes"] is not None and slope["twin_passes"] == 0, slope
 
 
 def test_a_planted_null_does_not_pass(null: tuple[Path, V1, int]) -> None:
@@ -407,7 +500,7 @@ def _tamper(run_dir: Path, name: str, rule: dict[str, Any]) -> None:
 TC_PLUS = prereg.SELECTIONS["primary"]
 TC_ONLY = prereg.SELECTIONS["held-out"]
 ALL = TC_PLUS | {"rule": "all"}
-ABLATION = next(name for name in TRAINED if name not in PRIMARY)
+ABLATION = ABLATIONS[0]
 
 
 @pytest.mark.parametrize(
@@ -616,6 +709,40 @@ def test_the_figures_are_drawn_from_the_tables_and_deterministic(scored: Path, a
     assert sorted(p.name for p in (scored / "figures").iterdir()) == sorted(FIGURES)
     assert runner.draw_figures(again) is None
     assert {name: (again / "figures" / name).read_bytes() for name in FIGURES} == first
+
+
+def test_the_pipeline_warning_reads_the_static_and_the_dynamic_check(scored: Path) -> None:
+    """_dynamic writes its role as dynamic-pipeline-check and _static as pipeline-check: a miss in
+    either is a pipeline fault, and hypothesis 1 says nothing else is read until it is fixed. A
+    judged test that fails is no such thing, and neither is a check that passes. The roles are the
+    ones the scorer writes."""
+    assert {"pipeline-check", "dynamic-pipeline-check"} <= {r["role"] for r in _rows(scored, "fss")}
+    rows = [
+        {"checkpoint": "a", "quantity": "l2_var_pc_1", "role": "pipeline-check", "verdict": "fail"},
+        {
+            "checkpoint": "b",
+            "quantity": "inverse_nu_pc_1_variance",
+            "role": "dynamic-pipeline-check",
+            "verdict": "inconclusive",
+        },
+        {
+            "checkpoint": "c",
+            "quantity": "inverse_nu_surprise_slope",
+            "role": "dynamic-test",
+            "verdict": "fail",
+        },
+        {"checkpoint": "d", "quantity": "l2_var_pc_1", "role": "pipeline-check", "verdict": "pass"},
+        {
+            "checkpoint": "e",
+            "quantity": "inverse_nu_pc_1_variance",
+            "role": "dynamic-pipeline-check",
+            "verdict": "pass",
+        },
+    ]
+    assert runner.pipeline_faults(rows) == [
+        "a: l2_var_pc_1 fail",
+        "b: inverse_nu_pc_1_variance inconclusive",
+    ]
 
 
 def test_a_figure_program_that_exits_nonzero_is_reported_not_raised(

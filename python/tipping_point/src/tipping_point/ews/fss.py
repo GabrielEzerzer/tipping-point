@@ -94,20 +94,29 @@ def fit_exponent(
 
 
 def peak_position(
-    values: np.ndarray, eps: np.ndarray, band: tuple[float, float], direction: str
+    values: np.ndarray,
+    eps: np.ndarray,
+    band: tuple[float, float],
+    direction: str,
+    margin: float = 0.0,
 ) -> np.ndarray:
     """Per row of values (rows, time): the eps_L of its extremum in the expected direction (the
     maximum for "greater", the minimum for "less") over the samples whose eps_L lies in
     band = (top, bottom). NaN where that extremum is the band's first or last sample, since the
     true one may lie beyond it, or where the row has no value inside: the peak was not located.
-    A NaN value is never the extremum."""
+    With `margin`, in eps_L, so is an extremum that close to either edge: a channel that only keeps
+    rising towards an edge has its extremum a few noisy samples inside it, not on it (#115). A NaN
+    value is never the extremum."""
     eps = np.asarray(eps, dtype=np.float64)
     inside = np.flatnonzero((eps <= band[0]) & (eps >= band[1]))
     v = oriented(np.atleast_2d(values)[:, inside], direction)
     v = np.where(np.isnan(v), -np.inf, v)
     k = np.argmax(v, axis=1)
     lost = (k == 0) | (k == len(inside) - 1) | np.isneginf(v).all(axis=1)
-    return np.where(lost, np.nan, eps[inside][k])
+    peak = eps[inside][k]
+    if margin:
+        lost |= (peak >= band[0] - margin) | (peak <= band[1] + margin)
+    return np.where(lost, np.nan, peak)
 
 
 def inverse_nu(L: Sequence[int], eps: np.ndarray) -> np.ndarray:

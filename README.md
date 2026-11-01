@@ -531,7 +531,12 @@ and the scorer takes both through every table, once per checkpoint.
   and a feature anchored to a fixed T gives 1/nu = 0. The harness plants both, and the second is the
   dynamic test's negative control. Positions are read half the headline window late (0.2 eps_L),
   and a read position within noise of 0, a true steepest change near +0.2 eps_L rather than at Tc,
-  is inconclusive.
+  is inconclusive. A channel that only keeps rising towards an edge of the search band has its
+  maximum a few noisy samples inside it, at the same eps_L at every L, which would read as 1/nu = 1
+  with no peak there (#115): so `fss.dynamic.edge_margin = "window"`, which every latent file holds,
+  counts an extremum within one headline window of either edge as not located, and over half of an
+  L's replicas not located is inconclusive. ising-ews-v1 refuses the key and reads the band's first
+  and last samples alone.
 - **Rows.** Every row of every table has a `checkpoint` column, the table's folder name, and so does
   each line of `trials.jsonl`; a classic row's is `""`. The file pins each checkpoint's sha256 and
   role, and the result's manifest gives the sha256 of each table's `complete.json` per run.
@@ -602,7 +607,10 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   a GPU: surrogates 22 h, alarms 15 h, probe embeddings 18 h on the CPU (19 ms a frame at L = 64), AUC,
   static fits and reading the tables 4 h. It was about 125 hours before the sequential test and the
   faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. The runner has no
-  resume: an interrupted run starts again, and no trial is logged until its tables are written.
+  resume: an interrupted run starts again. Its trials are logged in one write after its tables and
+  before `complete.json`, so a crash leaves a folder with no `complete.json`, its trials logged or
+  not, or a complete result with all of them. A crash in between spends the budget: the tables are
+  there, and scoring again means amending the file.
 
 Nothing here changes what ising-ews-v1 scores. `harness/ews_v1_golden.py` wrote every row and value
 of a v1 scoring on planted data from aa29cbc, the freeze lane's merge, and

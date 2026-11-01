@@ -14,6 +14,7 @@
 # because of the runner (slice 5), which reads what this file says:
 #   [indicators]         thin gone: it is the dense cadence's, which a latents table does not have
 #   [scoring.margins]    sizes and tolerance added: what the judged rows read, and fail or inconclusive
+#   [fss.dynamic]        edge_margin added and edge_rule reworded: a channel with no peak read as 1/nu = 1 (#115)
 
 id = "ising-latent"
 version = 1
@@ -226,7 +227,7 @@ pairing = "trained minus twin, same model seed, same data bootstrap draws (share
 seeds = "percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws"
 sizes = "mean"                    # a checkpoint's judged R^2 and selectivity: the mean over L; rows per L are reported, never judged
 sign_test = true                  # every paired margin must carry the predicted sign
-tolerance = 0.01                  # in R^2: a CI holding 0 inside this band is a fail (no margin), wider it is inconclusive
+tolerance = "<set before freeze>" # in R^2: a CI holding 0 inside this band is a fail (no margin), wider it is inconclusive
 ablations = "descriptive"
 
 [[fss.static]]
@@ -261,7 +262,8 @@ cadence = "matched"
 expected_inverse_nu = 1.0
 tolerance = 0.5
 min_draw_share = 0.95
-edge_rule = "inconclusive when more than half of an L's replicas take their extremum on an edge of the band"
+edge_rule = "inconclusive when more than half of an L's replicas take their extremum on an edge of the band or within one headline window of it"
+edge_margin = "window"            # one headline window of ramp: a channel only rising to an edge has its maximum a few noisy samples inside it (#115)
 statistics = [
   { observable = "pc_1", indicator = "variance", extremum = "max", role = "pipeline-check" },
   { observable = "surprise", indicator = "variance", extremum = "max", role = "test" },
