@@ -360,7 +360,8 @@ def test_pytest_leg_reads_the_dirs_from_the_real_pyproject(monkeypatch) -> None:
 
 
 def test_pyright_reads_every_python_file_the_repository_tracks() -> None:
-    # notebooks/ sat outside include, so a type error in the Kaggle runner first showed on Kaggle
+    # notebooks/ sat outside include, so a type error in the Kaggle runner first showed on Kaggle;
+    # an exclude entry over it brings that back, with pyright still reporting 0 errors
     pyproject = tomllib.loads((gate.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     tracked = subprocess.run(
         ["git", "ls-files", "*.py"],
@@ -371,8 +372,11 @@ def test_pyright_reads_every_python_file_the_repository_tracks() -> None:
         check=True,
     ).stdout.splitlines()
     assert "notebooks/kaggle_ising_runs.py" in tracked
-    include = pyproject["tool"]["pyright"]["include"]
+    include, exclude = (pyproject["tool"]["pyright"][key] for key in ("include", "exclude"))
     assert [f for f in tracked if not any(Path(f).is_relative_to(d) for d in include)] == []
+    # shortcut: is_relative_to reads a glob entry (notebooks/**) as no path, so it would go unseen;
+    # use full_match once an entry other than **/.venv holds a wildcard
+    assert [f for f in tracked if any(Path(f).is_relative_to(d) for d in exclude)] == []
 
 
 # ---------- the Cargo workspace, as cargo itself resolves it
