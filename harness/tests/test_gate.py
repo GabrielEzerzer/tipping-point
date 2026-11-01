@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import gate
@@ -353,6 +354,25 @@ def test_pytest_leg_reads_the_dirs_from_the_real_pyproject(monkeypatch) -> None:
     verdict = gate._judge_pytest_from_disk(0, "")
     assert not verdict.green
     assert "zero tests ran from harness/tests" in verdict.source
+
+
+# ---------- what pyright reads (#117)
+
+
+def test_pyright_reads_every_python_file_the_repository_tracks() -> None:
+    # notebooks/ sat outside include, so a type error in the Kaggle runner first showed on Kaggle
+    pyproject = tomllib.loads((gate.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.py"],
+        cwd=gate.ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.splitlines()
+    assert "notebooks/kaggle_ising_runs.py" in tracked
+    include = pyproject["tool"]["pyright"]["include"]
+    assert [f for f in tracked if not any(Path(f).is_relative_to(d) for d in include)] == []
 
 
 # ---------- the Cargo workspace, as cargo itself resolves it
