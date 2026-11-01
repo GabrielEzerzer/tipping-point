@@ -881,6 +881,124 @@ def test_a_figure_program_that_exits_nonzero_is_reported_not_raised(
     assert why is not None and "python" in why.lower()
 
 
+def _spent_copy(frozen: Frozen, scored: Path, root: Path) -> tuple[Path, Path]:
+    """The scored data's ews/ folder in `root`, its budget spent and its tables safe: the result
+    and the trial log, as a run that died after its last trial leaves them."""
+    shutil.copytree(frozen.data.root / "ews", root / "ews")
+    return root / "ews" / scored.name, prereg.trials_path(root)
+
+
+def _csv(run_dir: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in (run_dir / "csv").iterdir()}
+
+
+@pytest.mark.parametrize("left", ["no csv/", "a torn CSV", "a stray temp file"])
+def test_figures_only_writes_the_csv_again_and_charges_nothing(
+    frozen: Frozen,
+    scored: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    left: str,
+) -> None:
+    """#118: the budget is spent, and whatever a crash left of csv/, the entry gives the same bytes
+    back, then draws, with the whole csv/ there to draw from. No line joins the log, its count does
+    not move, no result folder appears, no Parquet file changes."""
+    run_dir, log = _spent_copy(frozen, scored, tmp_path)
+    pre = prereg.load(frozen.path)
+    budget = pre.doc["trials"]["budget"]
+    assert prereg.trials(tmp_path, pre) == budget
+    want, charged = _csv(run_dir), log.read_bytes()
+    tables = {p: p.read_bytes() for p in run_dir.rglob("*.parquet")}
+    folders = sorted((tmp_path / "ews").iterdir())
+    if left == "no csv/":
+        shutil.rmtree(run_dir / "csv")
+    elif left == "a torn CSV":
+        (run_dir / "csv" / "auc.csv").write_bytes(want["auc.csv"][:50])
+        (run_dir / "csv" / "margins.csv").unlink()
+    else:
+        (run_dir / "csv" / "auc.csv.tmp").write_bytes(b"half a table")
+        (run_dir / "csv" / "auc.csv").unlink()
+    drawn: list[tuple[Path, dict[str, bytes]]] = []
+    monkeypatch.setattr(runner, "draw_figures", lambda at: drawn.append((at, _csv(at))))
+    assert runner.main(["--figures-only", str(run_dir)]) == 0
+    assert drawn == [(run_dir, want)]
+    assert _csv(run_dir) == want
+    assert log.read_bytes() == charged and prereg.trials(tmp_path, pre) == budget
+    assert sorted((tmp_path / "ews").iterdir()) == folders
+    assert {p: p.read_bytes() for p in run_dir.rglob("*.parquet")} == tables
+
+
+def test_figures_only_reports_a_figure_failure_as_the_run_does(
+    frozen: Frozen,
+    scored: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exit 2 and why, with the CSV written: a failed figure step costs no more here than in a run.
+    --no-figures stops at the CSV."""
+    run_dir, _ = _spent_copy(frozen, scored, tmp_path)
+    want = _csv(run_dir)
+    shutil.rmtree(run_dir / "csv")
+    monkeypatch.setattr(runner, "draw_figures", lambda at: "a reason planted here")
+    assert runner.main(["--figures-only", str(run_dir)]) == 2
+    assert "a reason planted here" in capsys.readouterr().err
+    assert _csv(run_dir) == want
+    shutil.rmtree(run_dir / "csv")
+    monkeypatch.setattr(runner, "draw_figures", lambda at: pytest.fail("--no-figures drew"))
+    assert runner.main(["--figures-only", str(run_dir), "--no-figures"]) == 0
+    assert _csv(run_dir) == want
+
+
+def test_figures_only_refuses_a_folder_with_no_complete_json(
+    frozen: Frozen,
+    scored: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A torn result's cells may be unlogged, and #120 stops anyone scoring past them: this entry
+    must not be the way to read them. Exit 1 by name, no CSV, no figure. A path that holds no result
+    at all is refused the same way."""
+    run_dir, _ = _spent_copy(frozen, scored, tmp_path)
+    shutil.rmtree(run_dir / "csv")
+    (run_dir / "complete.json").unlink()
+    monkeypatch.setattr(runner, "draw_figures", lambda at: pytest.fail("a torn result was drawn"))
+    assert runner.main(["--figures-only", str(run_dir)]) == 1
+    assert f"{run_dir}: no complete.json" in capsys.readouterr().err
+    assert not (run_dir / "csv").exists()
+    assert runner.main(["--figures-only", str(tmp_path / "nothing-here")]) == 1
+    assert "no complete.json" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [[], ["--prereg", "a.toml", "--figures-only", "b"]])
+def test_figures_only_is_one_entry_or_the_other(argv: list[str]) -> None:
+    """It takes the place of --prereg: neither, or both, is argparse's usage error."""
+    with pytest.raises(SystemExit) as stopped:
+        runner.main(argv)
+    assert stopped.value.code == 2
+
+
+def test_figures_only_draws_what_the_tables_draw(
+    frozen: Frozen, scored: Path, tmp_path: Path
+) -> None:
+    """The whole way, with figure_command in its isolated environment: csv/ and figures/ gone, as
+    they are after a crash before csv_tables finished, the entry draws the five figures, to the
+    byte, the ones a whole run's tables draw."""
+    why = _environment_works()
+    if why is not None:
+        pytest.skip(f"no isolated matplotlib here: {why}")
+    assert runner.draw_figures(scored) is None
+    first = {name: (scored / "figures" / name).read_bytes() for name in FIGURES}
+    run_dir, _ = _spent_copy(frozen, scored, tmp_path)
+    shutil.rmtree(run_dir / "csv")
+    shutil.rmtree(run_dir / "figures")
+    assert runner.main(["--figures-only", str(run_dir)]) == 0
+    assert {name: (run_dir / "figures" / name).read_bytes() for name in FIGURES} == first
+    assert runner.main(["--figures-only", str(run_dir)]) == 0  # and again, over what is there
+    assert {name: (run_dir / "figures" / name).read_bytes() for name in FIGURES} == first
+
+
 def test_the_figure_script_imports_nothing_of_the_project() -> None:
     """It runs in an environment holding matplotlib alone."""
     text = runner.FIGURES.read_text("utf-8")

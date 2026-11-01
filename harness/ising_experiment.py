@@ -3,6 +3,7 @@ result folder and its figures.
 
   uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml \
       [--data-dir D] [--seed 26] [--device cuda] [--allow-stale-pilot] [--no-figures]
+  uv run python harness/ising_experiment.py --figures-only <result folder>
 
 <data dir>/ews/<run_id>/ holds what `ews score` writes, in its layout, and more:
   auc surrogates alarms peaks fss   the scorer's tables, every row with its checkpoint
@@ -18,6 +19,11 @@ result folder and its figures.
   figures/  drawn by harness/ising_figures.py in an isolated environment (FIGURE_ENVIRONMENT), since
             matplotlib is no dependency of the project. A figure step that fails loses nothing: the
             tables are written and logged first, the run exits 2, and it says how to draw them again
+
+--figures-only is for a run that died with its result complete but its CSV not: it writes csv/ from
+the result's Parquet, over what is there, then draws the figures. It scores nothing, so it charges
+nothing and logs no trial, and it refuses a folder with no complete.json, whose cells may be
+unlogged.
 
 Refused, before anything is read: a file not frozen, or short of a value (prereg.problems' strict
 check), a scoring whose cells would take the file past its trial budget, and one that would score
@@ -411,8 +417,9 @@ def _text(value: Any) -> str:
 
 
 def csv_tables(run_dir: Path) -> None:
-    """csv/<table>.csv for every table of a result, from its Parquet: what the figures read."""
-    (run_dir / "csv").mkdir()
+    """csv/<table>.csv for every table of a result, from its Parquet: what the figures read. It
+    writes over whatever an earlier attempt left there."""
+    (run_dir / "csv").mkdir(exist_ok=True)
     for name in io.read_json(run_dir / "manifest.json")["tables"]:
         table = pq.read_table(_table(run_dir, name))
         out = StringIO(newline="")
@@ -420,7 +427,9 @@ def csv_tables(run_dir: Path) -> None:
         writer.writerow(table.column_names)
         writer.writerows([_text(v) for v in row.values()] for row in table.to_pylist())
         io.write_file(
-            run_dir / "csv" / f"{name}.csv", lambda f, o=out: f.write(o.getvalue().encode())
+            run_dir / "csv" / f"{name}.csv",
+            lambda f, o=out: f.write(o.getvalue().encode()),
+            replace=True,
         )
 
 
@@ -441,7 +450,14 @@ def draw_figures(run_dir: Path) -> str | None:
 def main(argv: Sequence[str] | None = None, embed: Embed | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
-    parser.add_argument("--prereg", type=Path, required=True)
+    entry = parser.add_mutually_exclusive_group(required=True)
+    entry.add_argument("--prereg", type=Path)
+    entry.add_argument(
+        "--figures-only",
+        type=Path,
+        metavar="RUN_DIR",
+        help="a complete result's csv/, written again, then its figures: charges and logs nothing",
+    )
     parser.add_argument("--data-dir", type=Path, default=engine.data_dir())
     parser.add_argument("--seed", type=int, default=26, help="every bootstrap and surrogate draw")
     parser.add_argument("--device", help="for the probes' embeddings; default: cuda if available")
@@ -450,19 +466,28 @@ def main(argv: Sequence[str] | None = None, embed: Embed | None = None) -> int:
     parser.add_argument("--planted", action="store_true", help="unfrozen, on planted data alone")
     args = parser.parse_args(argv)
     try:
-        run_dir, judged, logged = run(
-            args.prereg, args.data_dir, args.seed, args.planted, args.allow_stale_pilot, embed,
-            args.device,
-        )  # fmt: skip
+        if args.figures_only:
+            run_dir = args.figures_only
+            if not (run_dir / "complete.json").is_file():  # its cells may be unlogged
+                raise ising.IsingDataError(
+                    f"{run_dir}: no complete.json (running or crashed); refused"
+                )
+            csv_tables(run_dir)
+            print(f"{run_dir}  (csv/ written, no trial charged)")
+        else:
+            run_dir, judged, logged = run(
+                args.prereg, args.data_dir, args.seed, args.planted, args.allow_stale_pilot, embed,
+                args.device,
+            )  # fmt: skip
+            for row in judged:
+                print(
+                    f"margin {row['quantity']:<20} {row['margin']:+.3f} "
+                    f"[{row['lo']:+.3f}, {row['hi']:+.3f}]  {row['verdict']}"
+                )
+            print(f"{run_dir}  ({logged} trials logged)")
     except (prereg.PreregError, ising.IsingDataError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    for row in judged:
-        print(
-            f"margin {row['quantity']:<20} {row['margin']:+.3f} "
-            f"[{row['lo']:+.3f}, {row['hi']:+.3f}]  {row['verdict']}"
-        )
-    print(f"{run_dir}  ({logged} trials logged)")
     if args.no_figures:
         return 0
     why = draw_figures(run_dir)

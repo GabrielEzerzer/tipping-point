@@ -593,7 +593,10 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   `probes.png`, primary checkpoints only, drawn by `harness/ising_figures.py` from the CSV tables
   alone, in a throwaway environment (matplotlib is no dependency of the project). The tables are
   written and logged first: if the figures fail the run exits 2 and prints the command to draw them.
-  A latent variance is divided by a per-checkpoint number before anything is drawn together, because
+  A run that dies with its result complete but its CSV not has spent its budget and left that command
+  nothing to read: `harness/ising_experiment.py --figures-only <result folder>` writes `csv/` again,
+  over what is there, then draws the figures, charging nothing and logging no trial. It refuses a
+  folder with no `complete.json`, whose cells may be unlogged. A latent variance is divided by a per-checkpoint number before anything is drawn together, because
   a PCA basis is per checkpoint and raw latent magnitudes do not compare.
 - **Planted runs.** `--planted` scores a file with no freeze behind it and refuses a data dir holding
   any run the planted generator did not write, so it can never read the confirmatory data early.
