@@ -1759,7 +1759,7 @@ def real_runs(k: ModuleType, root: Path) -> None:
         ledger,
     )
     check(
-        "a real pilot writes the tau.json a staircase reads",
+        "a finished pilot's folder holds the tau.json a staircase reads",
         (out2 / by2["quick"]["folder"] / "tau.json").is_file(),
         by2["quick"],
     )

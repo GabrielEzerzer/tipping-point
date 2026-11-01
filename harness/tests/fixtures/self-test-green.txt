@@ -499,7 +499,7 @@ PASS  session 2: STATUS complete, all four verified
 PASS  ... the finished simulator run reused, the training resumed in its folder
 PASS  ... resume lost and repeated no step: every step's row once, none stopped early
 PASS  ... the GPU-hour ledger came along and holds both sessions
-PASS  a real pilot writes the tau.json a staircase reads
+PASS  a finished pilot's folder holds the tau.json a staircase reads
 PASS  a real jepa extract, x-twin: complete and verified, its checkpoint and rule named
 PASS  a real jepa extract, x-final: complete and verified, its checkpoint and rule named
 PASS  STATUS gives the measured rates: seconds per step, microseconds per frame
