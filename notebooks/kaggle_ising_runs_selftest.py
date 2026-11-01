@@ -9,7 +9,7 @@ cap) with a stand-in for the simulator; the previous session's runs carried forw
 resumed; inputs found and checked against their sha256; the wheel and COMMIT.txt checks; run
 verification, judged by exit codes and files only; the rates STATUS gives, by checkpoint and L; the
 kernel folder against what `kaggle kernels push` checks; invalid plans refused at every door;
-pilot-28.json, its stage ids and kernel sources, on stand-in mounts.
+pilot-28.json and primary-28.json, their stage ids and kernel sources, on stand-in mounts.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
@@ -1313,7 +1313,7 @@ def leaks(folder: Path) -> list[str]:
 
 
 def kernel_acceptance(k: ModuleType, root: Path) -> None:
-    for name in ("job-a", "pilot-28"):
+    for name in ("job-a", "pilot-28", "primary-28"):
         source, folder = PLANS / f"{name}.json", root / name
         plan = json.loads(source.read_text(encoding="utf-8"))
         code = k.main(["--write-kernel", str(source), str(folder)])
@@ -1405,6 +1405,7 @@ def invalid_plans(k: Any, root: Path) -> None:  # Any: it swaps the module's PLA
 
 PILOT_RECORD = "20261025T194846Z-tauc-L16-32-64-128"  # #54's record
 PILOT_SHA256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698"
+DRAFT = "ising-latent-v1.toml"
 DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
 KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
 
@@ -1815,6 +1816,107 @@ def real_runs(k: ModuleType, root: Path) -> None:
     )
 
 
+def primary_28(k: ModuleType, root: Path) -> None:
+    from tipping_point.jepa.data import find_staircases
+
+    plan = json.loads((PLANS / "primary-28.json").read_text(encoding="utf-8"))
+    runs = {r["name"]: r for r in plan["runs"]}
+    errors = k.cli_errors(plan)
+    check("primary-28: the CLI itself takes every run's arguments", errors == [], errors)
+    check(
+        "primary-28: five trainings and nothing else, on model seeds 1-5",
+        all(r["command"] == "jepa train" for r in plan["runs"])
+        and [flag_ints(r["args"], "--seed") for r in plan["runs"]] == [[s] for s in range(1, 6)],
+        list(runs),
+    )
+    check(
+        "primary-28: one process per T4, the three first on GPU 0",
+        {n: r["gpu"] for n, r in runs.items()} == {"m1": 0, "m2": 1, "m3": 0, "m4": 1, "m5": 0},
+    )
+    pinned = hashlib.sha256(
+        (PLANS.parents[1] / "paper" / "prereg" / DRAFT).read_bytes()
+    ).hexdigest()
+    check(
+        "primary-28: its --prereg is the committed draft, pinned by sha256",
+        plan["inputs"]["prereg"]["sha256"] == pinned and plan["inputs"]["prereg"]["file"] == DRAFT,
+        plan["inputs"]["prereg"],
+    )
+    record = plan["inputs"]["record"]
+    check(
+        "primary-28: its --pilot is #54's record, pinned by sha256",
+        (record["run"], record["file"], record["sha256"])
+        == (PILOT_RECORD, "pilot.json", PILOT_SHA256),
+        record,
+    )
+    made = {
+        tuple(flag_ints(r["args"], f)[0] for f in ("--L", "--seed"))
+        for r in job_a()["runs"]
+        if r["command"] == "staircase"
+    }
+    for name, run in runs.items():
+        args = run["args"]
+        seeds = [*flag_ints(args, "--train-seeds"), *flag_ints(args, "--val-seed")]
+        check(
+            f"primary-28: {name} trains all three sizes on seeds 11-16 for 25,000 steps",
+            flag_ints(args, "--L") == [16, 32, 64]
+            and seeds == [11, 12, 13, 14, 15, 16]
+            and flag_ints(args, "--steps") == [25000]
+            and {"input": "record"} in args
+            and {"input": "prereg"} in args
+            and "--warmup" not in args,  # jepa train's own: steps / 20
+            args,
+        )
+        tags = [DATASET_ID.fullmatch(s) for s in run["stage"]]
+        staged = sorted((int(t[1]), int(t[3])) for t in tags if t and t[2] == "qs")
+        large = {pair for pair in staged if pair[0] == 64}
+        check(
+            f"primary-28: {name}'s stage ids are one staircase per (L, seed), L = 64 Job A's",
+            staged == sorted((L, s) for L in (16, 32, 64) for s in seeds)
+            and len(staged) == len(run["stage"])
+            and large == made,
+            run["stage"],
+        )
+
+    # on the mounts Kaggle gives it: the record's and the draft's bytes are stand-ins here, the
+    # runner checks the real ones there, so only their sha256 change
+    ctx = ctx_at(k, root)
+    ctx.py = sys.executable
+    ctx.helper.write_text(k.HELPER_SOURCE, encoding="utf-8")
+    trial = copy.deepcopy(plan)
+    folder = ctx.input / "tp-tauc-l64-l128" / "out" / "ising" / PILOT_RECORD
+    folder.mkdir(parents=True)
+    (folder / "pilot.json").write_text("{}", encoding="utf-8")
+    trial["inputs"]["record"]["sha256"] = hashlib.sha256(b"{}").hexdigest()
+    held = ctx.input / "tp-prereg-ising-latent" / trial["inputs"]["prereg"]["run"]
+    held.mkdir(parents=True)
+    (held / DRAFT).write_text("id = 'draft'", encoding="utf-8")
+    trial["inputs"]["prereg"]["sha256"] = hashlib.sha256(b"id = 'draft'").hexdigest()
+    session = k.Session(ctx, trial, {}, COMMIT, TORCH, 2)
+    job_output = ctx.input / "tp-ising-job-a" / "out" / "ising"
+    dataset = ctx.input / "tipping-point-ising-l16-l32"
+    for run_id in k.dataset_runs(session.runs):
+        stand_in_run((job_output if "-L64-" in run_id else dataset) / run_id, run_id)
+    session.locate_inputs()
+    session.locate_datasets()
+    check("primary-28: the 18 staircases are found among the sources", len(session.datasets) == 18)
+    errors = session.capture(session.runs)
+    check("primary-28: the helper's capture, as on Kaggle, refuses nothing", errors == [], errors)
+    session.stage()
+    found = find_staircases(ctx.out, [16, 32, 64], [11, 12, 13, 14, 15, 16])
+    check(
+        "primary-28: staged, the training's own lookup finds its runs, and only one each",
+        {r.run_id for r in found.values()} == set(runs["m1"]["stage"]),
+    )
+    tail, key = session.resolve(session.by_name["m3"])
+    check(
+        "primary-28: --prereg and --pilot resolve to the located files",
+        tail[tail.index("--prereg") + 1] == str(held / DRAFT)
+        and tail[tail.index("--pilot") + 1] == str(folder / "pilot.json")
+        and f"input/{trial['inputs']['prereg']['run']}/{DRAFT}" in key,
+        tail,
+    )
+
+
 def run_all(k: ModuleType) -> int:
     with tempfile.TemporaryDirectory(prefix="tp-self-test-", ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -1835,6 +1937,7 @@ def run_all(k: ModuleType) -> int:
         kernel_acceptance(k, root / "acceptance")
         invalid_plans(k, root / "invalid")
         pilot_28(k, root / "pilot-28")
+        primary_28(k, root / "primary-28")
         real_runs(k, root / "real")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1
