@@ -32,7 +32,8 @@ STATUS, and the exit-code policy.
   training's folder holds final.pt and its step-0 twin ckpt/step_0000000.pt.
 - {"input": <name>} is the file an `inputs` entry names, looked up in the attached datasets and
   kernel outputs (in a <run id> folder or a <run id>.zip) and checked against its sha256 before
-  any run starts: a pilot record for --pilot.
+  any run starts: a pilot record for --pilot, or a checkpoint for `jepa extract`. A final.pt with
+  no complete.json beside it is refused then as well, since `jepa extract` would refuse it.
 - {"dataset_run": <run id>} is a simulator run from an attached dataset or kernel output, and
   "stage" lists runs a training reads (it finds them by L and seed). Before any run starts, each is
   placed in out/ising/<run id> (inputs are read-only, and an extraction writes inside its run:
@@ -1315,8 +1316,17 @@ class Session:
                     f"input {name}: no {entry['run']}/{entry['file']} with sha256 "
                     f"{entry['sha256']} in {where}; found {digests or 'none'}"
                 )
-            self.inputs[name] = good[0]
-            log(f"input {name}: {good[0]}, sha256 {entry['sha256'][:16]}... as the plan says")
+            # jepa extract refuses a trained checkpoint with no complete.json beside it (#128)
+            # shortcut: presence only, not its file list, collapse or stopped_early; read those too
+            # before a plan reads a training whose final verdict has not been seen
+            usable = [p for p in good if p.name != FINAL or (p.parent / "complete.json").is_file()]
+            if not usable:
+                raise Refused(
+                    f"input {name}: {good[0]} has no complete.json beside it, so jepa extract "
+                    "would refuse it in every run that reads it"
+                )
+            self.inputs[name] = usable[0]
+            log(f"input {name}: {usable[0]}, sha256 {entry['sha256'][:16]}... as the plan says")
         self.summary["inputs"] = {n: str(p) for n, p in self.inputs.items()}
 
     def resolve(self, run: Run, pending_ok: bool = False) -> tuple[list[str], list[str]]:
