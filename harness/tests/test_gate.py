@@ -5,13 +5,17 @@ red = deliberately broken files; any other name = files deliberately edited into
 self-test-* ones have their local repo and temp prefixes replaced, because the repo is public.
 """
 
+import ast
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
+from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import gate
@@ -806,13 +810,94 @@ def test_every_leg_runs_with_the_capped_build_jobs(monkeypatch) -> None:
     assert gate.run_leg(leg).output_tail == [str(max(1, (os.cpu_count() or 2) // 2))]
 
 
+# (HANDLE)-1 is the process's own pseudo-handle, whole: GetCurrentProcess() through ctypes'
+# default int return comes back truncated, and GetPriorityClass then fails with 0
+PRIORITY_CLASS = (
+    "import ctypes; print(ctypes.windll.kernel32.GetPriorityClass(ctypes.c_void_p(-1)))"
+)
+BELOW_NORMAL, NORMAL = 0x4000, 0x20
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="priority classes are Windows'")
 def test_every_leg_starts_at_below_normal_priority() -> None:
-    # (HANDLE)-1 is the process's own pseudo-handle, whole: GetCurrentProcess() through ctypes'
-    # default int return comes back truncated, and GetPriorityClass then fails with 0
-    code = "import ctypes; print(ctypes.windll.kernel32.GetPriorityClass(ctypes.c_void_p(-1)))"
-    below_normal = 0x4000
-    assert gate.run_leg(_python_leg("priority", code)).output_tail == [str(below_normal)]
+    assert gate.run_leg(_python_leg("priority", PRIORITY_CLASS)).output_tail == [str(BELOW_NORMAL)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="priority classes are Windows'")
+@pytest.mark.parametrize(
+    ("choice", "expected"), [("normal", NORMAL), ("belownormal", BELOW_NORMAL)], ids=str
+)
+def test_a_leg_runs_at_the_priority_asked_for_even_from_a_below_normal_gate(
+    choice: str, expected: int
+) -> None:
+    # with no class given, a BelowNormal process's child is BelowNormal: a gate whose own process
+    # runs there (this test, in the gate's pytest leg) must still start a leg at Normal when told
+    leg = f"gate.Leg('priority', [sys.executable, '-c', {PRIORITY_CLASS!r}], gate.judge_ruff_check)"
+    code = f"import gate, sys; print(gate.run_leg({leg}, {choice!r}).output_tail)"
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=gate.ROOT / "harness",
+        capture_output=True,
+        text=True,
+        check=True,
+        creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS,
+    )
+    assert done.stdout.strip() == str([str(expected)])
+
+
+@pytest.mark.parametrize(
+    ("set_to", "priority"),
+    [(None, "belownormal"), ("belownormal", "belownormal"), ("normal", "normal")],
+    ids=["default", "belownormal", "normal"],
+)
+def test_the_priority_is_on_the_machine_line_and_in_the_record(
+    tmp_path, monkeypatch, capsys, set_to: str | None, priority: str
+) -> None:
+    # a timing test that goes red under load must say which priority it starved at
+    if set_to is None:
+        monkeypatch.delenv("TP_GATE_PRIORITY", raising=False)
+    else:
+        monkeypatch.setenv("TP_GATE_PRIORITY", set_to)
+    code = PRIORITY_CLASS if sys.platform == "win32" else "pass"
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", f"{code}; print('All checks passed!')")])
+    assert gate.main([]) == 0
+    record = _record(tmp_path)
+    assert record["priority"] == priority
+    assert f"machine at start: cores 8, cpu_busy_percent 12.5, priority {priority}\n" in (
+        capsys.readouterr().out
+    )
+    if sys.platform == "win32":
+        expected = {"normal": NORMAL, "belownormal": BELOW_NORMAL}[priority]
+        assert record["legs"][0]["output_tail"][0] == str(expected)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["high", "", "Normal", "BelowNormal", "below normal", " normal"],
+    ids=["high", "empty", "capital", "camel", "a-space", "padded"],
+)
+def test_an_invalid_priority_is_refused_before_anything_runs(
+    tmp_path, monkeypatch, capsys, value: str
+) -> None:
+    # ignored, it would run the gate at a priority nobody chose and record that as if chosen
+    def never(root: Path) -> None:
+        raise AssertionError("swept strays for a gate it should have refused")
+
+    ran = tmp_path / "leg-ran"
+    monkeypatch.setenv("TP_GATE_PRIORITY", value)
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    monkeypatch.setattr(gate.strays, "sweep", never)
+    code = f"open({str(ran)!r}, 'w').close(); print('All checks passed!')"
+    monkeypatch.setattr(gate, "LEGS", [_python_leg("ok", code)])
+    with pytest.raises(SystemExit) as refused:
+        gate.main([])
+    assert refused.value.code == 2
+    message = capsys.readouterr().err
+    assert "TP_GATE_PRIORITY must be one of ['belownormal', 'normal']" in message
+    assert repr(value) in message
+    assert not ran.exists()
+    assert not list(tmp_path.glob("gate-*.json"))
 
 
 def test_the_record_says_how_busy_the_cpu_was_and_what_was_swept(
@@ -863,14 +948,17 @@ def _self_test_leg() -> gate.Leg:
     return leg
 
 
-def _run_self_test_leg(root: Path, monkeypatch, selftest: str) -> gate.LegResult:
+def _run_self_test_leg(
+    root: Path, monkeypatch, selftest: str, limit: float | None = None
+) -> gate.LegResult:
     """The real leg on a copy of the real runner, with `selftest` as its checks: the whole path
     from the leg's argv to its verdict, in a second rather than five minutes."""
     (root / "notebooks").mkdir()
     shutil.copy(gate.ROOT / "notebooks" / "kaggle_ising_runs.py", root / "notebooks")
     (root / "notebooks" / "kaggle_ising_runs_selftest.py").write_text(selftest, encoding="utf-8")
     monkeypatch.setattr(gate, "ROOT", root)
-    return gate.run_leg(_self_test_leg())
+    leg = _self_test_leg()
+    return gate.run_leg(leg if limit is None else replace(leg, limit=limit))
 
 
 @pytest.mark.parametrize(
@@ -963,6 +1051,232 @@ def test_a_failed_check_stays_in_the_record_after_it_leaves_the_tail(tmp_path, m
     assert "no-such-input" in first
     assert first not in row["output_tail"]
     assert first in row["verdict_source"]
+
+
+# ---------- a section deleted from the self-test must not read as green (#124)
+
+
+# run_all's sections. The leg trusts the closing "N/M checks passed" line, which counts only the
+# checks that ran: delete real_runs, the only real train, resume and extract path and most of the
+# leg's time, and it reads 223/223, exit 0. A minimum count would need bumping on nearly every
+# change and could not say which section went. A new section joins this list.
+SELF_TEST = gate.ROOT / "notebooks" / "kaggle_ising_runs_selftest.py"
+SELF_TEST_SECTIONS = (
+    "plans",
+    "refusals",
+    "cli",
+    "shrinking",
+    "queues",
+    "failed_extractions",
+    "resolution",
+    "previous",
+    "inputs",
+    "wheel",
+    "verification",
+    "kernel_folder",
+    "jepa_entries",
+    "extraction_rates",
+    "kernel_acceptance",
+    "invalid_plans",
+    "pilot_28",
+    "primary_28",
+    "first_read_m1",
+    "real_runs",
+)
+
+
+def _calls_that_always_run(body: list[ast.stmt]) -> Iterator[str]:
+    """The name each bare call among these statements and through their `with` blocks calls. A call
+    behind an `if`, in a loop or in a function defined here may never run."""
+    for statement in body:
+        if isinstance(statement, ast.With):
+            yield from _calls_that_always_run(statement.body)
+        elif (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+        ):
+            yield statement.value.func.id
+
+
+def _sections_missing(source: str) -> list[str]:
+    bodies = [
+        node.body
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_all"
+    ]
+    called = {name for body in bodies for name in _calls_that_always_run(body)}
+    return [section for section in SELF_TEST_SECTIONS if section not in called]
+
+
+def test_run_all_calls_every_named_section() -> None:
+    assert _sections_missing(SELF_TEST.read_text("utf-8")) == []
+
+
+# run_all's shape with every section in it: what the check can catch, whatever the real one holds
+WHOLE_RUN_ALL = (
+    "def run_all(k):\n"
+    "    with tempfile.TemporaryDirectory() as tmp:\n"
+    "        root = Path(tmp)\n"
+    + "".join(f"        {section}(k, root)\n" for section in SELF_TEST_SECTIONS)
+    + "    return 0\n"
+)
+
+
+def test_a_run_all_with_every_section_has_none_missing() -> None:
+    assert _sections_missing(WHOLE_RUN_ALL) == []
+
+
+@pytest.mark.parametrize("section", SELF_TEST_SECTIONS)
+def test_a_section_deleted_from_run_all_is_named(section: str) -> None:
+    deleted = WHOLE_RUN_ALL.replace(f"        {section}(k, root)\n", "")
+    assert _sections_missing(deleted) == [section]
+
+
+@pytest.mark.parametrize(
+    "guarded",
+    [
+        "        if os.environ.get('TP_FULL'):\n            real_runs(k, root)\n",
+        "        for _ in ():\n            real_runs(k, root)\n",
+        "        def later():\n            real_runs(k, root)\n",
+        "        later = lambda: real_runs(k, root)\n",
+    ],
+    ids=["behind-an-if", "in-a-loop", "in-a-function", "in-a-lambda"],
+)
+def test_a_section_that_may_never_run_counts_as_deleted(guarded: str) -> None:
+    source = WHOLE_RUN_ALL.replace("        real_runs(k, root)\n", guarded)
+    assert _sections_missing(source) == ["real_runs"]
+
+
+def test_no_run_all_leaves_every_section_missing() -> None:
+    assert _sections_missing("def something_else(k):\n    plans(k)\n") == list(SELF_TEST_SECTIONS)
+
+
+# ---------- a hung leg ends in a red row, a last line and a record (#125)
+
+
+# The slowest each leg has taken on this laptop under load, in seconds: every record and gate log
+# across the checkouts, to 2026-11-01. A new leg has to bring its own. The limits allow for more
+# than three times these where a leg's time is mostly CPU: on 2026-11-01, at BelowNormal with every
+# core taken, pyright took nine times its median and a bare python stand-in over a minute.
+SLOWEST = {
+    "cargo-fmt": 55.15,  # .worktrees/gateprune.log, CPU 100% busy as it started
+    "cargo-clippy": 833.48,  # .worktrees/gate-freeze3.log, 83.6%
+    "cargo-test": 961.12,  # .worktrees/gateprune.log, 100%
+    "ruff-check": 15.63,  # the real leg through run_leg, 2026-11-01, 100%
+    "ruff-format": 16.94,  # the real leg through run_leg, 2026-11-01, 100%
+    "pyright": 416.48,  # the real leg through run_leg, 2026-11-01, 100%
+    "pytest": 2455.43,  # .worktrees/gater3.log, 54.3%
+    "self-test": 423.97,  # fix-runner's gate-20261101T062918.json, 95.5%
+}
+# Seconds a stand-in holds on for: past every limit below, however long a starved kill takes (at
+# BelowNormal under load a bare python can take a minute to start), and over by itself, so that a
+# gate that has lost its limit fails these tests instead of hanging them
+HOLD = 900
+
+
+def _hanging(name: str, limit: float, code: str = f"import time; time.sleep({HOLD})") -> gate.Leg:
+    return gate.Leg(name, [sys.executable, "-c", code], gate.judge_ruff_check, limit=limit)
+
+
+def _gone(pid: int, within: float = 120.0) -> bool:
+    """Whether the process has left the system's list, soon: a kill takes effect a moment after
+    taskkill says so, and longer on a starved laptop."""
+    deadline = time.monotonic() + within
+    while any(p.pid == pid for p in gate.strays.list_processes() or []):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def test_every_limit_sits_well_above_the_slowest_that_leg_has_taken() -> None:
+    assert [leg.name for leg in gate.LEGS if leg.limit < 3 * SLOWEST[leg.name]] == []
+
+
+def test_a_hung_leg_is_red_and_the_gate_still_reports(tmp_path, monkeypatch, capsys) -> None:
+    # #125: run_leg waited with no timeout, so a gate in a background shell never reported at all
+    monkeypatch.setattr(gate, "OUT", tmp_path)
+    last = _python_leg("last", "print('All checks passed!')")
+    monkeypatch.setattr(gate, "LEGS", [_hanging("hung", 2.0), last])
+    assert gate.main([]) == 1
+    rows = _record(tmp_path)["legs"]
+    assert [(r["leg"], r["verdict"]) for r in rows] == [("hung", "RED"), ("last", "GREEN")]
+    assert rows[0]["returncode"] is None
+    assert "hung: still running at its 2s limit" in rows[0]["verdict_source"]
+    assert 2.0 <= rows[0]["duration"] < HOLD
+    printed = capsys.readouterr().out.splitlines()
+    assert printed[-1].startswith("gate RED: hung  (record: ")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="lists processes on Windows alone")
+def test_a_hung_leg_takes_its_whole_tree_and_keeps_what_it_printed(tmp_path) -> None:
+    # killing only the leg leaves the process doing the work: a venv's python.exe and pytest.exe
+    # are launchers, cargo sits above the test binary, and subprocess.run(timeout=) kills the leg
+    # alone, then on Windows reads what the survivors hold open until they end. This stand-in has
+    # that shape: leg -> grandchild, each through the venv's launcher
+    pid_file = tmp_path / "grandchild.pid"
+    grandchild = (
+        "import os, time\n"
+        "print('grandchild up', flush=True)\n"
+        f"open({f'{pid_file}.tmp'!r}, 'w').write(str(os.getpid()))\n"
+        f"os.replace({f'{pid_file}.tmp'!r}, {str(pid_file)!r})\n"
+        f"time.sleep({HOLD})\n"
+    )
+    code = (
+        "import subprocess, sys\n"
+        "print('leg started', flush=True)\n"
+        f"subprocess.run([sys.executable, '-c', {grandchild!r}])\n"
+    )
+    for limit in (2.0, 8.0, 32.0, 128.0, 512.0):  # seconds alone, unless starting it takes minutes
+        result = gate.run_leg(_hanging("hung", limit, code))
+        if pid_file.is_file():
+            break
+    assert pid_file.is_file(), "the limit fell every time before the tree was up"
+    assert result.verdict == "RED"
+    assert result.duration < HOLD
+    assert f"hung: still running at its {limit:g}s limit" in result.verdict_source
+    assert result.output_tail == ["leg started", "grandchild up"]
+    assert _gone(int(pid_file.read_text())), result.verdict_source
+
+
+def test_a_leg_that_ended_is_judged_though_a_process_it_started_lives_on() -> None:
+    # that process inherited the leg's output: reading a pipe to its end would wait for it, so a
+    # finished leg sat there until the stray ended, and with no limit for ever
+    code = (
+        "import subprocess, sys\n"
+        f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({HOLD})'])\n"
+        "print(child.pid)\n"
+        "print('All checks passed!')\n"
+    )
+    result = gate.run_leg(_python_leg("leaves-one-behind", code))
+    if sys.platform == "win32":  # elsewhere it ends by itself, in HOLD seconds
+        gate.strays.kill_tree(int(result.output_tail[0]))
+    assert result.verdict == "GREEN", result.verdict_source
+    assert result.returncode == 0
+    assert result.duration < HOLD
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="taskkill is Windows'")
+def test_a_tree_kill_that_fails_is_said_and_the_gate_goes_on(monkeypatch) -> None:
+    def denied(pid: int) -> str:
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(gate.strays, "kill_tree", denied)
+    result = gate.run_leg(_hanging("hung", 1.0, "import time; time.sleep(10)"))
+    assert result.verdict == "RED"
+    assert "hung" in result.verdict_source and "access denied" in result.verdict_source
+
+
+def test_the_self_test_leg_hung_in_a_section_is_red(tmp_path, monkeypatch) -> None:
+    # #125's failing case, on the leg's own argv: a runner edit that stops Scheduler.stop setting
+    # halt makes the hold loop in the self-test's drive spin for ever
+    selftest = f"def run_all(k):\n    import time\n    time.sleep({HOLD})\n    return 0\n"
+    result = _run_self_test_leg(tmp_path, monkeypatch, selftest, limit=2.0)
+    assert result.verdict == "RED"
+    assert result.returncode is None
+    assert "hung" in result.verdict_source
+    assert result.duration < HOLD
 
 
 # ---------- lie: a tool that cannot start, a judge that crashes

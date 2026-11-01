@@ -5,22 +5,34 @@ Run as `uv run python harness/gate.py [--leg NAME ...]`.
 A leg is GREEN only when its exit code is 0 AND its own summary evidence is positive.
 Every leg always runs; the gate exits nonzero if any leg is RED. Stdlib only.
 
+A leg still running at its limit is hung: it is killed with its whole process tree and judged RED,
+and the gate goes on, so that a hang in a background shell still ends in a last line and a record.
+
 The cargo legs cover only the root workspace's members; test_gate fails engine/ or any crate
 under harness/ that is outside it, so app/src-tauri must join members and that check when it lands.
 
 On a shared laptop (#61): the gate kills strays (strays.py) as it starts and ends, cargo builds
 on half the logical cores unless CARGO_BUILD_JOBS is set, every leg starts at BelowNormal priority
 on Windows, and the record says how busy the CPU was at the start.
+
+TP_GATE_PRIORITY=normal starts the legs at Normal instead (belownormal, the default, is the other
+value; anything else is refused; the classes are Windows', so elsewhere it changes nothing). Use it
+for a dedicated gate run on a machine you control: at BelowNormal, a data job or another session
+running at Normal can starve the gate's timing tests (api_load) red, while at Normal the gate
+takes its share from whatever else is running.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import xml.etree.ElementTree as ET
@@ -53,6 +65,10 @@ def _last_line(output: str) -> str:
 
 def judge_missing_tool(tool: str) -> Verdict:
     return Verdict(False, f"tool not found on PATH: {tool}")
+
+
+def judge_hung(limit: float, killed: str) -> Verdict:
+    return Verdict(False, f"hung: still running at its {limit:g}s limit; {killed}")
 
 
 def judge_cargo_fmt(returncode: int, output: str) -> Verdict:
@@ -302,6 +318,10 @@ class Leg:
     argv: list[str]
     judge: Callable[[int, str], Verdict]
     evidence: Callable[[str], dict[str, list[Any]]] | None = None  # kept beside the tail
+    # Seconds until it counts as hung: a real leg's sits well above its slowest under load, which
+    # test_gate's SLOWEST holds, because a false RED costs a rerun of the gate and a real hang
+    # costs only the wait
+    limit: float = 3600.0
 
 
 def _judge_pytest_from_disk(returncode: int, _output: str) -> Verdict:
@@ -310,11 +330,12 @@ def _judge_pytest_from_disk(returncode: int, _output: str) -> Verdict:
 
 
 LEGS: list[Leg] = [
-    Leg("cargo-fmt", ["cargo", "fmt", "--all", "--check"], judge_cargo_fmt),
+    Leg("cargo-fmt", ["cargo", "fmt", "--all", "--check"], judge_cargo_fmt, limit=600.0),
     Leg(
         "cargo-clippy",
         ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
         judge_clippy,
+        limit=3600.0,
     ),
     # --no-fail-fast: one failing binary must not hide whether the ones after it pass
     Leg(
@@ -322,16 +343,18 @@ LEGS: list[Leg] = [
         ["cargo", "test", "--workspace", "--no-fail-fast"],
         judge_cargo_test,
         cargo_test_evidence,
+        limit=3600.0,
     ),
-    Leg("ruff-check", ["ruff", "check"], judge_ruff_check),
-    Leg("ruff-format", ["ruff", "format", "--check"], judge_ruff_format),
-    Leg("pyright", ["pyright"], judge_pyright),
+    Leg("ruff-check", ["ruff", "check"], judge_ruff_check, limit=600.0),
+    Leg("ruff-format", ["ruff", "format", "--check"], judge_ruff_format, limit=600.0),
+    Leg("pyright", ["pyright"], judge_pyright, limit=1800.0),
     # -c pins the config pytest_dirs reads: a pytest.toml or pytest.ini would otherwise
     # outrank pyproject.toml, and pytest would collect from dirs the floor never checks
     Leg(
         "pytest",
         ["pytest", "-c", "pyproject.toml", f"--junitxml={JUNIT}", "-q"],
         _judge_pytest_from_disk,
+        limit=14400.0,
     ),
     # sys.executable, not "python": Windows looks beside the running interpreter before PATH, and
     # a venv's python.exe runs the base install's, which has no tipping_point
@@ -340,13 +363,24 @@ LEGS: list[Leg] = [
         [sys.executable, "notebooks/kaggle_ising_runs.py", "--self-test"],
         judge_self_test,
         self_test_evidence,
+        limit=3600.0,
     ),
 ]
 
 
 TAIL_LINES = 200  # of each leg's output, kept in the record so a red leg reads without a re-run
-# What a leg starts (rustc, test binaries, the engine processes tests spawn) inherits this
-PRIORITY = subprocess.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 0
+KILL_WAIT = 30.0  # seconds a killed leg gets to be gone before the gate goes on without it
+# What a leg starts (rustc, test binaries, the engine processes tests spawn) inherits its class.
+# Normal is named, not 0: with no class given, a BelowNormal process's child is BelowNormal too
+PRIORITIES = (
+    {
+        "belownormal": subprocess.BELOW_NORMAL_PRIORITY_CLASS,
+        "normal": subprocess.NORMAL_PRIORITY_CLASS,
+    }
+    if sys.platform == "win32"
+    else {"belownormal": 0, "normal": 0}
+)
+DEFAULT_PRIORITY = "belownormal"
 
 
 def leg_env(environ: Mapping[str, str], cores: int | None) -> dict[str, str]:
@@ -404,32 +438,80 @@ class LegResult:
     evidence: dict[str, list[Any]]
 
 
-def run_leg(leg: Leg) -> LegResult:
+class LegHung(Exception):
+    """A leg killed at its limit: what it had printed, and how the kill went."""
+
+    def __init__(self, output: str, killed: str) -> None:
+        super().__init__(killed)
+        self.output, self.killed = output, killed
+
+
+def _kill_tree(proc: subprocess.Popen[Any]) -> str:
+    """Kill a leg and every process it started, and say how that went: a kill that fails is the
+    record's to tell, never a dead gate. shortcut: taskkill walks live parents, so a process whose
+    parent has already exited survives (the strays sweep takes the engine's, and nothing it holds
+    can block the gate); use a job object once such a survivor costs a run."""
+    try:
+        if sys.platform == "win32":
+            said = strays.kill_tree(proc.pid)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)  # the leg leads its own session
+            said = "killed its process group"
+    except Exception as exc:
+        said = f"could not kill its tree, so only the leg: {exc!r}"
+        with contextlib.suppress(OSError):
+            proc.kill()
+    try:
+        proc.wait(KILL_WAIT)
+    except subprocess.TimeoutExpired:
+        said += f"; still running {KILL_WAIT:g}s later"
+    return said
+
+
+def _run(leg: Leg, priority: str) -> tuple[int, str]:
+    """A leg's exit code and everything it printed, or LegHung once it has been killed at its
+    limit. The output goes to a file, not a pipe: whatever inherits it can hold a pipe open long
+    after the leg is gone, and reading one to its end, on Windows in one blocking read, would wait
+    for that process and lose the output so far if it never ended."""
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as log:
+        proc = subprocess.Popen(
+            leg.argv,
+            cwd=ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,  # one stream in write order: cargo's headers go to stderr
+            env=leg_env(os.environ, os.cpu_count()),
+            creationflags=PRIORITIES[priority],
+            start_new_session=True,  # the process group _kill_tree kills where there is no taskkill
+        )
+        try:
+            returncode = proc.wait(timeout=leg.limit)
+        except subprocess.TimeoutExpired:
+            killed = _kill_tree(proc)
+            log.seek(0)
+            raise LegHung(log.read(), killed) from None
+        except BaseException:  # an interrupted gate leaves no leg behind
+            _kill_tree(proc)
+            raise
+        log.seek(0)
+        return returncode, log.read()
+
+
+def run_leg(leg: Leg, priority: str = DEFAULT_PRIORITY) -> LegResult:
     start = time.perf_counter()
     output = ""
     try:
         if leg.name == "pytest":
             JUNIT.unlink(missing_ok=True)  # a stale report must never vouch for this run
-        proc = subprocess.run(
-            leg.argv,
-            cwd=ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # one stream in write order: cargo's headers go to stderr
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            env=leg_env(os.environ, os.cpu_count()),
-            creationflags=PRIORITY,
-        )
+        returncode, output = _run(leg, priority)
+    except LegHung as hung:
+        verdict, returncode, output = judge_hung(leg.limit, hung.killed), None, hung.output
     except FileNotFoundError:
         verdict, returncode = judge_missing_tool(leg.argv[0]), None
     except OSError as exc:  # also a stale JUnit report that cannot be deleted (held open)
         verdict, returncode = Verdict(False, f"tool could not start: {exc}"), None
     else:
-        returncode, output = proc.returncode, proc.stdout
         try:
-            verdict = leg.judge(proc.returncode, proc.stdout)
+            verdict = leg.judge(returncode, output)
         except Exception as exc:  # a crashing judge is a RED leg, never a dead gate
             verdict = Verdict(False, f"judge crashed: {exc!r}")
     return LegResult(
@@ -449,14 +531,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--leg", action="append", choices=names, help="run only this leg")
     args = parser.parse_args(argv)
     selected = [leg for leg in LEGS if not args.leg or leg.name in args.leg]
+    priority = os.environ.get("TP_GATE_PRIORITY", DEFAULT_PRIORITY)
+    if priority not in PRIORITIES:
+        parser.error(f"TP_GATE_PRIORITY must be one of {list(PRIORITIES)}, not {priority!r}")
 
     OUT.mkdir(parents=True, exist_ok=True)
     swept = {"start": sweep_strays("start")}  # before the load sample: a stray's CPU is not load
     load = machine()
-    print(f"machine at start: {', '.join(f'{k} {v}' for k, v in load.items())}", flush=True)
+    said = ", ".join(f"{k} {v}" for k, v in load.items())
+    print(f"machine at start: {said}, priority {priority}", flush=True)
     results = []
     for leg in selected:
-        result = run_leg(leg)
+        result = run_leg(leg, priority)
         results.append(result)
         print(
             f"{result.leg:<13} {result.verdict:<5} {result.duration:>7.2f}s  "
@@ -468,7 +554,10 @@ def main(argv: list[str] | None = None) -> int:
     record = OUT / f"gate-{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"
     legs = [asdict(r) for r in results]
     record.write_text(
-        json.dumps({"machine": load, "strays": swept, "legs": legs}, indent=2), encoding="utf-8"
+        json.dumps(
+            {"machine": load, "priority": priority, "strays": swept, "legs": legs}, indent=2
+        ),
+        encoding="utf-8",
     )
     red = [r.leg for r in results if r.verdict != "GREEN"]
     skips = [(r.leg, len(r.evidence["skipped"])) for r in results if r.evidence.get("skipped")]

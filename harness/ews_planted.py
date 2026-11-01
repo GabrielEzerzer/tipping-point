@@ -82,8 +82,8 @@ def write_run(
     `verdicts` = False leaves complete.json without thermalised checks, as before #50; `pilot`
     is the pilot-record stamp a ramp or null run's manifest carries (#55). `git_sha` and `dirty`
     go where the simulator puts the commit it ran from (producer.git_sha, producer.dirty); `rng`
-    replaces the default stream, which runs whose tags have the same length share."""
-    rng = rng if rng is not None else np.random.default_rng([seed, L, len(tag)])
+    replaces the default stream, the run's own from its seed, its L and its tag."""
+    rng = rng if rng is not None else np.random.default_rng([seed, L, *tag.encode()])
     run_dir = root / "ising" / f"20261023T000000Z-{tag}"
     run_dir.mkdir(parents=True)
     lattices = replicas * schedule.blocks
