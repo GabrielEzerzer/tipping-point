@@ -146,15 +146,49 @@ def controls(fit: Sequence[Frames], test: Sequence[Frames], seed: int = 0) -> Ta
     return out
 
 
+def fitted(
+    x_fit: np.ndarray, x_test: np.ndarray, targets: Targets, alpha: float = 1e-3
+) -> dict[tuple[str, str], np.ndarray]:
+    """For embeddings of the fit and test frames: each (target, column) probe's prediction of every
+    test frame. One solve: the columns fit independently."""
+    keys = [(t, c) for t in TARGETS for c in COLUMNS]
+    y_fit = np.stack([targets[k][0] for k in keys], 1)
+    pred = ridge(x_fit, y_fit, alpha).predict(x_test)
+    return {k: pred[:, i] for i, k in enumerate(keys)}
+
+
+def replica_sums(test: Sequence[Frames], y: np.ndarray, pred: np.ndarray) -> list[np.ndarray]:
+    """What r2_of needs of a probe's test frames, per run and replica, so that resampling runs and
+    replicas costs nothing per frame: for each run of `test`, (replicas, 4) frames, sum of y, sum of
+    y^2 and sum of squared errors."""
+    out, start = [], 0
+    for f in test:
+        stop = start + len(f.replica)
+        part, miss = y[start:stop], (y - pred)[start:stop]
+        size = int(f.replica.max()) + 1
+        weights = (np.ones(len(part)), part, part * part, miss * miss)
+        out.append(np.stack([np.bincount(f.replica, w, size) for w in weights], 1))
+        start = stop
+    return out
+
+
+def r2_of(sums: np.ndarray) -> float:
+    """r2 from replica_sums' rows (m, 4), however many of them, each as often as it was drawn."""
+    n, y, yy, sse = sums.sum(0)
+    return float(1.0 - sse / (yy - y * y / n))
+
+
 def score(
     x_fit: np.ndarray, x_test: np.ndarray, targets: Targets, alpha: float = 1e-3
 ) -> list[dict[str, Any]]:
     """For embeddings of the fit and test frames: R^2 on test of a ridge probe per target and
     column, the raw row carrying the target's selectivity."""
-    keys = [(t, c) for t in TARGETS for c in COLUMNS]
-    y_fit = np.stack([targets[k][0] for k in keys], 1)
-    pred = ridge(x_fit, y_fit, alpha).predict(x_test)  # one solve: the columns fit independently
-    r2s = {k: r2(targets[k][1], pred[:, i]) for i, k in enumerate(keys)}
+    return scored(fitted(x_fit, x_test, targets, alpha), targets)
+
+
+def scored(pred: dict[tuple[str, str], np.ndarray], targets: Targets) -> list[dict[str, Any]]:
+    """score's rows, from the predictions `fitted` made."""
+    r2s = {k: r2(targets[k][1], values) for k, values in pred.items()}
     rows = []
     for t in TARGETS:
         selectivity = r2s[t, "raw"] - r2s[t, "shuffle_within_T"]

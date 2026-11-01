@@ -16,18 +16,26 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .trend import rowwise
+
 PHI_MAX = 0.9999  # a fitted coefficient is kept inside the stationary range
 
 
 def phase_randomised(x: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
     x = np.asarray(x, dtype=np.float64)
     length = x.shape[-1]
-    spectrum = np.fft.rfft(x, axis=-1)[..., None, :]
-    phases = rng.uniform(0.0, 2 * np.pi, (*x.shape[:-1], n, spectrum.shape[-1]))
+    spectrum = np.fft.rfft(x.reshape(-1, length), axis=-1)
+    phases = rng.uniform(0.0, 2 * np.pi, (len(spectrum), n, spectrum.shape[-1]))
     phases[..., 0] = 0.0  # the mean
     if length % 2 == 0:
         phases[..., -1] = 0.0  # the Nyquist term of a real series is real
-    return np.fft.irfft(spectrum * np.exp(1j * phases), length, axis=-1)
+
+    def inverse(which: np.ndarray) -> np.ndarray:
+        row, draw = which[:, 0] // n, which[:, 0] % n
+        return np.fft.irfft(spectrum[row] * np.exp(1j * phases[row, draw]), length, axis=-1)
+
+    drawn = rowwise(inverse, np.arange(len(spectrum) * n)[:, None], length)
+    return drawn.reshape(*x.shape[:-1], n, length)
 
 
 @dataclass(frozen=True)

@@ -6,9 +6,10 @@ freeze    refuse a file with placeholders, or one that is untracked or differs f
 frozen    the file's sha256 must equal that of the blob at its tag; scoring refuses otherwise
 stamp     what a result's manifest records: the prereg's id, version, sha256, tag and commit
 write_result  <data dir>/ews/<run_id>/ in #22's layout: manifest.json (stamped), one Parquet
-          file per table, complete.json last
-log_trial append one evaluation to <data dir>/ews/trials.jsonl; every evaluation counts as a
-          trial, sensitivity cells included, and the count goes in the paper
+          file per table, its trials logged, complete.json last: a crash leaves a folder with no
+          complete.json, or one whose every trial is logged
+log_trials append evaluations to <data dir>/ews/trials.jsonl in one write; every evaluation counts
+          as a trial, sensitivity cells included, and the count goes in the paper
 
 An amendment is a new file, <id>-v<k+1>.toml, whose `supersedes` names the version it replaces
 and whose `reason` says why; results scored under an earlier version stay bound to it.
@@ -18,7 +19,8 @@ schema (_LATENT_SCHEMA): the checkpoints it scores, each with its untrained twin
 indicator) pairs judged by AUC, the statistics judged by the dynamic test, and the [baseline] whose
 runs it reads. As a draft it may leave as a placeholder a direction, an extremum or a reference's
 tolerance, which the file's experiment sets before the freeze; the freeze's strict check refuses
-every placeholder, whichever key holds it.
+every placeholder, whichever key holds it. Frozen text must not claim what the scorer ignores: a key
+outside the schema is refused, and so is a value the scorer would not act on (_latent_problems).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import re
 import subprocess
 import time
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,6 +63,30 @@ DYNAMIC_ROLES = {"pipeline-check", "test"}
 EXTREMA = {"max", "min"}
 # jepa.probes.TARGETS and COLUMNS but raw, which this package cannot import
 PROBE_TARGETS, PROBE_CONTROLS = {"abs_m", "energy", "l2var"}, {"iid", "shuffle_within_T"}
+PROBE_SELECTIVITY = "R^2(target) - R^2(shuffle_within_T)"  # what jepa.probes.score computes
+_PROBE_FIT = re.compile(
+    r"the staircase of simulator seed (\d+) at each L: "
+    r"(\d+) frames drawn without replacement, probe seed (\d+)"
+)
+# latents.extraction, word for word, and the jepa.extract.selection a staircase's table must have
+# been read under, per checkpoint role, which the scorer holds each table to (ising.admit)
+EXTRACTION = (
+    "ramps and nulls in full; staircases: the T = 2.269231 plateau in full and one burst in eight "
+    "elsewhere (primary and twins); ablation checkpoints: the Tc plateau, ramps and nulls only"
+)
+_TC_PLUS = {"rule": "tc-plus", "tc_plateau": 2.269231, "every": 8}
+SELECTIONS = {
+    "primary": _TC_PLUS,
+    "ema-only": _TC_PLUS | {"rule": "tc-only"},
+    "held-out": _TC_PLUS | {"rule": "tc-only"},
+}
+# fss.dynamic.edge_rule, word for word: what ising._dynamic does with what edge_margin leaves
+EDGE_RULE = (
+    "inconclusive when more than half of an L's replicas take their extremum on an edge of the "
+    "band or within one headline window of it"
+)
+LEARNED = "learned-beyond-random"  # the hypothesis whose direction is the margins' predicted sign
+TREND = "surprise-trend"  # the hypothesis that states the level's direction in words
 # "TBD", "<words>" as in TEMPLATE, or a choice still open, "<min|max, set before the freeze>"
 _PLACEHOLDER = re.compile(r"TBD|<[a-z][^<>|]*>|<[a-z]+(\|[a-z]+)+,[^<>]*>")
 _SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
@@ -181,7 +208,10 @@ _LATENT_SCHEMA: dict[str, Any] = _SCHEMA | {
             }
         ],
     },
-    "indicators": _SCHEMA["indicators"] | {"pairs": [[str]]},
+    "indicators": {  # thin is the dense cadence's, which a latents table does not have
+        **{key: kind for key, kind in _SCHEMA["indicators"].items() if key != "thin"},
+        "pairs": [[str]],
+    },
     "scoring": _SCHEMA["scoring"]
     | {
         "surrogates": _SCHEMA["scoring"]["surrogates"] | {"n_ablation": int},
@@ -191,7 +221,14 @@ _LATENT_SCHEMA: dict[str, Any] = _SCHEMA | {
             "band": [_NUMBER],
             "every": _NUMBER,
         },
-        "margins": {"pairing": str, "seeds": str, "sign_test": bool, "ablations": str},
+        "margins": {
+            "pairing": str,
+            "seeds": str,
+            "sizes": str,
+            "sign_test": bool,
+            "tolerance": (*_NUMBER, str),  # a string only as a placeholder: _margin_problems
+            "ablations": str,
+        },
     },
     "fss": {
         "static": _SCHEMA["fss"]["static"],
@@ -202,6 +239,7 @@ _LATENT_SCHEMA: dict[str, Any] = _SCHEMA | {
             "expected_inverse_nu": _NUMBER,
             "tolerance": _NUMBER,
             "edge_rule": str,
+            "edge_margin": str,
             "min_draw_share": _NUMBER,
         },
     },
@@ -214,6 +252,17 @@ _LATENT_SCHEMA: dict[str, Any] = _SCHEMA | {
         "selectivity": str,
         "per": str,
     },
+}
+# every key a file with a [latents] section may hold: the schema's, and those it may leave out
+_LATENT_KEYS: dict[str, Any] = _LATENT_SCHEMA | {
+    "data": _SCHEMA["data"]
+    | {
+        "ramps": _SCHEMA["data"]["ramps"] | {"eps_L": [_NUMBER]},
+        "staircase": _SCHEMA["data"]["staircase"] | {"tau_sha256": {}},
+    },
+    "indicators": _LATENT_SCHEMA["indicators"] | {"direction_by_observable": {}},
+    "fss": _LATENT_SCHEMA["fss"]
+    | {"static": [{"quantity": str, "role": str, "expected": _NUMBER, "tolerance": _NUMBER}]},
 }
 
 
@@ -241,6 +290,20 @@ def _check(value: Any, schema: Any, where: str, problems: list[str]) -> None:
         problems.append(f"{where}: expected {names}, got {value!r}")
 
 
+def _unread(value: Any, schema: Any, where: str = "") -> list[str]:
+    """Where a document holds a key its schema does not name: nothing reads it, so a frozen file
+    would be claiming what the scorer ignores. An empty table in the schema takes any key."""
+    if isinstance(schema, list) and isinstance(value, list):
+        return [k for i, v in enumerate(value) for k in _unread(v, schema[0], f"{where}[{i}]")]
+    if not (schema and isinstance(schema, dict) and isinstance(value, dict)):
+        return []
+    found = []
+    for key, item in value.items():
+        here = f"{where}.{key}".lstrip(".")
+        found += _unread(item, schema[key], here) if key in schema else [here]
+    return found
+
+
 def _strings(value: Any, where: str = "") -> list[tuple[str, str]]:
     if isinstance(value, dict):
         return [s for k, v in value.items() for s in _strings(v, f"{where}.{k}".lstrip("."))]
@@ -255,17 +318,67 @@ def _placeholder(value: Any) -> bool:
     return isinstance(value, str) and _PLACEHOLDER.search(value) is not None
 
 
-def _latent_problems(doc: dict[str, Any]) -> list[str]:
-    """What a file with a [latents] section can have wrong beyond the checks every file takes."""
-    found: list[str] = []
-    ind, latents, dyn = doc["indicators"], doc["latents"], doc["fss"]["dynamic"]
-    columns = set(latents["columns"])
-    if latents["table"] != "latents":
-        found.append("latents.table: 'latents', the folder extract writes under each run")
-    if not columns or not columns <= LATENT_COLUMNS:
-        found.append(f"latents.columns: a non-empty subset of {sorted(LATENT_COLUMNS)}")
-    if not set(ind["observables"]) <= columns:
-        found.append("indicators.observables: must be latents.columns")
+def probe_protocol(doc: dict[str, Any]) -> tuple[int, int]:
+    """(frames drawn per run, probe seed) as a latent file's probes.fit states them: the scorer
+    reads the numbers it uses from the sentence the file freezes (_latent_problems checks its
+    form)."""
+    fit = _PROBE_FIT.fullmatch(doc["probes"]["fit"])
+    if fit is None:
+        raise PreregError(f"probes.fit: not a sentence the scorer reads: {doc['probes']['fit']!r}")
+    return int(fit[2]), int(fit[3])
+
+
+def _probe_problems(doc: dict[str, Any]) -> list[str]:
+    """What a latent file's probe sentences say must be what the scorer will do with its seeds."""
+    probes, seeds = doc["probes"], sorted(doc["data"]["seeds"])
+    found = []
+    if not probes["targets"] or not set(probes["targets"]) <= PROBE_TARGETS:
+        found.append(f"probes.targets: a non-empty subset of {sorted(PROBE_TARGETS)}")
+    if "energy" not in probes["targets"]:
+        found.append("probes.targets: must hold energy, whose margins are judged")
+    if set(probes["controls"]) != PROBE_CONTROLS:
+        found.append(f"probes.controls: {sorted(PROBE_CONTROLS)}")
+    if probes["ridge_alpha"] <= 0:
+        found.append("probes.ridge_alpha: positive, per sample")
+    if probes["selectivity"] != PROBE_SELECTIVITY:
+        found.append(f"probes.selectivity: {PROBE_SELECTIVITY!r}, what the scorer computes")
+    fit = _PROBE_FIT.fullmatch(probes["fit"])
+    if fit is None or int(fit[1]) != doc["latents"]["validation_seed"]:
+        found.append(
+            "probes.fit: 'the staircase of simulator seed <latents.validation_seed> at each L: "
+            "<n> frames drawn without replacement, probe seed <k>'"
+        )
+    elif seeds and seeds == list(range(seeds[0], seeds[-1] + 1)):
+        said = f"the staircases of seeds {seeds[0]}-{seeds[-1]} at each L: {fit[2]} frames each"
+        if probes["test"] != f"{said}, same rule":
+            found.append(f"probes.test: {said + ', same rule'!r}, as data.seeds and probes.fit say")
+    else:
+        found.append("data.seeds: consecutive, so that probes.test can name them")
+    return found
+
+
+def _margin_problems(doc: dict[str, Any]) -> list[str]:
+    """The margin rule's switches have one setting each, the one ews.margins.table carries out."""
+    margins, found = doc["scoring"]["margins"], []
+    if margins["sign_test"] is not True:
+        found.append("scoring.margins.sign_test: true, the margin rule always takes it")
+    if margins["sizes"] != "mean":
+        found.append("scoring.margins.sizes: 'mean', each checkpoint's judged value over L")
+    if margins["ablations"] != "descriptive":
+        found.append("scoring.margins.ablations: 'descriptive', a margin with no verdict")
+    tolerance = margins["tolerance"]
+    if not _placeholder(tolerance) and (isinstance(tolerance, str) or tolerance <= 0):
+        found.append("scoring.margins.tolerance: positive, a number in the margin's units")
+    named = {h["name"]: h["direction"] for h in doc["hypotheses"]}
+    if named.get(LEARNED) not in ("greater", "less"):
+        found.append(f"hypotheses: {LEARNED} with 'greater' or 'less', the margins' predicted sign")
+    return found
+
+
+def _indicator_problems(doc: dict[str, Any]) -> list[str]:
+    """indicators.pairs is what the scorer reads: a name, an observable or a direction that no pair
+    uses would stand in the frozen file unread."""
+    ind, found = doc["indicators"], []
     pairs = [tuple(pair) for pair in ind["pairs"]]
     if (
         not pairs
@@ -275,15 +388,60 @@ def _latent_problems(doc: dict[str, Any]) -> list[str]:
             for pair in pairs
         )
     ):
-        found.append("indicators.pairs: distinct [observable, indicator] pairs of the scored ones")
+        return ["indicators.pairs: distinct [observable, indicator] pairs of the scored ones"]
+    if set(ind["observables"]) != {observable for observable, _ in pairs}:
+        found.append("indicators.observables: exactly those indicators.pairs scores")
+    if set(ind["names"]) != {name for _, name in pairs}:
+        found.append("indicators.names: exactly those indicators.pairs scores")
+    by_observable: dict[str, dict[str, Any]] = {}
     for observable, own in ind.get("direction_by_observable", {}).items():
         if observable not in ind["observables"] or not isinstance(own, dict):
             found.append(f"indicators.direction_by_observable.{observable}: a scored observable")
             continue
+        by_observable[observable] = own
         for name, value in own.items():
+            where = f"indicators.direction_by_observable.{observable}.{name}"
             if value not in ("greater", "less") and not _placeholder(value):
-                where = f"indicators.direction_by_observable.{observable}.{name}"
                 found.append(f"{where}: 'greater' or 'less', the expected trend")
+            if (observable, name) not in pairs:
+                found.append(f"{where}: no pair of indicators.pairs reads it")
+    for name, value in ind["direction"].items():
+        read = [by_observable.get(o, {}).get(name, value) for o, paired in pairs if paired == name]
+        if value not in read and not any(map(_placeholder, (value, *read))):
+            found.append(f"indicators.direction.{name}: no pair of indicators.pairs reads it")
+    trend = {h["name"]: h["direction"] for h in doc["hypotheses"]}.get(TREND)
+    level = by_observable.get("surprise", {}).get("level", ind["direction"].get("level"))
+    if (
+        trend is not None
+        and level is not None
+        and trend != level
+        and not (_placeholder(trend) or _placeholder(level))
+    ):
+        found.append(f"hypotheses: {TREND} says {trend}, but the level is scored as {level}")
+    return found
+
+
+def _latent_problems(doc: dict[str, Any]) -> list[str]:
+    """What a file with a [latents] section can have wrong beyond the checks every file takes."""
+    found = [
+        f"{key}: nothing reads this key in a file with [latents]; take it out"
+        for key in _unread(doc, _LATENT_KEYS)
+    ]
+    ind, latents, dyn = doc["indicators"], doc["latents"], doc["fss"]["dynamic"]
+    columns = set(latents["columns"])
+    if latents["table"] != "latents":
+        found.append("latents.table: 'latents', the folder extract writes under each run")
+    if not columns or not columns <= LATENT_COLUMNS:
+        found.append(f"latents.columns: a non-empty subset of {sorted(LATENT_COLUMNS)}")
+    if not set(ind["observables"]) <= columns:
+        found.append("indicators.observables: must be latents.columns")
+    if latents["extraction"] != EXTRACTION:
+        found.append(f"latents.extraction: {EXTRACTION!r}, the rule each table is held to")
+    if doc["data"]["staircase"]["temperature"] != _TC_PLUS["tc_plateau"]:
+        found.append(
+            f"data.staircase.temperature: {_TC_PLUS['tc_plateau']}, as extraction keeps it"
+        )
+    found += _indicator_problems(doc) + _probe_problems(doc) + _margin_problems(doc)
     entries = latents["checkpoints"]
     for i, entry in enumerate(entries):
         if entry["role"] not in CHECKPOINT_ROLES:
@@ -305,11 +463,12 @@ def _latent_problems(doc: dict[str, Any]) -> list[str]:
         found.append("scoring.surrogates.n_ablation: the surrogates per ablation checkpoint")
     if not _SLUG.fullmatch(doc["baseline"]["prereg"]):
         found.append("baseline.prereg: the <id>-v<k> whose runs this file reads")
-    for key in ("statistic", "indicators", "observable"):  # v1's, which statistics replaces
-        if key in dyn:
-            found.append(f"fss.dynamic.{key}: a file with [latents] judges fss.dynamic.statistics")
     if not dyn["statistics"]:
         found.append("fss.dynamic.statistics: at least one")
+    if dyn["edge_margin"] != "window":
+        found.append("fss.dynamic.edge_margin: 'window', one headline window of ramp (#115)")
+    if dyn["edge_rule"] != EDGE_RULE:
+        found.append(f"fss.dynamic.edge_rule: {EDGE_RULE!r}, the rule the scorer carries out")
     for i, entry in enumerate(dyn["statistics"]):
         where = f"fss.dynamic.statistics[{i}]"
         if entry["observable"] not in columns:
@@ -320,18 +479,19 @@ def _latent_problems(doc: dict[str, Any]) -> list[str]:
             found.append(f"{where}.extremum: one of {sorted(EXTREMA)}")
         if entry["role"] not in DYNAMIC_ROLES:
             found.append(f"{where}.role: one of {sorted(DYNAMIC_ROLES)}")
+    used = {*ind["observables"], *(entry["observable"] for entry in dyn["statistics"])}
     for i, row in enumerate(doc["fss"]["static"]):
         tolerance = row.get("tolerance", 0.0)
         number = isinstance(tolerance, _NUMBER) and not isinstance(tolerance, bool)
         if not number and not _placeholder(tolerance):
             found.append(f"fss.static[{i}].tolerance: a number")
-    probes = doc["probes"]
-    if not probes["targets"] or not set(probes["targets"]) <= PROBE_TARGETS:
-        found.append(f"probes.targets: a non-empty subset of {sorted(PROBE_TARGETS)}")
-    if set(probes["controls"]) != PROBE_CONTROLS:
-        found.append(f"probes.controls: {sorted(PROBE_CONTROLS)}")
-    if probes["ridge_alpha"] <= 0:
-        found.append("probes.ridge_alpha: positive, per sample")
+        used |= {c for c in columns if row["quantity"].endswith(f"_{c}")}
+        if row["role"] == "descriptive" and {"expected", "tolerance"} & row.keys():
+            found.append(f"fss.static[{i}]: a descriptive row is judged by nothing it states")
+        if row["role"] == "reference" and "expected" in row:
+            found.append(f"fss.static[{i}].expected: a reference is judged against 0 alone")
+    if columns - used:
+        found.append(f"latents.columns: {sorted(columns - used)} scored by nothing in this file")
     return found
 
 
@@ -415,6 +575,11 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
             found.append("fss.dynamic.observable: must be a scored observable")
         if not set(doc["scoring"]["alarms"]["indicators"]) <= set(ind["names"]):
             found.append("scoring.alarms.indicators: must be scored indicators")
+        if "edge_margin" in dyn:
+            found.append(
+                "fss.dynamic.edge_margin: a file with no [latents] reads the band's first and last "
+                "samples alone, as ising-ews-v1 froze it"
+            )
     if dyn["cadence"] not in ind["cadences"]:
         found.append("fss.dynamic.cadence: one of indicators.cadences, the verdict's cadence")
     if not 0 < dyn["min_draw_share"] <= 1:
@@ -582,15 +747,21 @@ def trials_path(data_dir: Path) -> Path:
     return Path(data_dir) / "ews" / "trials.jsonl"
 
 
-def log_trial(data_dir: Path, record: dict[str, Any]) -> None:
-    """Append one evaluation, flushed and synced before returning; the log only ever grows."""
+def log_trials(data_dir: Path, records: Sequence[dict[str, Any]]) -> None:
+    """Append evaluations, one line each, in one write, flushed and synced before returning; the log
+    only ever grows."""
     path = trials_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps({"logged_ns": time.time_ns(), **record}, sort_keys=True) + "\n"
-    with open(path, "a", encoding="utf-8", newline="\n") as f:
-        f.write(line)
+    now = time.time_ns()
+    lines = [json.dumps({"logged_ns": now, **record}, sort_keys=True) + "\n" for record in records]
+    with open(path, "ab") as f:
+        f.write("".join(lines).encode("utf-8"))
         f.flush()
         os.fsync(f.fileno())
+
+
+def log_trial(data_dir: Path, record: dict[str, Any]) -> None:
+    log_trials(data_dir, [record])
 
 
 def trials(data_dir: Path, prereg: Prereg) -> int:
@@ -606,6 +777,18 @@ def trials(data_dir: Path, prereg: Prereg) -> int:
             prereg.version,
         )
     return count
+
+
+def charge(data_dir: Path, prereg: Prereg, planned: int) -> int:
+    """Refuse a scoring whose `planned` cells would take this version past its budget, so that
+    cell budget + 1 is never evaluated; returns the trials logged so far."""
+    logged, budget = trials(data_dir, prereg), prereg.doc["trials"]["budget"]
+    if logged + planned > budget:
+        raise PreregError(
+            f"{prereg.name}: {logged} trials logged and {planned} more would exceed its budget of "
+            f"{budget}; amend the pre-registration to score again"
+        )
+    return logged
 
 
 def cells(doc: dict[str, Any]) -> int:
@@ -631,9 +814,12 @@ def write_result(
     tables: dict[str, list[dict[str, Any]]],
     inputs: list[dict[str, Any]],
     params: dict[str, Any],
+    records: Sequence[dict[str, Any]] = (),
 ) -> Path:
     """A scoring run's output in the shared layout: manifest.json first, each non-empty table as
-    <table>/00000000000000000000.parquet keyed by `cell`, and complete.json once all are synced."""
+    <table>/00000000000000000000.parquet keyed by `cell`, the trial `records` it evaluated logged
+    in one write, each naming this result, and complete.json once all are synced. A crash so leaves
+    a folder with no complete.json, its trials logged or not, or a complete one with all of them."""
     run_id = engine.run_id(prereg.name)
     run_dir = Path(data_dir) / "ews" / run_id
     run_dir.mkdir(parents=True)
@@ -656,6 +842,8 @@ def write_result(
         path.parent.mkdir()
         io.write_file(path, lambda f, table=table: pq.write_table(table, f, compression="zstd"))
         files[path.relative_to(run_dir).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if records:
+        log_trials(data_dir, [trial | {"result": run_id} for trial in records])
     record = {
         "ended_ns": time.time_ns(),
         "last_key": max((len(rows) - 1 for rows in filled.values()), default=-1),

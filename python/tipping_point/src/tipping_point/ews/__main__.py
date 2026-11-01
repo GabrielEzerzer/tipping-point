@@ -10,7 +10,9 @@
                        whose dwell was not read from the tau.json it pins at that L. A prereg with
                        a [latents] section reads the runs of the version its [baseline] names, so
                        they must come from that tag's commit, and scores each latents table it
-                       pins, made from the pinned checkpoint by its own tag's commit
+                       pins, made from the pinned checkpoint by its own tag's commit; it is scored
+                       whole by harness/ising_experiment.py, so here it is refused without
+                       --cells-only, which would spend its trial budget on a partial result
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside
@@ -22,7 +24,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +127,12 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="score with a pilot record that did not measure the running kernel (stamped stale)",
     )
+    p.add_argument(
+        "--cells-only",
+        action="store_true",
+        help="a latent file's cell tables alone, without the probes and margins of "
+        "harness/ising_experiment.py, spending its trials all the same",
+    )
     p.set_defaults(command=_score)
 
     p = sub.add_parser("prereg", help="pre-registration files")
@@ -149,31 +157,40 @@ def _calibrate(args: argparse.Namespace) -> int:
     return 0 if all(r["inside"] for r in rows) else 1
 
 
-def _score(args: argparse.Namespace) -> int:
-    pre = prereg.load(args.prereg)
-    ref = prereg.frozen(pre)
-    planned, logged = prereg.cells(pre.doc), prereg.trials(args.data_dir, pre)
-    budget = pre.doc["trials"]["budget"]
-    if logged + planned > budget:
-        raise prereg.PreregError(
-            f"{pre.name}: {logged} trials logged and {planned} more would exceed its budget of "
-            f"{budget}; amend the pre-registration to score again"
-        )
+def score(
+    pre: prereg.Prereg,
+    ref: prereg.Frozen,
+    data_dir: Path,
+    seed: int,
+    allow_stale: bool = False,
+    more: Callable[[ising.Evaluation], dict[str, list[dict[str, Any]]]] | None = None,
+) -> tuple[Path, ising.Evaluation, int]:
+    """One scoring run: refused past the trial budget, evaluated, then written and logged as one
+    (prereg.write_result, whose last step is complete.json). `more` adds tables from the evaluation
+    (harness/ising_experiment.py: a latent file's probes and margins). A ref without a commit, a
+    scoring of planted data only that runner allows, asks no commit of the runs. Returns the
+    result's folder, the evaluation and the trials logged before it."""
+    planned = prereg.cells(pre.doc)
+    logged = prereg.charge(data_dir, pre, planned)
     if pre.doc["data"]["domain"] != "ising":
         raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
-    rng = np.random.default_rng(args.seed)
+    rng = np.random.default_rng(seed)
     evaluation = ising.evaluate(
         pre.doc,
-        args.data_dir,
+        data_dir,
         rng,
-        allow_stale=args.allow_stale_pilot,
-        commit=ref.commit,
-        runs_commit=prereg.baseline_commit(pre),
+        allow_stale=allow_stale,
+        commit=ref.commit or None,
+        runs_commit=prereg.baseline_commit(pre) if ref.commit else None,
     )
+    if len(evaluation.tables["auc"]) != planned:  # the budget is only as good as this count
+        raise prereg.PreregError(
+            f"{pre.name}: {len(evaluation.tables['auc'])} AUC cells evaluated, {planned} counted"
+        )
     stamp = prereg.stamp(pre, ref)
     pilot = evaluation.pilot
     params = {
-        "seed": args.seed,
+        "seed": seed,
         "pilot": {
             "run_id": pilot.path.parent.name,
             "sha256": pilot.sha256,
@@ -195,20 +212,33 @@ def _score(args: argparse.Namespace) -> int:
         }
         for r in evaluation.inputs
     ]
-    run_dir = prereg.write_result(args.data_dir, pre, ref, evaluation.tables, inputs, params)
-    for row in evaluation.tables["auc"]:
-        prereg.log_trial(
-            args.data_dir,
-            {
-                "prereg": stamp,
-                "result": run_dir.name,
-                "cell": {key: row[key] for key in CELL},
-                "auc": row["auc"],
-                "auc_ci": [row["auc_lo"], row["auc_hi"]],
-                "n_pos": row["n_pos"],
-                "n_neg": row["n_neg"],
-            },
+    tables = evaluation.tables | (more(evaluation) if more else {})
+    trials = [
+        {
+            "prereg": stamp,
+            "cell": {key: row[key] for key in CELL},
+            "auc": row["auc"],
+            "auc_ci": [row["auc_lo"], row["auc_hi"]],
+            "n_pos": row["n_pos"],
+            "n_neg": row["n_neg"],
+        }
+        for row in evaluation.tables["auc"]
+    ]
+    run_dir = prereg.write_result(data_dir, pre, ref, tables, inputs, params, trials)
+    return run_dir, evaluation, logged
+
+
+def _score(args: argparse.Namespace) -> int:
+    pre = prereg.load(args.prereg)
+    ref = prereg.frozen(pre)
+    planned = prereg.cells(pre.doc)
+    if "latents" in pre.doc and not args.cells_only:
+        raise prereg.PreregError(
+            f"{pre.name} has a [latents] section: harness/ising_experiment.py scores it whole, "
+            f"with its probes and margins. This would spend its {planned} trials on the cells "
+            "alone; --cells-only says that is meant"
         )
+    run_dir, evaluation, logged = score(pre, ref, args.data_dir, args.seed, args.allow_stale_pilot)
     for row in evaluation.tables["auc"]:
         if row["headline"]:
             print(
@@ -221,6 +251,7 @@ def _score(args: argparse.Namespace) -> int:
             f"fss {row['quantity']:<22} {row['cadence']:<8} kappa {row['estimate']:+.3f} "
             f"[{row['lo']:+.3f}, {row['hi']:+.3f}]  {row['verdict']}"
         )
+    budget = pre.doc["trials"]["budget"]
     print(f"{run_dir}  ({logged + planned} of {budget} trials logged)")
     return 0
 

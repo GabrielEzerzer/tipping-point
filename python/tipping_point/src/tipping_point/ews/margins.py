@@ -24,17 +24,36 @@ every seed's margin carries the predicted sign. Otherwise it follows fss.exclude
 CI lies wholly on the wrong side of 0, or holds 0 within the tolerance band (precisely no margin);
 inconclusive when it holds 0 and is wider. A margin of the wrong sign on any seed fails the sign
 test, and with it the verdict (fss.combine); an undefined (NaN) margin makes both inconclusive.
+
+table() is a latent file's margins table, one row per quantity and role. Three rows are judged, each
+over the primary checkpoints: the energy probe's R^2 and its selectivity, the mean over L of each
+checkpoint's value, by the verdict above; and the surprise FSS verdicts, by the rule hypothesis
+learned-beyond-random states for them, at least one surprise statistic passing for at least 4 of 5
+trained checkpoints and for none of their twins (an inconclusive twin is no pass; inconclusive
+when the trained checkpoints that are inconclusive could still reach the 4). Every other row is
+descriptive and has no verdict: each L's value, AUC (parity, saturated by construction), the chi
+alignment and all of an ablation's.
 """
 
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 
 from . import fss
+from .ising import PRIMARY, latents_name
+from .prereg import LEARNED
 from .scoring import oriented, percentile_interval
+
+ALL = "all"  # a Quantity's scope when it is the mean over L, not one L's
+JUDGED = ("energy_r2", "energy_selectivity")
+SURPRISE_FSS = "surprise_fss"
+SURPRISE_SHARE = 4 / 5  # of the trained checkpoints, for a surprise statistic to count
 
 
 def paired(
@@ -99,4 +118,123 @@ def paired(
         "tolerance": tolerance,
         "sign_test": signs,
         "verdict": fss.combine(ci, signs),
+    }
+
+
+@dataclass(frozen=True)
+class Quantity:
+    """One scale-free quantity per checkpoint, the way the margins table reads it."""
+
+    name: str
+    scope: str  # ALL, or one L's "L=64"
+    values: dict[str, float]  # checkpoint -> Q
+    draws: dict[str, np.ndarray] = field(default_factory=dict)  # checkpoint -> Q per data resample,
+    # column b the same resample for every checkpoint; empty where Q has no data bootstrap
+    reference: float = float("nan")  # the baseline's value, where the quantity has a classic one
+
+
+def _surprise_verdict(trained: list[str], twin: list[str]) -> str:
+    """The rule for one statistic, from its verdicts over the trained checkpoints and the twins."""
+    need = math.ceil(SURPRISE_SHARE * len(trained))
+    passes = trained.count(fss.PASS)
+    if fss.PASS in twin:
+        return fss.FAIL
+    if passes >= need:
+        return fss.PASS
+    return fss.INCONCLUSIVE if passes + trained.count(fss.INCONCLUSIVE) >= need else fss.FAIL
+
+
+def table(
+    doc: dict[str, Any],
+    quantities: Iterable[Quantity],
+    fss_rows: Sequence[dict[str, Any]],
+    rng: np.random.Generator,
+) -> list[dict[str, Any]]:
+    """The margins table of a latent file: see the module docstring. A role with one checkpoint has
+    no spread between seeds to bootstrap over, and no rows."""
+    sc, steps = doc["scoring"], int(doc["latents"]["steps"])
+    tolerance = float(sc["margins"]["tolerance"])
+    n, level = int(sc["bootstrap"]), float(sc["ci_level"])
+    direction = next(h["direction"] for h in doc["hypotheses"] if h["name"] == LEARNED)
+    statistics = [
+        f"{s['observable']}_{s['indicator']}"
+        for s in doc["fss"]["dynamic"]["statistics"]
+        if s["observable"] == "surprise" and s["role"] == "test"
+    ]
+    verdicts = {(r["checkpoint"], r["quantity"]): r["verdict"] for r in fss_rows}
+    roles: dict[str, list[dict[str, Any]]] = {}
+    for entry in doc["latents"]["checkpoints"]:
+        roles.setdefault(entry["role"], []).append(entry)
+    measured = list(quantities)
+    rows = []
+    for role, entries in roles.items():
+        if len(entries) < 2:
+            continue
+        trained = [latents_name(entry["training"], steps) for entry in entries]
+        twin = [latents_name(entry["training"], 0) for entry in entries]
+        head = {
+            "role": role,
+            "checkpoint": ";".join(trained),  # what the row reads, in the order of its margins
+            "twin": ";".join(twin),
+            "model_seeds": [entry["model_seed"] for entry in entries],
+        }
+        for q in measured:
+            draws = ()
+            if q.draws:
+                draws = tuple(
+                    np.stack([q.draws[name] for name in side]) for side in (trained, twin)
+                )
+            found = paired(
+                [q.values[name] for name in trained],
+                [q.values[name] for name in twin],
+                direction,
+                tolerance,
+                rng,
+                *draws,
+                n=n,
+                level=level,
+            )
+            judged = role == PRIMARY and q.scope == ALL and q.name in JUDGED
+            rows.append(_row(q.name, q.scope, judged, head, found, reference=q.reference))
+        settled = []
+        for statistic in statistics:
+            key = f"inverse_nu_{statistic}"
+            says = [verdicts[name, key] for name in trained], [verdicts[name, key] for name in twin]
+            passed = [[float(v == fss.PASS) for v in side] for side in says]
+            found = paired(passed[0], passed[1], direction, tolerance, rng, n=n, level=level)
+            found |= {"sign_test": "", "verdict": _surprise_verdict(*says)}
+            counts = {
+                "trained_passes": says[0].count(fss.PASS),
+                "twin_passes": says[1].count(fss.PASS),
+            }
+            rows.append(_row(f"{SURPRISE_FSS}_{statistic}", ALL, False, head, found, **counts))
+            settled.append((found, counts))
+        if role == PRIMARY and settled:
+            order = (fss.PASS, fss.INCONCLUSIVE, fss.FAIL)
+            found, counts = min(settled, key=lambda pair: order.index(pair[0]["verdict"]))
+            rows.append(_row(SURPRISE_FSS, ALL, True, head, found, **counts))
+    return rows
+
+
+def _row(
+    quantity: str,
+    scope: str,
+    judged: bool,
+    head: dict[str, Any],
+    found: dict[str, Any],
+    **extra: Any,
+) -> dict[str, Any]:
+    """A margins row, every row with every column: a descriptive one keeps its CI, not its
+    verdict."""
+    return {
+        "quantity": quantity,
+        "scope": scope,
+        "judged": judged,
+        **head,
+        **found,
+        "verdict": found["verdict"] if judged else "",
+        "reference": float("nan"),
+        "trained_passes": None,
+        "twin_passes": None,
+        **extra,
     }

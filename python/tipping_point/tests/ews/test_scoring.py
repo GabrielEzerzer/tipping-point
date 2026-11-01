@@ -154,3 +154,68 @@ def test_bootstrap_takes_several_samples_for_two_sample_statistics() -> None:
     draws = scoring.hierarchical_bootstrap(scoring.auc, [pos, neg], 50, np.random.default_rng(6))
     assert np.all(draws == 1.0)
     assert scoring.percentile_interval(np.arange(101.0)) == pytest.approx((2.5, 97.5))
+
+
+def _replayed(table: dict[bytes, np.ndarray], used: dict[bytes, int]) -> scoring.Surrogate:
+    """A surrogate generator that hands each row the next of its own fixed draws, whoever asks and
+    in whatever batches: the same surrogates for the whole test and the sequential one."""
+
+    def make(rows: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
+        out = []
+        for row in rows:
+            key = row.tobytes()
+            out.append(table[key][used[key] : used[key] + n])
+            used[key] += n
+        return np.stack(out)
+
+    return make
+
+
+@pytest.mark.parametrize(("n", "alpha"), [(199, 0.05), (99, 0.1), (19, 0.05), (2, 0.05)])
+@pytest.mark.parametrize("direction", ["greater", "less"])
+def test_the_sequential_test_decides_as_the_whole_test_does_on_the_same_surrogates(
+    n: int, alpha: float, direction: str
+) -> None:
+    """Row for row, p <= alpha alike, on null rows and on rows with a planted trend, and it draws
+    far fewer of them. A row that runs its n has the whole test's p; a stopped one is above
+    alpha."""
+    rng = np.random.default_rng(n)
+    window, length = 8, 40
+    pipe = Pipeline("variance", window, length, None)
+    span = pipe.span
+    sign = 1.0 if direction == "greater" else -1.0
+    ramp = np.exp(sign * np.linspace(-1.5, 1.5, span))
+    x = np.concatenate([rng.standard_normal((30, span)), rng.standard_normal((30, span)) * ramp])
+    table = {
+        row.tobytes(): surrogates.phase_randomised(row[None], n, rng)[0]
+        for row in pipe.residuals(x)
+    }
+    whole, p_whole = scoring.surrogate_test(
+        x, pipe, _replayed(table, dict.fromkeys(table, 0)), n, rng, direction
+    )
+    used = dict.fromkeys(table, 0)
+    observed, p = scoring.sequential_test(x, pipe, _replayed(table, used), n, rng, direction, alpha)
+    assert np.array_equal(observed, whole)
+    assert np.array_equal(p <= alpha, p_whole <= alpha)
+    drawn = np.array(list(used.values()))
+    full = drawn == n
+    assert np.array_equal(p[full], p_whole[full]) and (p[~full] > alpha).all()
+    assert drawn.max() <= n
+    if n >= 99:
+        assert drawn[:30].mean() < 0.6 * n  # the nulls settle early
+        assert (p_whole[30:] <= alpha).any()  # and some planted rows ran to the end, flagged
+
+
+def test_the_sequential_test_leaves_an_undefined_row_undefined_and_draws_none_for_it() -> None:
+    rng = np.random.default_rng(5)
+    pipe = Pipeline("variance", 8, 40, None)
+    x = rng.standard_normal((3, pipe.span))
+    x[1, 4] = np.nan
+    calls: list[int] = []
+
+    def make(rows: np.ndarray, n: int, r: np.random.Generator) -> np.ndarray:
+        calls.append(len(rows))
+        return surrogates.phase_randomised(rows, n, r)
+
+    _, p = scoring.sequential_test(x, pipe, make, 19, rng)
+    assert np.isnan(p[1]) and np.isfinite(p[[0, 2]]).all() and max(calls) <= 2

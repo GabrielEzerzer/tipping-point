@@ -220,3 +220,23 @@ def test_excludes_and_combine_verdicts() -> None:
     assert fss.combine(fss.PASS, fss.INCONCLUSIVE) == fss.INCONCLUSIVE
     assert fss.combine(fss.INCONCLUSIVE, fss.FAIL, fss.PASS) == fss.FAIL
     assert fss.combine(fss.PASS, fss.PASS) == fss.PASS
+
+
+def test_a_margin_leaves_unlocated_what_lies_that_close_to_either_edge() -> None:
+    """#115. Bumps along a band read 0.1 apart: with a margin of 0.4, one 0.3 inside an edge is not
+    located, at the hot edge and the cold, one 0.5 inside still is and keeps its place, one on the
+    edge is lost as it always was. Without a margin, as ising-ews-v1 reads it, all but the edges'
+    are located: the margin is the only thing that differs. Falling channels read the same way."""
+    eps = np.linspace(6.0, -4.0, 101)
+    band = (6.0, -4.0)
+    places = np.array([6.0, 5.7, 5.5, 0.6, -3.5, -3.7, -4.0])
+    rows = np.stack([np.exp(-(((eps - at) / 0.2) ** 2)) for at in places])
+    plain = fss.peak_position(rows, eps, band, "greater")
+    assert np.isnan(plain[[0, 6]]).all()
+    assert plain[1:6] == pytest.approx(places[1:6])
+    assert np.array_equal(plain, fss.peak_position(rows, eps, band, "greater", 0.0), equal_nan=True)
+    near = fss.peak_position(rows, eps, band, "greater", 0.4)
+    assert np.isnan(near[[0, 1, 5, 6]]).all()
+    assert near[[2, 3, 4]] == pytest.approx(places[[2, 3, 4]])
+    falling = fss.peak_position(-rows, eps, band, "less", 0.4)
+    assert np.array_equal(falling, near, equal_nan=True)
