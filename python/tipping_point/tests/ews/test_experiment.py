@@ -533,6 +533,36 @@ def test_a_torn_log_stops_a_scoring_as_a_refusal_not_a_traceback(
 # ---------------------------------------------------------------- 4: the margins
 
 
+def test_two_checkpoints_on_one_embedding_draw_the_same_resamples(frozen: Frozen) -> None:
+    """#122, the runner's side of what margins.paired asks of its draws: column b is one resample of
+    the data for every checkpoint of a quantity, so that within a column a trained-twin difference
+    is the model's alone. Two checkpoints given one embedding in one probe_tables call have equal
+    draws, to the bit, for every target, quantity and L. A third, with its own embedding, has not,
+    and every set of draws spreads, so equal is not degenerate. A stream per checkpoint would move
+    every margin's CI, and nothing else here would go red."""
+    doc = prereg.load(frozen.path).doc
+    admitted = ising.admit(doc, frozen.spare.root)
+    first, second, third = admitted.passes[:3]
+    embedding = planted.planted_embedding()
+
+    def embed(checkpoint: ising.Checkpoint, sets: Any) -> np.ndarray:
+        return embedding(first if checkpoint == second else checkpoint, sets)
+
+    _, draws = runner.probe_tables(
+        doc, frozen.spare.root, admitted.scored, (first, second, third), embed, 26
+    )
+    targets = doc["probes"]["targets"]
+    assert len(draws) == len(targets) * 2 * len(V1_SIZES) * 3
+    for target in targets:
+        for quantity in ("r2", "selectivity"):
+            for L in V1_SIZES:
+                key = (target, quantity, L)
+                one, two, other = (draws[(*key, c.name)] for c in (first, second, third))
+                assert one.shape == (doc["scoring"]["bootstrap"],) and one.std() > 0, key
+                assert np.array_equal(one, two), key
+                assert not np.array_equal(one, other), key
+
+
 def test_a_planted_positive_margin_passes(scored: Path) -> None:
     """The three judged rows and no others: energy's R^2 and selectivity by the CI and the sign
     test, every seed's margin positive, and the surprise FSS rule, at least 4 trained checkpoints of
