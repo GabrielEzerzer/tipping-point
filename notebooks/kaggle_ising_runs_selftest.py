@@ -10,7 +10,7 @@ runs carried forward and reused or resumed; inputs found and checked against the
 final.pt against the complete.json beside it; the wheel and COMMIT.txt checks; run verification,
 judged by exit codes and files only; the rates STATUS gives, by checkpoint and L; the kernel folder
 against what `kaggle kernels push` checks; invalid plans refused at every door; pilot-28.json,
-primary-28.json and first-read-m1.json, their stage ids, inputs and kernel sources, on stand-in
+primary-28.json and the first-read plans, their stage ids, inputs and kernel sources, on stand-in
 mounts.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
@@ -1522,7 +1522,7 @@ def leaks(folder: Path) -> list[str]:
 
 
 def kernel_acceptance(k: ModuleType, root: Path) -> None:
-    for name in ("job-a", "pilot-28", "primary-28", "first-read-m1"):
+    for name in ("job-a", "pilot-28", "primary-28", "first-read-m1", "first-read-m2"):
         source, folder = PLANS / f"{name}.json", root / name
         plan = json.loads(source.read_text(encoding="utf-8"))
         code = k.main(["--write-kernel", str(source), str(folder)])
@@ -1617,8 +1617,20 @@ PILOT_SHA256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698
 DRAFT = "ising-latent-v1.toml"
 DRAFT_RUN = "20261101T000000Z-ising-latent-v1-draft"  # its folder in tp-prereg-ising-latent
 M1_RUN = "20261101T051047Z-L16-32-64-m1"  # primary model seed 1, in tp-jepa-primary-28's output
-M1_FINAL_SHA256 = "3f251147a5072964176cab40122cbf855755d7a7dd77bf946eaaef661b43d149"
-M1_TWIN_SHA256 = "5e076a53e61d8c359d55c13738f8a2619e4af1002843de0c10b3ca33bc6d4224"
+# The model each first read reads, in that output. Written out here as well as in its plan, so that
+# a slip in a plan's pin turns red here and is not first refused on Kaggle.
+FIRST_READS = {
+    "m1": {
+        "run": M1_RUN,
+        "final": "3f251147a5072964176cab40122cbf855755d7a7dd77bf946eaaef661b43d149",
+        "twin": "5e076a53e61d8c359d55c13738f8a2619e4af1002843de0c10b3ca33bc6d4224",
+    },
+    "m2": {
+        "run": "20261101T051110Z-L16-32-64-m2",
+        "final": "7638b436d5ee0cb39f68e6ce62f965b0c0c4f66ff9c402e80e93df0afad9aef4",
+        "twin": "d22f7e494b6ee40bc6e319173e183c8c21709a3f5d149a0251b03fac84415176",
+    },
+}
 DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
 KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
 
@@ -2033,8 +2045,9 @@ def real_runs(k: ModuleType, root: Path) -> None:
         [(r.name, r.state, r.note) for r in session.runs],
     )
 
-    # a checkpoint read out of an input mount, as first-read-m1 reads m1's: the training's folder
-    # attached as a kernel output, where jepa extract needs complete.json beside final.pt (#127)
+    # a checkpoint read out of an input mount, as a first-read plan reads its model's: the
+    # training's folder attached as a kernel output, where jepa extract needs complete.json beside
+    # final.pt (#127)
     source = "tp-tiny-primary"
     attached = root / "input" / source / "out" / "jepa" / by2["tiny"]["run_id"]
     shutil.copytree(out2 / training, attached)
@@ -2176,12 +2189,31 @@ def primary_28(k: ModuleType, root: Path) -> None:
     )
 
 
-def first_read_m1(k: ModuleType, root: Path) -> None:
-    plan = json.loads((PLANS / "first-read-m1.json").read_text(encoding="utf-8"))
+def first_read_plan(model: str) -> dict:
+    return json.loads((PLANS / f"first-read-{model}.json").read_text(encoding="utf-8"))
+
+
+def first_read_inputs(k: ModuleType, model: str) -> dict:
+    """The inputs a model's first read must name: its two files, pinned as FIRST_READS says."""
+    pins = FIRST_READS[model]
+    return {
+        f"{model}_final": {"run": pins["run"], "file": k.FINAL, "sha256": pins["final"]},
+        f"{model}_twin": {"run": pins["run"], "file": k.TWIN, "sha256": pins["twin"]},
+    }
+
+
+def first_read(k: ModuleType, root: Path, model: str) -> None:
+    label, trained = f"first-read-{model}", FIRST_READS[model]["run"]
+    plan = first_read_plan(model)
     pilot = json.loads((PLANS / "pilot-28.json").read_text(encoding="utf-8"))
+    check(
+        f"{label}: its kernel is its own, so a push is no new version of another read's",
+        plan["kernel"] == f"tp-jepa-{label}",
+        plan["kernel"],
+    )
     errors = k.cli_errors(plan)
-    check("first-read-m1: the CLI itself takes every run's arguments", errors == [], errors)
-    checkpoints = {k.FINAL: "m1_final", k.TWIN: "m1_twin"}
+    check(f"{label}: the CLI itself takes every run's arguments", errors == [], errors)
+    checkpoints = {k.FINAL: f"{model}_final", k.TWIN: f"{model}_twin"}
     mirrored = [
         {
             "name": r["name"],
@@ -2192,27 +2224,29 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         if r["name"].startswith("x-")
     ]
     check(
-        "first-read-m1: pilot-28's own read and nothing else: its names, order and arguments, on "
-        "m1's two files, no run pinned so that each T4 takes the next",
+        f"{label}: pilot-28's own read and nothing else: its names, order and arguments, on "
+        f"{model}'s two files, no run pinned so that each T4 takes the next",
         plan["runs"] == mirrored,
     )
     entries = plan["inputs"]
     check(
-        "first-read-m1: its checkpoints are m1's final.pt and twin, pinned, from primary-28",
+        f"{label}: its checkpoints are {model}'s final.pt and twin, pinned, from primary-28",
         plan["kernel_sources"] == [f"{k.OWNER}/tp-jepa-primary-28"]
         and plan["datasets"] == pilot["datasets"]
-        and {n: (e["run"], e["file"], e["sha256"]) for n, e in entries.items()}
-        == {
-            "m1_final": (M1_RUN, k.FINAL, M1_FINAL_SHA256),
-            "m1_twin": (M1_RUN, k.TWIN, M1_TWIN_SHA256),
-        },
+        and entries == first_read_inputs(k, model),
         entries,
     )
     check(
-        "first-read-m1: its wheel is the project's wheel dataset, by name: Kaggle attaches the "
+        f"{label}: its wheel is the project's wheel dataset, by name: Kaggle attaches the "
         "dataset's latest version",
         plan["wheel"] == f"{k.OWNER}/{k.WHEEL_DATASET}",
         plan["wheel"],
+    )
+    check(
+        f"{label}: its description names model seed {model[1:]} and the commit that trained",
+        f"Model seed {model[1:]}'s final.pt" in plan["description"]
+        and "must hold e598e62, the commit that trained" in plan["description"],
+        plan["description"],
     )
     read = [
         (r["args"][0]["input"], r["args"][1]["dataset_run"], r["args"][2:]) for r in plan["runs"]
@@ -2223,16 +2257,16 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         for (_, d, rest), t in zip(read, tagged, strict=True)
         if t is None or rest != (["--select", "tc-plus"] if t[2] == "qs" else [])
     ]
-    check("first-read-m1: staircases are read as tc-plus, ramps and nulls whole", not wrong, wrong)
+    check(f"{label}: staircases are read as tc-plus, ramps and nulls whole", not wrong, wrong)
     check(
-        "first-read-m1: it reads seeds 1-5 at L = 16 and 32, and nothing else",
+        f"{label}: it reads seeds 1-5 at L = 16 and 32, and nothing else",
         {int(t[3]) for t in tagged if t} == {1, 2, 3, 4, 5}
         and {int(t[1]) for t in tagged if t} == {16, 32},
     )
     pairs = collections.Counter((name, d) for name, d, _ in read)
     runs = {d for _, d in pairs}
     check(
-        "first-read-m1: final.pt and the twin each read all 60 runs, once",
+        f"{label}: final.pt and the twin each read all 60 runs, once",
         len(runs) == 60 and all(pairs[(n, d)] == 1 for n in entries for d in runs),
         len(runs),
     )
@@ -2241,24 +2275,25 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         variant = copy.deepcopy(plan)
         variant["runs"][-1]["args"][1]["dataset_run"] = f"20261025T031229Z-L32-ramp-x2-s{seed}"
         reaching.append(f"has seed {seed}: jepa extract never reads" in refused(k, variant))
-    check("first-read-m1: a run at any of seeds 6-10 would be refused at load", all(reaching))
+    check(f"{label}: a run at any of seeds 6-10 would be refused at load", all(reaching))
 
-    # on the mounts Kaggle gives it: m1's bytes are stand-ins here, the runner checks the real ones
+    # on the mounts Kaggle gives it: the model's bytes are stand-ins here, the runner checks the
+    # real ones
     ctx = ctx_at(k, root)
     ctx.py = sys.executable
     ctx.helper.write_text(k.HELPER_SOURCE, encoding="utf-8")
     trial = copy.deepcopy(plan)
     output = ctx.input / "tp-jepa-primary-28" / "out"
-    held = output / "jepa" / M1_RUN
+    held = output / "jepa" / trained
     for name, entry in trial["inputs"].items():
         (held / entry["file"]).parent.mkdir(parents=True, exist_ok=True)
         (held / entry["file"]).write_text(name, encoding="utf-8")
         entry["sha256"] = hashlib.sha256(name.encode()).hexdigest()
-    named = {"name": "x-twin-L16-qs-s1", "folder": "jepa/m1"}  # a name this plan has as well
+    named = {"name": "x-twin-L16-qs-s1", "folder": f"jepa/{model}"}  # a name this plan has as well
     state = {"kernel": "tp-jepa-primary-28", "runs": [named]}
     (output / k.STATE).write_text(json.dumps(state), encoding="utf-8")
     check(
-        "first-read-m1: the primary kernel's own state, attached with its output, is no previous "
+        f"{label}: the primary kernel's own state, attached with its output, is no previous "
         "session of this kernel",
         k.carry_forward(ctx, trial) is None,
     )
@@ -2272,29 +2307,27 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
     except k.Refused as exc:
         why = str(exc)
     check(
-        "first-read-m1: with no complete.json beside m1's final.pt, the session is refused",
-        "input m1_final:" in why and "has no complete.json" in why,
+        f"{label}: with no complete.json beside {model}'s final.pt, the session is refused",
+        f"input {model}_final:" in why and "has no complete.json" in why,
         why or "accepted",
     )
-    (held / "complete.json").write_text("{}", encoding="utf-8")  # m1's folder holds it (#128)
+    (held / "complete.json").write_text("{}", encoding="utf-8")  # a finished one holds it (#128)
     session.locate_inputs()
     session.locate_datasets()
     check(
-        "first-read-m1: m1's two files and the 60 runs are found among the attached sources",
+        f"{label}: {model}'s two files and the 60 runs are found among the attached sources",
         set(session.inputs) == set(entries) and set(session.datasets) == runs,
         len(session.datasets),
     )
     errors = session.capture(session.runs)
-    check(
-        "first-read-m1: the helper's capture, as on Kaggle, refuses nothing", errors == [], errors
-    )
+    check(f"{label}: the helper's capture, as on Kaggle, refuses nothing", errors == [], errors)
     session.stage()
     staircase = next(d for d in runs if d.endswith("-L16-qs-s1"))
     tail, key = session.resolve(session.by_name["x-final-L16-qs-s1"])
     check(
-        "first-read-m1: an extraction resolves to m1's file and its staged run, tc-plus kept",
+        f"{label}: an extraction resolves to {model}'s file and its staged run, tc-plus kept",
         tail == [str(held / k.FINAL), str(ctx.out / "ising" / staircase), "--select", "tc-plus"]
-        and f"input/{M1_RUN}/{k.FINAL}" in key,
+        and f"input/{trained}/{k.FINAL}" in key,
         tail,
     )
     refused_seeds = []
@@ -2304,7 +2337,7 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         except k.RunError as exc:
             refused_seeds.append(str(exc))
     check(
-        "first-read-m1: every run passes refuse_seeds, on stand-ins built from their ids",
+        f"{label}: every run passes refuse_seeds, on stand-ins built from their ids",
         not refused_seeds,
         refused_seeds,
     )
@@ -2319,10 +2352,45 @@ def first_read_m1(k: ModuleType, root: Path) -> None:
         run.state, run.folder = "complete", table.relative_to(ctx.out).as_posix()
     text = k.rates_text(session.measured())
     check(
-        "first-read-m1: STATUS keeps final.pt's rate and the twin's apart, by input",
-        "extract m1_final L16" in text and "extract m1_twin L16" in text,
+        f"{label}: STATUS keeps final.pt's rate and the twin's apart, by input",
+        f"extract {model}_final L16" in text and f"extract {model}_twin L16" in text,
         text,
     )
+
+
+def first_reads(k: ModuleType, root: Path) -> None:
+    written = sorted(path.stem for path in PLANS.glob("first-read-*.json"))
+    check(
+        "every first-read plan has its pins in FIRST_READS, so the checks below reach it",
+        written == [f"first-read-{model}" for model in sorted(FIRST_READS)],
+        written,
+    )
+    # a plan copied whole, its run and hash both left at the model before, would pass every other
+    # check against pins copied the same way, and read that model again with nothing to refuse it
+    pinned = [pin for pins in FIRST_READS.values() for pin in pins.values()]
+    check(
+        "no two first reads share a run or a sha256, and each run's id names its model",
+        len(set(pinned)) == len(pinned)
+        and all(pins["run"].endswith(f"-{model}") for model, pins in FIRST_READS.items()),
+        pinned,
+    )
+    for model in FIRST_READS:
+        first_read(k, root / model, model)
+    base, *others = FIRST_READS
+    for model in others:
+        plan, expected = first_read_plan(model), first_read_plan(base)
+        expected["kernel"] = f"tp-jepa-first-read-{model}"
+        expected["description"] = plan["description"]  # first_read reads it
+        expected["inputs"] = first_read_inputs(k, model)
+        for run in expected["runs"]:
+            run["args"][0]["input"] = run["args"][0]["input"].replace(base, model)
+        apart = sorted(key for key in {*plan, *expected} if plan.get(key) != expected.get(key))
+        check(
+            f"first-read-{model}: first-read-{base}'s plan but for its kernel name, description, "
+            "its inputs' names, run and sha256, and the runs' references to those inputs",
+            not apart,
+            apart,
+        )
 
 
 def run_all(k: ModuleType) -> int:
@@ -2347,7 +2415,7 @@ def run_all(k: ModuleType) -> int:
         invalid_plans(k, root / "invalid")
         pilot_28(k, root / "pilot-28")
         primary_28(k, root / "primary-28")
-        first_read_m1(k, root / "first-read-m1")
+        first_reads(k, root / "first-reads")
         real_runs(k, root / "real")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1

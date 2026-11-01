@@ -1081,7 +1081,7 @@ SELF_TEST_SECTIONS = (
     "invalid_plans",
     "pilot_28",
     "primary_28",
-    "first_read_m1",
+    "first_reads",
     "real_runs",
 )
 
