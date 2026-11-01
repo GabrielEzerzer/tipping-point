@@ -1747,7 +1747,16 @@ class Session:
                 manifest = read_json(self.ctx.out / r.folder / "manifest.json") or {}
                 size = ((manifest.get("params") or {}).get("dataset") or {}).get("L")
                 group = extract.setdefault(
-                    " ".join(filter(None, (ckpt.get("run", "?"), ckpt.get("file"), f"L{size}"))),
+                    " ".join(
+                        filter(
+                            None,
+                            (
+                                ckpt.get("run", "?"),
+                                ckpt.get("file"),
+                                f"L{size}" if size is not None else None,
+                            ),
+                        )
+                    ),
                     {
                         "tables": 0,
                         "frames": 0,

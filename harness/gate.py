@@ -261,6 +261,38 @@ def pytest_dirs(pyproject: Path) -> list[str]:
     return dirs
 
 
+_SELF_TEST_SUMMARY = re.compile(r"^(?P<passed>\d+)/(?P<total>\d+) checks passed$", re.MULTILINE)
+_SELF_TEST_FAIL = "FAIL  "  # how the Kaggle runner's self-test starts the line of a failed check
+
+
+def self_test_evidence(output: str) -> dict[str, list[Any]]:
+    """Every failed check's line: what the sections after it print can push it past the tail."""
+    return {
+        "failures": [ln.strip() for ln in output.splitlines() if ln.startswith(_SELF_TEST_FAIL)]
+    }
+
+
+def judge_self_test(returncode: int, output: str) -> Verdict:
+    """The Kaggle runner's self-test, from its closing 'N/M checks passed' line and exit code. It
+    prints that line after its last section, so a crash at import or in a section leaves none and
+    judges RED, and so does 0/0, since it exits 0 when no check ran at all."""
+    fails = self_test_evidence(output)["failures"]
+    first = f"; first: {fails[0]}" if fails else ""
+    summaries = list(_SELF_TEST_SUMMARY.finditer(output))
+    if not summaries:
+        reason = f"no 'N/M checks passed' line (exit {returncode}): {_last_line(output)}"
+        return Verdict(False, reason + first)
+    line = summaries[-1].group(0)
+    passed, total = int(summaries[-1]["passed"]), int(summaries[-1]["total"])
+    if total < 1:
+        return Verdict(False, f"{line} (zero checks ran)")
+    if passed != total:
+        return Verdict(False, line + first)
+    if returncode != 0:
+        return Verdict(False, f"exit {returncode} despite: {line}")
+    return Verdict(True, line)
+
+
 # ---------------------------------------------------------------- legs and runner
 
 
@@ -300,6 +332,14 @@ LEGS: list[Leg] = [
         "pytest",
         ["pytest", "-c", "pyproject.toml", f"--junitxml={JUNIT}", "-q"],
         _judge_pytest_from_disk,
+    ),
+    # sys.executable, not "python": Windows looks beside the running interpreter before PATH, and
+    # a venv's python.exe runs the base install's, which has no tipping_point
+    Leg(
+        "self-test",
+        [sys.executable, "notebooks/kaggle_ising_runs.py", "--self-test"],
+        judge_self_test,
+        self_test_evidence,
     ),
 ]
 

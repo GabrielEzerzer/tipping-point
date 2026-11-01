@@ -1,0 +1,224 @@
+PASS  plan job-a.json loads
+PASS  plan job-a.json: each file a run reads, its run writes
+PASS  plan pilot-28.json loads
+PASS  plan pilot-28.json: each file a run reads, its run writes
+FAIL  plan primary-28.json loads: run 'm1': input 'no-such-input' is not in the plan's inputs
+PASS  plan primary-28.json: each file a run reads, its run writes
+PASS  ... and a file its run never writes is caught
+PASS  job A: three grid pilots with no dependency
+PASS  job A: six staircases, each waiting on grid-L64 alone
+PASS  job A: staircase seeds 11-16
+PASS  the minimal plan loads
+PASS  refused: a name used twice
+PASS  refused: an unknown command
+PASS  refused: a reference to a later run
+PASS  refused: a reference to itself
+PASS  refused: a reference to no run
+PASS  refused: a reference of another shape
+PASS  refused: a path out of the run folder
+PASS  refused: --device
+PASS  refused: --data-dir=...
+PASS  refused: a negative gpu
+PASS  refused: a boolean gpu
+PASS  refused: a boolean argument
+PASS  refused: an unknown run key
+PASS  refused: an unknown plan key
+PASS  refused: a kernel that is no slug
+PASS  refused: no runs
+PASS  refused: an input the plan does not declare
+PASS  refused: inputs with nowhere to look
+PASS  refused: an input without its sha256
+PASS  every problem is listed at once
+PASS  job A: the CLI itself takes every run's arguments
+PASS  the CLI's parser catches a misspelt flag
+PASS  ... and a bad choice in a run that waits on a file
+PASS  shrink 8: grid-L64 at L = 8, sweep counts / 64
+PASS  shrink 8: L never below 4
+PASS  shrink: seeds and references untouched
+PASS  shrink 1 changes nothing
+PASS  --only keeps the named runs and what they read
+PASS  --only refuses a run the plan lacks
+PASS  longest first: grid-L64 and grid-L32 start the two queues
+PASS  no staircase starts before grid-L64 is complete
+PASS  all nine complete: STATUS complete
+PASS  a failure stops its own queue
+PASS  ... while the other queue finishes its runs
+PASS  ... and the runs reading it are blocked
+PASS  STATUS failed names the run, its log and the stopped queue
+PASS  pinned runs run on their GPU
+PASS  a run pinned to a stopped queue is not started; the rest go on
+PASS  the deadline: the running run is interrupted, its dependants not started
+PASS  STATUS incomplete says how to continue
+[2026-11-01 06:10:10 UTC +     7s] no run starts from now on: output cap: 18.1 GB under /kaggle/working, the cap is 18 GB
+PASS  the output cap: no run starts past it
+PASS  STATUS says so
+PASS  a failed extraction leaves its queue running: the tables behind it start and complete
+PASS  ... and its queue is not marked stopped
+PASS  ... it blocks only what reads it, directly or in turn
+PASS  ... STATUS failed names it and what it blocked, and no stopped queue
+PASS  ... on one GPU, with nothing pinned, too
+PASS  a failed jepa train still stops its queue, and the other queue goes on
+PASS  a failed pilot still stops its queue, and the other queue goes on
+PASS  a failed staircase still stops its queue, and the other queue goes on
+PASS  a failed ramp still stops its queue, and the other queue goes on
+PASS  a failed null still stops its queue, and the other queue goes on
+PASS  ... on one GPU an independent extraction behind it is not started
+PASS  a staircase waiting on grid-L64 holds a placeholder
+PASS  ... and cannot start
+PASS  a missing tau.json stops the run that reads it
+PASS  --tau resolves to grid-L64's folder when the run starts
+PASS  the key names that folder by run id
+[2026-11-01 06:10:11 UTC +     8s]   grid-L16: ising/20261025T000000Z-L16-pilot-s6 (complete) copied in
+[2026-11-01 06:10:11 UTC +     8s]   grid-L32: ising/20261025T000001Z-L32-pilot-s6 (interrupted) copied in
+[2026-11-01 06:10:11 UTC +     8s]   grid-L64: ising/20261025T000002Z-L64-pilot-s6 (complete) copied in
+[2026-11-01 06:10:11 UTC +     8s] C:\tmp\tp-self-test-u5ip7fyw\previous\input\tp-ising-job-a\out\kaggle-ising-runs.json: None; 3 runs carried forward
+PASS  the newest state of this kernel is the one read
+PASS  its runs are copied into this output first
+PASS  ... only the plan's
+PASS  a carried run keeps its folder until the session decides
+PASS  a finished run of the same commit is reused
+PASS  an unfinished one is resumed from its checkpoint
+[2026-11-01 06:10:11 UTC +     8s] [grid-L64] ising/20261025T000002Z-L64-pilot-s6 is not reused: it was made by commit, torch and device ['dddddddddddddddddddddddddddddddddddddddd', '2.14.1+cpu', 'cpu'], not ['cccccccccccccccccccccccccccccccccccccccc', '2.14.1+cpu', 'cpu']; starting afresh
+PASS  one made by another commit starts afresh, its copy removed
+[2026-11-01 06:10:11 UTC +     8s] [grid-L16] ising/20261025T000000Z-L16-pilot-s6 is not reused: it was made from other arguments; starting afresh
+PASS  one made from other arguments starts afresh
+PASS  a run new to the plan starts afresh
+PASS  a plan with an input loads
+[2026-11-01 06:10:11 UTC +     8s] input record: C:\tmp\tp-self-test-u5ip7fyw\inputs\input\tp-tauc-l64-l128\out\ising\20261025T194846Z-tauc-L16-32-64-128\pilot.json, sha256 11a83b6dc8c727d5... as the plan says
+PASS  an input in an attached kernel output is found, its sha256 checked
+PASS  --pilot resolves to it
+PASS  a sha256 other than the plan's is refused before any run
+[2026-11-01 06:10:11 UTC +     8s] input record: C:\tmp\tp-self-test-u5ip7fyw\inputs\tmp\tp-inputs\20261025T194846Z-tauc-L16-32-64-128\pilot.json, sha256 11a83b6dc8c727d5... as the plan says
+PASS  ... or unpacked from a <run id>.zip in a dataset
+PASS  a missing input is refused
+PASS  no COMMIT.txt: refused
+PASS  a COMMIT.txt marked dirty: refused
+PASS  a COMMIT.txt naming no commit: refused
+[2026-11-01 06:10:11 UTC +     8s] wheel tipping_point-0.1.0-py3-none-any.whl sha256 fcab7fcc2b4cffd9..., COMMIT.txt '655949aa79ea32adfc103635d4cfb303ae24b94f'
+PASS  a clean commit: accepted
+PASS  two wheels: refused
+PASS  the installed package names COMMIT.txt's clean commit: accepted
+PASS  ... another commit: refused
+PASS  ... the same, dirty: refused
+PASS  ... a stamp-less wheel: refused
+PASS  another torch: refused
+PASS  no GPU: refused
+PASS  a clean run of the wheel's commit passes
+PASS  another commit fails
+PASS  a dirty manifest fails
+PASS  complete.json not clean fails
+PASS  a failed check fails, with its temperature
+PASS  no complete.json fails
+PASS  jepa verify: exit 0 is clean whatever else it printed
+PASS  jepa verify: a failure names the folder's problem, never the noise
+PASS  jepa verify: a failure with nothing to say still fails
+PASS  the real jepa verify accepts the intact folder
+PASS  ... and names a changed file
+PASS  the written kernel embeds the plan
+PASS  its metadata: private, a GPU, the internet, the wheel, no kernel source
+PASS  --resume attaches the kernel's own output beside the plan's sources
+PASS  the checkpoint and ledger names are the library's
+PASS  a plan of jepa entries loads
+PASS  refused: jepa extract on a seed 7 dataset run
+PASS  refused: jepa extract on a run whose seed it cannot read
+PASS  refused: jepa extract on this plan's own seed 8 run
+PASS  ... and accepted at the CLI's default seed 1
+PASS  refused: a stage entry that is no run id
+PASS  refused: a staged run listed twice
+PASS  refused: a command the runner does not run
+PASS  refused: dataset runs with nowhere to look
+PASS  refused: a wheel that names no dataset
+PASS  the jepa CLI itself takes every entry's arguments
+PASS  ... and catches a misspelt training flag
+PASS  ... and an extraction missing its run
+[2026-11-01 06:10:26 UTC +    23s] 3 dataset runs found among the attached inputs
+[2026-11-01 06:10:26 UTC +    23s] [verify] $ C:\repo\.venv\Scripts\python.exe -I -u -m tipping_point.jepa verify C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261024T133416Z-L16-qs-s11 C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261024T133934Z-L16-qs-s12 C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261023T010039Z-L16-null-e2-s1
+[2026-11-01 06:10:32 UTC +    29s] [verify] C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261024T133416Z-L16-qs-s11: ok
+[2026-11-01 06:10:32 UTC +    29s] [verify] C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261024T133934Z-L16-qs-s12: ok
+[2026-11-01 06:10:32 UTC +    29s] [verify] C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261023T010039Z-L16-null-e2-s1: ok
+PASS  every dataset run the plan reads is staged and verified
+PASS  ... hard linked when the input shares the filesystem
+[2026-11-01 06:10:32 UTC +    29s] 3 dataset runs found among the attached inputs
+[2026-11-01 06:10:32 UTC +    29s] [verify] $ C:\repo\.venv\Scripts\python.exe -I -u -m tipping_point.jepa verify C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261024T133416Z-L16-qs-s11 C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261024T133934Z-L16-qs-s12 C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261023T010039Z-L16-null-e2-s1
+[2026-11-01 06:10:39 UTC +    36s] [verify] C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261024T133416Z-L16-qs-s11: ok
+[2026-11-01 06:10:39 UTC +    36s] [verify] C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261024T133934Z-L16-qs-s12: sha256 differs: configs/00000000000000000001.parquet
+[2026-11-01 06:10:39 UTC +    36s] [verify] C:\tmp\tp-self-test-u5ip7fyw\jepa\working\out\ising\20261023T010039Z-L16-null-e2-s1: ok
+PASS  a damaged input is refused by jepa verify's exit code
+PASS  final.pt and the dataset run resolve to their folders
+PASS  ... named by folder in the key
+PASS  the step-0 twin resolves too
+PASS  jepa extract runs with --device and no --data-dir
+PASS  jepa train runs with --device and --data-dir
+PASS  an unfinished training resumes with jepa resume
+PASS  an unfinished extraction runs again
+PASS  no latents table yet
+PASS  the latents table is the one naming its checkpoint's sha256
+PASS  ... not the twin's
+PASS  seed 1 may be extracted
+PASS  seed 7 is refused again from the run's own manifest
+PASS  an interrupted extraction is resumed from its table
+PASS  a finished one is reused
+PASS  an unfinished training is resumed
+PASS  a training's rate leaves out start-up and the closing line
+PASS  an extraction's rate is per frame, by checkpoint: the readout by its table's own clock
+PASS  STATUS carries both
+PASS  a table finished across sessions has no readout clock
+[2026-11-01 06:10:39 UTC +    37s] unstaged 20261024T133934Z-L16-qs-s12: a plain copy of an input
+PASS  unstaging keeps the runs that gained latents and drops a plain copy
+[2026-11-01 06:10:39 UTC +    37s]   x-final: ising/20261023T010039Z-L16-null-e2-s1/latents/t (complete) copied in
+[2026-11-01 06:10:39 UTC +    37s]   m3: jepa/20261026T000000Z-L16-m3 (interrupted) copied in
+[2026-11-01 06:10:39 UTC +    37s] C:\tmp\tp-self-test-u5ip7fyw\jepa\carry\input\tp-self-test\out\kaggle-ising-runs.json: None; 2 runs carried forward
+PASS  a latents table travels in its dataset run; a training and the ledger come too
+[2026-11-01 06:10:39 UTC +    37s]   grid-L64: ising/20261025T000000Z-L64-pilot-s6 (None) copied in
+[2026-11-01 06:10:39 UTC +    37s] C:\tmp\tp-self-test-u5ip7fyw\jepa\carry\input\tp-self-test\out\kaggle-ising-runs.json: None; 1 runs carried forward
+PASS  a record from before folders reads as ising/<run id>
+[2026-11-01 06:10:39 UTC +    37s] wheel tipping_point-0.1.0-py3-none-any.whl sha256 fcab7fcc2b4cffd9..., COMMIT.txt '655949aa79ea32adfc103635d4cfb303ae24b94f'
+PASS  the plan's wheel dataset is the one installed
+PASS  a second wheel anywhere among the inputs is refused
+PASS  the kernel attaches the plan's wheel dataset
+PASS  an extraction's rate is by checkpoint and L: one group for each pair
+PASS  ... the tables at one L add up
+PASS  ... and L = 64 keeps its own rate, not an average with L = 16
+PASS  ... and the twin stays apart from final.pt
+PASS  STATUS gives the rate of each L
+PASS  a table with no params.dataset.L groups without a size, not as LNone
+PASS  ... and STATUS gives its rate under that group
+wrote C:\tmp\tp-self-test-u5ip7fyw\acceptance\job-a\tp-ising-job-a.py and C:\tmp\tp-self-test-u5ip7fyw\acceptance\job-a\kernel-metadata.json
+push it with: kaggle kernels push -p C:\tmp\tp-self-test-u5ip7fyw\acceptance\job-a
+PASS  job-a: --write-kernel writes a folder `kaggle kernels push` would take
+PASS  job-a: the folder holds the kernel and its metadata alone
+PASS  job-a: the plan is embedded whole
+PASS  job-a: no credentials and nothing identifying in the folder
+wrote C:\tmp\tp-self-test-u5ip7fyw\acceptance\pilot-28\tp-jepa-pilot-28.py and C:\tmp\tp-self-test-u5ip7fyw\acceptance\pilot-28\kernel-metadata.json
+push it with: kaggle kernels push -p C:\tmp\tp-self-test-u5ip7fyw\acceptance\pilot-28
+PASS  pilot-28: --write-kernel writes a folder `kaggle kernels push` would take
+PASS  pilot-28: the folder holds the kernel and its metadata alone
+PASS  pilot-28: the plan is embedded whole
+PASS  pilot-28: no credentials and nothing identifying in the folder
+the plan is refused:
+run 'm1': input 'no-such-input' is not in the plan's inputs
+Traceback (most recent call last):
+  File "C:\repo\notebooks\kaggle_ising_runs.py", line 2338, in <module>
+    code = main()
+  File "C:\repo\notebooks\kaggle_ising_runs.py", line 2331, in main
+    return self_test()
+  File "C:\repo\notebooks\kaggle_ising_runs.py", line 2262, in self_test
+    return run_all(sys.modules[__name__])
+  File "C:\repo\notebooks\kaggle_ising_runs_selftest.py", line 1992, in run_all
+    kernel_acceptance(k, root / "acceptance")
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\repo\notebooks\kaggle_ising_runs_selftest.py", line 1368, in kernel_acceptance
+    problems = push_problems(folder)
+  File "C:\repo\notebooks\kaggle_ising_runs_selftest.py", line 1317, in push_problems
+    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\pathlib\_local.py", line 546, in read_text
+    return PathBase.read_text(self, encoding, errors, newline)
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\pathlib\_abc.py", line 632, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\pathlib\_local.py", line 537, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\tmp\\tp-self-test-u5ip7fyw\\acceptance\\primary-28\\kernel-metadata.json'

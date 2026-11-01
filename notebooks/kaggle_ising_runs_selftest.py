@@ -3,13 +3,14 @@
     uv run --no-sync python notebooks/kaggle_ising_runs.py --self-test
     uv run --no-sync python notebooks/kaggle_ising_runs_selftest.py
 
-Plan validation and the CLI's verdict on every run's arguments; dependency resolution; the queues
-(longest first, dependencies, pinning, a failure, a failed extraction, the deadline, the output
-cap) with a stand-in for the simulator; the previous session's runs carried forward and reused or
-resumed; inputs found and checked against their sha256; the wheel and COMMIT.txt checks; run
-verification, judged by exit codes and files only; the rates STATUS gives, by checkpoint and L; the
-kernel folder against what `kaggle kernels push` checks; invalid plans refused at every door;
-pilot-28.json and primary-28.json, their stage ids and kernel sources, on stand-in mounts.
+Plan validation, the files a run reads from another and the CLI's verdict on every run's arguments;
+dependency resolution; the queues (longest first, dependencies, pinning, a failure, a failed
+extraction, the deadline, the output cap) with a stand-in for the simulator; the previous session's
+runs carried forward and reused or resumed; inputs found and checked against their sha256; the
+wheel and COMMIT.txt checks; run verification, judged by exit codes and files only; the rates STATUS
+gives, by checkpoint and L; the kernel folder against what `kaggle kernels push` checks; invalid
+plans refused at every door; pilot-28.json and primary-28.json, their stage ids and kernel sources,
+on stand-in mounts.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
@@ -18,7 +19,8 @@ extraction fails with another behind it on its queue, all in a venv that prints 
 sitecustomize errors on stderr from every child. No wheel is built: the venv holds a copy of the
 package stamped clean, so the outcome does not depend on this checkout's state.
 
-About five minutes on a laptop CPU. One line per check, then exit 1 if any failed.
+About five minutes on a laptop CPU. One line per check, then exit 1 if any failed. The gate's
+self-test leg (harness/gate.py) runs this and reads its closing "N/M checks passed" and exit code.
 """
 
 from __future__ import annotations
@@ -100,10 +102,36 @@ def refused(k: ModuleType, plan: dict) -> str:
     return ""
 
 
+def unwritten_reads(k: ModuleType, plan: dict) -> list[str]:
+    """Each file a run reads from an earlier run that the earlier run's command never writes.
+    load_plan takes any path inside the folder, so such a run first fails on Kaggle as it starts."""
+    writes = {"pilot": {"tau.json"}, "jepa train": {k.FINAL, k.TWIN}}
+    written = {r["name"]: writes.get(r["command"], ()) for r in plan["runs"]}
+    return [
+        f"{r['name']} reads {arg['file']} of {arg.get('run')}"
+        for r in plan["runs"]
+        for arg in r["args"]
+        if isinstance(arg, dict)
+        and "file" in arg
+        and arg["file"] not in written.get(arg.get("run"), ())
+    ]
+
+
 def plans(k: ModuleType) -> None:
     for path in sorted(PLANS.glob("*.json")):
-        why = refused(k, json.loads(path.read_text(encoding="utf-8")))
+        plan = json.loads(path.read_text(encoding="utf-8"))
+        why = refused(k, plan)
         check(f"plan {path.name} loads", not why, why)
+        wrong = unwritten_reads(k, plan)
+        check(f"plan {path.name}: each file a run reads, its run writes", not wrong, wrong)
+    misread = job_a()
+    next(r for r in misread["runs"] if r["name"] == "qs-L64-s12")["args"][-1]["file"] = "taus.json"
+    wrong = unwritten_reads(k, misread)
+    check(
+        "... and a file its run never writes is caught",
+        wrong == ["qs-L64-s12 reads taus.json of grid-L64"],
+        wrong,
+    )
     runs = {r.name: r for r in k.make_runs(job_a())}
     pilots = [r for r in runs.values() if r.command == "pilot"]
     stairs = [r for r in runs.values() if r.command == "staircase"]
@@ -1260,6 +1288,26 @@ def extraction_rates(k: ModuleType, root: Path) -> None:
         and "extract m final.pt L64 8000.0 us/frame readout" in text,
         text,
     )
+    # a hand-made manifest may stop at any level above params.dataset.L; extract always writes it
+    for name, manifest in (
+        ("a", {"started_ns": 10**9}),
+        ("b", {"started_ns": 10**9, "params": {}}),
+        ("c", {"started_ns": 10**9, "params": {"dataset": {}}}),
+    ):
+        path = ctx.out / session.by_name[name].folder / "manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+    rates = session.measured()
+    check(
+        "a table with no params.dataset.L groups without a size, not as LNone",
+        sorted(rates["extract"]) == ["m ckpt/step_0000000.pt L16", "m final.pt"],
+        sorted(rates["extract"]),
+    )
+    text = k.rates_text(rates)
+    check(
+        "... and STATUS gives its rate under that group",
+        "extract m final.pt 2000.0 us/frame readout" in text and "LNone" not in text,
+        text,
+    )
 
 
 def push_problems(folder: Path) -> list[str]:
@@ -1406,6 +1454,7 @@ def invalid_plans(k: Any, root: Path) -> None:  # Any: it swaps the module's PLA
 PILOT_RECORD = "20261025T194846Z-tauc-L16-32-64-128"  # #54's record
 PILOT_SHA256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698"
 DRAFT = "ising-latent-v1.toml"
+DRAFT_RUN = "20261101T000000Z-ising-latent-v1-draft"  # its folder in tp-prereg-ising-latent
 DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
 KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
 
@@ -1709,6 +1758,11 @@ def real_runs(k: ModuleType, root: Path) -> None:
         joins == 1 and {x["run_id"] for x in ledger} == {by2["tiny"]["run_id"]},
         ledger,
     )
+    check(
+        "a finished pilot's folder holds the tau.json a staircase reads",
+        (out2 / by2["quick"]["folder"] / "tau.json").is_file(),
+        by2["quick"],
+    )
     for name, untrained, rule in (("x-twin", True, "tc-plus"), ("x-final", False, "all")):
         table = out2 / by2[name]["folder"]
         manifest = json.loads((table / "manifest.json").read_text(encoding="utf-8"))
@@ -1836,10 +1890,11 @@ def primary_28(k: ModuleType, root: Path) -> None:
     pinned = hashlib.sha256(
         (PLANS.parents[1] / "paper" / "prereg" / DRAFT).read_bytes()
     ).hexdigest()
+    prereg = plan["inputs"]["prereg"]
     check(
         "primary-28: its --prereg is the committed draft, pinned by sha256",
-        plan["inputs"]["prereg"]["sha256"] == pinned and plan["inputs"]["prereg"]["file"] == DRAFT,
-        plan["inputs"]["prereg"],
+        (prereg["run"], prereg["file"], prereg["sha256"]) == (DRAFT_RUN, DRAFT, pinned),
+        prereg,
     )
     record = plan["inputs"]["record"]
     check(
