@@ -27,12 +27,14 @@ test, and with it the verdict (fss.combine); an undefined (NaN) margin makes bot
 
 table() is a latent file's margins table, one row per quantity and role. Three rows are judged, each
 over the primary checkpoints: the energy probe's R^2 and its selectivity, the mean over L of each
-checkpoint's value, by the verdict above; and the surprise FSS verdicts, by the rule hypothesis
-learned-beyond-random states for them, at least one surprise statistic passing for at least 4 of 5
-trained checkpoints and for none of their twins (an inconclusive twin is no pass; inconclusive
-when the trained checkpoints that are inconclusive could still reach the 4). Every other row is
-descriptive and has no verdict: each L's value, AUC (parity, saturated by construction), the chi
-alignment and all of an ablation's.
+checkpoint's value, by the verdict above, whose sign test under scoring.margins.sizes = "every"
+also asks each seed's margin at every L to carry the predicted sign; and the surprise FSS
+verdicts, by the rule hypothesis learned-beyond-random states for them, at least one surprise
+statistic passing for at least 4 of 5 trained checkpoints and for none of their twins (an
+inconclusive twin is no pass; inconclusive when the trained checkpoints that are inconclusive could
+still reach the 4), a row a file with no surprise statistic of role test does not have. Every
+other row is descriptive and has no verdict: each L's value, AUC (parity, saturated by
+construction), the chi alignment and all of an ablation's.
 """
 
 from __future__ import annotations
@@ -66,12 +68,14 @@ def paired(
     twin_draws: npt.ArrayLike | None = None,
     n: int = 2_000,
     level: float = 0.95,
+    per_size: npt.ArrayLike = (),
 ) -> dict[str, Any]:
     """One row for Q: trained and twin (seeds,), seed s at index s in both, with optional draws
     (seeds, draws), aligned: column b of both arrays must be one resample of the data, the same
     for every checkpoint of the quantity, trained and twin alike. direction is the predicted sign
     of the margin, "greater" (trained above twin) or "less"; tolerance, in Q's units, is the band
-    fss.excludes judges a CI by."""
+    fss.excludes judges a CI by. per_size, each L's margins seed by seed (scoring.margins.sizes =
+    "every"), joins the sign test: every one of them must carry the predicted sign too."""
     q1, q0 = np.asarray(trained, dtype=np.float64), np.asarray(twin, dtype=np.float64)
     if q1.ndim != 1 or q1.shape != q0.shape or len(q1) < 2:
         raise ValueError(
@@ -79,7 +83,7 @@ def paired(
             f"got shapes {q1.shape} and {q0.shape}"
         )
     delta = q1 - q0
-    signed = oriented(delta, direction)  # > 0 where the prediction holds
+    signed = oriented(np.append(delta, per_size), direction)  # > 0 where the prediction holds
     seeds = len(delta)
     if (trained_draws is None) != (twin_draws is None):
         raise ValueError("data draws come in pairs, the trained checkpoint's and its twin's")
@@ -154,6 +158,7 @@ def table(
     no spread between seeds to bootstrap over, and no rows."""
     sc, steps = doc["scoring"], int(doc["latents"]["steps"])
     tolerance = float(sc["margins"]["tolerance"])
+    every = sc["margins"]["sizes"] == "every"
     n, level = int(sc["bootstrap"]), float(sc["ci_level"])
     direction = next(h["direction"] for h in doc["hypotheses"] if h["name"] == LEARNED)
     statistics = [
@@ -184,6 +189,12 @@ def table(
                 draws = tuple(
                     np.stack([q.draws[name] for name in side]) for side in (trained, twin)
                 )
+            judged = role == PRIMARY and q.scope == ALL and q.name in JUDGED
+            per_size = [
+                [p.values[a] - p.values[b] for a, b in zip(trained, twin, strict=True)]
+                for p in measured
+                if every and judged and p.name == q.name and p.scope != ALL
+            ]
             found = paired(
                 [q.values[name] for name in trained],
                 [q.values[name] for name in twin],
@@ -193,8 +204,8 @@ def table(
                 *draws,
                 n=n,
                 level=level,
+                per_size=per_size,
             )
-            judged = role == PRIMARY and q.scope == ALL and q.name in JUDGED
             rows.append(_row(q.name, q.scope, judged, head, found, reference=q.reference))
         settled = []
         for statistic in statistics:

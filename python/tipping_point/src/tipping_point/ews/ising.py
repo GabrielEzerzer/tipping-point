@@ -60,6 +60,7 @@ KEY = ("step", "replica", "temperature", "segment", "burst", "frame")
 _CONFIGS = (*KEY, "magnetisation", "energy")
 LATENTS = "latents"
 PRIMARY = "primary"  # latents.checkpoints.role of the checkpoints scored on the whole grid
+REPORTED = "reported"  # the verdict of a row judged on the twins alone, on a trained pass
 _CELL_TABLES = ("auc", "surrogates", "alarms", "peaks")  # what _cells fills
 Row = dict[str, Any]
 Peaks = dict[tuple[str, str], dict[int, list[np.ndarray]]]  # per-L, per-seed peak eps_L
@@ -625,6 +626,7 @@ class Checkpoint:
     name: str  # the table's folder under each run, and the rows' `checkpoint` column
     sha256: str  # of the checkpoint file the prereg pins
     role: str  # latents.checkpoints.role, a twin's that of its trained checkpoint
+    trained: bool = False  # a trained checkpoint's pass, not its twin's nor the classic one
 
 
 def checkpoints(doc: dict[str, Any]) -> list[Checkpoint]:
@@ -634,9 +636,9 @@ def checkpoints(doc: dict[str, Any]) -> list[Checkpoint]:
         return [Checkpoint("", "", PRIMARY)]
     steps = int(doc["latents"]["steps"])
     return [
-        Checkpoint(latents_name(entry["training"], step), entry[pin], entry["role"])
+        Checkpoint(latents_name(entry["training"], step), entry[pin], entry["role"], trained)
         for entry in doc["latents"]["checkpoints"]
-        for step, pin in ((steps, "trained_sha256"), (0, "twin_sha256"))
+        for step, pin, trained in ((steps, "trained_sha256", True), (0, "twin_sha256", False))
     ]
 
 
@@ -728,8 +730,8 @@ def evaluate(
                     f"L = {L}, {cadence}: {prep.sweeps:g} sweeps per sample, "
                     f"tau_c = {pilot.tau(L):g}"
                 )
-        static, lost = _static(own, slots, rng)
-        part["fss"] = static + _dynamic(own, peaks, rng)
+        static, lost = _static(own, slots, rng, checkpoint.trained)
+        part["fss"] = static + _dynamic(own, peaks, rng, checkpoint.trained)
         plateaus_dropped = max(plateaus_dropped, lost)  # the same plateaus, table after table
         for table, rows in part.items():
             tables[table] += [row | {"checkpoint": checkpoint.name} for row in rows]
@@ -1207,18 +1209,23 @@ def _fss_row(quantity: str, cadence: str, role: str, fit: fss.Exponent, judged: 
     }
 
 
-def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> list[Row]:
+def _dynamic(
+    doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator, trained: bool = False
+) -> list[Row]:
     """1/nu from the median peak eps_L over L, per fss.dynamic indicator and cadence. Only
     fss.dynamic.cadence carries the pre-registered verdict (role dynamic); another cadence's row
     is a robustness check (role dynamic-robustness, no verdict). A fss.dynamic.statistics entry
-    is judged like an indicator, its row's role dynamic-<its role>. A peak on the search band's
-    edge, or inside _edge_margin, was not located and is left out. The verdict, in this order:
-    inconclusive when 1/nu has no value, when more than half of an L's replicas were not located,
-    or when fewer than fss.dynamic.min_draw_share of the bootstrap draws give 1/nu a value (the CI
-    would rest on a sign-selected subset); otherwise fss.match and fss.excludes, combined."""
+    is judged like an indicator, its row's role dynamic-<its role>; one of role descriptive is
+    computed alike and has no verdict, and one judged on the twins alone (judged = "twin") reads
+    REPORTED on a `trained` pass. A peak on the search band's edge, or inside _edge_margin, was not
+    located and is left out. The verdict, in this order: inconclusive when 1/nu has no value, when
+    more than half of an L's replicas were not located, or when fewer than
+    fss.dynamic.min_draw_share of the bootstrap draws give 1/nu a value (the CI would rest on a
+    sign-selected subset); otherwise fss.match and fss.excludes, combined."""
     dyn, sc = doc["fss"]["dynamic"], doc["scoring"]
     expected, tolerance = float(dyn["expected_inverse_nu"]), float(dyn["tolerance"])
     roles = {_statistic_key(entry): entry["role"] for entry in dyn.get("statistics", [])}
+    twins = {_statistic_key(e) for e in dyn.get("statistics", []) if e.get("judged") == "twin"}
     # dispatched as _peak_statistics is: what is read is judged, whatever else the section holds
     named = roles if "statistics" in dyn else dyn["indicators"]
     rows = []
@@ -1228,8 +1235,10 @@ def _dynamic(doc: dict[str, Any], peaks: Peaks, rng: np.random.Generator) -> lis
         fit = fss.peak_convergence(samples, int(sc["bootstrap"]), rng, float(sc["ci_level"]))
         judged = cadence == dyn["cadence"]
         lost = max(np.mean(np.isnan(np.concatenate(g))) for g in samples.values())
-        if not judged:
-            verdict = ""  # a robustness check, never a verdict
+        if not judged or roles.get(name) == "descriptive":
+            verdict = ""  # a robustness check or a descriptive statistic, never a verdict
+        elif trained and name in twins:
+            verdict = REPORTED
         elif not np.isfinite(fit.kappa) or lost > 0.5 or fit.draws_used < dyn["min_draw_share"]:
             verdict = fss.INCONCLUSIVE  # unmeasured: neither a pass nor a fail
         else:
@@ -1284,11 +1293,12 @@ def _verdict(role: str, fit: fss.Exponent, expected: float, tolerance: float) ->
 
 
 def _static(
-    doc: dict[str, Any], chosen: dict[int, Inputs], rng: np.random.Generator
+    doc: dict[str, Any], chosen: dict[int, Inputs], rng: np.random.Generator, trained: bool = False
 ) -> tuple[list[Row], int]:
     """Exponents at the staircase plateau nearest Tc, one row per fss.static entry: the measured
     rows feed the moments and tau_int, bursts of frames one sweep apart feed 1 - AC1. A latents
-    table holds the matched cadence alone, so its frames feed both."""
+    table holds the matched cadence alone, so its frames feed both. On a `trained` pass a row judged
+    on the twins alone (judged = "twin") is computed all the same and reads REPORTED."""
     T = float(doc["data"]["staircase"]["temperature"])
     sc = doc["scoring"]
     latent = any(inputs.latents for inputs in chosen.values())
@@ -1346,5 +1356,7 @@ def _static(
             "tolerance": tolerance,
             "verdict": _verdict(role, fit, expected, tolerance),
         }
+        if trained and spec.get("judged") == "twin":
+            judged["verdict"] = REPORTED
         rows.append(_fss_row(quantity, cadence, role, fit, judged))
     return rows, dropped

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import ews_v1_golden
+import ising_experiment as runner
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -637,6 +638,130 @@ def test_the_static_fits_read_each_tables_frames_at_the_plateau(scored: ising.Ev
     assert static["l2_var_surprise"]["role"] == "reference"
     assert static["l2_var_surprise"]["estimate"] == pytest.approx(2.0, abs=0.15)  # white noise: L^2
     assert static["one_minus_ac1_pc_1"]["role"] == "reference"
+
+
+# ---------------------------------------------------------------- judged on the twins, descriptive
+
+
+def test_each_pass_says_whether_it_is_a_trained_checkpoint(doc: dict[str, Any]) -> None:
+    """What a row judged on the twins alone turns on: each entry's trained checkpoint, then its
+    step-0 twin, and the classic pass of a file with no [latents], which has no twin and is judged
+    as it always was."""
+    assert [(c.name, c.trained) for c in ising.checkpoints(doc)] == [
+        (TRAINED_A, True),
+        (TWIN_A, False),
+        (TRAINED_B, True),
+        (TWIN_B, False),
+    ]
+    (classic,) = ising.checkpoints({})
+    assert (classic.name, classic.trained) == ("", False)
+
+
+@pytest.fixture(scope="module")
+def twin_judged(data: V1) -> ising.Evaluation:
+    """The planted file with its two pipeline checks judged on the twins alone, the static one held
+    to kappa = 3, which neither table's pc_1 has (it holds L^7/4), and surprise's variance
+    descriptive. One primary training at the headline cell, to score in seconds; the file is one a
+    freeze would take."""
+    doc = _planted_doc(data)
+    doc["latents"]["checkpoints"] = doc["latents"]["checkpoints"][:1]
+    doc["sensitivity"] |= {"window": [20.0], "bandwidth": [10.0]}
+    doc["trials"]["budget"] = prereg.cells(doc)
+    statistics = doc["fss"]["dynamic"]["statistics"]
+    assert doc["fss"]["static"][0]["quantity"] == "l2_var_pc_1"
+    keys = [ising._statistic_key(s) for s in statistics[:2]]
+    assert keys == ["pc_1_variance", "surprise_variance"]
+    doc["fss"]["static"][0] |= {"judged": "twin", "expected": 3.0}
+    statistics[0]["judged"] = "twin"
+    statistics[1]["role"] = "descriptive"
+    assert prereg.problems(doc, strict=True) == []
+    return ising.evaluate(doc, data.root, np.random.default_rng(28), say=lambda _: None)
+
+
+def test_a_check_judged_on_the_twins_alone_is_reported_on_the_trained_pass(
+    twin_judged: ising.Evaluation,
+) -> None:
+    """The owner's rule (#28): a trained pc_1 need not track |m|, so its pipeline checks are judged
+    on the step-0 twins alone. Held to kappa = 3, both passes miss it. The twin's row fails, a
+    pipeline fault. The trained row is computed in full, estimate, CI and the value and tolerance
+    it was held to, which it misses as plainly, and reads reported, which no fault list counts.
+    The dynamic check, which both pass, passes on the twin and is reported on the trained pass,
+    its 1/nu computed all the same."""
+    (trained,) = _rows(twin_judged, "fss", checkpoint=TRAINED_A, quantity="l2_var_pc_1")
+    (twin,) = _rows(twin_judged, "fss", checkpoint=TWIN_A, quantity="l2_var_pc_1")
+    for row in (trained, twin):
+        assert row["role"] == "pipeline-check", row
+        assert (row["expected"], row["tolerance"]) == (3.0, 0.15), row
+        assert abs(row["estimate"] - 1.75) <= 0.15 and row["lo"] < row["hi"] < 2.85, row
+        assert fss.match(row["estimate"], (row["lo"], row["hi"]), 3.0, 0.15) == fss.FAIL
+    assert trained["verdict"] == ising.REPORTED and twin["verdict"] == fss.FAIL
+    quantity = "inverse_nu_pc_1_variance"
+    (trained,) = _rows(twin_judged, "fss", checkpoint=TRAINED_A, quantity=quantity)
+    (twin,) = _rows(twin_judged, "fss", checkpoint=TWIN_A, quantity=quantity)
+    assert {trained["role"], twin["role"]} == {"dynamic-pipeline-check"}
+    assert trained["verdict"] == ising.REPORTED and twin["verdict"] == fss.PASS
+    assert abs(trained["estimate"] - 1.0) <= 0.2 and trained["lo"] < trained["hi"], trained
+    assert runner.pipeline_faults(twin_judged.tables["fss"]) == [f"{TWIN_A}: l2_var_pc_1 fail"]
+
+
+def test_a_descriptive_statistic_is_scored_as_its_test_was_and_has_no_verdict(
+    twin_judged: ising.Evaluation, scored: ising.Evaluation
+) -> None:
+    """Role descriptive (#28), in a full scoring: surprise's variance, a test in the module's file,
+    keeps its row on both passes, role dynamic-descriptive, its 1/nu from the same positions, as the
+    peaks table shows them, edge shares and all, and no verdict, where the test had one. The
+    statistics left as tests are judged as before."""
+    quantity = "inverse_nu_surprise_variance"
+    for table in (TRAINED_A, TWIN_A):
+        (row,) = _rows(twin_judged, "fss", checkpoint=table, quantity=quantity)
+        (test,) = _rows(scored, "fss", checkpoint=table, quantity=quantity)
+        assert (row["role"], row["verdict"]) == ("dynamic-descriptive", ""), row
+        assert test["role"] == "dynamic-test", test
+        assert test["verdict"] in (fss.PASS, fss.FAIL, fss.INCONCLUSIVE), test
+        assert row["estimate"] == pytest.approx(test["estimate"], nan_ok=True), (row, test)
+        assert (row["expected"], row["tolerance"]) == (test["expected"], test["tolerance"])
+        assert row["draws"] == test["draws"] and np.isfinite(row["draws_used"]), row
+        where = {"checkpoint": table, "observable": "surprise", "indicator": "variance"}
+        np.testing.assert_equal(
+            _rows(twin_judged, "peaks", **where), _rows(scored, "peaks", **where)
+        )
+        (judged,) = _rows(
+            twin_judged, "fss", checkpoint=table, quantity="inverse_nu_surprise_slope"
+        )
+        assert (judged["role"], judged["verdict"]) == (
+            "dynamic-test",
+            _dynamic(scored, table, "inverse_nu_surprise_slope")["verdict"],
+        )
+
+
+def test_the_dynamic_rows_of_a_descriptive_statistic_and_a_twin_judged_check() -> None:
+    """_dynamic on planted positions, one draw of the bootstrap shared: a descriptive statistic's
+    row is the row it had as a test, 1/nu, CI and draws to the last digit, with no verdict; a check
+    judged on the twins alone keeps its row too, and its verdict on a twin's pass but reads reported
+    on a trained one. The test beside them is judged on both, as before."""
+    doc = tomllib.loads(DRAFT.read_text("utf-8"))
+    doc["scoring"]["bootstrap"] = 20
+    rng = np.random.default_rng(29)
+    at_eps = {L: [0.6 + 0.01 * rng.standard_normal(4) for _ in V1_SEEDS] for L in V1_SIZES}
+    keys = [ising._statistic_key(s) for s in doc["fss"]["dynamic"]["statistics"]]
+    assert keys == ["pc_1_variance", "surprise_variance", "surprise_slope"]
+    peaks = {(key, "matched"): at_eps for key in keys}
+    before = ising._dynamic(doc, peaks, np.random.default_rng(30), trained=True)
+    assert [r["verdict"] for r in before] == [fss.PASS] * 3, before
+    doc["fss"]["dynamic"]["statistics"][0]["judged"] = "twin"
+    doc["fss"]["dynamic"]["statistics"][1]["role"] = "descriptive"
+    numbers = ("quantity", "cadence", "estimate", "lo", "hi", "corrected", "draws", "draws_used")
+    for trained, check in ((False, fss.PASS), (True, ising.REPORTED)):
+        rows = ising._dynamic(doc, peaks, np.random.default_rng(30), trained=trained)
+        # assert_equal: `corrected` is NaN at three sizes, and NaN != NaN to ==
+        np.testing.assert_equal(
+            [[r[k] for k in numbers] for r in rows], [[r[k] for k in numbers] for r in before]
+        )
+        assert [(r["role"], r["verdict"]) for r in rows] == [
+            ("dynamic-pipeline-check", check),
+            ("dynamic-descriptive", ""),
+            ("dynamic-test", fss.PASS),
+        ]
 
 
 def test_a_prereg_with_latents_refuses_runs_without_its_tables(data: V1, tmp_path: Path) -> None:

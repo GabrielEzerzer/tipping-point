@@ -278,6 +278,33 @@ def test_strict_wants_a_checkpoint_pinned_by_its_sha256(draft: dict[str, Any], k
         (lambda d: d["fss"]["static"][1].update(tolerance=0.1), "a descriptive row"),
         (lambda d: d["fss"]["static"][1].update(expected=-0.125), "a descriptive row"),
         (lambda d: d["fss"]["static"][2].update(expected=1.75), "a reference is judged"),
+        (lambda d: d["fss"]["static"][1].update(judged="twin"), "a descriptive row"),
+        (lambda d: d["fss"]["static"][1].update(judged="both"), "a descriptive row"),
+        (lambda d: d["fss"]["static"][0].update(judged="trained"), "fss.static[0].judged: one of"),
+        (lambda d: d["fss"]["static"][0].update(judged="Twin"), "fss.static[0].judged: one of"),
+        (lambda d: d["fss"]["static"][0].update(judged=True), "fss.static[0].judged: one of"),
+        (lambda d: d["fss"]["static"][0].update(judged=["twin"]), "fss.static[0].judged: one of"),
+        (lambda d: d["fss"]["static"][2].update(judged=""), "fss.static[2].judged: one of"),
+        (
+            lambda d: d["fss"]["dynamic"]["statistics"][0].update(judged="trained"),
+            "statistics[0].judged: one of",
+        ),
+        (
+            lambda d: d["fss"]["dynamic"]["statistics"][0].update(judged={"twin": True}),
+            "statistics[0].judged: one of",
+        ),
+        (
+            lambda d: d["fss"]["dynamic"]["statistics"][1].update(
+                role="descriptive", judged="both"
+            ),
+            "statistics[1]: a descriptive statistic",
+        ),
+        (
+            lambda d: d["fss"]["dynamic"]["statistics"][1].update(judged="twin"),
+            "statistics[1].judged: 'both' for a test",
+        ),
+        (lambda d: d["scoring"]["margins"].update(sizes="median"), "margins.sizes"),
+        (lambda d: d["scoring"]["margins"].update(sizes="each"), "margins.sizes"),
     ],
 )
 def test_malformed_latent_files_are_named(draft: dict[str, Any], edit: Any, complaint: str) -> None:
@@ -478,6 +505,74 @@ def test_a_key_inside_a_list_of_tables_is_found_too(draft: dict[str, Any]) -> No
         "fss.static[0].band",
     ):
         assert any(p.startswith(f"{where}: nothing reads") for p in found), (where, found)
+
+
+@pytest.mark.parametrize("value", ["both", "twin"])
+def test_a_row_with_a_verdict_may_be_judged_on_the_twins_alone(
+    draft: dict[str, Any], value: str
+) -> None:
+    """The owner's rule (#28): a check may be judged on the step-0 twins alone, its trained rows
+    reported. `judged` stands on a static row with a verdict, a pipeline check's or a reference's,
+    and on a dynamic pipeline check, draft or ready to freeze; "both" says what a row without the
+    key does."""
+    filled = _filled(draft)
+    for doc in (draft, filled):
+        static, statistics = doc["fss"]["static"], doc["fss"]["dynamic"]["statistics"]
+        assert (static[0]["role"], static[2]["role"]) == ("pipeline-check", "reference")
+        assert statistics[0]["role"] == "pipeline-check"
+        for row in (static[0], static[2], statistics[0]):
+            row["judged"] = value
+    assert prereg.problems(draft) == []
+    assert prereg.problems(filled, strict=True) == []
+
+
+def test_both_is_what_a_test_statistic_may_say(draft: dict[str, Any]) -> None:
+    """A test's trained verdicts are what the margin rule counts, so it may say "both", the default,
+    and nothing else: judged on the twins alone it could never pass."""
+    draft["fss"]["dynamic"]["statistics"][1]["judged"] = "both"
+    assert draft["fss"]["dynamic"]["statistics"][1]["role"] == "test"
+    assert prereg.problems(draft) == []
+
+
+def test_a_misspelt_judged_is_a_key_nothing_reads(draft: dict[str, Any]) -> None:
+    """The key is let in by name alone: anything near it is still refused, wherever it stands."""
+    draft["fss"]["static"][0]["judge"] = "twin"
+    draft["fss"]["dynamic"]["statistics"][0]["judged_on"] = "twin"
+    found = prereg.problems(draft)
+    for where in ("fss.static[0].judge", "fss.dynamic.statistics[0].judged_on"):
+        assert any(p.startswith(f"{where}: nothing reads") for p in found), (where, found)
+
+
+def test_a_dynamic_statistic_may_be_descriptive_and_every_one_of_them_may_be(
+    draft: dict[str, Any],
+) -> None:
+    """Role descriptive (#28): a statistic computed and reported with no verdict. One of them, or
+    all of them, leaving no test, draft or ready to freeze; an empty list is still refused."""
+    filled = _filled(draft)
+    for doc in (draft, filled):
+        doc["fss"]["dynamic"]["statistics"][1]["role"] = "descriptive"
+    assert prereg.problems(draft) == []
+    assert prereg.problems(filled, strict=True) == []
+    for doc in (draft, filled):
+        for statistic in doc["fss"]["dynamic"]["statistics"]:
+            statistic["role"] = "descriptive"
+    assert prereg.problems(draft) == []
+    assert prereg.problems(filled, strict=True) == []
+    filled["fss"]["dynamic"]["statistics"] = []
+    assert "fss.dynamic.statistics: at least one" in prereg.problems(filled, strict=True)
+
+
+@pytest.mark.parametrize("sizes", ["mean", "every"])
+def test_the_margins_sign_test_reads_the_mean_or_every_size(
+    draft: dict[str, Any], sizes: str
+) -> None:
+    """scoring.margins.sizes (#28): the judged value is the mean over L either way; "every" asks
+    the sign test of each L's margins too. Both load, draft or ready to freeze."""
+    filled = _filled(draft)
+    for doc in (draft, filled):
+        doc["scoring"]["margins"]["sizes"] = sizes
+    assert prereg.problems(draft) == []
+    assert prereg.problems(filled, strict=True) == []
 
 
 def test_the_keys_a_latent_file_may_leave_out_are_not_taken_for_stale(
