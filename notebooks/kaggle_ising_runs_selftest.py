@@ -3144,9 +3144,8 @@ def ablation_name(role: str, seed: int) -> str:
 
 def ablations_canonical(primary: dict) -> dict:
     """The plan #28 asks for, worked out from primary-28.json: its m1 for each ablation, with the
-    model seed and the flags the role adds, pinned in plan order to GPU 0, 1, 0, ... as primary-28's
-    runs are, so that each T4 takes three and both roles; primary-28's wheel, sources and inputs;
-    and `commit` e598e62."""
+    model seed and the flags the role adds and without its GPU pin, so that a T4 takes the next
+    training as it comes free; primary-28's wheel, sources and inputs; and `commit` e598e62."""
     base = primary["runs"][0]
     runs = []
     for role, (seeds, extra) in ABLATIONS.items():
@@ -3157,7 +3156,6 @@ def ablations_canonical(primary: dict) -> dict:
                 {
                     "name": ablation_name(role, seed),
                     "command": base["command"],
-                    "gpu": len(runs) % 2,
                     "stage": list(base["stage"]),
                     "args": [*args, *extra],
                 }
@@ -3207,13 +3205,15 @@ def ablations_problems(plan: dict, canonical: dict) -> dict[str, list[str]]:
                 found[kinds.get(flag, "flags")].append(said)
         if got.get("stage") != want["stage"]:
             found["stage"].append(f"{name}: its stage ids are not primary-28's")
-        if got.get("gpu") != want["gpu"]:
-            found["gpus"].append(f"{name}: gpu {got.get('gpu')!r}, not {want['gpu']}")
-        if set(got) != set(want) or got["command"] != want["command"]:
+        if set(got) - {"gpu"} != set(want) or got["command"] != want["command"]:
             found["flags"].append(f"{name}: keys {sorted(got)}, command {got.get('command')!r}")
-    load = collections.Counter(r.get("gpu") for r in plan["runs"])
-    if load != collections.Counter({0: 3, 1: 3}):
-        found["gpus"].append(f"trainings per GPU {dict(load)}, not three on each T4")
+    # no run is pinned, so a T4 takes the next training as it comes free; a null gpu, as the runner
+    # reads it, pins nothing
+    found["gpus"] += [
+        f"{r.get('name')}: pinned to gpu {r['gpu']!r}"
+        for r in plan["runs"]
+        if r.get("gpu") is not None
+    ]
     pins, given_inputs = canonical["inputs"], plan.get("inputs", {})
     for name in sorted({*pins, *given_inputs}):
         if given_inputs.get(name) != pins.get(name):
@@ -3252,9 +3252,12 @@ def ablations_wrong_plans(canonical: dict) -> list[tuple[str, dict, str, str, st
 
     ema, held = ablation_name("ema-only", 12), ablation_name("held-out", 22)
     seed, steps = ablation_name("ema-only", 13), ablation_name("held-out", 21)
-    split, stage = ablation_name("held-out", 23), ablation_name("ema-only", 11)
+    pinned, stage = ablation_name("held-out", 23), ablation_name("ema-only", 11)
     sha = copy.deepcopy(canonical)
     sha["inputs"]["prereg"]["sha256"] = "0" * 64
+    balanced = copy.deepcopy(canonical)  # the first version's pins: 0, 1, 0, ... in plan order
+    for i, run in enumerate(balanced["runs"]):
+        run["gpu"] = i % 2
     return [
         (
             "a missing --var-weight 0 on an EMA-only run",
@@ -3293,12 +3296,13 @@ def ablations_wrong_plans(canonical: dict) -> list[tuple[str, dict, str, str, st
         ),
         ("a wrong prereg sha", sha, "inputs", "input prereg", "the session refuses: input prereg:"),
         (
-            "an unbalanced GPU split",
-            changed(split, lambda run: run.update(gpu=0)),
+            "a run pinned to a GPU",
+            changed(pinned, lambda run: run.update(gpu=0)),
             "gpus",
-            split,
+            pinned,
             "",
         ),
+        ("every run pinned, three on each T4", balanced, "gpus", stage, ""),
         ("a staircase of seed 7 staged", changed(stage, seed_seven), "stage", stage, ""),
     ]
 
@@ -3405,7 +3409,7 @@ def ablations_28(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN
             "--cov-weight 0 for EMA-only, --held-out for held-out",
         ),
         ("stage", "each training stages primary-28's 18 staircases"),
-        ("gpus", "three trainings pinned to each T4, both roles on each"),
+        ("gpus", "no training is pinned to a GPU, so a T4 takes the next as it comes free"),
         ("inputs", "the record and the draft are primary-28's pins"),
         ("plan", "its kernel is its own, primary-28's wheel and sources, and `commit` e598e62"),
     ):
