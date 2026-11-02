@@ -12,6 +12,7 @@ STATUS, and the exit-code policy.
     {"kernel": "tp-ising-job-a",                  the kernel slug: <owner>/<slug> and its title
      "description": "...",                        optional
      "wheel": "<owner>/<slug>",                   optional: gabrielezerzer/tipping-point-wheel
+     "commit": "<40 hex digits>",                 optional: the only commit COMMIT.txt may name
      "datasets": ["<owner>/<slug>"],              optional: datasets to attach
      "kernel_sources": ["<owner>/<slug>"],        optional: other kernels' outputs to attach
      "inputs": {"record": {"run": "<run id>", "file": "pilot.json", "sha256": "<hex>"}},
@@ -561,9 +562,22 @@ def load_plan(plan: object) -> dict:
     if not isinstance(plan, dict):
         raise PlanError("a plan is a JSON object")
     problems = []
-    keys = {"kernel", "description", "wheel", "datasets", "kernel_sources", "inputs", "runs"}
+    keys = {
+        "kernel",
+        "description",
+        "wheel",
+        "commit",
+        "datasets",
+        "kernel_sources",
+        "inputs",
+        "runs",
+    }
     if set(plan) - keys:
         problems.append(f"unknown keys {sorted(set(plan) - keys)}")
+    if "commit" in plan and not (
+        isinstance(plan["commit"], str) and COMMIT.fullmatch(plan["commit"])
+    ):
+        problems.append(f"commit {plan['commit']!r}: 40 lowercase hex digits")
     if not (isinstance(plan.get("kernel"), str) and SLUG.fullmatch(plan["kernel"])):
         problems.append(f"kernel {plan.get('kernel')!r}: a slug, 5-50 of a-z, 0-9 and '-'")
     if not isinstance(plan.get("description", ""), str):
@@ -1921,11 +1935,14 @@ def kernel_main(ctx: Ctx) -> int:
             summary.update(prior={k: prior[k] for k in ("path", "status")}, runs=prior["runs"])
         log("== wheel and environment")
         wheel, summary["wheel"] = find_wheel(ctx, plan.get("wheel", DEFAULT_WHEEL))
+        commit = summary["wheel"]["commit"]
+        # a frozen prereg's scorer refuses any other commit's runs: say so before the quota goes
+        if plan.get("commit", commit) != commit:
+            raise Refused(f"COMMIT.txt names {commit}; this plan's runs need {plan['commit']}")
         env = summary["env"] = probe(ctx) if ctx.py else ensure_env(ctx, wheel)
         log(json.dumps(env, indent=2))
-        check_env(ctx, env, summary["wheel"]["commit"])
+        check_env(ctx, env, commit)
         gpus = ctx.gpus or len(env["devices"])
-        commit = summary["wheel"]["commit"]
         session = Session(ctx, plan, summary, commit, env["torch"], gpus, prior)
         return session.run()
     except (Refused, PlanError) as why:

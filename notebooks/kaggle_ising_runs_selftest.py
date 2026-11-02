@@ -11,7 +11,8 @@ final.pt against the complete.json beside it; the wheel and COMMIT.txt checks; r
 judged by exit codes and files only; the rates STATUS gives, by checkpoint and L; the kernel folder
 against what `kaggle kernels push` checks; invalid plans refused at every door; pilot-28.json,
 primary-28.json and the first-read plans, their stage ids, inputs and kernel sources, on stand-in
-mounts.
+mounts; v1-confirmatory.json against what the frozen file's `ews score` selects and accepts, its
+runs made by the tag's own CLI as manifests, with nothing simulated.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
@@ -43,6 +44,7 @@ import shutil
 import site
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -1522,7 +1524,14 @@ def leaks(folder: Path) -> list[str]:
 
 
 def kernel_acceptance(k: ModuleType, root: Path) -> None:
-    for name in ("job-a", "pilot-28", "primary-28", "first-read-m1", "first-read-m2"):
+    for name in (
+        "job-a",
+        "pilot-28",
+        "primary-28",
+        "first-read-m1",
+        "first-read-m2",
+        "v1-confirmatory",
+    ):
         source, folder = PLANS / f"{name}.json", root / name
         plan = json.loads(source.read_text(encoding="utf-8"))
         code = k.main(["--write-kernel", str(source), str(folder)])
@@ -2393,6 +2402,557 @@ def first_reads(k: ModuleType, root: Path) -> None:
         )
 
 
+V1_PLAN = PLANS / "v1-confirmatory.json"
+V1_PREREG = PLANS.parents[1] / "paper" / "prereg" / "ising-ews-v1.toml"
+V1_RECORD = (
+    PLANS.parents[1] / "python" / "tipping_point" / "tests" / "fixtures" / "ising_pilot.json"
+)
+V1_KERNEL = "tp-ising-v1-confirmatory"
+V1_WHEEL = "gabrielezerzer/tipping-point-wheel-v1"
+V1_SOURCES = ["gabrielezerzer/tp-ising-job-a", "gabrielezerzer/tp-tauc-l64-l128"]
+# the grid pilots whose tau.json the frozen file pins, in tp-ising-job-a's output: it names them in
+# comments alone, so they are written out here
+V1_GRID_PILOTS = {
+    16: "20261025T220933Z-L16-pilot-s6",
+    32: "20261025T220814Z-L32-pilot-s6",
+    64: "20261025T220810Z-L64-pilot-s6",
+}
+V1_RESUME = (
+    "uv run --no-sync python notebooks/kaggle_ising_runs.py --write-kernel "
+    "notebooks/plans/v1-confirmatory.json ../.wf/kaggle/kernel-v1-confirmatory-resume --resume; "
+    "kaggle kernels push -p ../.wf/kaggle/kernel-v1-confirmatory-resume"
+)
+V1_TAG_CLI = r'''
+"""Each plan's runs through a copy of the tag's package: its own parser and schedules, with
+run.start swapped for a stub that writes the manifest the tag would write and stops. Nothing is
+simulated.
+Usage: <this> <folder holding tipping_point> <job.json> <out.json>"""
+import contextlib
+import io as text_io
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import tipping_point
+import torch
+from tipping_point.ising import __main__ as cli
+from tipping_point.ising import io, run
+
+assert Path(tipping_point.__file__).is_relative_to(sys.argv[1]), tipping_point.__file__
+made = []
+
+
+def stub(spec, schedule, root, tag, device=None, pilot=None):
+    run_id = f"20261102T{len(made):06d}Z-{tag}"  # engine.run_id's shape, unique within this process
+    folder = Path(root) / "ising" / run_id
+    folder.mkdir(parents=True)
+    manifest = run._manifest(spec, schedule, run_id, torch.device(device), pilot)
+    io.write_json(folder / "manifest.json", manifest)
+    made.append(run_id)
+    return folder
+
+
+run.start = stub
+results = {}
+for label, runs in json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")).items():
+    results[label] = {}
+    for name, argv in runs.items():
+        said = text_io.StringIO()
+        try:
+            with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                cli.main(argv)
+            results[label][name] = {"run_id": made[-1]}
+        except SystemExit as exc:  # argparse's usage error, or the CLI's own refusal
+            why = exc.code if isinstance(exc.code, str) else said.getvalue().strip()[-300:]
+            results[label][name] = {"error": why}
+Path(sys.argv[3]).write_text(json.dumps(results), encoding="utf-8")
+'''
+
+
+def v1_wanted(data: dict) -> dict[str, dict]:
+    """Every run ews.ising.select needs, by name, with the flags its slot takes (README, note 13):
+    one slow ramp and one staircase per (L, seed), one null run per (L, seed, eps_L). A ramp at
+    another x fills no slot, so note 13's 90 runs, which hold the fast ramps, are not these."""
+    start, end = data["ramps"]["eps_L"]
+    record = {"input": "record"}
+    slow = ["--x", data["ramps"]["x"], "--pilot", record, "--eps-start", start, "--eps-end", end]
+    wanted = {}
+    for L, seed in itertools.product(data["L"], data["seeds"]):
+        base = ["--L", L, "--seed", seed, "--replicas", data["replicas"]]
+        wanted[f"ramp-L{L}-s{seed}"] = {"command": "ramp", "args": [*base, *slow]}
+        wanted[f"qs-L{L}-s{seed}"] = {
+            "command": "staircase",
+            "args": [*base, "--tau", {"input": f"tau_L{L}"}],
+        }
+        for eps in data["nulls"]["eps_L"]:
+            wanted[f"null-L{L}-e{eps:g}-s{seed}"] = {
+                "command": "null",
+                "args": [*base, "--epsilon-L", eps, "--pilot", record],
+            }
+    return wanted
+
+
+def v1_pins(data: dict) -> dict[str, dict]:
+    """The inputs v1 pins, as a plan's `inputs` names them: the record and each dwell file."""
+    pins = {
+        "record": {
+            "run": data["tau_c"]["pilot_run"],
+            "file": "pilot.json",
+            "sha256": data["tau_c"]["pilot_sha256"],
+        }
+    }
+    for L in data["L"]:
+        pins[f"tau_L{L}"] = {
+            "run": V1_GRID_PILOTS[L],
+            "file": "tau.json",
+            "sha256": data["staircase"]["tau_sha256"][str(L)],
+        }
+    return pins
+
+
+def v1_plan_problems(plan: dict, data: dict) -> dict[str, list[str]]:
+    """A plan's runs and inputs against the frozen file's data section, by what is wrong and which
+    run it is wrong in. The scorer alone would let some through: it refuses too few replicas, not
+    too many, and takes any --saves or --pre."""
+    wanted, runs = v1_wanted(data), {r["name"]: r for r in plan["runs"]}
+    found: dict[str, list[str]] = {
+        "missing": [name for name in wanted if name not in runs],
+        "extra": [name for name in runs if name not in wanted],
+        "seed": [],
+        "replicas": [],
+        "inputs": [],
+        "flags": [],
+    }
+    kinds = {"--seed": "seed", "--replicas": "replicas", "--tau": "inputs", "--pilot": "inputs"}
+    for name in wanted:
+        if name not in runs:
+            continue
+        got, want = (r["args"] for r in (runs[name], wanted[name]))
+        flags = {str(flag): value for flag, value in zip(got[::2], got[1::2], strict=False)}
+        needed = dict(zip(want[::2], want[1::2], strict=True))
+        for flag in {*flags, *needed}:
+            if flags.get(flag) != needed.get(flag):
+                said = f"{name}: {flag} {flags.get(flag)!r}, not {needed.get(flag)!r}"
+                found[kinds.get(flag, "flags")].append(said)
+        spec = {key: value for key, value in runs[name].items() if key not in ("name", "args")}
+        if spec != {"command": wanted[name]["command"]}:  # another command, or a GPU pin
+            found["flags"].append(f"{name}: {spec}, not {wanted[name]['command']}")
+    pins, given = v1_pins(data), plan.get("inputs", {})
+    for name in {*pins, *given}:
+        if given.get(name) != pins.get(name):
+            found["inputs"].append(f"input {name}: {given.get(name)}, not {pins.get(name)}")
+    return found
+
+
+def v1_tag_package(root: Path, commit: str) -> Path:
+    """The folder holding the tag's package as the wheel built from it holds it, out of git, stamped
+    as hatch_build.py stamps it: main's CLI may move on, and the wheel cannot."""
+    args = ["git", "-C", str(PLANS.parents[1]), "archive", commit]
+    args.append("python/tipping_point/src/tipping_point")
+    raw = subprocess.run(args, capture_output=True, check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
+        for member in tar.getmembers():
+            member.name = member.name.removeprefix("python/tipping_point/src/")
+            if member.name.startswith("tipping_point"):
+                tar.extract(member, root, filter="data")
+    stamp = f"commit = {commit!r}\ndirty = False\n"
+    (root / "tipping_point" / "_build_info.py").write_text(stamp, encoding="utf-8")
+    return root
+
+
+def v1_on_stand_ins(plan: dict, stand_ins: dict[str, str]) -> dict:
+    """The plan pinning each dwell file's stand-in where it pins the real one: the runner checks the
+    real bytes on Kaggle. Any other pin stays as it is, and finds nothing on the mounts."""
+    trial = copy.deepcopy(plan)
+    for entry in trial.get("inputs", {}).values():
+        entry["sha256"] = stand_ins.get(entry["sha256"], entry["sha256"])
+    return trial
+
+
+def v1_scorer_problems(
+    k: ModuleType,
+    plans: dict[str, dict],
+    ctx: Any,
+    stand_ins: dict[str, str],
+    doc: dict,
+    commit: str,
+    root: Path,
+) -> dict[str, list[str]]:
+    """What the scorer says of the runs the tag's own CLI makes from each plan: the session's lookup
+    of its inputs on the stand-in mounts, the tag's parser and schedules writing each manifest, then
+    what `ews score` asks of them before it reads a frame (ising.admit): one complete run per slot,
+    at the file's size, seed and replicas, by the tag's commit, against the pinned record and the
+    pinned dwell. A run that fills no slot is named too: the scorer itself only leaves it out."""
+    from tipping_point.ews import ising
+
+    job, said = {}, {label: [] for label in plans}
+    dirs = {label: root / str(n) for n, label in enumerate(plans)}
+    for label, plan in plans.items():
+        trial = v1_on_stand_ins(plan, stand_ins)
+        session = k.Session(ctx, trial, {}, COMMIT, TORCH, 2)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                session.locate_inputs()
+        except k.Refused as exc:
+            said[label].append(f"the session refuses: {exc}")
+            continue
+        job[label] = {
+            r.name: [
+                k.module_of(r.command)[1],
+                *session.resolve(r)[0],
+                *session.flags(r, dirs[label]),
+            ]
+            for r in session.runs
+        }
+    root.mkdir(parents=True, exist_ok=True)
+    script, given, out = root / "tag_cli.py", root / "job.json", root / "made.json"
+    script.write_text(V1_TAG_CLI, encoding="utf-8")
+    given.write_text(json.dumps(job), encoding="utf-8")
+    package = v1_tag_package(root / "tag", commit)
+    argv = [sys.executable, "-I", str(script), str(package), str(given), str(out)]
+    done = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert done.returncode == 0, done.stderr[-2000:]
+    record = doc["data"]["tau_c"]["pilot_run"]
+    for label, made in json.loads(out.read_text(encoding="utf-8")).items():
+        ids = {}
+        for name, got in made.items():
+            if "error" in got:
+                said[label].append(f"{name}: the tag's CLI refuses it: {got['error']}")
+                continue
+            ids[got["run_id"]] = name
+            folder = dirs[label] / "ising" / got["run_id"]
+            manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+            schedule = manifest["params"]["schedule"]
+            blocks = schedule["params"]["temperatures"] if schedule["kind"] == "fixed" else []
+            checks = [{"temperature": T, "passed": True} for T in blocks]
+            done_json = {"clean": True, "files": {}, "checks": {"thermalised": checks}}
+            (folder / "complete.json").write_text(json.dumps(done_json), encoding="utf-8")
+        (dirs[label] / "ising" / record).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(V1_RECORD, dirs[label] / "ising" / record / "pilot.json")
+        try:
+            admitted = ising.admit(doc, dirs[label], lambda _: None, commit=commit)
+        except ising.IsingDataError as exc:
+            said[label].append(f"the scorer refuses: {exc}")
+            continue
+        scored = {r.run_id for r in admitted.scored}
+        said[label] += [f"{n} fills no slot" for run_id, n in ids.items() if run_id not in scored]
+    return said
+
+
+def v1_wrong_plans(canonical: dict) -> list[tuple[str, dict, str, str, str]]:
+    """Each way a plan could go wrong: what it is, the plan so changed, where v1_plan_problems must
+    file it and the name it must give, and the name the scorer's refusal must give, "" where the
+    scorer would let it through."""
+
+    def changed(*changes: tuple[str, str, Any]) -> dict:
+        plan = copy.deepcopy(canonical)
+        for name, flag, value in changes:
+            args = next(r for r in plan["runs"] if r["name"] == name)["args"]
+            args[args.index(flag) + 1] = value
+        return plan
+
+    missing = copy.deepcopy(canonical)
+    missing["runs"] = [r for r in missing["runs"] if r["name"] != "ramp-L64-s9"]
+    fast = copy.deepcopy(canonical)
+    fast_run = copy.deepcopy(next(r for r in fast["runs"] if r["name"] == "ramp-L16-s6"))
+    fast_run["name"] = "ramp-x2-L16-s6"
+    fast_run["args"][fast_run["args"].index("--x") + 1] = 2
+    fast["runs"].append(fast_run)
+    doubled = copy.deepcopy(canonical)
+    twin = copy.deepcopy(next(r for r in doubled["runs"] if r["name"] == "null-L32-e4-s7"))
+    twin["name"] = "null-L32-e4-s7-again"
+    doubled["runs"].append(twin)
+    record_pin = copy.deepcopy(canonical)
+    record_pin["inputs"]["record"]["sha256"] = "0" * 64
+    tau_pin = copy.deepcopy(canonical)
+    tau_pin["inputs"]["tau_L64"]["sha256"] = "0" * 64
+    saves = copy.deepcopy(canonical)
+    next(r for r in saves["runs"] if r["name"] == "qs-L16-s7")["args"] += ["--saves", 100]
+    return [
+        ("a missing run", missing, "missing", "ramp-L64-s9", "(64, 'ramp', 9)"),
+        ("an extra run no slot takes", fast, "extra", "ramp-x2-L16-s6", "ramp-x2-L16-s6 fills no"),
+        (
+            "an extra run filling a slot twice",
+            doubled,
+            "extra",
+            "null-L32-e4-s7-again",
+            "more than",
+        ),
+        (
+            "a wrong seed",
+            changed(("qs-L32-s7", "--seed", 11)),
+            "seed",
+            "qs-L32-s7",
+            "(32, 'staircase', 7)",
+        ),
+        (
+            "too few replicas",
+            changed(("null-L16-e4-s8", "--replicas", 16)),
+            "replicas",
+            "null-L16-e4-s8",
+            "fewer than 64 replicas",
+        ),
+        (
+            "too many replicas",
+            changed(("ramp-L32-s6", "--replicas", 128)),
+            "replicas",
+            "ramp-L32-s6",
+            "",
+        ),
+        (
+            "another size's dwell file",
+            changed(("qs-L16-s6", "--tau", {"input": "tau_L32"})),
+            "inputs",
+            "qs-L16-s6",
+            "staircases whose dwell",
+        ),
+        (
+            "a number for the dwell",
+            changed(("qs-L64-s10", "--tau", 50)),
+            "inputs",
+            "qs-L64-s10",
+            "tau.json sha256 None",
+        ),
+        (
+            "a record pinned by another sha256",
+            record_pin,
+            "inputs",
+            "input record",
+            "input record:",
+        ),
+        (
+            "a dwell file pinned by another sha256",
+            tau_pin,
+            "inputs",
+            "input tau_L64",
+            "input tau_L64:",
+        ),
+        (
+            "a ramp over another window",
+            changed(("ramp-L64-s6", "--eps-end", -4)),
+            "flags",
+            "ramp-L64-s6",
+            "its ramp runs from",
+        ),
+        (
+            "a ramp at another x",
+            changed(("ramp-L16-s10", "--x", 2)),
+            "flags",
+            "ramp-L16-s10",
+            "'ramp', 10",
+        ),
+        ("a flag the scorer lets through", saves, "flags", "qs-L16-s7", ""),
+    ]
+
+
+def v1_confirmatory(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN_JSON
+    from tipping_point.ews import prereg
+    from tipping_point.ising import protocol
+
+    pre = prereg.load(V1_PREREG)
+    tag = prereg.frozen(pre)  # what `ews score` asks first: the frozen file, byte for byte
+    data = pre.doc["data"]
+    plan = json.loads(V1_PLAN.read_text(encoding="utf-8"))
+    why = refused(k, plan)
+    check("v1-confirmatory: the plan loads", not why, why)
+    if why:
+        return
+    errors = k.cli_errors(plan)
+    check("v1-confirmatory: the CLI itself takes every run's arguments", errors == [], errors)
+    check(
+        "v1-confirmatory: its kernel is its own, its wheel the v1 wheel, never the project's other",
+        plan["kernel"] == V1_KERNEL
+        and plan.get("wheel") == V1_WHEEL
+        and k.DEFAULT_WHEEL not in [*plan.get("datasets", []), *plan.get("kernel_sources", [])],
+        [plan["kernel"], plan.get("wheel"), plan.get("datasets")],
+    )
+    check(
+        "v1-confirmatory: `commit` is the commit the freeze tag points at",
+        plan.get("commit") == tag.commit,
+        plan.get("commit"),
+    )
+    check(
+        "v1-confirmatory: the record and the dwell files come from the kernels that wrote them",
+        plan.get("kernel_sources") == V1_SOURCES and not plan.get("datasets"),
+        plan.get("kernel_sources"),
+    )
+    wanted = v1_wanted(data)
+    count = len(data["L"]) * len(data["seeds"]) * (2 + len(data["nulls"]["eps_L"]))
+    found = v1_plan_problems(plan, data)
+    check(
+        f"v1-confirmatory: the scorer's selection needs {count} runs, per (L, seed) a slow ramp, a "
+        "staircase and a null run per eps_L",
+        len(wanted) == count == 75,
+        len(wanted),
+    )
+    for kind, what in (
+        ("missing", "no run the selection needs is missing"),
+        ("extra", "no run beyond what the selection needs"),
+        ("seed", "every run has its slot's seed"),
+        ("replicas", f"every run has data.replicas, {data['replicas']}"),
+        ("inputs", "every input is the file's pin, and each run reads its own"),
+        ("flags", "every run has exactly its slot's flags, and no GPU pin"),
+    ):
+        check(f"v1-confirmatory: {what}", not found[kind], found[kind])
+
+    # on the mounts Kaggle gives it: the record's bytes are the real ones, the repository's copy;
+    # the dwell files sit on Kaggle alone, so each gets a stand-in, and the file's pin of it follows
+    ctx = ctx_at(k, root / "session")
+    ctx.py = sys.executable
+    ctx.helper.write_text(k.HELPER_SOURCE, encoding="utf-8")
+    holder = ctx.input / "tp-tauc-l64-l128" / "out" / "ising" / data["tau_c"]["pilot_run"]
+    holder.mkdir(parents=True)
+    shutil.copyfile(V1_RECORD, holder / "pilot.json")
+    doc = copy.deepcopy(pre.doc)
+    stand_ins, tau_files = {}, {}
+    for L in data["L"]:
+        points = [{"temperature": T, "tau": 60.0, "reliable": True} for T in protocol.GRID]
+        text = json.dumps({"L": L, "seconds": 1.0, "points": points}, indent=2)
+        folder = ctx.input / "tp-ising-job-a" / "out" / "ising" / V1_GRID_PILOTS[L]
+        folder.mkdir(parents=True)
+        tau_files[L] = folder / "tau.json"
+        tau_files[L].write_text(text, encoding="utf-8", newline="\n")
+        sha = hashlib.sha256(text.encode()).hexdigest()
+        stand_ins[data["staircase"]["tau_sha256"][str(L)]] = sha
+        doc["data"]["staircase"]["tau_sha256"][str(L)] = sha
+
+    canonical = {
+        "kernel": V1_KERNEL,
+        "wheel": V1_WHEEL,
+        "commit": tag.commit,
+        "kernel_sources": V1_SOURCES,
+        "inputs": v1_pins(data),
+        "runs": [{"name": name, **run} for name, run in wanted.items()],
+    }
+    wrong = v1_wrong_plans(canonical)
+    plans = {
+        "the plan": plan,
+        "the canonical plan": canonical,
+        **{w[0]: w[1] for w in wrong if w[4]},
+    }
+    said = v1_scorer_problems(k, plans, ctx, stand_ins, doc, tag.commit, root / "made")
+    check(
+        f"v1-confirmatory: made by the tag's own CLI, `ews score` admits all {count} and scores "
+        "every one, against the tag's commit, the pinned record and the pinned dwell",
+        not said["the plan"],
+        said["the plan"],
+    )
+    check(
+        "... as it does the plan worked out from the frozen file, so these refusals are the plan's",
+        not said["the canonical plan"],
+        said["the canonical plan"],
+    )
+    for what, wrong_plan, kind, named, says in wrong:
+        problems = v1_plan_problems(wrong_plan, data)
+        check(
+            f"... {what} goes red under {kind}, naming {named}",
+            not refused(k, wrong_plan) and any(named in p for p in problems[kind]),
+            problems,
+        )
+        if says:
+            check(
+                f"... {what}: the scorer's refusal names {says}",
+                any(says in p for p in said[what]),
+                said[what],
+            )
+    if any(problem.startswith("the session refuses") for problem in said["the plan"]):
+        return  # red above, by name, and what follows needs its inputs found
+    made = sorted((root / "made" / "0" / "ising").glob("*/manifest.json"))
+    keys = {json.loads(m.read_text("utf-8"))["params"]["rng"]["seed"] for m in made}
+    check("v1-confirmatory: every run draws its own stream", len(keys) == len(made), len(keys))
+
+    trial = v1_on_stand_ins(plan, stand_ins)
+    session = k.Session(ctx, trial, {}, COMMIT, TORCH, 2)
+    session.locate_inputs()
+    errors = session.capture(session.runs)
+    check(
+        "v1-confirmatory: the helper's capture, as on Kaggle, refuses nothing", errors == [], errors
+    )
+    check(
+        f"v1-confirmatory: each run is one block of {data['replicas']} lattices at a size of v1",
+        {tuple(r.shape or ()) for r in session.runs} == {(L, data["replicas"]) for L in data["L"]},
+        sorted({tuple(r.shape or ()) for r in session.runs}),
+    )
+    ramp = next(r for r in session.runs if {"input": "record"} in r.args)
+    tail, key = session.resolve(ramp)
+    check(
+        "v1-confirmatory: its key names the record by run and file, not by where it was mounted, "
+        "so a resumed session reuses and continues the runs a session made",
+        tail[tail.index("--pilot") + 1] == str(holder / "pilot.json")
+        and f"input/{data['tau_c']['pilot_run']}/pilot.json" in key
+        and str(ctx.input) not in " ".join(key),
+        key,
+    )
+    resaved = json.dumps(json.loads(tau_files[32].read_text(encoding="utf-8")))
+    tau_files[32].write_text(resaved, encoding="utf-8")
+    again = k.Session(ctx, trial, {}, COMMIT, TORCH, 2)
+    try:
+        again.locate_inputs()
+        why = ""
+    except k.Refused as exc:
+        why = str(exc)
+    check(
+        "v1-confirmatory: a re-serialised tau.json is refused, by name",
+        "input tau_L32:" in why,
+        why,
+    )
+
+    state = {"kernel": "tp-ising-job-a", "runs": [{"name": "qs-L16-s6", "folder": "ising/x"}]}
+    (ctx.input / "tp-ising-job-a" / "out" / k.STATE).write_text(json.dumps(state), encoding="utf-8")
+    check(
+        "v1-confirmatory: Job A's own state, attached with its output, is no previous session",
+        k.carry_forward(ctx, trial) is None,
+    )
+    folder = root / "resumed"
+    code = k.main(["--write-kernel", str(V1_PLAN), str(folder), "--resume"])
+    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    check(
+        "v1-confirmatory --resume: the v1 wheel alone, its two sources, then its own output last",
+        code == 0
+        and not push_problems(folder)
+        and meta["dataset_sources"] == [V1_WHEEL]
+        and meta["kernel_sources"] == [*V1_SOURCES, f"{k.OWNER}/{V1_KERNEL}"],
+        meta,
+    )
+    check(
+        "v1-confirmatory: the description holds the one line that resumes it",
+        V1_RESUME in plan.get("description", ""),
+        plan.get("description"),
+    )
+
+    # the plan's commit, read by the kernel before any quota goes on a wheel the scorer would refuse
+    held = ctx.input / "tipping-point-wheel-v1"
+    held.mkdir()
+    (held / "tipping_point-0.1.0-py3-none-any.whl").write_bytes(b"PK")
+
+    def session_says(commit: str) -> str:
+        (held / "COMMIT.txt").write_text(f"{commit}\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            k.kernel_main(ctx)
+        return (ctx.out / "STATUS").read_text(encoding="utf-8")
+
+    saved, k.PLAN_JSON = k.PLAN_JSON, json.dumps(trial)
+    try:
+        other = session_says(OTHER)
+        same = session_says(tag.commit)
+    finally:
+        k.PLAN_JSON = saved
+    check(
+        "v1-confirmatory: a wheel from any other commit is refused before the environment is built",
+        other.startswith(f"refused: COMMIT.txt names {OTHER}; this plan's runs need {tag.commit}"),
+        other,
+    )
+    check(
+        "... and the tag's commit passes that line, on to the installed package's own stamp",
+        same.startswith("refused: the installed package names commit"),
+        same,
+    )
+    for bad in ("main", 7, tag.commit[:12]):
+        why = refused(k, dict(copy.deepcopy(plan), commit=bad))
+        check(f"refused: a plan's commit of {bad!r}", "40 lowercase hex digits" in why, why)
+
+
 def run_all(k: ModuleType) -> int:
     with tempfile.TemporaryDirectory(prefix="tp-self-test-", ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -2416,6 +2976,7 @@ def run_all(k: ModuleType) -> int:
         pilot_28(k, root / "pilot-28")
         primary_28(k, root / "primary-28")
         first_reads(k, root / "first-reads")
+        v1_confirmatory(k, root / "v1-confirmatory")
         real_runs(k, root / "real")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1
