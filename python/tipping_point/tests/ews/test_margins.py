@@ -198,12 +198,16 @@ def test_an_undefined_margin_is_inconclusive() -> None:
 # ---------------------------------------------------------------- the table
 
 
-def _doc(primaries: int = SEEDS, ablations: int = 0) -> dict[str, Any]:
+def _doc(primaries: int = SEEDS, ablations: int = 0, sizes: str = "mean") -> dict[str, Any]:
     """What margins.table reads of a latent file."""
     entries = [("primary", s, f"p{s}") for s in range(primaries)]
     entries += [("held-out", 100 + s, f"h{s}") for s in range(ablations)]
     return {
-        "scoring": {"bootstrap": 400, "ci_level": 0.95, "margins": {"tolerance": 0.01}},
+        "scoring": {
+            "bootstrap": 400,
+            "ci_level": 0.95,
+            "margins": {"tolerance": 0.01, "sizes": sizes},
+        },
         "latents": {
             "steps": 50,
             "checkpoints": [
@@ -411,6 +415,101 @@ def test_a_role_with_one_checkpoint_has_no_rows() -> None:
     """A margin needs a spread between seeds to bootstrap over."""
     doc = _doc(primaries=1)
     assert margins.table(doc, [], _verdicts(doc, (1, 0, 0), (0, 0, 0)), _rng()) == []
+
+
+def test_per_size_margins_join_the_sign_test_and_nothing_else() -> None:
+    """paired's per_size: the margins at each L, seed by seed. One of the wrong sign fails the sign
+    test, and with it the verdict, though every seed's own margin carries the sign; the CI, read
+    off the seeds' margins and the rng alone, is the same. A NaN among them is inconclusive."""
+    twin = np.random.default_rng(15).normal(1.0, 0.3, SEEDS)
+    trained = twin + np.array([0.5, 0.6, 0.55, 0.45, 0.5])
+    good = np.full((3, SEEDS), 0.4)
+    alone = margins.paired(trained, twin, "greater", 0.1, np.random.default_rng(16))
+    sized = margins.paired(trained, twin, "greater", 0.1, np.random.default_rng(16), per_size=good)
+    assert alone == sized and sized["verdict"] == fss.PASS
+    bad = good.copy()
+    bad[1, 3] = -0.01
+    wrong = margins.paired(trained, twin, "greater", 0.1, np.random.default_rng(16), per_size=bad)
+    assert wrong["sign_test"] == fss.FAIL and wrong["verdict"] == fss.FAIL
+    assert (wrong["lo"], wrong["hi"], wrong["margins"]) == (
+        alone["lo"],
+        alone["hi"],
+        alone["margins"],
+    )
+    bad[1, 3] = np.nan
+    unknown = margins.paired(trained, twin, "greater", 0.1, np.random.default_rng(16), per_size=bad)
+    assert unknown["sign_test"] == fss.INCONCLUSIVE and unknown["verdict"] == fss.INCONCLUSIVE
+    turned = margins.paired(trained, twin, "less", 0.1, np.random.default_rng(16), per_size=-good)
+    assert turned["sign_test"] == fss.FAIL  # the seeds' own margins are against "less"
+
+
+def _over_sizes(
+    doc: dict[str, Any], name: str, per_L: dict[str, np.ndarray]
+) -> list[margins.Quantity]:
+    """Q at each L, each trained checkpoint per_L[scope] over its twin, and the mean over L of
+    values and draws alike, as the runner's probe_quantities builds them."""
+    each = [_quantity(doc, name, margin, scope=scope) for scope, margin in per_L.items()]
+    names = list(each[0].values)
+    mean = {c: float(np.mean([q.values[c] for q in each])) for c in names}
+    draws = {c: np.mean([q.draws[c] for q in each], axis=0) for c in names}
+    return [*each, margins.Quantity(name, margins.ALL, mean, draws)]
+
+
+def test_under_every_size_one_wrong_signed_margin_at_one_L_fails_the_judged_row() -> None:
+    """scoring.margins.sizes = "every" (#28): a judged row's value and CI stay the mean over L, and
+    its sign test asks all 5 seeds at all 3 sizes. Every seed's mean margin is clearly positive,
+    but the fifth seed loses to its twin at L = 32: under "mean" the row passes, under "every" it
+    fails, with the same margins and CI. Each L's rows are reported as before, and a descriptive
+    quantity's row keeps the mean's sign test: the rule is the judged rows'."""
+    gain = np.array([0.3, 0.25, 0.35, 0.28, 0.32])
+    lost = gain.copy()
+    lost[4] = -0.05
+    per_L = {"L=16": gain, "L=32": lost, "L=64": gain}
+    rows = {}
+    for sizes in ("mean", "every"):
+        doc = _doc(sizes=sizes)
+        quantities = [
+            *_over_sizes(doc, "energy_r2", per_L),
+            *_over_sizes(doc, "energy_selectivity", dict.fromkeys(per_L, gain)),
+            *_over_sizes(doc, "l2var_r2", per_L),
+        ]
+        rows[sizes] = margins.table(doc, quantities, _verdicts(doc, (5, 0, 0), (0, 0, 0)), _rng())
+    mean, every = _judged(rows["mean"])["energy_r2"], _judged(rows["every"])["energy_r2"]
+    assert all(m > 0.15 for m in mean["margins"]) and mean["lo"] > 0, mean
+    assert mean["sign_test"] == fss.PASS and mean["verdict"] == fss.PASS
+    assert every["sign_test"] == fss.FAIL and every["verdict"] == fss.FAIL
+    same = ("margins", "margin", "lo", "hi", "n_seeds", "n_draws", "scope")
+    assert [every[k] for k in same] == [mean[k] for k in same]
+    assert _judged(rows["every"])["energy_selectivity"]["verdict"] == fss.PASS
+    assert _judged(rows["every"])["surprise_fss"]["verdict"] == fss.PASS
+
+    def reported(found: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+        """Every row but the judged ones, as the columns a reader sees."""
+        keys = ("quantity", "scope", "margins", "lo", "hi", "sign_test", "verdict")
+        return [tuple(r[k] for k in keys) for r in found if not r["judged"]]
+
+    assert reported(rows["every"]) == reported(rows["mean"])
+    at_32 = [r for r in rows["every"] if (r["quantity"], r["scope"]) == ("energy_r2", "L=32")]
+    assert [(r["sign_test"], r["verdict"]) for r in at_32] == [(fss.FAIL, "")]
+    descriptive = [r for r in rows["every"] if (r["quantity"], r["scope"]) == ("l2var_r2", "all")]
+    assert [(r["sign_test"], r["verdict"]) for r in descriptive] == [(fss.PASS, "")]
+
+
+def test_a_file_with_no_test_statistic_has_no_surprise_row() -> None:
+    """Every statistic descriptive or a pipeline check (#28): the hypothesis's surprise rule has
+    nothing to count, so the table has no surprise_fss row, judged or per statistic, whatever the
+    FSS rows say or if there are none, and raises nothing. The energy rows are judged as before."""
+    doc = _doc()
+    for statistic in doc["fss"]["dynamic"]["statistics"]:
+        if statistic["role"] == "test":
+            statistic["role"] = "descriptive"
+    gain = np.array([0.3, 0.25, 0.35, 0.28, 0.32])
+    quantities = [_quantity(doc, "energy_r2", gain), _quantity(doc, "energy_selectivity", gain)]
+    for fss_rows in (_verdicts(doc, (5, 0, 0), (0, 0, 0)), []):
+        rows = margins.table(doc, quantities, fss_rows, _rng())
+        assert not [r for r in rows if r["quantity"].startswith(margins.SURPRISE_FSS)], rows
+        assert set(_judged(rows)) == {"energy_r2", "energy_selectivity"}
+        assert all(r["verdict"] == fss.PASS for r in _judged(rows).values())
 
 
 def test_the_table_reads_the_predicted_sign_from_the_file() -> None:

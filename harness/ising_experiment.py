@@ -395,11 +395,12 @@ def run(
 
 def pipeline_faults(rows: Sequence[Row]) -> list[str]:
     """Which pipeline checks did not pass, static (role pipeline-check) or dynamic
-    (dynamic-pipeline-check): hypothesis 1 says no other latent row is read until they do."""
+    (dynamic-pipeline-check): hypothesis 1 says no other latent row is read until they do. A check
+    judged on the twins alone is reported on a trained checkpoint, never passed or failed there."""
     return [
         f"{r['checkpoint']}: {r['quantity']} {r['verdict']}"
         for r in rows
-        if r["role"].endswith("pipeline-check") and r["verdict"] != "pass"
+        if r["role"].endswith("pipeline-check") and r["verdict"] not in ("pass", ising.REPORTED)
     ]
 
 

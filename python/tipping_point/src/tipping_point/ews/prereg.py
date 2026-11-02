@@ -60,7 +60,9 @@ LATENT_INDICATORS = INDICATORS | RAW
 LATENT_ROLES = ROLES | {"pipeline-check"}
 LATENT_STATISTICS = ("l2_var", "mean", "one_minus_ac1")  # a quantity is <statistic>_<column>
 CHECKPOINT_ROLES = {"primary", "ema-only", "held-out"}  # primary: the whole grid; else the headline
-DYNAMIC_ROLES = {"pipeline-check", "test"}
+DYNAMIC_ROLES = {"pipeline-check", "test", "descriptive"}
+# a judged row's optional `judged`: on trained checkpoints and twins (the default), or twins alone
+JUDGED_ON = ("both", "twin")  # a tuple: membership must not hash whatever a file holds there
 EXTREMA = {"max", "min"}
 # jepa.probes.TARGETS and COLUMNS but raw, which this package cannot import
 PROBE_TARGETS, PROBE_CONTROLS = {"abs_m", "energy", "l2var"}, {"iid", "shuffle_within_T"}
@@ -262,8 +264,13 @@ _LATENT_KEYS: dict[str, Any] = _LATENT_SCHEMA | {
         "staircase": _SCHEMA["data"]["staircase"] | {"tau_sha256": {}},
     },
     "indicators": _LATENT_SCHEMA["indicators"] | {"direction_by_observable": {}},
-    "fss": _LATENT_SCHEMA["fss"]
-    | {"static": [{"quantity": str, "role": str, "expected": _NUMBER, "tolerance": _NUMBER}]},
+    "fss": {
+        "static": [
+            _SCHEMA["fss"]["static"][0] | {"expected": _NUMBER, "tolerance": _NUMBER, "judged": str}
+        ],
+        "dynamic": _LATENT_SCHEMA["fss"]["dynamic"]
+        | {"statistics": [_LATENT_SCHEMA["fss"]["dynamic"]["statistics"][0] | {"judged": str}]},
+    },
 }
 
 
@@ -363,8 +370,11 @@ def _margin_problems(doc: dict[str, Any]) -> list[str]:
     margins, found = doc["scoring"]["margins"], []
     if margins["sign_test"] is not True:
         found.append("scoring.margins.sign_test: true, the margin rule always takes it")
-    if margins["sizes"] != "mean":
-        found.append("scoring.margins.sizes: 'mean', each checkpoint's judged value over L")
+    if margins["sizes"] not in ("mean", "every"):
+        found.append(
+            "scoring.margins.sizes: 'mean', each checkpoint's judged value over L, or 'every', "
+            "that value with its sign test at every L"
+        )
     if margins["ablations"] != "descriptive":
         found.append("scoring.margins.ablations: 'descriptive', a margin with no verdict")
     tolerance = margins["tolerance"]
@@ -480,6 +490,12 @@ def _latent_problems(doc: dict[str, Any]) -> list[str]:
             found.append(f"{where}.extremum: one of {sorted(EXTREMA)}")
         if entry["role"] not in DYNAMIC_ROLES:
             found.append(f"{where}.role: one of {sorted(DYNAMIC_ROLES)}")
+        if entry.get("judged", "both") not in JUDGED_ON:
+            found.append(f"{where}.judged: one of {sorted(JUDGED_ON)}")
+        if entry["role"] == "descriptive" and "judged" in entry:
+            found.append(f"{where}: a descriptive statistic is judged by nothing it states")
+        if entry["role"] == "test" and entry.get("judged") == "twin":
+            found.append(f"{where}.judged: 'both' for a test, whose trained verdicts margins read")
     used = {*ind["observables"], *(entry["observable"] for entry in dyn["statistics"])}
     for i, row in enumerate(doc["fss"]["static"]):
         tolerance = row.get("tolerance", 0.0)
@@ -487,8 +503,10 @@ def _latent_problems(doc: dict[str, Any]) -> list[str]:
         if not number and not _placeholder(tolerance):
             found.append(f"fss.static[{i}].tolerance: a number")
         used |= {c for c in columns if row["quantity"].endswith(f"_{c}")}
-        if row["role"] == "descriptive" and {"expected", "tolerance"} & row.keys():
+        if row["role"] == "descriptive" and {"expected", "tolerance", "judged"} & row.keys():
             found.append(f"fss.static[{i}]: a descriptive row is judged by nothing it states")
+        if row.get("judged", "both") not in JUDGED_ON:
+            found.append(f"fss.static[{i}].judged: one of {sorted(JUDGED_ON)}")
         if row["role"] == "reference" and "expected" in row:
             found.append(f"fss.static[{i}].expected: a reference is judged against 0 alone")
     if columns - used:
