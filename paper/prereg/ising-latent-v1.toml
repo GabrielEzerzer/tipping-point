@@ -210,7 +210,7 @@ primary = "phase"
 secondary = "ar1"                 # not applied to level (no detrending): level rows carry phase only
 n = 999                           # primary checkpoints and their twins, at the headline cell
 n_ablation = 199                  # ablation checkpoints, whose rows are descriptive (call 7, amended)
-cells = "headline"
+cells = "headline-h0"             # surrogates at the headline cell for h = 0 only, agreed on 1 November as a scoring-time lever
 
 [scoring.alarms]
 far = 0.001                       # 1 per 1,000 tau_c, as the v1 freeze; a reported table, never a hypothesis

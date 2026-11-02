@@ -598,6 +598,30 @@ def test_level_rows_carry_the_phase_surrogate_alone(
         assert kinds == {"phase"}, table
 
 
+def test_headline_h0_tests_every_checkpoint_at_h_0_alone(data: V1) -> None:
+    """ising-latent-v1's scoring-time lever (#28, 1 November): under scoring.surrogates.cells =
+    "headline-h0" each pass, the primary checkpoint, the ablation and both twins, runs its
+    surrogate tests at the headline cell for h = 0 alone, for every judged pair at every L, while
+    its AUC rows still cover every h. Two horizons and the headline cell alone, to score in
+    seconds."""
+    doc = _planted_doc(data)
+    doc["event"]["horizons"] = [0.0, 1.0]
+    doc["sensitivity"] |= {"window": [20.0], "bandwidth": [10.0]}
+    doc["scoring"]["surrogates"]["cells"] = "headline-h0"
+    doc["trials"]["budget"] = prereg.cells(doc)
+    assert prereg.problems(doc, strict=True) == []
+    scored = ising.evaluate(doc, data.root, np.random.default_rng(28), say=lambda _: None)
+    pairs = {(observable, name) for observable, name in doc["indicators"]["pairs"]}
+    for table in TABLES:
+        auc = _rows(scored, "auc", checkpoint=table)
+        assert {r["h"] for r in auc} == {0.0, 1.0}, table
+        rows = _rows(scored, "surrogates", checkpoint=table)
+        assert {(r["h"], r["headline"]) for r in rows} == {(0.0, True)}, table
+        assert {(r["observable"], r["indicator"], r["L"]) for r in rows} == {
+            (*pair, L) for pair in pairs for L in V1_SIZES
+        }, table
+
+
 def test_alarms_run_over_the_judged_pairs(scored: ising.Evaluation) -> None:
     """The reported alarm table reads each judged pair at the headline cell, each with its own
     direction, for every checkpoint and L."""

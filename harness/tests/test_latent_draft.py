@@ -171,7 +171,8 @@ def test_the_checkpoints_are_the_eleven_trainings_pinned_by_sha256() -> None:
 def test_the_rules_are_the_ones_rewritten_after_both_reads() -> None:
     """The pipeline checks judged on the twins alone, the surprise variance and the two former
     reference rows descriptive, the slope gone, the margins' sign test at every size beside a
-    tolerance of 0.002, and alarm scores every 5 tau_c."""
+    tolerance of 0.002, and the scoring-time levers of 1 November: alarm scores every 5 tau_c, and
+    surrogate tests at the headline cell for h = 0 alone, with its reason beside it."""
     doc = prereg.load(PREREG).doc
     static = {row["quantity"]: row for row in doc["fss"]["static"]}
     assert static["l2_var_pc_1"] == {
@@ -198,6 +199,10 @@ def test_the_rules_are_the_ones_rewritten_after_both_reads() -> None:
     assert (margins["sizes"], margins["tolerance"]) == ("every", 0.002)
     assert (margins["sign_test"], margins["ablations"]) == (True, "descriptive")
     assert doc["scoring"]["alarms"]["every"] == 5
+    assert doc["scoring"]["surrogates"]["cells"] == "headline-h0"
+    lines = PREREG.read_text("utf-8").splitlines()
+    (cells,) = [line for line in lines if line.startswith("cells = ")]
+    assert "the headline cell for h = 0 only" in cells and "1 November" in cells
 
 
 def test_the_hypotheses_say_what_is_judged_and_what_is_reported() -> None:

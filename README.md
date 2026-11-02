@@ -619,12 +619,17 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
 - **Surrogates in a latent file** stop drawing once a row's decision at alpha is settled
   (`scoring.sequential_test`, Besag and Clifford 1991): the surrogate table reads only p <= alpha, and
   on the same surrogates every decision is the one a full N_s gives. A null row draws about a quarter
-  of N_s. ising-ews-v1 keeps its whole test and its draws.
+  of N_s. ising-ews-v1 keeps its whole test and its draws. `scoring.surrogates.cells` says where the
+  tests run: `"all"` at every cell, `"headline"` at the headline cell for every h, as ising-ews-v1
+  has it, and `"headline-h0"` at the headline cell for h = 0 only, as ising-latent-v1 has it.
 - **Run time.** On the project's laptop (i7-1185G7, 4 cores, other work running), the 22 checkpoints
   of `ising-latent-v1` are projected to take about 59 hours, or about 41 with the probes' embeddings on
   a GPU: surrogates 22 h, alarms 15 h, probe embeddings 18 h on the CPU (19 ms a frame at L = 64), AUC,
   static fits and reading the tables 4 h. It was about 125 hours before the sequential test and the
-  faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. The runner has no
+  faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. Those figures assume
+  alarm scores every tau_c and surrogate tests at every h. The file now scores alarms every 5 tau_c
+  (`scoring.alarms.every = 5`) and runs its surrogate tests at h = 0 only, so both parts will take
+  less; the total has not been projected again. The runner has no
   resume: a run interrupted before it writes its result starts again. Its trials are logged in one
   write after its tables and before `complete.json`, so a crash in that write leaves a folder with no
   `complete.json`, its trials logged or not, or a complete result with all of them. `prereg.charge`,

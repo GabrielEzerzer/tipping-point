@@ -858,6 +858,7 @@ def _cells(
     rows depend on h only through the span, which is mostly the same at every h, so they are
     scored and surrogate-tested once per pipeline and reused (#70)."""
     ind, sens, sc = doc["indicators"], doc["sensitivity"], doc["scoring"]
+    cells = sc["surrogates"]["cells"]  # where the surrogate tests run
     segment = float(doc["event"]["segment"])
     horizons = [float(h) for h in doc["event"]["horizons"]]
     band = (max(horizons) + segment, min(horizons))
@@ -907,7 +908,7 @@ def _cells(
                             "tau_c": tau_c,
                         }
                         tables["auc"].append(_auc_row(cell, pos, neg, sc, rng) | samples)
-                        if top or sc["surrogates"]["cells"] == "all":
+                        if (top and (h == 0 or cells != "headline-h0")) or cells == "all":
                             direction = cell["direction"]
                             test = scoring.sequential_test if "latents" in doc else None
                             if key not in null_pvalues:
