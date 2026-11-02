@@ -892,36 +892,55 @@ def verification(k: ModuleType, root: Path) -> None:
         "detail": "flat",
     }
 
-    def write(producer: dict | None = None, clean: bool = True, passed: bool = True) -> list[str]:
+    def write(
+        producer: dict | None = None,
+        clean: bool = True,
+        passed: bool = True,
+        gate: str = "thermalised",
+        command: str = "staircase",
+    ) -> tuple[list[str], list[str]]:
+        """verdicts' (what fails the run, what the scorer drops and counts) for a run of this
+        command whose complete.json holds one check, of this gate."""
         manifest = {"producer": producer or {"git_sha": COMMIT, "dirty": False}}
         done = {
             "clean": clean,
             "files": {f"stats/{chunk.name}": hashlib.sha256(b"rows").hexdigest()},
-            "checks": {"thermalised": [dict(thermalised, passed=passed)]},
+            "checks": {gate: [dict(thermalised, gate=gate, passed=passed)]},
         }
         (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         (folder / "complete.json").write_text(json.dumps(done), encoding="utf-8")
-        return k.verdicts(folder, COMMIT)
+        return k.verdicts(folder, COMMIT, command)
 
-    check("a clean run of the wheel's commit passes", write() == [])
+    check("a clean run of the wheel's commit passes", write() == ([], []))
     check(
         "another commit fails",
-        "is not the wheel's" in str(write({"git_sha": OTHER, "dirty": False})),
+        "is not the wheel's" in str(write({"git_sha": OTHER, "dirty": False})[0]),
     )
     check(
-        "a dirty manifest fails", "dirty is True" in str(write({"git_sha": COMMIT, "dirty": True}))
+        "a dirty manifest fails",
+        "dirty is True" in str(write({"git_sha": COMMIT, "dirty": True})[0]),
     )
-    check("complete.json not clean fails", "clean is False" in str(write(clean=False)))
-    problems = write(passed=False)
+    check("complete.json not clean fails", "clean is False" in str(write(clean=False)[0]))
+    miss = "check thermalised failed at T = 2.2179: flat"
+    said = write(passed=False, gate="independence")
     check(
         "a failed check fails, with its temperature",
-        "check thermalised failed at T = 2.2179: flat" in str(problems),
-        problems,
+        said == (["check independence failed at T = 2.2179: flat"], []),
+        said,
     )
+    said = write(passed=False)
+    check(
+        "... but a simulator run's failed thermalised check is noted, not failed: the scorer drops "
+        "that plateau or null block and counts it",
+        said == ([], [miss]),
+        said,
+    )
+    said = write(passed=False, command="jepa train")
+    check("... and it fails any other run", said == ([miss], []), said)
     (folder / "complete.json").unlink()
     check(
         "no complete.json fails",
-        k.verdicts(folder, COMMIT) == ["complete.json is missing or unreadable"],
+        k.verdicts(folder, COMMIT, "staircase") == (["complete.json is missing or unreadable"], []),
     )
     write()
     check(
@@ -951,6 +970,102 @@ def verification(k: ModuleType, root: Path) -> None:
     said = k.file_problems(ran.returncode, ran.stdout.splitlines(), [folder])
     check(
         "... and names a changed file", ran.returncode == 1 and "sha256 differs" in str(said), said
+    )
+
+    # The session's verdict on a finished null run whose one failed check is thermalised: complete,
+    # the miss noted, so its queue goes on, in the session that made it and on each resume; one
+    # that failed another check as well still fails and stops its queue
+    ctx = ctx_at(k, root / "session")
+    ctx.py = sys.executable  # what runs jepa verify
+    specs = [
+        {"name": name, "command": "null", "args": ["--L", 8, "--seed", seed, "--epsilon-L", 2]}
+        for name, seed in (("a", 7), ("b", 8), ("c", 9))
+    ]
+    plan = {"kernel": "tp-self-test", "runs": specs}
+    ids = {"a": "20261102T000007Z-L8-null-e2-s7", "b": "20261102T000008Z-L8-null-e2-s8"}
+    prior = {
+        "runs": [
+            {
+                "name": s["name"],
+                "folder": f"ising/{ids[s['name']]}",
+                "key": [s["command"], *map(str, s["args"])],
+                "state": "complete",
+            }
+            for s in specs[:2]
+        ]
+    }
+
+    def finished(name: str, **passed: bool) -> Path:
+        """The run's folder as the simulator leaves it, with one check per gate named."""
+        run_dir = ctx.out / "ising" / ids[name]
+        if not run_dir.is_dir():
+            made(run_dir, done=False)
+        checks = {gate: [dict(thermalised, gate=gate, passed=ok)] for gate, ok in passed.items()}
+        done = {"clean": True, "files": {}, "checks": checks}
+        (run_dir / "complete.json").write_text(json.dumps(done), encoding="utf-8")
+        return run_dir
+
+    def resumed() -> Any:
+        """The next session on one GPU: a and b reused in turn, the deadline before c starts."""
+        session = k.Session(ctx, plan, {}, COMMIT, TORCH, 1, prior)
+        takes: list[int] = []
+
+        def deadline() -> str | None:
+            takes.append(1)
+            return "session deadline" if len(takes) > 2 else None
+
+        session.scheduler.budget = deadline
+        session.scheduler.run(session.tick, ctx.poll_s)
+        return session
+
+    fresh = k.Session(ctx, plan, {}, COMMIT, TORCH, 1)
+    run = fresh.by_name["a"]
+    state, note = fresh.settle(run, finished("a", thermalised=False), 0, collections.deque(), "")
+    check(
+        "a simulator run whose only failed check is thermalised: complete, the miss noted, in the "
+        "session that made it",
+        (state, run.problems, run.dropped) == ("complete", [], [miss]),
+        (state, note, run.problems, run.dropped),
+    )
+    finished("b", thermalised=True)
+    session = resumed()
+    by = session.by_name
+    check(
+        "... and on resume: reused, complete again, its folder kept",
+        by["a"].state == "complete"
+        and by["a"].reused
+        and by["a"].dropped == [miss]
+        and (ctx.out / "ising" / ids["a"] / "complete.json").is_file(),
+        [(r.name, r.state, r.note, r.dropped) for r in session.runs],
+    )
+    check(
+        "... its queue goes on: the run behind it on the one GPU completes",
+        by["b"].state == "complete" and session.scheduler.stopped == {},
+        (session.scheduler.stopped, [(r.name, r.state, r.note) for r in session.runs]),
+    )
+    status, detail = k.verdict(session.runs, session.scheduler.stopped)
+    check(
+        "... STATUS incomplete names it as the scorer's to drop, and says how to continue",
+        status == "incomplete"
+        and "thermalised missed in a plateau or null block, which the scorer drops and counts: a;"
+        in detail
+        and "--resume" in detail,
+        detail,
+    )
+    finished("a", thermalised=False, independence=False)
+    session = resumed()
+    by = session.by_name
+    status, detail = k.verdict(session.runs, session.scheduler.stopped)
+    check(
+        "a simulator run that failed another check as well: failed, its folder kept, its queue "
+        "stopped as before",
+        by["a"].state == "failed"
+        and "check independence failed" in by["a"].note
+        and (ctx.out / "ising" / ids["a"] / "complete.json").is_file()
+        and session.scheduler.stopped == {0: "a failed"}
+        and by["b"].state == by["c"].state == "not started"
+        and status == "failed",
+        (detail, [(r.name, r.state, r.note) for r in session.runs]),
     )
 
 
