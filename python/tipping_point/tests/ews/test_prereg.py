@@ -245,6 +245,30 @@ def test_the_search_band_may_reach_the_ramp_windows_ends() -> None:
     assert prereg.problems(doc) == []
 
 
+def test_surrogate_cells_are_every_cell_the_headline_cell_or_its_h_0_alone() -> None:
+    """#28's scoring-time lever (1 November): `headline-h0`, the headline cell at h = 0 only, is
+    taken beside `headline` and `all`. A misspelling is refused with the three values named, and so
+    is `headline-h0` in a file with no h = 0, where it would run no surrogate test at all."""
+    doc = tomllib.loads(V1.read_text("utf-8"))
+    tests = doc["scoring"]["surrogates"]
+    for cells in ("headline", "headline-h0", "all"):
+        tests["cells"] = cells
+        assert prereg.problems(doc) == [], cells
+    for typo in ("headline_h0", "headline-h1", "Headline-h0", "h0", ""):
+        tests["cells"] = typo
+        assert prereg.problems(doc) == [
+            "scoring.surrogates.cells: 'headline', 'headline-h0' or 'all'"
+        ], typo
+    doc["event"]["horizons"] = [1, 2]
+    tests["cells"] = "headline-h0"
+    assert prereg.problems(doc) == [
+        "scoring.surrogates.cells: 'headline-h0' tests h = 0 alone, which event.horizons lacks"
+    ]
+    for cells in ("headline", "all"):  # every h they test is one the file scores
+        tests["cells"] = cells
+        assert prereg.problems(doc) == [], cells
+
+
 def test_freeze_binds_the_file_and_results_carry_the_stamp(tmp_path: Path, repo: Path) -> None:
     """Unfrozen, a file cannot be scored; frozen, the tag is annotated and on the committed file,
     results are stamped with it in the shared layout (manifest, one Parquet file per non-empty

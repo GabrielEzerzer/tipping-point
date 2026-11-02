@@ -1,12 +1,10 @@
-# Draft pre-registration: the latent signals of a JEPA on the 2D Ising model (#28). NOT frozen: the
-# checkpoints and their sha256 wait for the primary and ablation trainings, baseline.result for the
-# scoring of ising-ews-v1, and scoring.margins.tolerance for the owner; the freeze refuses each
-# while it is a placeholder. Every other value is set: the research pass's calls (#28, 2026-10-25),
-# the freeze lane's and the runner's keys, and what the exploratory pass on seeds 1-5 set, each with
-# its reason beside it. Units as in ising-ews-v1: time in tau_c(L) as measured per L, temperature in
-# eps_L = L (T - Tc) / Tc, lags in samples of the cadence. Read [disclosure] first: the pass found
-# things that bear on hypotheses 1, 4 and 5, which stand here as decided before any latent number
-# existed.
+# Pre-registration: the latent signals of a JEPA on the 2D Ising model (#28). Its rules were
+# rewritten on 2 November 2026, after the exploratory reads of primary models m1 and m2, and every
+# placeholder of the draft was filled that day but baseline.result, which takes the run id of
+# ising-ews-v1's result on these runs once that score completes. The decisions, each with its
+# reason, are recorded on #28 and in disclosure.decisions. Units as in ising-ews-v1: time in
+# tau_c(L) as measured per L, temperature in eps_L = L (T - Tc) / Tc, lags in samples of the
+# cadence. Read [disclosure] first.
 
 id = "ising-latent"
 version = 1
@@ -16,44 +14,44 @@ question = "Do early-warning signals read from a JEPA's latents (prediction-erro
 
 [[hypotheses]]
 name = "latent-pipeline-check"
-statement = "A local pooled encoder's pc_1 is spin-coupled: at the Tc plateau L^2 Var(pc_1) scales as L^(7/4) for trained checkpoints and twins alike (locality, #27)."
-prediction = "kappa within 0.15 of 1.75 for every primary checkpoint and twin; a miss is a pipeline bug and no other latent row is read until it is fixed."
+statement = "A random local encoder's pc_1 is spin-coupled: at the Tc plateau, L^2 Var(pc_1) of every step-0 twin scales as L^(7/4) (locality, #27)."
+prediction = "kappa within 0.15 of 1.75 for every twin; a miss is a pipeline bug and no other latent row is read until it is fixed. The trained checkpoints' kappa is reported beside it and not judged."
 direction = "match"
 
 [[hypotheses]]
 name = "latent-variance-rises"
 statement = "Var(pc_1) and AC1(pc_1) rise before the bath reaches Tc on the slow ramp, as |m|'s do."
-prediction = "Headline cell, matched cadence: AUC 95% CI above 0.5 for every L and h, trained and twin. Parity with |m| at the matched cadence under ising-ews-v1; not a margin."
+prediction = "Headline cell, matched cadence: the trained rows pass when all five primary checkpoints' AUC 95% CIs lie above 0.5 at every L and h, for Var(pc_1) and for AC1(pc_1); the twin rows are read by the same rule, separately, as the pipeline's. Parity with |m| at the matched cadence under ising-ews-v1 is reported, not judged."
 direction = "greater"
 
 [[hypotheses]]
 name = "surprise-trend"
 statement = "The level of surprise changes monotonically as the bath cools towards Tc."
-prediction = "Headline cell: AUC of the level trend has a 95% CI away from 0.5 in the pre-registered direction for every trained primary checkpoint at every L and h; twin rows reported."
-direction = "less"  # seeds 1-5, pilot seed 100: on every ramp replica s falls, -0.59 to -0.89 median at all L, h
+prediction = "Descriptive: the level's AUC at the headline cell, oriented to 'less', is reported for every trained checkpoint and twin at every L and h; no verdict."
+direction = "less"  # the orientation of a reported number, not a bet; the validator holds it equal to the level's
 
 [[hypotheses]]
 name = "latent-dynamic-fss"
-statement = "Latent indicators that track the transition take their extremum at a fixed scaled temperature: eps_L_peak of Var(pc_1), of Var(surprise) and of the steepest change of surprise is the same at every L."
-prediction = "1/nu within 0.5 of 1 with a CI excluding 0, per checkpoint (fss.dynamic). Var(pc_1) is expected to pass for trained and twin (pipeline). The two surprise statistics are the falsification test: a feature anchored to a fixed T gives 1/nu = 0."
+statement = "Latent indicators that track the transition take their extremum at a fixed scaled temperature: eps_L_peak of Var(pc_1) and of Var(surprise) is the same at every L."
+prediction = "1/nu within 0.5 of 1 with a CI excluding 0 for every twin's Var(pc_1); the trained Var(pc_1) and Var(surprise) are reported with the same intervals and the same edge rule, with no verdict."
 direction = "match"
 
 [[hypotheses]]
 name = "learned-beyond-random"
-statement = "Training adds physics a random local encoder lacks: energy becomes linearly readable at the frame level, and surprise obeys finite-size scaling where the twin's does not."
-prediction = "Paired by model seed, trained minus twin: (a) energy-probe R^2 margin, 95% CI over the 5 primary seeds excludes 0 and all 5 margins are positive; (b) energy-probe selectivity (R^2 minus the within-plateau-shuffle control's R^2) is larger for the trained checkpoint on all 5 seeds; (c) at least one surprise statistic of latent-dynamic-fss passes for >= 4 of 5 trained checkpoints and for none of the twins. 'Learned the physics' is claimed only if (a), (b) and (c) hold."
+statement = "Training adds physics a random local encoder lacks: energy becomes linearly readable at the frame level."
+prediction = "Paired by model seed, trained minus twin, on the 128-dimensional embedding: (a) the energy-probe R^2 margin: the 95% CI over the five primary seeds of the mean over L lies above 0, and all fifteen paired margins (five seeds at three sizes) are positive; (b) the same for energy-probe selectivity. 'Learned the physics' is claimed only if (a) and (b) hold."
 direction = "greater"
 
 [[hypotheses]]
 name = "held-out-band"
 statement = "Dropping T in [2.0, 2.5] from training separates distribution shift from physics in the surprise curve."
-prediction = "Descriptive at 3 seeds: mean surprise on the band's plateaus and the peak-position table beside the primary's; no verdict."
+prediction = "Descriptive at 3 seeds: mean surprise on the band's plateaus and the peak-position table beside the primary's; no verdict. The band drops 10 of the validation seed's 40 plateaus."
 direction = "two-sided"
 
 [[hypotheses]]
 name = "ema-only"
 statement = "Without the VICReg terms the representation may partially collapse (C-JEPA)."
-prediction = "Descriptive at 3 seeds: collapse monitors, probe R^2 and the same tables; no verdict."
+prediction = "Descriptive at 3 seeds: collapse monitors, probe R^2 and the same tables; no verdict. A seed whose final.pt the extraction refuses as collapsed contributes its training monitors and its twin's rows only, and the table says so."
 direction = "two-sided"
 
 [data]
@@ -89,7 +87,7 @@ temperature = 2.269231
 
 [baseline]
 prereg = "ising-ews-v1"           # the matched-cadence |m| rows of its result on these runs are the parity reference
-# ising-ews-v1 is not frozen or scored yet, so no result exists to name: filled when one does
+# the run id of ising-ews-v1's result on these runs, scored before this file's freeze
 result = "<ews result run_id, filled when v1 has been scored>"
 
 [latents]
@@ -104,79 +102,79 @@ spares = [6, 7]                   # a primary seed whose training collapses is r
 [[latents.checkpoints]]
 role = "primary"
 model_seed = 1
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261101T051047Z-L16-32-64-m1"
+trained_sha256 = "3f251147a5072964176cab40122cbf855755d7a7dd77bf946eaaef661b43d149"
+twin_sha256 = "5e076a53e61d8c359d55c13738f8a2619e4af1002843de0c10b3ca33bc6d4224"
 
 [[latents.checkpoints]]
 role = "primary"
 model_seed = 2
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261101T051110Z-L16-32-64-m2"
+trained_sha256 = "7638b436d5ee0cb39f68e6ce62f965b0c0c4f66ff9c402e80e93df0afad9aef4"
+twin_sha256 = "d22f7e494b6ee40bc6e319173e183c8c21709a3f5d149a0251b03fac84415176"
 
 [[latents.checkpoints]]
 role = "primary"
 model_seed = 3
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261101T061841Z-L16-32-64-m3"
+trained_sha256 = "869427f1e895b06159cf4619690df578d2bf73c5259ac4ec2a2d062d240d08cb"
+twin_sha256 = "0a3836fa6984ce42601cc61b28671ac53768679d7f8ace62793d2e9a9ec32777"
 
 [[latents.checkpoints]]
 role = "primary"
 model_seed = 4
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261101T061932Z-L16-32-64-m4"
+trained_sha256 = "1b46a30123ca3e4f861d6ca67d922c3451d857a364a6ec19f2b2a8a3d4671714"
+twin_sha256 = "3024657c3dd1c3c816c028669e6a333459d17c58dd84cf84affd242771431fff"
 
 [[latents.checkpoints]]
 role = "primary"
 model_seed = 5
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261101T072708Z-L16-32-64-m5"
+trained_sha256 = "0f3a58d8350bdae307798481a3152518a0084ab3d83b43f0332aeb0a21aba6b1"
+twin_sha256 = "c8c0a8999d1b77a078e7034d5643f67e0458b5a163d15c5c6ee5179258d6d76b"
 
 [[latents.checkpoints]]          # var_weight = 0, cov_weight = 0
 role = "ema-only"
 model_seed = 11
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261102T103007Z-L16-32-64-m11"
+trained_sha256 = "eb9c53c03427a3f24434b4de326501c215f73652213b4bb1a1f3c3706b4d223d"
+twin_sha256 = "e3791615d8ca59722ae74e23ceff207f7ceacaf2b524ea070919983884590af2"
 
 [[latents.checkpoints]]
 role = "ema-only"
 model_seed = 12
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261102T103030Z-L16-32-64-m12"
+trained_sha256 = "fd4d4c3ed41806b52744debd622223d45e2ada733895a94ac7ffd1fd6d46e1b8"
+twin_sha256 = "353bfd22ee0ccca4a994cc84daa4cc2462904e55b4c297bb6f7b55516638851f"
 
 [[latents.checkpoints]]
 role = "ema-only"
 model_seed = 13
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261102T113627Z-L16-32-64-m13"
+trained_sha256 = "a9f536a28390f0f34186c90e38006a3bf11011b42439be9b510590d88c0b6422"
+twin_sha256 = "3effa35cda0cdf639943ada961a77342472333e2b0cb355f27af327766427dc0"
 
 [[latents.checkpoints]]          # --held-out: plateaus in [2.0, 2.5] dropped
 role = "held-out"
 model_seed = 21
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261102T113656Z-L16-32-64-m21-heldout"
+trained_sha256 = "3dc8a07bb342a3cb9215ca95d315420dded10bfe72cd20e0bfffd7af65989296"
+twin_sha256 = "65a99dd8807b332a490c4907af03e946e2d652c9fdd390fff68e5e08f7b62006"
 
 [[latents.checkpoints]]
 role = "held-out"
 model_seed = 22
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261102T124232Z-L16-32-64-m22-heldout"
+trained_sha256 = "add45912a55f4ceb3c3c2b56b1e305f221ecdbb34025adc483cb9c9e16d16541"
+twin_sha256 = "c4458678b51addb4040ed08decd9daf01125af8cf3b9b61eaba11687ae3d5b93"
 
 [[latents.checkpoints]]
 role = "held-out"
 model_seed = 23
-training = "<jepa run_id>"
-trained_sha256 = "<final.pt>"
-twin_sha256 = "<ckpt/step_0000000.pt>"
+training = "20261102T124357Z-L16-32-64-m23-heldout"
+trained_sha256 = "3a800b838824f25394e654b9e7084c32e01e9733485fa5c870d512bca06b16e9"
+twin_sha256 = "825336443b4f7845e83673429bf7e91cca7c3f6dcd9b47c54b8944e3abdb446a"
 
 [indicators]
 names = ["variance", "ac", "level"]
@@ -184,13 +182,14 @@ observables = ["pc_1", "surprise"]
 pairs = [["pc_1", "variance"], ["pc_1", "ac"], ["surprise", "variance"], ["surprise", "level"]]
 cadences = ["matched"]
 lag = 1
-detrend = "gaussian"              # variance and ac only; level and slope run on the raw series
-# level: what the level of the one column it is judged on does, surprise (below)
+detrend = "gaussian"              # variance and ac only; level runs on the raw series
+# level: the orientation of surprise's level AUC (below), a reported number since surprise-trend is descriptive; the validator still requires it
 direction = { variance = "greater", ac = "greater", level = "less" }
 
 [indicators.direction_by_observable]
 # seeds 1-5, pilot seed 100, by a rule fixed before the numbers: the sign of the trained table's median s at the headline cell at every L and h; the grid agreed
 # variance: s +0.38 to +0.81 over the grid, rising as the bath cools. level: s -0.55 to -0.95, falling; its twin's rises (+0.45 to +0.83), reported, not used
+# level is now the orientation of a reported number, with no verdict on it (surprise-trend is descriptive); the validator requires it and holds surprise-trend's direction to it
 surprise = { variance = "greater", level = "less" }
 
 [event]
@@ -211,27 +210,28 @@ primary = "phase"
 secondary = "ar1"                 # not applied to level (no detrending): level rows carry phase only
 n = 999                           # primary checkpoints and their twins, at the headline cell
 n_ablation = 199                  # ablation checkpoints, whose rows are descriptive (call 7, amended)
-cells = "headline"
+cells = "headline-h0"             # surrogates at the headline cell for h = 0 only, agreed on 1 November as a scoring-time lever
 
 [scoring.alarms]
 far = 0.001                       # 1 per 1,000 tau_c, as the v1 freeze; a reported table, never a hypothesis
 report_per = 1000.0
 band = [2.0, -2.0]
-every = 1.0
+every = 5.0                       # s(t) every 5 tau_c rather than 1 (1 November): a shorter scoring of a table no hypothesis judges
 
 [scoring.margins]
 pairing = "trained minus twin, same model seed, same data bootstrap draws (shared RNG seed per quantity)"
 seeds = "percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws"
-sizes = "mean"                    # a checkpoint's judged R^2 and selectivity: the mean over L; rows per L are reported, never judged
+sizes = "every"                   # a checkpoint's judged R^2 and selectivity is the mean over L, and the sign test also asks every seed's margin at every L
 sign_test = true                  # every paired margin must carry the predicted sign
-tolerance = "<set before freeze>" # in R^2: a CI holding 0 inside this band is a fail (no margin), wider it is inconclusive; the owner's call
+tolerance = 0.002                 # in R^2: a CI holding 0 inside this band is a fail (no margin), wider it is inconclusive; the owner's number, its rule in disclosure.decisions
 ablations = "descriptive"
 
 [[fss.static]]
 quantity = "l2_var_pc_1"
-role = "pipeline-check"           # judged like a positive control; a fail is a pipeline bug
+role = "pipeline-check"           # judged like a positive control, on the twins alone; a fail is a pipeline bug
 expected = 1.75
 tolerance = 0.15
+judged = "twin"                   # the trained checkpoints' kappa is reported beside it, never judged
 
 [[fss.static]]
 quantity = "mean_pc_1"
@@ -239,9 +239,8 @@ role = "descriptive"              # not -1/8: pc_1 is centred on the training me
 
 [[fss.static]]
 quantity = "l2_var_surprise"
-role = "reference"                # kappa free; CI must exclude 0 to count as scaling; reported against 7/4 and 0
-# half-widths at two sizes and 80 replicas: 0.045 trained, 0.109 twin; a third size and 320 replicas should give about a quarter, so a CI holding 0 can fail, not just be inconclusive
-tolerance = 0.1
+role = "descriptive"              # reported against 7/4 and 0
+# kappa on the reads: +0.146 (m1) and +0.252 (m2), twins +1.569 and +1.444
 
 [[fss.static]]
 quantity = "mean_surprise"
@@ -249,13 +248,12 @@ role = "descriptive"              # does the error at Tc grow with L once L exce
 
 [[fss.static]]
 quantity = "one_minus_ac1_pc_1"
-role = "reference"                # compared with v1's one_minus_ac1 of |m| (about -1.6), never with z
-# half-widths at two sizes and 80 replicas: 0.049 trained, 0.094 twin, the same reasoning, and v1's own reference takes 0.1; no CI seen held 0, so this decided nothing seen
-tolerance = 0.1
+role = "descriptive"              # reported against v1's one_minus_ac1 of |m| (about -1.6), never against z
+# kappa on the reads: -0.681 (m1) and -0.344 (m2), twins -1.591 and -1.608
 
 [fss.dynamic]
 # Positions are read half the headline window late (0.2 eps_L), and a read position within noise of
-# 0, a true steepest change near +0.2 eps_L rather than at Tc, is inconclusive.
+# 0 is inconclusive.
 search = [6.0, -4.0]
 cadence = "matched"
 expected_inverse_nu = 1.0
@@ -264,10 +262,8 @@ min_draw_share = 0.95
 edge_rule = "inconclusive when more than half of an L's replicas take their extremum on an edge of the band or within one headline window of it"
 edge_margin = "window"            # one headline window of ramp: a channel only rising to an edge has its maximum a few noisy samples inside it (#115)
 statistics = [
-  { observable = "pc_1", indicator = "variance", extremum = "max", role = "pipeline-check" },
-  { observable = "surprise", indicator = "variance", extremum = "max", role = "test" },
-  # min: follows the level's direction by the same rule; a surprise falling as the bath cools changes fastest at its slope's minimum
-  { observable = "surprise", indicator = "slope", extremum = "min", role = "test" },
+  { observable = "pc_1", indicator = "variance", extremum = "max", role = "pipeline-check", judged = "twin" },
+  { observable = "surprise", indicator = "variance", extremum = "max", role = "descriptive" },
 ]
 
 [probes]
@@ -289,9 +285,9 @@ budget = 3132                     # 10 x 270 (primary + twins, full grid) + 12 x
 counted = "One trial per AUC evaluation of a (checkpoint, observable, indicator, L, h, window, bandwidth) cell; every scoring run appends its cells to ews/trials.jsonl. Judged non-AUC rows are listed in the result manifest and printed in the paper."
 
 [disclosure]
-exploratory = "Before this file was written, a pilot checkpoint, model seed 100 at 10,000 steps (warm-up 500), trained at L = 16 and 32 on staircase seeds 11-15 with validation seed 16 and never scored here, was read with its step-0 twin over the exploratory seeds 1-5 datasets at L = 16 and 32: ramps and null runs whole, staircases under tc-plus. harness/explore scored those tables, logging no trial: surprise and pc_1 against T, trend scores and AUC over the whole grid, surrogate tests at N_s = 99, the alarm tables, peak positions and 1/nu at two sizes, pc_k against |m| and e, and ridge probes with their controls on the 8 principal components. jepa probe read final.pt and the twin on the 128-dimensional embedding, fitted on seed 16 and tested on seeds 1-5, and the training's monitors were read. What was seen, trained beside twin. pc_1 follows e more than |m| at the T = 2.269231 plateau (|r| 0.91 and 0.94 with e, 0.74 with |m|; the twin's pc_1 is -|m|, |r| 1.000), and kappa of L^2 Var(pc_1) is 0.10 [0.05, 0.15] beside the twin's 1.64 [1.53, 1.73], so latent-pipeline-check misses on that checkpoint and holds on its twin. Trained surprise falls as the bath cools, by about 0.03 from eps_L = 6 to a shallow dip at eps_L = +0.7 at both sizes, rises by about 0.01 to a hump near T = 2.1, and falls steeply below T = 2; the twin's rises through a sigmoid, and follows |m| (|r| 0.90-0.92 at that plateau). The trained rolling variances of pc_1 and of surprise keep rising through the search band, so 79-90% of replicas lie on its cold edge or within one window of it at both sizes: under the edge rule as first written that gave 1/nu near 1 and a pass though no peak was located, and under this file's rule, fss.dynamic.edge_margin, those statistics are inconclusive, and the same rule turns the trained slope of surprise, a test statistic of latent-dynamic-fss, from a pass at 1/nu +1.12 [+0.95, +1.49] to inconclusive at +2.35 [+1.21, +4.51], with 49% and 36% of its replicas on the edge or within one window of it, too few to leave it not located, so its interval decides it. The twin's peak inside the band, at eps_L about +0.6 to +0.9, with no replica near an edge and 1/nu inconclusive at two sizes. On the trained table the AUC at the headline cell, turned to each pair's direction, is 0.94-1.000 for all four pairs; on the twin it is 0.95-1.000 for pc_1's pairs and surprise's variance, and its level trends the other way. On the embedding, one model seed, no intervals: energy selectivity 0.1219 beside 0.1216 at L = 16 and 0.0335 beside 0.0334 at L = 32, about no margin; energy R^2 margin +0.0037 and +0.0016; l2var selectivity 0.1092 beside 0.0586 and 0.1014 beside 0.0518. No collapse monitor fired. The seeds 1-5 datasets, the L = 16, 32 and 64 training staircases and the tau_c record all took each run's random stream from its seed alone, which couples runs of one shape at one seed, in energy much more than in |m| (README: Which stream a run draws). These readouts follow energy, so the AUC and surrogate figures on the exploratory data, which treat a seed's runs as independent, may be somewhat too sure."
-decisions = "Made with those results in view: surprise's directions and the slope's extremum, by a rule fixed before they were read (the sign of the trained table's median s; the extremum follows the level); the tolerances of the two reference rows; and fss.dynamic.edge_margin with the wording of edge_rule (#115), because the rule as first written passed channels with no located peak. The step count came from the pilot's timing, by call 9's rule. The hypotheses, the columns judged, the roles of the statistics, the search band, the VICReg weights and the probe protocol were not changed by what was seen: they stand as decided on #28 before any latent number existed, and what the pass found against them is reported there as open decisions, with scoring.margins.tolerance, which is still to be set."
-confirmatory = "ising-latent-v1 scores only the runs of ising-ews-v1 on seeds 6-10, which no checkpoint has read and no pass has seen, through the checkpoints pinned above: five primaries on model seeds 1-5 at 25,000 steps and six ablations, each with its step-0 twin. Seed 100 and the seeds 1-5 tables are never scored. Trainings read staircase seeds 11-16 alone and name this file, so seeds 6-10 are refused; the freeze comes before any extraction on them (call 11), and each scored table must come from its tag's commit, from the checkpoint it pins."
+exploratory = "Before this file was written, a pilot checkpoint, model seed 100 at 10,000 steps (warm-up 500), trained at L = 16 and 32 on staircase seeds 11-15 with validation seed 16 and never scored here, was read with its step-0 twin over the exploratory seeds 1-5 datasets at L = 16 and 32: ramps and null runs whole, staircases under tc-plus. harness/explore scored those tables, logging no trial: surprise and pc_1 against T, trend scores and AUC over the whole grid, surrogate tests at N_s = 99, the alarm tables, peak positions and 1/nu at two sizes, pc_k against |m| and e, and ridge probes with their controls on the 8 principal components. jepa probe read final.pt and the twin on the 128-dimensional embedding, fitted on seed 16 and tested on seeds 1-5, and the training's monitors were read. What was seen, trained beside twin. pc_1 follows e more than |m| at the T = 2.269231 plateau (|r| 0.91 and 0.94 with e, 0.74 with |m|; the twin's pc_1 is -|m|, |r| 1.000), and kappa of L^2 Var(pc_1) is 0.10 [0.05, 0.15] beside the twin's 1.64 [1.53, 1.73], so latent-pipeline-check misses on that checkpoint and holds on its twin. Trained surprise falls as the bath cools, by about 0.03 from eps_L = 6 to a shallow dip at eps_L = +0.7 at both sizes, rises by about 0.01 to a hump near T = 2.1, and falls steeply below T = 2; the twin's rises through a sigmoid, and follows |m| (|r| 0.90-0.92 at that plateau). The trained rolling variances of pc_1 and of surprise keep rising through the search band, so 79-90% of replicas lie on its cold edge or within one window of it at both sizes: under the edge rule as first written that gave 1/nu near 1 and a pass though no peak was located, and under this file's rule, fss.dynamic.edge_margin, those statistics are inconclusive, and the same rule turns the trained slope of surprise, then a test statistic of latent-dynamic-fss, from a pass at 1/nu +1.12 [+0.95, +1.49] to inconclusive at +2.35 [+1.21, +4.51], with 49% and 36% of its replicas on the edge or within one window of it, too few to leave it not located, so its interval decides it. The twin's peak inside the band, at eps_L about +0.6 to +0.9, with no replica near an edge and 1/nu inconclusive at two sizes. On the trained table the AUC at the headline cell, turned to each pair's direction, is 0.94-1.000 for all four pairs; on the twin it is 0.95-1.000 for pc_1's pairs and surprise's variance, and its level trends the other way. On the embedding, one model seed, no intervals: energy selectivity 0.1219 beside 0.1216 at L = 16 and 0.0335 beside 0.0334 at L = 32, about no margin; energy R^2 margin +0.0037 and +0.0016; l2var selectivity 0.1092 beside 0.0586 and 0.1014 beside 0.0518. No collapse monitor fired. The seeds 1-5 datasets, the L = 16, 32 and 64 training staircases and the tau_c record all took each run's random stream from its seed alone, which couples runs of one shape at one seed, in energy much more than in |m| (README: Which stream a run draws). These readouts follow energy, so the AUC and surrogate figures on the exploratory data, which treat a seed's runs as independent, may be somewhat too sure. After the primary trainings, two of the primary models were read beside their step-0 twins, model seed 1 (m1) on 1 November and model seed 2 (m2) on 2 November, on the seeds 1-5 datasets at L = 16 and 32 only, since no seeds 1-5 run holds frames at L = 64. On both, the trained pc_1 follows e rather than |m| (|r| with e 0.89-0.92 on m1 and 0.70-0.79 on m2), and kappa of L^2 Var(pc_1) is +0.265 on m1 and -0.226 on m2, beside +1.644 and +1.673 for the twins. Var(pc_1) at L = 32, h = 0 gives AUC 0.995 [0.988, 0.999] on m1 and 0.026 [0.011, 0.048] on m2. The level of surprise at L = 16, h = 0 gives AUC 0.495 [0.378, 0.602] on m1 and 0.869 [0.817, 0.914] on m2. Every trained dynamic statistic is inconclusive under the edge rule, with 81-89% of replicas at the cold edge or within one window of it, the twins' Var(surprise) is inconclusive too, and the slope's 1/nu has no value on either model (intervals [+4.35, +10.21] and [+5.28, +10.08]). Kappa of L^2 Var(surprise) is +0.146 on m1 and +0.252 on m2, twins +1.569 and +1.444, and kappa of 1 - AC1(pc_1) is -0.681 and -0.344, twins -1.591 and -1.608: both reference rows passed on both models, their CIs excluding 0, at exponents far from any physical value. On the embedding, with no intervals, the energy R^2 margin is +0.0047 at L = 16 and +0.0022 at L = 32 on m1 and +0.0054 and +0.0022 on m2, and the energy selectivity margin +0.0008 and +0.0004 on m1 and +0.0007 and +0.0004 on m2. On the 8-component probe, the 95th-percentile gap between redraws of the shuffle control for energy selectivity is 0.0014 and 0.0016 on the two models at L = 16, and 0.0004 and 0.0005 at L = 32. Models m3, m4 and m5 were not read before this rewrite. The monitor tables of the six ablation trainings were read on 2 November: no collapse monitor fired, and the three EMA-only encoders end with an effective rank of about 38 of 128, as at step 0, beside about 120 for the three held-out trainings, which keep the full loss. ising-ews-v1's result named in baseline.result was scored before this freeze, and no latent rule changed after it was seen."
+decisions = "Made with the pilot's tables in view: surprise's directions, by a rule fixed before they were read (the sign of the trained table's median s), and fss.dynamic.edge_margin with the wording of edge_rule (#115), because the rule as first written passed channels with no located peak. The step count came from the pilot's timing, by call 9's rule. Made after the m1 and m2 reads, with m3, m4 and m5 unread: latent-pipeline-check is judged on the twins alone (judged = twin) and the trained kappa is reported, because the trained pc_1 follows energy on both models and its kappa missed 1.75 on both, and a check that fails on every trained checkpoint seen is a result, not a pipeline check of the trained model. latent-variance-rises takes one verdict over the five primaries, all five AUC intervals above 0.5, because a verdict on one model says little about another (Var(pc_1) at L = 32, h = 0: AUC 0.995 on m1, 0.026 on m2), and no code judges it: with per-checkpoint intervals the only over-seed rule a reader can apply is that all five lie on the predicted side (one-sided p = 1/32 were each seed a coin), the sign rule the margins use. surprise-trend is descriptive, its direction kept as the orientation of a reported AUC, because the level's AUC at L = 16, h = 0 was 0.495 on m1 and 0.869 on m2: its direction cannot be one bet, and reading it per size would need a reason beyond these reads. In latent-dynamic-fss, Var(pc_1) is a pipeline check on the twins alone, Var(surprise) is descriptive and the slope of surprise is dropped, because every trained dynamic statistic was inconclusive under the edge rule on both models and the slope's 1/nu had no value on either: a statistic that returns no estimate on two of two models is not kept as a test. learned-beyond-random keeps (a) and (b), each with every paired margin positive at every size (scoring.margins.sizes = every), and drops (c), the surprise finite-size-scaling share, which as written passed on neither model; the margins were positive at both sizes on both reads, so asking for the sign at every size costs nothing seen and closes the gap where a mean over L hides one size of the wrong sign. The reference rows l2_var_surprise and one_minus_ac1_pc_1 are descriptive and lose their tolerances, because a reference row passed on any CI excluding 0, which both did on both reads at exponents far from any physical value, so the rule could not fail. scoring.margins.tolerance is 0.002, the owner's number, by a rule: the largest 95th-percentile gap between redraws of the shuffle control seen on the reads, 0.0016, rounded up to one significant figure. It was measured on the 8-component probe, not on the 128-dimensional embedding the scorer judges, whose margins on the reads carry no interval. On the reads, the selectivity margins, +0.0004 to +0.0008, lie inside it, so (b) is more likely to fail than to pass unless the five seeds agree, and the R^2 margins, +0.0022 to +0.0054, lie outside it. The ablation hypotheses stay descriptive, with 199 surrogates and the headline cell alone; ema-only now says what a collapsed seed's rows hold, and held-out-band how many plateaus its band drops. On 1 November, to shorten the scoring, scoring.alarms.every became 5 (it was 1) and scoring.surrogates.cells became headline-h0, the surrogate tests at the headline cell for h = 0 alone where the draft ran them at every h; the AUC cells and the trial budget do not change, and the false-positive rate is still read from all null runs. The columns judged, the search band, the VICReg weights, the probe protocol and the 25,000 training steps were not changed by either read."
+confirmatory = "ising-latent-v1 scores only the runs of ising-ews-v1 on seeds 6-10, which no checkpoint has read and no pass has seen, through the checkpoints pinned above: five primaries on model seeds 1-5 at 25,000 steps and six ablations, each with its step-0 twin. Seed 100 and the seeds 1-5 tables are never scored. Trainings read staircase seeds 11-16 alone and name this file's draft, sha256 4d9fd3ed79e02f3e0ec535dd02e2b4f8c6a716ceed5476a6a00fcc72e95552ad from before its placeholders were filled, so seeds 6-10 are refused; the freeze comes before any extraction on them (call 11), and each scored table must come from its tag's commit, from the checkpoint it pins."
 links = ["https://github.com/GabrielEzerzer/tipping-point/issues/28"]
 
 [deviations]

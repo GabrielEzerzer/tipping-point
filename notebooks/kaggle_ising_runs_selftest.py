@@ -1744,6 +1744,9 @@ PILOT_RECORD = "20261025T194846Z-tauc-L16-32-64-128"  # #54's record
 PILOT_SHA256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698"
 DRAFT = "ising-latent-v1.toml"
 DRAFT_RUN = "20261101T000000Z-ising-latent-v1-draft"  # its folder in tp-prereg-ising-latent
+# the draft the trainings ran under; the frozen file's sha256 differs because its placeholders
+# were filled
+DRAFT_SHA256 = "4d9fd3ed79e02f3e0ec535dd02e2b4f8c6a716ceed5476a6a00fcc72e95552ad"
 M1_RUN = "20261101T051047Z-L16-32-64-m1"  # primary model seed 1, in tp-jepa-primary-28's output
 # The model each first read reads, in that output. Written out here as well as in its plan, so that
 # a slip in a plan's pin turns red here and is not first refused on Kaggle.
@@ -2227,13 +2230,10 @@ def primary_28(k: ModuleType, root: Path) -> None:
         "primary-28: one process per T4, the three first on GPU 0",
         {n: r["gpu"] for n, r in runs.items()} == {"m1": 0, "m2": 1, "m3": 0, "m4": 1, "m5": 0},
     )
-    pinned = hashlib.sha256(
-        (PLANS.parents[1] / "paper" / "prereg" / DRAFT).read_bytes()
-    ).hexdigest()
     prereg = plan["inputs"]["prereg"]
     check(
-        "primary-28: its --prereg is the committed draft, pinned by sha256",
-        (prereg["run"], prereg["file"], prereg["sha256"]) == (DRAFT_RUN, DRAFT, pinned),
+        "primary-28: its --prereg is the draft it trained under, pinned by sha256",
+        (prereg["run"], prereg["file"], prereg["sha256"]) == (DRAFT_RUN, DRAFT, DRAFT_SHA256),
         prereg,
     )
     record = plan["inputs"]["record"]
@@ -3424,11 +3424,11 @@ def ablations_28(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN
         == sorted((L, s) for L in (16, 32, 64) for s in range(11, 17)),
         staged,
     )
-    pinned = hashlib.sha256(draft_path.read_bytes()).hexdigest()
     check(
-        "ablations-28: its --prereg is the committed draft, pinned by sha256 as primary-28 pins it",
+        "ablations-28: its --prereg is the draft primary-28 trained under, pinned by sha256 as "
+        "primary-28 pins it",
         plan["inputs"]["prereg"] == primary["inputs"]["prereg"]
-        and plan["inputs"]["prereg"]["sha256"] == pinned,
+        and plan["inputs"]["prereg"]["sha256"] == DRAFT_SHA256,
         plan["inputs"]["prereg"],
     )
     text = plan.get("description", "")
@@ -3444,7 +3444,8 @@ def ablations_28(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN
     )
 
     # on the mounts Kaggle gives it: the record's and the draft's bytes are the real ones, the
-    # repository's copies, so the plan's own pins are what is checked; the staircases are stand-ins
+    # repository's record and the draft as e598e62 holds it, the bytes the trainings read, so the
+    # plan's own pins are what is checked; the staircases are stand-ins
     ctx = ctx_at(k, root / "session")
     ctx.py = sys.executable
     ctx.helper.write_text(k.HELPER_SOURCE, encoding="utf-8")
@@ -3453,7 +3454,8 @@ def ablations_28(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN
     shutil.copyfile(V1_RECORD, holder / "pilot.json")
     held = ctx.input / "tp-prereg-ising-latent" / DRAFT_RUN
     held.mkdir(parents=True)
-    shutil.copyfile(draft_path, held / DRAFT)
+    show = ["git", "-C", str(PLANS.parents[1]), "show", f"{ABLATIONS_COMMIT}:paper/prereg/{DRAFT}"]
+    (held / DRAFT).write_bytes(subprocess.run(show, capture_output=True, check=True).stdout)
     job_output = ctx.input / "tp-ising-job-a" / "out" / "ising"
     dataset = ctx.input / "tipping-point-ising-l16-l32"
     for run_id in staged:
@@ -3513,7 +3515,12 @@ def ablations_28(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN
         and "held_out" in base
         and base["held_out"] is None
         and base.get("prereg")
-        == {"id": "ising-latent", "version": 1, "sha256": pinned, "seeds": [*CONFIRMATORY_SEEDS]}
+        == {
+            "id": "ising-latent",
+            "version": 1,
+            "sha256": DRAFT_SHA256,
+            "seeds": [*CONFIRMATORY_SEEDS],
+        }
         and set(CONFIRMATORY_SEEDS) <= set(base.get("refused", []))
         and (base.get("pilot") or {}).get("sha256") == PILOT_SHA256
         and sorted([*base.get("train", []), *val]) == staged

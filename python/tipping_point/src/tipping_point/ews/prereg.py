@@ -621,8 +621,12 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     if len(doc["scoring"]["alarms"]["band"]) != 2:
         found.append("scoring.alarms.band: [from eps_L, to eps_L]")
     tests = doc["scoring"]["surrogates"]
-    if tests["cells"] not in {"headline", "all"}:
-        found.append("scoring.surrogates.cells: 'headline' or 'all'")
+    if tests["cells"] not in {"headline", "headline-h0", "all"}:
+        found.append("scoring.surrogates.cells: 'headline', 'headline-h0' or 'all'")
+    elif tests["cells"] == "headline-h0" and 0 not in doc["event"]["horizons"]:
+        found.append(
+            "scoring.surrogates.cells: 'headline-h0' tests h = 0 alone, which event.horizons lacks"
+        )
     for key in ("primary", "secondary"):
         if tests[key] not in SURROGATES:
             found.append(f"scoring.surrogates.{key}: one of {sorted(SURROGATES)}")

@@ -418,6 +418,36 @@ def test_a_falling_direction_reaches_the_surrogate_test_and_the_alarms(planted: 
     assert alarm["direction"] == "less" and alarm["miss_rate"] > 0.3, alarm  # rising: 0
 
 
+@pytest.mark.parametrize(
+    ("cells", "tested"),
+    [
+        ("headline", {(0.0, True), (1.0, True)}),
+        ("headline-h0", {(0.0, True)}),
+        ("all", {(0.0, True), (1.0, True), (0.0, False), (1.0, False)}),
+    ],
+)
+def test_surrogates_run_where_scoring_surrogates_cells_says(
+    planted: Any, cells: str, tested: set[tuple[float, bool]]
+) -> None:
+    """#28's scoring-time lever (1 November): `headline-h0` tests the headline cell at h = 0 alone,
+    where `headline` tests it at every h and `all` every cell, as before. Over two horizons and two
+    bandwidths, the first the headline's, the AUC rows are the same four whichever it is, and each
+    cell tested has its phase and its ar1 row, once."""
+    doc = tomllib.loads(_text(planted.root, "demo", PILOT_RUN))
+    doc["indicators"]["names"] = ["variance"]
+    doc["scoring"]["alarms"]["indicators"] = ["variance"]
+    doc["scoring"]["surrogates"] |= {"n": 4, "cells": cells}
+    assert doc["event"]["horizons"] == [0.0, 1.0]
+    inputs = ising.select(*ising.find_runs(planted.root), doc["data"])[32]
+    tau_c = ising.read_pilot(planted.root, PILOT_RUN, allow_stale=True).tau(32)
+    tables: dict[str, list[dict[str, Any]]] = {name: [] for name in ising._CELL_TABLES}
+    ising._cells(doc, 32, inputs, "dense", tau_c, tables, {}, np.random.default_rng(3))
+    every = [(0.0, False), (0.0, True), (1.0, False), (1.0, True)]
+    assert sorted((r["h"], r["headline"]) for r in tables["auc"]) == every
+    rows = Counter((r["h"], r["headline"], r["surrogate"]) for r in tables["surrogates"])
+    assert rows == Counter((h, top, kind) for h, top in tested for kind in ("phase", "ar1"))
+
+
 def test_the_first_seed_sets_theta_and_the_second_tests_it(planted: Any) -> None:
     """#64: alternate seeds set theta and test its false-alarm rate. Swapped, every theta, rate
     and alarm position in the results moves while the planted ranges do not notice (one median

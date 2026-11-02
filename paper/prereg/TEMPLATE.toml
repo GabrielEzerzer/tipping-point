@@ -82,7 +82,7 @@ bootstrap = 2000         # hierarchical: seeds, then replicas within each seed
 primary = "phase"        # phase-randomised (Theiler et al. 1992)
 secondary = "ar1"        # AR(1)-fitted (Dakos et al. 2012; Bury et al. 2021)
 n = 999
-cells = "headline"       # headline | all
+cells = "headline"       # headline | headline-h0 (the headline cell at h = 0 only) | all
 
 [scoring.alarms]
 indicators = ["variance", "ac", "skewness"]  # a reported table: theta, rates, alarm eps_L

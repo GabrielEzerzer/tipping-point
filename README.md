@@ -547,15 +547,20 @@ and the scorer takes both through every table, once per checkpoint.
   role, and the result's manifest gives the sha256 of each table's `complete.json` per run.
 - **What a file holds.** `indicators.pairs` lists the (observable, indicator) pairs judged by AUC,
   `indicators.direction_by_observable` overrides a direction for one observable, and
-  `fss.dynamic.statistics` lists the peak statistics judged by the dynamic test. A primary
-  checkpoint and its twin take the whole grid; an ablation's take the headline cell, with
-  `scoring.surrogates.n_ablation` surrogates. `prereg.cells` counts that. Static quantities are
-  `l2_var_<column>`, `mean_<column>` and `one_minus_ac1_<column>`, read from the matched cadence.
+  `fss.dynamic.statistics` lists the peak statistics the dynamic test reads. A statistic of role
+  `descriptive` is computed with the same intervals and edge rule and has no verdict. A static row
+  with a verdict, or a dynamic pipeline check, may say `judged = "twin"`: it is then judged on the
+  step-0 twins alone, and on a trained checkpoint its row is computed all the same and reads
+  `reported`. A primary checkpoint and its twin take the whole grid; an ablation's take the
+  headline cell, with `scoring.surrogates.n_ablation` surrogates. `prereg.cells` counts that.
+  Static quantities are `l2_var_<column>`, `mean_<column>` and `one_minus_ac1_<column>`, read from
+  the matched cadence.
 - **The freeze.** A latent file reads the runs of the version its `[baseline]` names, so those runs
   must come from that tag's commit, and each table from the file's own tag and the checkpoint it
   pins: the freeze comes before any extraction on a scored seed. `paper/prereg/ising-latent-v1.toml`
-  is the draft, set by the exploratory pass, with its checkpoints, `baseline.result` and
-  `scoring.margins.tolerance` still placeholders, which the freeze refuses.
+  was rewritten on 2 November after the m1 and m2 reads, with its eleven checkpoints pinned and
+  `scoring.margins.tolerance` set. `baseline.result` is its one placeholder, which the freeze
+  refuses until it holds the run id of ising-ews-v1's result on these runs.
   `python/tipping_point/tests/fixtures/ising_latent_draft.toml` is the schema's fixture, with every
   value the pass was to set left open.
 - **What a file may say.** Frozen text must not claim what the scorer ignores, so a key outside the
@@ -591,9 +596,12 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   resample per replicate, and the sign test. Three rows are judged, over the primary checkpoints: the
   energy probe's R^2 and its selectivity, each checkpoint's value being the mean over L
   (`scoring.margins.sizes`), and the surprise FSS verdicts, by the hypothesis's own rule: a surprise
-  statistic passing for at least 4 of 5 trained checkpoints and for none of their twins. Each L's
-  value, AUC (parity, with |m|'s beside it as `reference`), the chi alignment and all of an ablation's
-  rows report a margin and its CI with no verdict.
+  statistic passing for at least 4 of 5 trained checkpoints and for none of their twins. The third
+  is absent from a file with no surprise statistic of role `test`. With
+  `scoring.margins.sizes = "every"` the judged value and its CI stay the mean over L, and the sign
+  test also asks every seed's margin at every L to carry the predicted sign. Each L's value, AUC
+  (parity, with |m|'s beside it as `reference`), the chi alignment and all of an ablation's rows
+  report a margin and its CI with no verdict.
 - **Figures.** `figures/` holds `scaling.png`, `peaks.png`, `curves.png`, `collapse.png` and
   `probes.png`, primary checkpoints only, drawn by `harness/ising_figures.py` from the CSV tables
   alone, in a throwaway environment (matplotlib is no dependency of the project). The tables are
@@ -611,12 +619,17 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
 - **Surrogates in a latent file** stop drawing once a row's decision at alpha is settled
   (`scoring.sequential_test`, Besag and Clifford 1991): the surrogate table reads only p <= alpha, and
   on the same surrogates every decision is the one a full N_s gives. A null row draws about a quarter
-  of N_s. ising-ews-v1 keeps its whole test and its draws.
+  of N_s. ising-ews-v1 keeps its whole test and its draws. `scoring.surrogates.cells` says where the
+  tests run: `"all"` at every cell, `"headline"` at the headline cell for every h, as ising-ews-v1
+  has it, and `"headline-h0"` at the headline cell for h = 0 only, as ising-latent-v1 has it.
 - **Run time.** On the project's laptop (i7-1185G7, 4 cores, other work running), the 22 checkpoints
   of `ising-latent-v1` are projected to take about 59 hours, or about 41 with the probes' embeddings on
   a GPU: surrogates 22 h, alarms 15 h, probe embeddings 18 h on the CPU (19 ms a frame at L = 64), AUC,
   static fits and reading the tables 4 h. It was about 125 hours before the sequential test and the
-  faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. The runner has no
+  faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. Those figures assume
+  alarm scores every tau_c and surrogate tests at every h. The file now scores alarms every 5 tau_c
+  (`scoring.alarms.every = 5`) and runs its surrogate tests at h = 0 only, so both parts will take
+  less; the total has not been projected again. The runner has no
   resume: a run interrupted before it writes its result starts again. Its trials are logged in one
   write after its tables and before `complete.json`, so a crash in that write leaves a folder with no
   `complete.json`, its trials logged or not, or a complete result with all of them. `prereg.charge`,

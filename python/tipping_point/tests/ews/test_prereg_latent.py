@@ -199,6 +199,7 @@ def test_strict_wants_a_checkpoint_pinned_by_its_sha256(draft: dict[str, Any], k
         (lambda d: d["hypotheses"][2].update(direction="up"), "hypotheses[2].direction"),
         (lambda d: d["scoring"]["surrogates"].pop("n_ablation"), "n_ablation: missing"),
         (lambda d: d["scoring"]["surrogates"].update(n_ablation=0), "n_ablation"),
+        (lambda d: d["scoring"]["surrogates"].update(cells="headline_h0"), "surrogates.cells"),
         (lambda d: d["scoring"]["margins"].update(sign_test="yes"), "sign_test: expected bool"),
         (lambda d: d["scoring"].pop("margins"), "scoring.margins: missing"),
         (lambda d: d["fss"]["dynamic"].pop("statistics"), "fss.dynamic.statistics: missing"),
