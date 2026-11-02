@@ -3,6 +3,7 @@ frozen file in a scratch repository to the result folder, twice for its bytes; t
 planted null, whose margins must not pass; what it refuses; and the figures, drawn in the isolated
 environment."""
 
+import copy
 import hashlib
 import json
 import math
@@ -20,7 +21,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import pytest
 from ews_planted import V1, V1_SEEDS, V1_SIZES
-from tipping_point.ews import fss, ising, prereg
+from tipping_point.ews import fss, ising, margins, prereg
 from tipping_point.ews.__main__ import main as ews_main
 from tipping_point.ews.__main__ import score
 from tipping_point.ising import io
@@ -603,6 +604,70 @@ def test_two_checkpoints_on_one_embedding_draw_the_same_resamples(frozen: Frozen
                 assert one.shape == (doc["scoring"]["bootstrap"],) and one.std() > 0, key
                 assert np.array_equal(one, two), key
                 assert not np.array_equal(one, other), key
+
+
+def test_under_every_size_the_sign_test_reads_the_per_L_rows_the_runner_emits(
+    frozen: Frozen,
+) -> None:
+    """scoring.margins.sizes = "every" (#28) through the runner's own path: probe_tables' rows and
+    draws, then probe_quantities, then margins.table. Every planted energy margin is positive, so
+    both judged rows pass. Give one primary seed's energy R^2 at one L back to its twin, values and
+    draws swapped there, and that row's sign test fails under "every" but not under "mean", with
+    the same margins and CI: the per-L quantities probe_quantities emits are the ones the sign test
+    reads. Named otherwise, "every" would find no per-L margin and pass on the mean alone."""
+    doc = copy.deepcopy(prereg.load(frozen.path).doc)
+    for statistic in doc["fss"]["dynamic"]["statistics"]:
+        statistic["role"] = "descriptive"  # as ising-latent-v1 has it: no surprise rule to feed
+    admitted = ising.admit(doc, frozen.spare.root)
+    rows, draws = runner.probe_tables(
+        doc, frozen.spare.root, admitted.scored, admitted.passes, planted.planted_embedding(), 26
+    )
+    emitted = runner.probe_quantities(doc, rows, draws)
+    assert {q.scope for q in emitted if q.name == "energy_r2"} == {
+        *(f"L={L}" for L in V1_SIZES),
+        margins.ALL,
+    }
+    L, seed = V1_SIZES[1], len(PRIMARY) - 1
+    trained, twin = TRAINED[seed], TWINS[seed]
+    turned = [dict(r) for r in rows]
+    pair = [
+        r
+        for r in turned
+        if (r["target"], r["column"], r["L"]) == ("energy", "raw", L)
+        and r["checkpoint"] in (trained, twin)
+    ]
+    assert len(pair) == 2
+    pair[0]["r2"], pair[1]["r2"] = pair[1]["r2"], pair[0]["r2"]
+    swapped = dict(draws)
+    mine, its = ("energy", "r2", L, trained), ("energy", "r2", L, twin)
+    swapped[mine], swapped[its] = draws[its], draws[mine]
+
+    def table(sizes: str, given: list[dict[str, Any]], drawn: dict[Any, Any]) -> list[Any]:
+        own = copy.deepcopy(doc)
+        own["scoring"]["margins"]["sizes"] = sizes
+        found = runner.probe_quantities(own, given, drawn)
+        return margins.table(own, found, [], np.random.default_rng([26, 28]))
+
+    def judged(found: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return {r["quantity"]: r for r in found if r["judged"]}
+
+    whole = judged(table("every", rows, draws))
+    assert set(whole) == {"energy_r2", "energy_selectivity"}
+    for row in whole.values():
+        assert (row["sign_test"], row["verdict"]) == (fss.PASS, fss.PASS), row
+    every_rows = table("every", turned, swapped)
+    every, mean = judged(every_rows), judged(table("mean", turned, swapped))
+    (at_L,) = [
+        r
+        for r in every_rows
+        if (r["quantity"], r["scope"], r["role"]) == ("energy_r2", f"L={L}", "primary")
+    ]
+    assert at_L["margins"][seed] < 0 < min(mean["energy_r2"]["margins"]), at_L  # turned at L alone
+    assert (every["energy_r2"]["sign_test"], every["energy_r2"]["verdict"]) == (fss.FAIL, fss.FAIL)
+    assert (mean["energy_r2"]["sign_test"], mean["energy_r2"]["verdict"]) == (fss.PASS, fss.PASS)
+    same = ("margins", "margin", "lo", "hi", "n_draws")
+    assert [every["energy_r2"][k] for k in same] == [mean["energy_r2"][k] for k in same]
+    assert every["energy_selectivity"]["verdict"] == fss.PASS  # its margins were left alone
 
 
 def test_a_planted_positive_margin_passes(scored: Path) -> None:
