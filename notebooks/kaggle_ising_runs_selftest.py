@@ -12,7 +12,9 @@ judged by exit codes and files only; the rates STATUS gives, by checkpoint and L
 against what `kaggle kernels push` checks; invalid plans refused at every door; pilot-28.json,
 primary-28.json and the first-read plans, their stage ids, inputs and kernel sources, on stand-in
 mounts; v1-confirmatory.json against what the frozen file's `ews score` selects and accepts, its
-runs made by the tag's own CLI as manifests, with nothing simulated.
+runs made by the tag's own CLI as manifests, with nothing simulated; ablations-28.json against
+primary-28.json and #28's six ablations, each training's command taken by e598e62's own CLI with
+nothing trained, and each planted fault red by name.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
@@ -50,6 +52,7 @@ import threading
 import time
 import tomllib
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -1646,6 +1649,7 @@ def kernel_acceptance(k: ModuleType, root: Path) -> None:
         "first-read-m1",
         "first-read-m2",
         "v1-confirmatory",
+        "ablations-28",
     ):
         source, folder = PLANS / f"{name}.json", root / name
         plan = json.loads(source.read_text(encoding="utf-8"))
@@ -3068,6 +3072,530 @@ def v1_confirmatory(k: Any, root: Path) -> None:  # Any: it swaps the module's P
         check(f"refused: a plan's commit of {bad!r}", "40 lowercase hex digits" in why, why)
 
 
+ABLATIONS_PLAN = PLANS / "ablations-28.json"
+ABLATIONS_KERNEL = "tp-jepa-ablations-28"
+# e598e62, the commit that trained primary-28 and that tipping-point-wheel holds. Written out here
+# as well as in the plan, so that a slip in the plan's pin turns red here and is not first refused
+# on Kaggle.
+ABLATIONS_COMMIT = "e598e627998cb940458be3c26a02d1c4a3ea7f08"
+# #28's research pass, section 4 "Runs", as #28 accepted it: each role of the draft's ablation
+# checkpoints, its model seeds, and the flags it adds to a primary's training
+ABLATIONS = {
+    "ema-only": ((11, 12, 13), ["--var-weight", 0, "--cov-weight", 0]),
+    "held-out": ((21, 22, 23), ["--held-out"]),
+}
+HELD_OUT_BAND = [2.0, 2.5]  # the research pass's band, written out: a slip in data.HELD_OUT is red
+ABLATIONS_RESUME = (
+    "uv run --no-sync python notebooks/kaggle_ising_runs.py --write-kernel "
+    "notebooks/plans/ablations-28.json ../.wf/kaggle/kernel-ablations-28-resume --resume; "
+    "kaggle kernels push -p ../.wf/kaggle/kernel-ablations-28-resume"
+)
+ABLATIONS_WHEEL_CLI = r'''
+"""Each training's command through a copy of the wheel commit's package: its own parser and
+_train, with data.load and train.start swapped for stubs that note what they are handed and stop.
+The commit's own lookup finds the staged runs; nothing is loaded and nothing is trained.
+Usage: <this> <folder holding tipping_point> <job.json> <out.json>"""
+import contextlib
+import io as text_io
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import tipping_point
+from tipping_point.jepa import __main__ as cli
+from tipping_point.jepa import train
+
+assert Path(tipping_point.__file__).is_relative_to(sys.argv[1]), tipping_point.__file__
+seen = {}
+
+
+def load(data_dir, train_runs, val_runs, held_out=None, refused=frozenset(), expect=None):
+    seen.update(train=list(train_runs), val=list(val_runs), held_out=held_out)
+    seen.update(refused=sorted(refused))
+
+
+def start(config, data, root, tag, device=None, pilot=None, prereg=None):
+    seen.update(config=config.to_json(), tag=tag, pilot=pilot, prereg=prereg)
+    return tag
+
+
+cli.load, train.start = load, start
+results = {}
+for label, runs in json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")).items():
+    results[label] = {}
+    for name, argv in runs.items():
+        seen.clear()
+        said = text_io.StringIO()
+        try:
+            with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                code = cli.main(argv)
+        except SystemExit as exc:  # argparse's usage error
+            code = exc.code
+        why = said.getvalue().strip()[-300:] or f"exit {code}"
+        results[label][name] = dict(seen) if code == 0 else {"error": why}
+Path(sys.argv[3]).write_text(json.dumps(results), encoding="utf-8")
+'''
+
+
+def ablation_name(role: str, seed: int) -> str:
+    return f"L16-32-64-{role}-m{seed}"
+
+
+def ablations_canonical(primary: dict) -> dict:
+    """The plan #28 asks for, worked out from primary-28.json: its m1 for each ablation, with the
+    model seed and the flags the role adds and without its GPU pin, so that a T4 takes the next
+    training as it comes free; primary-28's wheel, sources and inputs; and `commit` e598e62."""
+    base = primary["runs"][0]
+    runs = []
+    for role, (seeds, extra) in ABLATIONS.items():
+        for seed in seeds:
+            args = copy.deepcopy(base["args"])
+            args[args.index("--seed") + 1] = seed
+            runs.append(
+                {
+                    "name": ablation_name(role, seed),
+                    "command": base["command"],
+                    "stage": list(base["stage"]),
+                    "args": [*args, *extra],
+                }
+            )
+    shared = ("wheel", "datasets", "kernel_sources", "inputs")
+    return {
+        "kernel": ABLATIONS_KERNEL,
+        **{key: copy.deepcopy(primary[key]) for key in shared},
+        "commit": ABLATIONS_COMMIT,
+        "runs": runs,
+    }
+
+
+def flag_groups(args: list) -> list[tuple[str, list]]:
+    """A run's arguments as argparse groups them: each flag with the values up to the next flag."""
+    groups: list[tuple[str, list]] = []
+    for arg in args:
+        if isinstance(arg, str) and arg.startswith("--"):
+            groups.append((arg, []))
+        elif groups:
+            groups[-1][1].append(arg)
+        else:
+            groups.append(("(before any flag)", [arg]))
+    return groups
+
+
+def ablations_problems(plan: dict, canonical: dict) -> dict[str, list[str]]:
+    """A plan against the one #28 asks for, by what is wrong, each problem naming its run, input or
+    key. Flags are compared as argparse reads them: their order is free, but a flag given twice is
+    named."""
+    runs, wanted = ({r["name"]: r for r in p["runs"]} for p in (plan, canonical))
+    found: dict[str, list[str]] = {
+        "missing": [name for name in wanted if name not in runs],
+        "extra": [name for name in runs if name not in wanted],
+        **{kind: [] for kind in ("seed", "steps", "flags", "stage", "gpus", "inputs", "plan")},
+    }
+    kinds = {"--seed": "seed", "--steps": "steps"}
+    for name in (name for name in wanted if name in runs):
+        got, want = runs[name], wanted[name]
+        given = flag_groups(got.get("args", []))
+        flags, needed = dict(given), dict(flag_groups(want["args"]))
+        if len(flags) != len(given):
+            found["flags"].append(f"{name}: a flag given twice")
+        for flag in sorted({*flags, *needed}):
+            if flags.get(flag) != needed.get(flag):
+                said = f"{name}: {flag} {flags.get(flag)!r}, not {needed.get(flag)!r}"
+                found[kinds.get(flag, "flags")].append(said)
+        if got.get("stage") != want["stage"]:
+            found["stage"].append(f"{name}: its stage ids are not primary-28's")
+        if set(got) - {"gpu"} != set(want) or got["command"] != want["command"]:
+            found["flags"].append(f"{name}: keys {sorted(got)}, command {got.get('command')!r}")
+    # no run is pinned, so a T4 takes the next training as it comes free; a null gpu, as the runner
+    # reads it, pins nothing
+    found["gpus"] += [
+        f"{r.get('name')}: pinned to gpu {r['gpu']!r}"
+        for r in plan["runs"]
+        if r.get("gpu") is not None
+    ]
+    pins, given_inputs = canonical["inputs"], plan.get("inputs", {})
+    for name in sorted({*pins, *given_inputs}):
+        if given_inputs.get(name) != pins.get(name):
+            found["inputs"].append(f"input {name}: {given_inputs.get(name)}, not {pins.get(name)}")
+    for key in ("kernel", "wheel", "commit", "datasets", "kernel_sources"):
+        if plan.get(key) != canonical[key]:
+            found["plan"].append(f"{key}: {plan.get(key)!r}, not {canonical[key]!r}")
+    return found
+
+
+def ablations_wrong_plans(canonical: dict) -> list[tuple[str, dict, str, str, str]]:
+    """Each planted fault: what it is, the plan so changed, where ablations_problems must file it
+    and the name it must give, and what the session or e598e62's CLI must then say of it on the
+    mounts, "" where neither can tell: this section alone stands between such a plan and Kaggle."""
+
+    def changed(name: str, change: Callable[[dict], object]) -> dict:
+        plan = copy.deepcopy(canonical)
+        change(next(r for r in plan["runs"] if r["name"] == name))
+        return plan
+
+    def drop(flag: str, values: int) -> Callable[[dict], None]:
+        def change(run: dict) -> None:
+            at = run["args"].index(flag)
+            del run["args"][at : at + 1 + values]
+
+        return change
+
+    def value(flag: str, new: int) -> Callable[[dict], None]:
+        def change(run: dict) -> None:
+            run["args"][run["args"].index(flag) + 1] = new
+
+        return change
+
+    def seed_seven(run: dict) -> None:
+        run["stage"][0] = "20261102T000000Z-L16-qs-s7"
+
+    ema, held = ablation_name("ema-only", 12), ablation_name("held-out", 22)
+    seed, steps = ablation_name("ema-only", 13), ablation_name("held-out", 21)
+    pinned, stage = ablation_name("held-out", 23), ablation_name("ema-only", 11)
+    sha = copy.deepcopy(canonical)
+    sha["inputs"]["prereg"]["sha256"] = "0" * 64
+    balanced = copy.deepcopy(canonical)  # the first version's pins: 0, 1, 0, ... in plan order
+    for i, run in enumerate(balanced["runs"]):
+        run["gpu"] = i % 2
+    return [
+        (
+            "a missing --var-weight 0 on an EMA-only run",
+            changed(ema, drop("--var-weight", 1)),
+            "flags",
+            ema,
+            f"{ema}: var_weight 0.025, not 0.0",
+        ),
+        (
+            "a missing --cov-weight 0 on an EMA-only run",
+            changed(ema, drop("--cov-weight", 1)),
+            "flags",
+            ema,
+            f"{ema}: cov_weight 0.001, not 0.0",
+        ),
+        (
+            "a missing --held-out on a held-out run",
+            changed(held, drop("--held-out", 0)),
+            "flags",
+            held,
+            f"{held}: held_out None, not [2.0, 2.5]",
+        ),
+        (
+            "a wrong model seed",
+            changed(seed, value("--seed", 3)),
+            "seed",
+            seed,
+            f"{seed}: seed 3, not 13",
+        ),
+        (
+            "wrong steps",
+            changed(steps, value("--steps", 50000)),
+            "steps",
+            steps,
+            f"{steps}: steps 50000, not 25000",
+        ),
+        ("a wrong prereg sha", sha, "inputs", "input prereg", "the session refuses: input prereg:"),
+        (
+            "a run pinned to a GPU",
+            changed(pinned, lambda run: run.update(gpu=0)),
+            "gpus",
+            pinned,
+            "",
+        ),
+        ("every run pinned, three on each T4", balanced, "gpus", stage, ""),
+        ("a staircase of seed 7 staged", changed(stage, seed_seven), "stage", stage, ""),
+    ]
+
+
+def ablations_commands(k: ModuleType, ctx: Any, plan: dict) -> dict[str, list[str]] | str:
+    """Each training's command as the runner gives it on the mounts, its inputs found and checked
+    against their sha256 and the runner's own flags added; or the session's refusal."""
+    session = k.Session(ctx, plan, {}, COMMIT, TORCH, 2)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            session.locate_inputs()
+    except k.Refused as exc:
+        return f"the session refuses: {exc}"
+    return {
+        r.name: [k.module_of(r.command)[1], *session.resolve(r)[0], *session.flags(r, ctx.out)]
+        for r in session.runs
+    }
+
+
+def ablations_made(job: dict[str, dict[str, list[str]]], root: Path) -> dict[str, dict] | str:
+    """What e598e62's own CLI makes of each command (ABLATIONS_WHEEL_CLI), by label and run; or why
+    it did not run."""
+    root.mkdir(parents=True, exist_ok=True)
+    script, given, out = root / "wheel_cli.py", root / "job.json", root / "made.json"
+    script.write_text(ABLATIONS_WHEEL_CLI, encoding="utf-8")
+    given.write_text(json.dumps(job), encoding="utf-8")
+    package = v1_tag_package(root / "wheel", ABLATIONS_COMMIT)
+    argv = [sys.executable, "-I", str(script), str(package), str(given), str(out)]
+    done = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if done.returncode != 0:
+        return done.stderr[-2000:] or f"exit {done.returncode}"
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def ablations_expected(primary: dict) -> dict[str, dict]:
+    """What e598e62's CLI must make of each ablation: what it makes of primary-28's m1, but for the
+    model seed and the role's change, the VICReg weights at 0 or the band held out (and the CLI's
+    -heldout tag)."""
+    expected = {}
+    for role, (seeds, _) in ABLATIONS.items():
+        for seed in seeds:
+            config = dict(primary["config"], seed=seed)
+            if role == "ema-only":
+                config.update(var_weight=0.0, cov_weight=0.0)
+            held = role == "held-out"
+            expected[ablation_name(role, seed)] = dict(
+                primary,
+                config=config,
+                tag=f"L16-32-64-m{seed}" + ("-heldout" if held else ""),
+                held_out=HELD_OUT_BAND if held else None,
+            )
+    return expected
+
+
+def ablations_made_problems(made: dict[str, dict], expected: dict[str, dict]) -> list[str]:
+    """Each difference between what e598e62's CLI made of a training and what #28 asks of it, naming
+    the run and the field, a config field by its own name."""
+    problems = [f"{name}: made, though #28 asks for none" for name in made if name not in expected]
+    for name, want in expected.items():
+        got = made.get(name, {"error": "the plan has no such training"})
+        if "error" in got:
+            problems.append(f"{name}: the wheel's CLI refuses it: {got['error']}")
+            continue
+        config = got.get("config", {})
+        pairs = [(f, config.get(f), want["config"].get(f)) for f in {*config, *want["config"]}]
+        pairs += [(key, got.get(key), want.get(key)) for key in {*got, *want} - {"config"}]
+        problems += [
+            f"{name}: {field} {value!r}, not {needed!r}"
+            for field, value, needed in sorted(pairs, key=lambda pair: pair[0])
+            if value != needed
+        ]
+    return problems
+
+
+def ablations_28(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN_JSON
+    draft_path = PLANS.parents[1] / "paper" / "prereg" / DRAFT
+    plan = json.loads(ABLATIONS_PLAN.read_text(encoding="utf-8"))
+    primary = json.loads((PLANS / "primary-28.json").read_text(encoding="utf-8"))
+    why = refused(k, plan)
+    check("ablations-28: the plan loads", not why, why)
+    if why:
+        return
+    errors = k.cli_errors(plan)
+    check("ablations-28: the CLI itself takes every run's arguments", errors == [], errors)
+    roles: dict[str, list[int]] = collections.defaultdict(list)
+    for entry in tomllib.loads(draft_path.read_text(encoding="utf-8"))["latents"]["checkpoints"]:
+        roles[entry["role"]].append(entry["model_seed"])
+    roles.pop("primary", None)
+    check(
+        "ablations-28: its roles and model seeds are the draft's ablation checkpoints",
+        roles == {role: list(seeds) for role, (seeds, _) in ABLATIONS.items()},
+        dict(roles),
+    )
+    canonical = ablations_canonical(primary)
+    found = ablations_problems(plan, canonical)
+    for kind, what in (
+        ("missing", "no training #28 asks for is missing"),
+        ("extra", "no training beyond the six"),
+        ("seed", "each training has its role's model seed"),
+        ("steps", "each training runs primary-28's 25,000 steps"),
+        (
+            "flags",
+            "each training has primary-28's flags and exactly its role's: --var-weight 0 "
+            "--cov-weight 0 for EMA-only, --held-out for held-out",
+        ),
+        ("stage", "each training stages primary-28's 18 staircases"),
+        ("gpus", "no training is pinned to a GPU, so a T4 takes the next as it comes free"),
+        ("inputs", "the record and the draft are primary-28's pins"),
+        ("plan", "its kernel is its own, primary-28's wheel and sources, and `commit` e598e62"),
+    ):
+        check(f"ablations-28: {what}", not found[kind], found[kind])
+    staged = sorted({s for r in plan["runs"] for s in r["stage"]})
+    tags = [DATASET_ID.fullmatch(s) for s in staged]
+    check(
+        "ablations-28: it stages the 18 staircases of seeds 11-16 at L = 16, 32 and 64, so none "
+        "of seeds 6-10",
+        all(t is not None and t[2] == "qs" for t in tags)
+        and sorted((int(t[1]), int(t[3])) for t in tags if t)
+        == sorted((L, s) for L in (16, 32, 64) for s in range(11, 17)),
+        staged,
+    )
+    pinned = hashlib.sha256(draft_path.read_bytes()).hexdigest()
+    check(
+        "ablations-28: its --prereg is the committed draft, pinned by sha256 as primary-28 pins it",
+        plan["inputs"]["prereg"] == primary["inputs"]["prereg"]
+        and plan["inputs"]["prereg"]["sha256"] == pinned,
+        plan["inputs"]["prereg"],
+    )
+    text = plan.get("description", "")
+    check(
+        "ablations-28: the description holds the one line that resumes it",
+        ABLATIONS_RESUME in text,
+        text,
+    )
+    check(
+        "ablations-28: the description says nothing is read from seeds 6-10, and names e598e62",
+        "Nothing is read from seeds 6-10" in text and "e598e62" in text,
+        text,
+    )
+
+    # on the mounts Kaggle gives it: the record's and the draft's bytes are the real ones, the
+    # repository's copies, so the plan's own pins are what is checked; the staircases are stand-ins
+    ctx = ctx_at(k, root / "session")
+    ctx.py = sys.executable
+    ctx.helper.write_text(k.HELPER_SOURCE, encoding="utf-8")
+    holder = ctx.input / "tp-tauc-l64-l128" / "out" / "ising" / PILOT_RECORD
+    holder.mkdir(parents=True)
+    shutil.copyfile(V1_RECORD, holder / "pilot.json")
+    held = ctx.input / "tp-prereg-ising-latent" / DRAFT_RUN
+    held.mkdir(parents=True)
+    shutil.copyfile(draft_path, held / DRAFT)
+    job_output = ctx.input / "tp-ising-job-a" / "out" / "ising"
+    dataset = ctx.input / "tipping-point-ising-l16-l32"
+    for run_id in staged:
+        stand_in_run((job_output if "-L64-" in run_id else dataset) / run_id, run_id)
+    session = k.Session(ctx, plan, {}, COMMIT, TORCH, 2)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            session.locate_inputs()
+            session.locate_datasets()
+        why = ""
+    except k.Refused as exc:
+        why = str(exc)
+    check(
+        "ablations-28: on the mounts, the record and the draft are found by the plan's own sha256, "
+        "and the 18 staircases among the sources",
+        not why
+        and set(session.inputs) == {"record", "prereg"}
+        and sorted(session.datasets) == staged,
+        why or sorted(session.datasets),
+    )
+    if why:
+        return
+    with contextlib.redirect_stdout(io.StringIO()):
+        errors = session.capture(session.runs)
+        session.stage()
+    check("ablations-28: the helper's capture, as on Kaggle, refuses nothing", errors == [], errors)
+
+    # every training's command as the runner gives it, through e598e62's own CLI
+    wrong = ablations_wrong_plans(canonical)
+    plans = {
+        "the plan": plan,
+        "the canonical plan": canonical,
+        **{w[0]: w[1] for w in wrong if w[4]},
+    }
+    m1 = ablations_commands(k, ctx, primary)
+    job = {"primary-28": {"m1": m1["m1"]} if isinstance(m1, dict) else {}}
+    said: dict[str, list[str]] = {label: [] for label in plans}
+    for label, each in plans.items():
+        commands = ablations_commands(k, ctx, each)
+        if isinstance(commands, str):
+            said[label].append(commands)
+        else:
+            job[label] = commands
+    made = ablations_made(job, root / "made")
+    if isinstance(made, str):
+        check("ablations-28: e598e62's own CLI takes the commands", False, made)
+        return
+    base = made["primary-28"].get("m1", {})
+    config, val = base.get("config", {}), base.get("val", [])
+    check(
+        "ablations-28: e598e62's own CLI makes primary-28's m1 as it trained: tag L16-32-64-m1, "
+        "25,000 steps, warm-up 1,250, VICReg at 0.025 and 0.001, no band held out, the draft read "
+        "and seeds 6-10 refused, staircases 11-15 to train on and 16 to validate on",
+        base.get("tag") == "L16-32-64-m1"
+        and (config.get("seed"), config.get("steps"), config.get("warmup")) == (1, 25000, 1250)
+        and (config.get("var_weight"), config.get("cov_weight")) == (0.025, 0.001)
+        and "held_out" in base
+        and base["held_out"] is None
+        and base.get("prereg")
+        == {"id": "ising-latent", "version": 1, "sha256": pinned, "seeds": [*CONFIRMATORY_SEEDS]}
+        and set(CONFIRMATORY_SEEDS) <= set(base.get("refused", []))
+        and (base.get("pilot") or {}).get("sha256") == PILOT_SHA256
+        and sorted([*base.get("train", []), *val]) == staged
+        and len(val) == 3
+        and all(v.endswith("-qs-s16") for v in val),
+        base,
+    )
+    if "config" not in base:
+        return
+    expected = ablations_expected(base)
+    for label in plans:
+        if label in made:
+            said[label] += ablations_made_problems(made[label], expected)
+    check(
+        "ablations-28: made by e598e62's own CLI, each training is primary-28's m1 but for its "
+        "model seed and its role's change, on the same staircases, record and draft",
+        not said["the plan"],
+        said["the plan"],
+    )
+    check(
+        "... as is the plan worked out from primary-28.json, so these refusals are the plan's",
+        not said["the canonical plan"],
+        said["the canonical plan"],
+    )
+    for what, wrong_plan, kind, named, says in wrong:
+        problems = ablations_problems(wrong_plan, canonical)
+        check(
+            f"... {what} goes red under {kind}, naming {named}",
+            not refused(k, wrong_plan) and any(named in p for p in problems[kind]),
+            problems,
+        )
+        if says:
+            check(
+                f"... {what}: on the mounts, {says}",
+                any(says in p for p in said[what]),
+                said[what],
+            )
+
+    folder = root / "resumed"
+    code = k.main(["--write-kernel", str(ABLATIONS_PLAN), str(folder), "--resume"])
+    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    check(
+        "ablations-28 --resume: primary-28's wheel and datasets, its two sources, then its own "
+        "output last",
+        code == 0
+        and not push_problems(folder)
+        and meta["dataset_sources"] == [primary["wheel"], *primary["datasets"]]
+        and meta["kernel_sources"] == [*primary["kernel_sources"], f"{k.OWNER}/{ABLATIONS_KERNEL}"],
+        meta,
+    )
+
+    # the plan's commit, read by the kernel before any quota goes on another commit's wheel
+    wheels = ctx.input / k.WHEEL_DATASET
+    wheels.mkdir()
+    (wheels / "tipping_point-0.1.0-py3-none-any.whl").write_bytes(b"PK")
+
+    def session_says(commit: str) -> str:
+        (wheels / "COMMIT.txt").write_text(f"{commit}\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            k.kernel_main(ctx)
+        return (ctx.out / "STATUS").read_text(encoding="utf-8")
+
+    saved, k.PLAN_JSON = k.PLAN_JSON, json.dumps(plan)
+    try:
+        other = session_says(OTHER)
+        same = session_says(ABLATIONS_COMMIT)
+    finally:
+        k.PLAN_JSON = saved
+    check(
+        "ablations-28: a wheel from any other commit is refused before the environment is built",
+        other.startswith(
+            f"refused: COMMIT.txt names {OTHER}; this plan's runs need {ABLATIONS_COMMIT}"
+        ),
+        other,
+    )
+    check(
+        "... and e598e62 passes that line, on to the installed package's own stamp",
+        same.startswith("refused: the installed package names commit"),
+        same,
+    )
+
+
 def run_all(k: ModuleType) -> int:
     with tempfile.TemporaryDirectory(prefix="tp-self-test-", ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -3092,6 +3620,7 @@ def run_all(k: ModuleType) -> int:
         primary_28(k, root / "primary-28")
         first_reads(k, root / "first-reads")
         v1_confirmatory(k, root / "v1-confirmatory")
+        ablations_28(k, root / "ablations-28")
         real_runs(k, root / "real")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1
