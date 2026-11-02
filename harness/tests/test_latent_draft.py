@@ -280,6 +280,7 @@ def test_the_disclosure_says_what_was_seen() -> None:
         "scored before this freeze",
         "scoring.margins.tolerance is 0.002",
         "8-component probe",
+        "headline-h0",
         TRAINED_UNDER,
     ):
         assert fact in text, fact
