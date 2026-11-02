@@ -12,6 +12,7 @@ STATUS, and the exit-code policy.
     {"kernel": "tp-ising-job-a",                  the kernel slug: <owner>/<slug> and its title
      "description": "...",                        optional
      "wheel": "<owner>/<slug>",                   optional: gabrielezerzer/tipping-point-wheel
+     "commit": "<40 hex digits>",                 optional: the only commit COMMIT.txt may name
      "datasets": ["<owner>/<slug>"],              optional: datasets to attach
      "kernel_sources": ["<owner>/<slug>"],        optional: other kernels' outputs to attach
      "inputs": {"record": {"run": "<run id>", "file": "pilot.json", "sha256": "<hex>"}},
@@ -85,11 +86,13 @@ the wheel must be the only tipping_point wheel among the inputs, with a COMMIT.t
 not marked dirty, and the installed package must name the same clean commit. After each run, the
 runner checks: exit 0; complete.json present, clean, with every check passed; every file it lists
 intact (`jepa verify`, which also checks a latents table's rows); and a manifest whose git_sha is
-COMMIT.txt's, with dirty false. Runs are judged by exit codes, files and manifests, never by
-output text, because Kaggle's image prints sitecustomize errors from every child process. A
-failed simulator run or training stops its GPU's queue and blocks the runs that read it; the other
-queues go on. A failed extraction blocks only the runs that read it, and its queue's other tables
-go on. No run starts once /kaggle/working holds 18 GB (Kaggle keeps 20 GB) or past 8 h 15 min.
+COMMIT.txt's, with dirty false. A simulator run's failed thermalised check is the one exception:
+the scorer drops that plateau or null block and counts it, so the run is complete and STATUS
+names it. Runs are judged by exit codes, files and manifests, never by output text, because
+Kaggle's image prints sitecustomize errors from every child process. A failed simulator run or
+training stops its GPU's queue and blocks the runs that read it; the other queues go on. A failed
+extraction blocks only the runs that read it, and its queue's other tables go on. No run starts
+once /kaggle/working holds 18 GB (Kaggle keeps 20 GB) or past 8 h 15 min.
 
 Status: out/STATUS holds one line (running, complete, incomplete, failed or refused) with the
 measured rates: seconds per training step after warm-up, from the training's own GPU-hour ledger,
@@ -561,9 +564,22 @@ def load_plan(plan: object) -> dict:
     if not isinstance(plan, dict):
         raise PlanError("a plan is a JSON object")
     problems = []
-    keys = {"kernel", "description", "wheel", "datasets", "kernel_sources", "inputs", "runs"}
+    keys = {
+        "kernel",
+        "description",
+        "wheel",
+        "commit",
+        "datasets",
+        "kernel_sources",
+        "inputs",
+        "runs",
+    }
     if set(plan) - keys:
         problems.append(f"unknown keys {sorted(set(plan) - keys)}")
+    if "commit" in plan and not (
+        isinstance(plan["commit"], str) and COMMIT.fullmatch(plan["commit"])
+    ):
+        problems.append(f"commit {plan['commit']!r}: 40 lowercase hex digits")
     if not (isinstance(plan.get("kernel"), str) and SLUG.fullmatch(plan["kernel"])):
         problems.append(f"kernel {plan.get('kernel')!r}: a slug, 5-50 of a-z, 0-9 and '-'")
     if not isinstance(plan.get("description", ""), str):
@@ -634,6 +650,7 @@ class Run:
     reused: bool = False
     resumed: bool = False
     problems: list[str] = field(default_factory=list)
+    dropped: list[str] = field(default_factory=list)  # thermalised misses: the scorer's to drop
     output_tail: list[str] = field(default_factory=list)
 
 
@@ -941,16 +958,19 @@ def checks_in(node: object) -> list[dict]:
     return []
 
 
-def verdicts(run_dir: Path, commit: str) -> list[str]:
+def verdicts(run_dir: Path, commit: str, command: str) -> tuple[list[str], list[str]]:
     """What keeps a finished run from counting: its manifest must name the wheel's commit and say
-    it is not dirty, and complete.json must say clean and hold no failed check."""
+    it is not dirty, and complete.json must say clean and hold no failed check. Second, what
+    counts with a note: a simulator run's failed thermalised checks, since the scorer drops each
+    such plateau or null block and counts it (ews.ising.plateaus and select)."""
     manifest, done = read_json(run_dir / "manifest.json"), read_json(run_dir / "complete.json")
     if manifest is None:
-        return ["manifest.json is missing or unreadable"]
+        return ["manifest.json is missing or unreadable"], []
     if done is None:
-        return ["complete.json is missing or unreadable"]
+        return ["complete.json is missing or unreadable"], []
     producer = manifest.get("producer") or {}
-    problems = []
+    problems: list[str] = []
+    dropped: list[str] = []
     if producer.get("git_sha") != commit:
         problems.append(f"manifest git_sha {producer.get('git_sha')} is not the wheel's {commit}")
     if producer.get("dirty") is not False:
@@ -959,10 +979,14 @@ def verdicts(run_dir: Path, commit: str) -> list[str]:
         problems.append(f"complete.json clean is {done.get('clean')}")
     for check in checks_in(done.get("checks")):
         if check.get("passed") is not True:
-            T = check.get("temperature")
+            T, gate = check.get("temperature"), check.get("gate", "?")
             at = f" at T = {T:.4f}" if isinstance(T, int | float) else ""
-            problems.append(f"check {check.get('gate', '?')} failed{at}: {check.get('detail', '')}")
-    return problems
+            said = f"check {gate} failed{at}: {check.get('detail', '')}"
+            if gate == "thermalised" and command in ISING_COMMANDS:
+                dropped.append(said)
+            else:
+                problems.append(said)
+    return problems, dropped
 
 
 def file_problems(code: int, lines: list[str], dirs: list[Path]) -> list[str]:
@@ -1142,6 +1166,11 @@ def verdict(runs: list[Run], stopped: dict[int, str], final: bool = True) -> tup
         f"{len(done)}/{len(runs)} complete and verified"
         + (f" ({', '.join(extra)})" if extra else "")
     )
+    if noted := [r for r in done if r.dropped]:
+        parts.append(
+            "thermalised missed in a plateau or null block, which the scorer drops and counts: "
+            + names(noted)
+        )
     if by["failed"] or by["blocked"]:
         status = "failed"
     elif live and not final:
@@ -1698,7 +1727,7 @@ class Session:
             log(f"{prefix}no tau.json, as after a resume: writing it as `ising pilot` would")
             self.helper("tau_json", run_dir=str(run_dir), seconds=round(run.wall_s, 1))
         run.folder, run.run_id = run_dir.relative_to(self.ctx.out).as_posix(), run_dir.name
-        problems = verdicts(run_dir, self.commit)
+        problems, run.dropped = verdicts(run_dir, self.commit, run.command)
         argv = [self.ctx.py, "-I", "-u", "-m", "tipping_point.jepa", "verify", run_dir]
         code, lines = stream(
             argv, env=self.env, cwd=self.ctx.cwd, check=False, prefix=prefix + "[verify] "
@@ -1717,6 +1746,8 @@ class Session:
             note = "; ".join(
                 filter(None, [note, f"{early}, collapsed: {collapse.get('collapsed')}"])
             )
+        if run.dropped:
+            log(f"{prefix}thermalised missed, which the scorer drops and counts: {run.dropped}")
         log(f"{prefix}complete and verified: {run.folder}")
         return "complete", note
 
@@ -1921,11 +1952,14 @@ def kernel_main(ctx: Ctx) -> int:
             summary.update(prior={k: prior[k] for k in ("path", "status")}, runs=prior["runs"])
         log("== wheel and environment")
         wheel, summary["wheel"] = find_wheel(ctx, plan.get("wheel", DEFAULT_WHEEL))
+        commit = summary["wheel"]["commit"]
+        # a frozen prereg's scorer refuses any other commit's runs: say so before the quota goes
+        if plan.get("commit", commit) != commit:
+            raise Refused(f"COMMIT.txt names {commit}; this plan's runs need {plan['commit']}")
         env = summary["env"] = probe(ctx) if ctx.py else ensure_env(ctx, wheel)
         log(json.dumps(env, indent=2))
-        check_env(ctx, env, summary["wheel"]["commit"])
+        check_env(ctx, env, commit)
         gpus = ctx.gpus or len(env["devices"])
-        commit = summary["wheel"]["commit"]
         session = Session(ctx, plan, summary, commit, env["torch"], gpus, prior)
         return session.run()
     except (Refused, PlanError) as why:
