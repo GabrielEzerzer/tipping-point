@@ -18,6 +18,16 @@ import numpy as np
 
 from . import indicators
 
+
+def _threads() -> int:
+    value = os.environ.get("TP_THREADS")
+    if not value:
+        return min(8, os.cpu_count() or 1)
+    if not value.isdecimal() or int(value) < 1:
+        raise ValueError(f"TP_THREADS must be a positive integer: {value!r}")
+    return int(value)
+
+
 INDICATORS: dict[str, Callable[..., np.ndarray]] = {
     "variance": lambda x, window, lag: indicators.rolling_variance(x, window),
     "ac": lambda x, window, lag: indicators.rolling_autocorrelation(x, window, lag),
@@ -27,7 +37,8 @@ INDICATORS: dict[str, Callable[..., np.ndarray]] = {
 }
 RAW = frozenset({"level", "slope"})  # read the raw series: residuals have no level to read
 CHUNK = 1 << 17  # elements per row chunk: small enough to stay in cache
-THREADS = min(8, os.cpu_count() or 1)
+# 8 spares a shared machine; many-core hosts lift it, changing no result: rows are independent
+THREADS = _threads()
 SLICES = 1 << 23  # elements of s(t) slices held at once (64 MB)
 
 
