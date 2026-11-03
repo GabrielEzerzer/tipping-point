@@ -1,5 +1,7 @@
 """Kendall's tau against scipy, and the pipeline's score and s(t) against their definitions."""
 
+import os
+
 import numpy as np
 import pytest
 from scipy.stats import kendalltau
@@ -43,6 +45,48 @@ def test_kendall_tau_is_the_same_in_any_chunking(monkeypatch: pytest.MonkeyPatch
     whole = trend.kendall_tau(rows)
     monkeypatch.setattr(trend, "CHUNK", 1000)
     assert np.array_equal(trend.kendall_tau(rows), whole)
+
+
+def test_a_score_is_the_same_on_any_thread_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What makes TP_THREADS safe to raise: the detrend, the rolling indicator and Kendall's tau
+    each split the rows into chunks, and one thread or eight must give the same digits back."""
+    x = np.random.default_rng(17).standard_normal((300, 200)).cumsum(axis=1)
+    p = Pipeline("variance", window=40, length=150, bandwidth=30.0)
+    monkeypatch.setattr(trend, "CHUNK", 1000)  # 5 or 6 rows a chunk: 50 to 60 chunks a pass
+    monkeypatch.setattr(trend, "THREADS", 1)
+    serial = p(x)
+    monkeypatch.setattr(trend, "THREADS", 8)
+    assert np.array_equal(p(x), serial)
+
+
+def test_threads_default_to_the_cores_up_to_8(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset or empty, TP_THREADS leaves the count at min(8, cores), and 1 when the core count is
+    unknown."""
+    monkeypatch.delenv("TP_THREADS", raising=False)
+    assert trend._threads() == min(8, os.cpu_count() or 1)
+    monkeypatch.setenv("TP_THREADS", "")
+    assert trend._threads() == min(8, os.cpu_count() or 1)
+    monkeypatch.setattr(os, "cpu_count", lambda: 64)
+    assert trend._threads() == 8
+    monkeypatch.setattr(os, "cpu_count", lambda: None)
+    assert trend._threads() == 1
+
+
+def test_tp_threads_sets_the_count_past_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TP_THREADS", "3")
+    assert trend._threads() == 3
+    monkeypatch.setenv("TP_THREADS", "16")
+    assert trend._threads() == 16
+
+
+@pytest.mark.parametrize("value", ["0", "-2", "abc", "2.5"])
+def test_tp_threads_refuses_what_is_not_a_positive_integer(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo stops the import, naming the variable, rather than running hours on the default."""
+    monkeypatch.setenv("TP_THREADS", value)
+    with pytest.raises(ValueError, match="TP_THREADS"):
+        trend._threads()
 
 
 def test_pipeline_scores_the_trailing_segment_of_the_indicator() -> None:

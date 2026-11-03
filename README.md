@@ -629,7 +629,9 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. Those figures assume
   alarm scores every tau_c and surrogate tests at every h. The file now scores alarms every 5 tau_c
   (`scoring.alarms.every = 5`) and runs its surrogate tests at h = 0 only, so both parts will take
-  less; the total has not been projected again. The runner has no
+  less; the total has not been projected again. Scoring runs on up to 8 threads by default; on a
+  host with more cores, `TP_THREADS=<n>` sets the count to n, and the results do not depend on it.
+  The runner has no
   resume: a run interrupted before it writes its result starts again. Its trials are logged in one
   write after its tables and before `complete.json`, so a crash in that write leaves a folder with no
   `complete.json`, its trials logged or not, or a complete result with all of them. `prereg.charge`,
