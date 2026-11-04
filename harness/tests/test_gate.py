@@ -1085,6 +1085,7 @@ SELF_TEST_SECTIONS = {
     "first_reads": 21,
     "v1_confirmatory": 22,
     "ablations_28": 20,
+    "extract_seeds": 8,
     "real_runs": 21,
 }
 
