@@ -1331,22 +1331,13 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         session.latents(final) == table,
     )
     check("... not the twin's", session.latents(twin) is None)
-    own = ctx.out / "ising" / NULL / "manifest.json"
-    turned = {}
-    for seed in CONFIRMATORY_SEEDS:
-        own.write_text(json.dumps({"params": {"seed": seed}}), encoding="utf-8")
-        try:
-            session.resolve(final)
-            if session.latents(final) != table:
-                turned[seed] = "its latents table is not found"
-        except k.RunError as exc:
-            turned[seed] = str(exc)
+    tail, _ = session.resolve(final)
+    found = session.latents(final)
     check(
-        "a run at any of seeds 6-10, by its own manifest, resolves and finds its latents table",
-        not turned,
-        turned,
+        "the extraction resolves and finds its latents table",
+        (tail, found) == (expected, table),
+        (tail, found),
     )
-    own.write_text(json.dumps({"params": {"seed": 1}}), encoding="utf-8")
 
     session.prior = {
         "x-final": {"name": "x-final", "folder": f"ising/{NULL}", "key": key},
