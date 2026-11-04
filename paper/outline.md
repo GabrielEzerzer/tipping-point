@@ -1,6 +1,6 @@
 # Paper outline
 
-The LaTeX skeleton in [main.tex](main.tex) now carries these sections for the Ising-only version.
+The LaTeX skeleton in [main.tex](main.tex) now carries the sections of the Ising-only version (all but 5 to 7).
 
 A skeleton, not a draft. Each section says what it will cover. As the build goes, drop notes, numbers,
 failures and the reasons behind decisions under the matching section, so the writing week starts from a

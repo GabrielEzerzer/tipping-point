@@ -105,23 +105,24 @@ The same pre-registered protocol applied to crypto markets will be reported in a
 % section (run 20261104T095100Z-ising-ews-v1). Tolerances from paper/prereg/ising-ews-v1.toml.
 % Do not round or restate them.
 \begin{table}[t]
-\caption{Classic baseline under ising-ews-v1}
+\caption{Classic baseline under ising-ews-v1. The first three rows are static exponents at the
+staircase plateau nearest $T_c$. The $1 - \mathrm{AC1}$ row passes if its CI excludes 0; the
+pre-registered 0.1 is the CI width below which a CI that holds 0 fails rather than being
+inconclusive.}
 \label{tab:ising-ews-v1}
 \begin{center}
 \begin{tabular}{lccc}
 \toprule
 Fitted exponent & Value [95\% CI] & Exact & Tolerance \\
 \midrule
-$L^2\,\mathrm{Var}(|m|)$ at the plateau nearest $T_c$ & $1.766$ $[1.739, 1.792]$ & $7/4$ & $0.1$ \\
-Mean $|m|$ at the plateau nearest $T_c$ & $-0.1253$ $[-0.1289, -0.1219]$ & $-1/8$ & $0.02$ \\
-Skewness of $|m|$ at the plateau nearest $T_c$ & $-0.011$ $[-0.022, 0.002]$ & $0$ & $0.1$ \\
+$L^2\,\mathrm{Var}(|m|)$ & $1.766$ $[1.739, 1.792]$ & $7/4$ & $0.1$ \\
+Mean $|m|$ & $-0.1253$ $[-0.1289, -0.1219]$ & $-1/8$ & $0.02$ \\
+Skewness of $|m|$ & $-0.011$ $[-0.022, 0.002]$ & $0$ & $0.1$ \\
 $1/\nu$ from the rolling $\mathrm{Var}(|m|)$ peak & $1.007$ $[0.930, 1.143]$ & $1$ & $0.5$ \\
 $1 - \mathrm{AC1}(|m|)$, one-sweep lag & $-1.728$ $[-1.757, -1.700]$ & $-7/4$ & sign only \\
 \bottomrule
 \end{tabular}
 \end{center}
-% TODO: decide whether the row labels fit the page width, or move the "at the plateau" detail into
-%       the caption.
 \end{table}
 
 \section{Discussion and limitations}
@@ -154,8 +155,7 @@ TODO: reproducibility statement.
 
 \section*{Use of AI}
 
-% draft: author to confirm
-The code, tests and documentation for this project were written with an AI assistant (Anthropic's
+TODO (author to confirm): The code, tests and documentation for this project were written with an AI assistant (Anthropic's
 Claude, used through Claude Code) under the author's direction. The author set the research
 question, the hypotheses and the pre-registered protocol, reviewed every change, and ran the
 experiments. The assistant also drafted parts of the text of this paper, which the author edited.
