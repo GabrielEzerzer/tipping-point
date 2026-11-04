@@ -71,7 +71,8 @@ one per confirmatory seed.
 --shrink (8: L = 4 and 8 for Job A) and sweep counts by its square. It builds a wheel from HEAD in a
 clean clone (the code the Kaggle wheel would hold), in an environment whose children print Kaggle's
 sitecustomize errors, and runs two sessions of the written kernel. The first is stopped by a
-simulated deadline at the first progress line after a run finishes. The second runs with the
+simulated deadline at the first progress line after a run finishes, or, as an extraction prints
+none, once one has begun its table after a run finishes. The second runs with the
 first's output attached, as Kaggle attaches it, and a fresh `jepa verify` closes the rehearsal over
 every run's folder. --only keeps the named runs and the runs they read: a staircase takes at least
 101,000 sweeps whatever its L, since every plateau holds 500 + 2,000, so a busy CPU wants one.
@@ -704,7 +705,8 @@ class Ctx:
     py: str = ""  # the pinned environment's python, once there is one
     gpus: int | None = None  # None: as many as torch sees
     shrink: int = 1
-    interrupt: bool = False  # dry run: a deadline at the first progress line after a run finishes
+    interrupt: bool = False  # dry run: a deadline at the first progress line (or begun table)
+    # after a run finishes
     stop_s: float = STOP_S
     cap_bytes: int = CAP_BYTES
 
@@ -1815,6 +1817,18 @@ class Session:
     def tick(self) -> None:
         if time.time() - T0 > self.ctx.stop_s:
             self.deadline("session deadline")
+        # jepa extract prints no progress line for pump to stop on, so the dry run's deadline also
+        # falls once a run is complete and a running extraction has begun a resumable table (#136)
+        if self.ctx.interrupt and any(r.state == "complete" for r in self.runs):
+            begun = [
+                table
+                for r in self.runs
+                if r.state == "running" and r.command == "jepa extract" and r.folder
+                for table in (self.ctx.out / r.folder).glob("latents/*/manifest.json")
+                if not (table.parent / "complete.json").is_file()
+            ]
+            if begun:
+                self.deadline("session deadline, simulated by the dry run")
         if time.time() - self.beat > HEARTBEAT_S:
             self.beat = time.time()
             for r in self.runs:
@@ -2194,8 +2208,8 @@ def rehearse(
     plan: dict, root: Path, python: str, gpus: int, shrink_by: int, sink: Any = None
 ) -> int:
     """Two local sessions of the written kernel: the first stopped by a simulated deadline at the
-    first progress line after a run finishes, the second with the first's output attached. Their
-    output goes to sink, or to this process's own."""
+    first progress line (or begun latents table) after a run finishes, the second with the first's
+    output attached. Their output goes to sink, or to this process's own."""
     script = write_kernel(plan, root / "kernel", resume=True)
     sessions = []
     for n in (1, 2):

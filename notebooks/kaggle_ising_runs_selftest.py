@@ -34,6 +34,7 @@ import ast
 import collections
 import contextlib
 import copy
+import dataclasses
 import hashlib
 import inspect
 import io
@@ -1356,6 +1357,36 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         session.latents(final) == table,
     )
     check("... not the twin's", session.latents(twin) is None)
+
+    def ticked(interrupt: bool, done: bool, running: bool, finished_table: bool) -> bool:
+        """Whether the clock fires the deadline on that begun table (#136): `jepa extract` prints
+        no progress line, so the dry run's deadline cannot wait for one."""
+        at = dataclasses.replace(ctx, interrupt=interrupt)
+        clock = k.Session(at, copy.deepcopy(JEPA_PLAN), {}, COMMIT, TORCH, 2)
+        clock.by_name["m3"].state = "complete" if done else "running"
+        x = clock.by_name["x-final"]
+        x.state, x.folder = ("running" if running else "pending"), f"ising/{NULL}"
+        complete = table / "complete.json"
+        if finished_table:
+            complete.write_text("{}", encoding="utf-8")
+        try:
+            clock.tick()
+        finally:
+            complete.unlink(missing_ok=True)
+        return clock.deadline_hit
+
+    check(
+        "dry run: a run done and an extraction with a begun table fire the deadline (#136)",
+        ticked(interrupt=True, done=True, running=True, finished_table=False),
+    )
+    for what, change in (
+        ("on Kaggle (no --interrupt)", {"interrupt": False}),
+        ("before any run is done", {"done": False}),
+        ("when the extraction is not running", {"running": False}),
+        ("when its table is finished", {"finished_table": True}),
+    ):
+        given = {"interrupt": True, "done": True, "running": True, "finished_table": False}
+        check(f"... and not {what}", not ticked(**{**given, **change}))
     tail, _ = session.resolve(final)
     found = session.latents(final)
     check(
