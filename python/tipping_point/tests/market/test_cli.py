@@ -1,20 +1,24 @@
-"""The two commands end to end on a fake archive (#29 S1-S2): fetch, then labels into a run in
-#22's layout. Two runs give tables with identical sha256 (determinism), the manifest's sources
-are only Binance klines, metrics and funding files (the static circularity check), and the
-confirmatory span and unverified files are refused."""
+"""The commands end to end on a fake archive (#29 S1-S5): fetch, then labels into a run in #22's
+layout. Two runs give tables with identical sha256 (determinism), the manifest's sources are only
+Binance klines, metrics and funding files (the static circularity check), and the confirmatory
+span and unverified files are refused. Then cascade into a run of its own, reports into the labels
+run's reports/ from that run and the cascade run, refusing what does not match, and the floor's
+entry point outside the package (harness/market_floor.py) on the run's own labeller."""
 
 import dataclasses
 import hashlib
 import json
 import re
+import shutil
 from datetime import date
 from pathlib import Path
 
+import market_floor
 import pyarrow.parquet as pq
 import pytest
 from market_planted import vision
 from tipping_point import engine
-from tipping_point.market import archive, msvol
+from tipping_point.market import archive, msvol, reports
 from tipping_point.market.__main__ import main
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
@@ -116,3 +120,153 @@ def test_the_confirmatory_span_and_unverified_files_are_refused(
     data = tmp_path / "data"
     assert main(["labels", *SPAN, "--archive", str(spoilt), "--data-dir", str(data)]) == 1
     assert "SHA-256" in capsys.readouterr().err and not (data / "labels").exists()
+
+
+# ---------------------------------------------------------------- cascade, reports and the floor
+
+# Every threshold at 0 fires on any window whose open interest falls while price and flow agree,
+# so the fake archive's random walks give both symbols candidates for the reports to count.
+LOOSE = ["--trailing-days", "7", "--a", "0", "--b", "0", "--c", "0", "--v", "0"]
+
+
+def _cascade(fetched: Path, data: Path, tag: str, span: list[str]) -> Path:
+    where = ["--archive", str(fetched), "--data-dir", str(data), "--tag", tag]
+    assert main(["cascade", *span, *where, *LOOSE]) == 0
+    (run_dir,) = (data / "labels").glob(f"*-{tag}")
+    return run_dir
+
+
+@pytest.fixture(scope="module")
+def cascades(fetched: Path, run: Path) -> Path:
+    return _cascade(fetched, run.parent.parent, "c", SPAN)
+
+
+@pytest.fixture(scope="module")
+def reported(fetched: Path, run: Path, cascades: Path) -> Path:
+    argv = ["reports", "--run", str(run), "--cascades", str(cascades), "--archive", str(fetched)]
+    assert main(argv) == 0
+    return run / "reports"
+
+
+def test_cascade_writes_its_pooled_list_as_a_run_of_its_own(cascades: Path) -> None:
+    manifest, complete = _json(cascades / "manifest.json"), _json(cascades / "complete.json")
+    assert (manifest["domain"], manifest["tables"]) == ("labels", ["cascades"])
+    assert manifest["params"]["symbols"] == SYMBOLS and manifest["params"]["cascade"]["a"] == 0.0
+    assert manifest["params"]["cascade"]["trailing_days"] == 7
+    assert all(SOURCE.fullmatch(s["url"]) for s in manifest["sources"])
+    rows = engine.read(cascades.parent.parent, "labels", cascades.name, "cascades").to_pylist()
+    assert {r["symbol"] for r in rows} == set(SYMBOLS)
+    assert complete["checks"]["asset_instances"] == len(rows) == complete["rows"]["cascades"]
+
+
+def test_reports_land_in_the_labels_runs_reports_folder(reported: Path) -> None:
+    for name, schemas in (("label_count", reports.LABEL_COUNT), ("stability", reports.STABILITY)):
+        folder = reported / name
+        files = sorted(p.name for p in folder.iterdir())
+        assert files == sorted([*(f"{table}.parquet" for table in schemas), "summary.md"])
+        for table, schema in schemas.items():
+            assert pq.read_table(folder / f"{table}.parquet").schema.equals(schema), table
+        assert (folder / "summary.md").read_text(encoding="utf-8").startswith("# ")
+
+
+def test_reports_count_the_runs_labels_and_the_cascade_runs_list(
+    run: Path, cascades: Path, reported: Path
+) -> None:
+    data = run.parent.parent
+    episodes = engine.read(data, "labels", run.name, "episodes").to_pylist()
+    monthly = pq.read_table(reported / "label_count" / "monthly.parquet").to_pylist()
+    pooled = engine.read(data, "labels", cascades.name, "cascades").to_pylist()
+    counted = pq.read_table(reported / "label_count" / "cascades.parquet").to_pylist()
+    assert [row["symbol"] for row in counted] == SYMBOLS
+    for symbol in SYMBOLS:
+        events = [e for e in episodes if e["symbol"] == symbol and e["kind"] == "event"]
+        assert sum(m["events"] for m in monthly if m["symbol"] == symbol) == len(events)
+        (row,) = [row for row in counted if row["symbol"] == symbol]
+        assert row["candidates"] == sum(r["symbol"] == symbol for r in pooled) > 0
+        assert row["events"] == len(events)
+    inputs = pq.read_table(reported / "label_count" / "inputs.parquet").to_pylist()
+    assert {r["item"]: r["status"] for r in inputs} == {
+        "releases": "not supplied",
+        "cascades": "supplied",
+    }
+    agreement = pq.read_table(reported / "stability" / "agreement.parquet").to_pylist()
+    assert sorted(r["symbol"] for r in agreement if r["against"] == "oracle") == SYMBOLS
+    assert any(r["against"] == "parkinson" for r in agreement)
+    refits = pq.read_table(reported / "stability" / "refits.parquet")
+    assert refits.num_rows == engine.read(data, "labels", run.name, "refits").num_rows
+
+
+def test_reports_refuse_runs_that_do_not_match(
+    fetched: Path, run: Path, cascades: Path, reported: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    where = ["--archive", str(fetched)]
+    before = sorted(reported.iterdir())
+    assert main(["reports", "--run", str(cascades), *where]) == 1
+    assert "is not a labels run" in capsys.readouterr().err
+    assert main(["reports", "--run", str(run), "--cascades", str(run), *where]) == 1
+    assert "is not a cascade run of" in capsys.readouterr().err
+    later = ["--start", "2023-01-09", "--end", "2023-01-29"]
+    shorter = _cascade(fetched, run.parent.parent, "short", later)
+    assert main(["reports", "--run", str(run), "--cascades", str(shorter), *where]) == 1
+    assert "is not a cascade run of" in capsys.readouterr().err
+    assert not (cascades / "reports").exists() and sorted(reported.iterdir()) == before
+
+
+def test_reports_refuse_a_second_run_before_reading_the_archive(
+    run: Path, reported: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The run's reports exist: refused before the fetched files are read (none here)."""
+    assert main(["reports", "--run", str(run), "--archive", str(tmp_path)]) == 1
+    assert f"error: {reported / 'label_count'} exists" in capsys.readouterr().err
+
+
+def test_reports_refuse_a_run_the_fetched_files_no_longer_give(
+    fetched: Path, run: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Relabelled with other parameters than the run's, the series is not the run's: refused, and
+    nothing written."""
+    copy = tmp_path / "labels" / run.name
+    shutil.copytree(run, copy, ignore=shutil.ignore_patterns("reports"))
+    manifest = _json(copy / "manifest.json")
+    manifest["params"]["labeller"]["baseline_days"] = 14
+    (copy / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert main(["reports", "--run", str(copy), "--archive", str(fetched)]) == 1
+    assert "no longer give" in capsys.readouterr().err
+    assert not (copy / "reports").exists()
+
+
+def test_reports_take_an_unchanged_run_whose_refits_failed(fetched: Path, tmp_path: Path) -> None:
+    """A refit with no valid start stores NaN in its theta, log-likelihood and shares. Written as
+    null, labelling the same files again gives back the run's tables, so the reports go through."""
+    where = ["--archive", str(fetched), "--data-dir", str(tmp_path), "--tag", "failed"]
+    assert main(["labels", *SPAN, *where, "--warmup-days", "7", "--baseline-days", "14"]) == 0
+    (run,) = (tmp_path / "labels").glob("*-failed")
+    reasons = engine.read(tmp_path, "labels", run.name, "refits")["reason"].to_pylist()
+    assert reasons.count("no valid start: too few observed bars") == 4  # 01-09 and 01-16
+    assert main(["reports", "--run", str(run), "--archive", str(fetched)]) == 0
+    assert sorted(p.name for p in (run / "reports").iterdir()) == ["label_count", "stability"]
+
+
+def test_the_floor_runs_the_labels_runs_own_labeller_into_its_reports(run: Path) -> None:
+    garch = ["--omega", "1.14e-11", "--alpha", "0.005", "--beta", "0.9949", "--nu", "6"]
+    assert market_floor.main(["--run", str(run), *garch, "--days", "28", "--paths", "2"]) == 0
+    folder = run / "reports" / "floor"
+    files = sorted(p.name for p in folder.iterdir())
+    assert files == sorted([*(f"{table}.parquet" for table in reports.FLOOR), "summary.md"])
+    values = pq.read_table(folder / "garch.parquet").to_pylist()
+    assert values == [
+        {"parameter": "omega", "value": 1.14e-11},
+        {"parameter": "alpha", "value": 0.005},
+        {"parameter": "beta", "value": 0.9949},
+        {"parameter": "nu", "value": 6.0},
+    ]
+    paths = pq.read_table(folder / "paths.parquet").to_pylist()
+    # the run's 14-day warm-up refits on days 14 and 21; the default 184 days would never refit
+    assert [p["refits"] for p in paths] == [2, 2]
+    cells = pq.read_table(folder / "cells.parquet").to_pylist()
+    pairs = [(c["scorer"], c["horizon_bars"]) for c in cells]
+    assert pairs == [(s, h) for s in ("variance", "ac") for h in market_floor.HORIZONS]
+    assert pq.read_table(folder / "path_cells.parquet").num_rows == 2 * len(cells)
+    first = (folder / "summary.md").read_text(encoding="utf-8").split("\n\n")[1]
+    assert "seed = 29, paths = 2, days = 28" in first
+    assert first.count("window=60, length=240") == len(market_floor.SCORERS)

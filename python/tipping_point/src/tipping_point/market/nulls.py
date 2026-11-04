@@ -10,13 +10,14 @@ research pass section 4, "Circularity, dynamic", section 2 item 12, call 7).
   shift_onsets       the event-time shift null: events moved to eligible bars at least a day away
   circularity_floor  simulate at 10 seconds, build 1-minute OHLC, run the exact bars and labeller,
                      score close-to-close 1-minute returns: the AUC of pre-onset segments against
-                     null slices, and of shifted segments against the same slices
+                     null slices, pooled over the paths and per path (the floor's own spread),
+                     and of shifted segments against the same slices
 
 The floor takes its scorers and its AUC as inputs. A scorer is any ews.trend.Pipeline, whose
 windows and horizons #30's pre-registration fixes; scoring.auc is the AUC. No module of this package
 may import those (tests/market/test_circularity.py: the labels cannot see the features), and the
 floor needs nothing of them but the call. The GARCH parameters are an input too: their fit on the
-2023 pilot year belongs to #29 S5.
+2023 pilot year belongs to #29 S5. harness/market_floor.py assembles them all for a labels run.
 
 Lengths: a segment or slice is `span` 1-minute samples. Bar b covers minutes [5b, 5b + 5), so the
 segment at horizon h bars before onset bar b ends just before minute 5(b - h): it holds nothing of
@@ -256,6 +257,7 @@ class Scorer(Protocol):
 class Floor(NamedTuple):
     cells: list[dict[str, Any]]  # one per (scorer, horizon)
     paths: list[dict[str, Any]]  # one per simulated path
+    path_cells: list[dict[str, Any]]  # one per (path, scorer, horizon)
 
 
 def circularity_floor(
@@ -272,10 +274,11 @@ def circularity_floor(
     first: date = FIRST,
 ) -> Floor:
     """The AUC a clustering process with no critical dynamics gives each scorer at each horizon
-    (in bars), pooled over `paths` simulated series of `days` days, and the same with each path's
-    events shifted, per draw; an event with no eligible bar a day away counts in its path's
-    unshifted_events and stays out of the shift. A horizon below the worst path's p90 detection
-    delay, or with no delay known, is marked contaminated (research pass section 2, item 12)."""
+    (in bars), pooled over `paths` simulated series of `days` days and per path, and the pooled
+    one with each path's events shifted, per draw; an event with no eligible bar a day away counts
+    in its path's unshifted_events and stays out of the shift. A horizon below the worst path's p90
+    detection delay, or with no delay known, is marked contaminated (research pass section 2, item
+    12)."""
     params = params or msvol.Params()
     refuse_confirmatory(archive.day_ms(first + timedelta(days=days - 1)) * 1_000_000)
     start_ms = archive.day_ms(first)
@@ -285,7 +288,7 @@ def circularity_floor(
     pos: dict[tuple[str, int], list[np.ndarray]] = {(s, h): [] for s in scorers for h in horizons}
     moved: dict[tuple[str, int], list[np.ndarray]] = {key: [] for key in pos}
     neg: dict[str, list[np.ndarray]] = {s: [] for s in scorers}
-    summary = []
+    summary, path_cells = [], []
     for path in range(paths):
         rng = np.random.default_rng([seed, path])
         klines = minute_klines(start_ms, simulate(garch, days * DAY_STEPS, rng))
@@ -297,10 +300,21 @@ def circularity_floor(
         eligible = eligible[eligible >= room]
         shifted, kept = shift_onsets(onsets, eligible, min_offset, draws, rng)
         for name, scorer in scorers.items():
-            neg[name].append(_score(scorer, null_rows(minutes, out.nulls, scorer.span)))
+            negative = _score(scorer, null_rows(minutes, out.nulls, scorer.span))
+            neg[name].append(negative)
             for h in horizons:
-                rows = pre_onset_rows(minutes, onsets, h, scorer.span)
-                pos[name, h].append(_score(scorer, rows))
+                positive = _score(scorer, pre_onset_rows(minutes, onsets, h, scorer.span))
+                pos[name, h].append(positive)
+                path_cells.append(
+                    {
+                        "path": path,
+                        "scorer": name,
+                        "horizon_bars": h,
+                        "auc": auc(positive, negative),
+                        "n_pos": int(np.isfinite(positive).sum()),
+                        "n_neg": int(np.isfinite(negative).sum()),
+                    }
+                )
                 rows = pre_onset_rows(minutes, shifted.ravel(), h, scorer.span)
                 moved[name, h].append(_score(scorer, rows).reshape(draws, -1))
         theta = final_theta(out)
@@ -346,7 +360,7 @@ def circularity_floor(
                 "shift_draws": int(null_aucs.size),
             }
         )
-    return Floor(cells, summary)
+    return Floor(cells, summary, path_cells)
 
 
 def _score(scorer: Scorer, rows: np.ndarray) -> np.ndarray:

@@ -381,6 +381,12 @@ def test_the_floor_runs_end_to_end_on_events_and_null_slices(floor: nulls.Floor)
     for cell in floor.cells:
         assert cell["n_pos"] == n_events and cell["n_neg"] >= 50
         assert cell["shift_draws"] == nulls.SHIFT_DRAWS
+        key = cell["scorer"], cell["horizon_bars"]
+        own = [c for c in floor.path_cells if (c["scorer"], c["horizon_bars"]) == key]
+        assert [c["path"] for c in own] == [0, 1, 2]
+        assert sum(c["n_pos"] for c in own) == cell["n_pos"]
+        assert sum(c["n_neg"] for c in own) == cell["n_neg"]
+    assert len(floor.path_cells) == 3 * len(floor.cells)
 
 
 class Recording:
@@ -473,6 +479,44 @@ def test_the_floor_scores_the_labellers_own_segments_of_close_to_close_returns()
         assert np.all(out.h[bar - SMALL.refractory : bar] >= 0)
 
 
+def test_each_paths_auc_reads_its_own_segments_against_its_own_slices() -> None:
+    """The floor's own spread (#111): per path and cell, the AUC of that path's pre-onset segments
+    against that path's null slices alone, which the pooled AUC mixes over every path."""
+    seed, days, horizons, paths = 8, 35, (0, 6), 2  # both paths hold events and null slices
+    recording = Recording()
+    found = nulls.circularity_floor(
+        FLOOR_GARCH,
+        {"recording": recording},
+        scoring.auc,
+        horizons,
+        days=days,
+        paths=paths,
+        seed=seed,
+        params=SMALL,
+        draws=3,
+    )
+    per_path = 1 + 2 * len(horizons)  # the null slices, then each horizon's segments and shifts
+    assert len(recording.calls) == paths * per_path
+    want = []
+    for path in range(paths):
+        null_slices, *cut = recording.calls[path * per_path : (path + 1) * per_path]
+        for h, segments in zip(horizons, cut[::2], strict=True):
+            assert len(segments) and len(null_slices)
+            score = scoring.auc(segments[:, -1], null_slices[:, -1])
+            want.append((path, "recording", h, score, len(segments), len(null_slices)))
+    keys = ("path", "scorer", "horizon_bars", "auc", "n_pos", "n_neg")
+    assert [tuple(c[k] for k in keys) for c in found.path_cells] == want
+    assert want[0][3] != want[len(horizons)][3]  # the paths differ: the spread is there to see
+    for cell in found.cells:
+        own = [c for c in found.path_cells if c["horizon_bars"] == cell["horizon_bars"]]
+        assert sum(c["n_pos"] for c in own) == cell["n_pos"]
+    report = reports.floor(found, FLOOR_GARCH, {})
+    table = report.tables["path_cells"]
+    assert table.schema.equals(reports.FLOOR["path_cells"])
+    assert table.to_pylist() == found.path_cells
+    assert "## AUC per path: the floor's own spread" in report.summary
+
+
 def test_an_event_that_cannot_move_a_day_is_counted_and_the_rest_stay_on_eligible_bars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -500,7 +544,7 @@ def test_an_event_that_cannot_move_a_day_is_counted_and_the_rest_stay_on_eligibl
     shifted = recording.calls[-1]
     assert shifted.shape == (draws * (onsets.size - 1), 299)
     assert np.isin(_moved_bars(minutes, shifted, h), near).all()
-    report = reports.floor(found, FLOOR_GARCH)
+    report = reports.floor(found, FLOOR_GARCH, {})
     assert report.tables["paths"]["unshifted_events"].to_pylist() == [1]
     assert f"1 of the {onsets.size} events had no eligible bar a day away" in report.summary
 
@@ -527,7 +571,7 @@ def test_a_path_too_short_to_move_any_event_a_day_says_so_and_shifts_nothing() -
     assert cell["n_pos"] == path["events"]
     assert cell["shift_draws"] == 0 and math.isnan(cell["shift_auc_median"])
     assert sum(len(rows) for rows in recording.calls) == cell["n_pos"] + cell["n_neg"]
-    report = reports.floor(found, FLOOR_GARCH)
+    report = reports.floor(found, FLOOR_GARCH, {})
     assert report.tables["cells"]["shift_auc_median"].null_count == 1
     assert report.tables["paths"]["unshifted_events"].to_pylist() == [path["events"]]
     n = path["events"]
@@ -616,11 +660,17 @@ def test_the_floor_and_its_report_repeat_under_a_seed(tmp_path: Any) -> None:
     assert repr(_small_floor(9)) != repr(a)
     assert a.cells[0]["n_pos"] > 0 and a.cells[0]["n_neg"] > 0  # something to repeat
     written = [
-        reports.write(reports.floor(found, FLOOR_GARCH), tmp_path / name)
+        reports.write(reports.floor(found, FLOOR_GARCH, {}), tmp_path / name)
         for found, name in ((a, "a"), (b, "b"))
     ]
     names = sorted(p.name for p in written[0].iterdir())
-    assert names == ["cells.parquet", "garch.parquet", "paths.parquet", "summary.md"]
+    assert names == [
+        "cells.parquet",
+        "garch.parquet",
+        "path_cells.parquet",
+        "paths.parquet",
+        "summary.md",
+    ]
     for name in names:
         assert (written[0] / name).read_bytes() == (written[1] / name).read_bytes()
     summary = (written[0] / "summary.md").read_text(encoding="utf-8")
@@ -649,7 +699,7 @@ def test_a_process_with_no_clustering_gives_no_labels_and_no_crash() -> None:
     assert path["events"] == path["unshifted_events"] == 0 and math.isnan(path["delay_p90"])
     assert math.isnan(cell["auc"]) and cell["n_pos"] == cell["n_neg"] == 0
     assert cell["contaminated"] and cell["shift_draws"] == 0
-    report = reports.floor(found, Garch(1e-7, 0.0, 0.0, 6.0))
+    report = reports.floor(found, Garch(1e-7, 0.0, 0.0, 6.0), {})
     assert report.tables["cells"]["auc"].null_count == 1
 
 

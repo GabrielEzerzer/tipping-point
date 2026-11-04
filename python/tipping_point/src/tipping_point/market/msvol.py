@@ -546,7 +546,12 @@ def tables(series: dict[str, tuple[dict[str, np.ndarray], Labels]]) -> dict[str,
             ],
         }
         for name, found in rows.items():
-            parts[name].append(pa.Table.from_pylist(found, schema=SCHEMAS[name]))
+            # NaN as null, as in _table: the reports check's Table.equals never matches NaN to NaN
+            clean = [
+                {k: None if isinstance(v, float) and math.isnan(v) else v for k, v in r.items()}
+                for r in found
+            ]
+            parts[name].append(pa.Table.from_pylist(clean, schema=SCHEMAS[name]))
     return {
         name: pa.concat_tables(found).sort_by([("ts_ns", "ascending"), ("symbol", "ascending")])
         if found

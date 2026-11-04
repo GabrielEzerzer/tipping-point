@@ -10,6 +10,9 @@ summary for the issue. Nothing in them reads a clock, so a report repeats byte f
   floor        the tables of nulls.circularity_floor
   write        <out dir>/<name>/<table>.parquet and summary.md
 
+The out dir is the reports/ folder of the labels run they describe: `python -m tipping_point.market
+reports` writes the first two there, and harness/market_floor.py the floor.
+
 An input that comes from elsewhere is optional: the committed CPI, NFP and FOMC calendar (call 10),
 the cascade candidates (S4) and the aggTrades RV. Without it the report's `inputs` table and its
 summary say "not supplied", and its table is empty.
@@ -173,6 +176,9 @@ FLOOR = {
         flickers=_INT,
         null_bars=_INT,
         delay_p90=_FLOAT,
+    ),
+    "path_cells": _schema(
+        path=_INT, scorer=_TEXT, horizon_bars=_INT, auc=_FLOAT, n_pos=_INT, n_neg=_INT
     ),
 }
 
@@ -756,15 +762,18 @@ def _stability_summary(
 # ---------------------------------------------------------------- the floor's tables
 
 
-def floor(found: nulls.Floor, garch: nulls.Garch) -> Report:
-    """The floor's tables and summary. `garch` is what the floor ran on, kept with its result."""
+def floor(found: nulls.Floor, garch: nulls.Garch, settings: Mapping[str, Any]) -> Report:
+    """The floor's tables and summary. `garch` and `settings` (its seed, paths, days and scorers)
+    are what the floor ran on, kept with its result."""
     values = asdict(garch)
     tables = {
         "garch": _table(FLOOR["garch"], [{"parameter": k, "value": v} for k, v in values.items()]),
         "cells": _table(FLOOR["cells"], found.cells),
         "paths": _table(FLOOR["paths"], found.paths),
+        "path_cells": _table(FLOOR["path_cells"], found.path_cells),
     }
     parameters = ", ".join(f"{k} = {v:g}" for k, v in values.items())
+    ran_with = ", ".join(f"{k} = {v}" for k, v in settings.items())
     events = sum(p["events"] for p in found.paths)
     unshifted = sum(p["unshifted_events"] for p in found.paths)
     stranded = (
@@ -779,9 +788,11 @@ def floor(found: nulls.Floor, garch: nulls.Garch) -> Report:
             f"GARCH(1,1)-t at 10 seconds, {parameters}, through the exact bars and labeller, over "
             f"{len(found.paths)} simulated paths with {events} events. A clustering process with "
             "no critical dynamics gives this AUC by construction: a real AUC counts only above "
-            f"it.{stranded}",
+            f"it.{stranded}\nThe floor ran with {ran_with}.",
             "## AUC of pre-onset segments against null slices, and of shifted events",
             _markdown(tables["cells"]),
+            "## AUC per path: the floor's own spread",
+            _markdown(tables["path_cells"]),
             "## Paths",
             _markdown(tables["paths"]),
             "",
