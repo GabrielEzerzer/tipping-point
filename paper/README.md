@@ -13,8 +13,10 @@ With a TeX distribution installed (TeX Live or MiKTeX, both ship `latexmk`), run
 latexmk -pdf main.tex
 ```
 
-`latexmk` runs pdfLaTeX and BibTeX as many times as the references need. The build outputs are
-ignored by git. On Overleaf, upload the contents of `paper/` (keeping `figures/`), set the main
+`latexmk` runs pdfLaTeX and BibTeX as many times as the references need. Without a TeX distribution,
+the single-binary Tectonic engine (https://tectonic-typesetting.github.io, version 0.17.0 was used)
+builds the same PDF with `tectonic --keep-logs main.tex` from `paper/`, fetching the packages it needs
+on first use. The build outputs are ignored by git. On Overleaf, upload the contents of `paper/` (keeping `figures/`), set the main
 document to `main.tex` and the compiler to pdfLaTeX.
 
 The file is in its preprint form. The comment at the top of `main.tex` explains how to switch to the
