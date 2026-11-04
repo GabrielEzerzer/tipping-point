@@ -76,7 +76,7 @@ NOISE = [  # what every child printed on Kaggle's image (tp-tauc-l64-l128's log)
     "Error in sitecustomize; set PYTHONVERBOSE for traceback:",
     "ModuleNotFoundError: No module named 'wrapt'",
 ]
-# written out, not k.NO_EXTRACT_SEEDS: a slip in the runner's constant must turn these red (#126)
+# written out, not read from the runner or the wheel: a slip in either must turn these red (#126)
 CONFIRMATORY_SEEDS = range(6, 11)
 results: list[bool] = []
 
@@ -1187,31 +1187,28 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         plan["runs"][1]["args"][1] = target
         return refused(k, plan)
 
-    reached = [
-        seed
+    turned = {
+        seed: why
         for seed in CONFIRMATORY_SEEDS
-        if f"has seed {seed}:"
-        not in extract_on({"dataset_run": f"20261101T000000Z-L16-null-e2-s{seed}"})
-    ]
-    check("refused: jepa extract on a dataset run at any of seeds 6-10", not reached, reached)
+        if (why := extract_on({"dataset_run": f"20261101T000000Z-L16-null-e2-s{seed}"}))
+    }
+    check("accepted: jepa extract on a dataset run at any of seeds 6-10", not turned, turned)
     untagged = {"dataset_run": "20261101T000000Z-train"}
-    check(
-        "refused: jepa extract on a run whose seed it cannot read",
-        "no seed" in extract_on(untagged),
-    )
+    why = extract_on(untagged)
+    check("accepted: jepa extract on a dataset run whose id names no seed", not why, why)
     plan = copy.deepcopy(JEPA_PLAN)
     plan["runs"].insert(1, {"name": "sim", "command": "null", "args": []})
     plan["runs"][2]["args"][1] = {"run": "sim"}
-    reached = []
+    turned = {}
     for seed in CONFIRMATORY_SEEDS:
         for given in seed_spellings(seed):
             plan["runs"][1]["args"] = ["--L", 16, *given]
-            if f"has seed {seed}:" not in refused(k, plan):
-                reached.append(given)
+            if why := refused(k, plan):
+                turned[str(given)] = why
     check(
-        "refused: jepa extract on this plan's own run at any of seeds 6-10, in any spelling",
-        not reached,
-        reached,
+        "accepted: jepa extract on this plan's own run at any of seeds 6-10, in any spelling",
+        not turned,
+        turned,
     )
 
     def cli_reads(given: list) -> int | None:
@@ -1225,22 +1222,6 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
 
     misread = [(g, cli_reads(g)) for g in seed_spellings(7) if cli_reads(g) != 7]
     check("... each of those spellings being one the CLI itself reads so", not misread, misread)
-    plan["runs"][1]["args"] = ["--L", 16]  # no --seed: the CLI's seed 1
-    check("... and accepted at the CLI's default seed 1", not refused(k, plan), refused(k, plan))
-    plan["runs"][1]["args"] = ["--L", 16, "--seed", 7, "--seed", 1]
-    check("... and when seed 1 is given last", not refused(k, plan), refused(k, plan))
-    taken = []
-    for given in (["--sweeps", 7], ["--saves=7"], ["--", 7], ["-s", 7], ["", 7]):
-        plan["runs"][1]["args"] = ["--L", 16, *given]
-        if refused(k, plan):
-            taken.append(given)
-    check("... and a flag that only starts alike is not taken for --seed", not taken, taken)
-    unread = []
-    for given in (["--seed=x"], ["--seed="], ["--see"], ["--seed", {"run": "m3"}]):
-        plan["runs"][1]["args"] = ["--L", 16, *given]
-        if "no seed to read" not in refused(k, plan):
-            unread.append(given)
-    check("refused: jepa extract on this plan's own run with no seed to read", not unread, unread)
     for what, change, needle in (
         ("a stage entry that is no run id", {"stage": ["L16-qs-s11"]}, "stage: a list of run ids"),
         ("a staged run listed twice", {"stage": [STAIRS[0], STAIRS[0]]}, "listed twice"),
@@ -1350,19 +1331,21 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         session.latents(final) == table,
     )
     check("... not the twin's", session.latents(twin) is None)
-    session.refuse_seeds(final)
-    check("seed 1 may be extracted", True)
     own = ctx.out / "ising" / NULL / "manifest.json"
-    reached = []
+    turned = {}
     for seed in CONFIRMATORY_SEEDS:
         own.write_text(json.dumps({"params": {"seed": seed}}), encoding="utf-8")
         try:
-            session.refuse_seeds(final)
-            reached.append(seed)
+            session.resolve(final)
+            if session.latents(final) != table:
+                turned[seed] = "its latents table is not found"
         except k.RunError as exc:
-            if f"has seed {seed}:" not in str(exc):
-                reached.append(seed)
-    check("each of seeds 6-10 is refused again from the run's own manifest", not reached, reached)
+            turned[seed] = str(exc)
+    check(
+        "a run at any of seeds 6-10, by its own manifest, resolves and finds its latents table",
+        not turned,
+        turned,
+    )
     own.write_text(json.dumps({"params": {"seed": 1}}), encoding="utf-8")
 
     session.prior = {
@@ -1692,7 +1675,7 @@ def kernel_acceptance(k: ModuleType, root: Path) -> None:
 
 def invalid_plans(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN_JSON
     bad = copy.deepcopy(JEPA_PLAN)
-    bad["runs"][1]["args"][1] = {"dataset_run": "20261101T000000Z-L16-null-e2-s7"}
+    bad["runs"][1]["args"][0] = {"dataset_run": NULL}  # two simulator runs, no checkpoint
     path = root / "bad.json"
     root.mkdir(parents=True)
     path.write_text(json.dumps(bad), encoding="utf-8")
@@ -1712,7 +1695,7 @@ def invalid_plans(k: Any, root: Path) -> None:  # Any: it swaps the module's PLA
         said = (ctx.out / "STATUS").read_text(encoding="utf-8")
         check(
             "a kernel holding an invalid plan runs nothing: STATUS refused, exit 1",
-            code == 1 and said.startswith("refused:") and "seed 7" in said,
+            code == 1 and said.startswith("refused:") and "reads one checkpoint" in said,
             f"exit {code}: {said}",
         )
         k.PLAN_JSON = None
@@ -1933,17 +1916,17 @@ def pilot_28(k: ModuleType, root: Path) -> None:
         and tail[2:] == ["--select", "tc-plus"],
         tail,
     )
-    refused_seeds = []
+    unresolved = []
     for r in session.runs:
         if r.command == "jepa extract":
             try:
-                session.refuse_seeds(r)
+                session.extract_paths(r)
             except k.RunError as exc:
-                refused_seeds.append(str(exc))
+                unresolved.append(str(exc))
     check(
-        "pilot-28: every extraction passes refuse_seeds, on stand-ins built from their ids",
-        not refused_seeds,
-        refused_seeds,
+        "pilot-28: every extraction names its checkpoint and its simulator run",
+        not unresolved,
+        unresolved,
     )
     every = flag_ints(runs["timing"]["args"], "--checkpoint-every")[0]
     ends = [*range(every, trainings["timing"][2] + 1, every), trainings["timing"][2]]  # + closing
@@ -2398,12 +2381,13 @@ def first_read(k: ModuleType, root: Path, model: str) -> None:
         len(runs) == 60 and all(pairs[(n, d)] == 1 for n in entries for d in runs),
         len(runs),
     )
-    reaching = []
+    turned = {}
     for seed in CONFIRMATORY_SEEDS:
         variant = copy.deepcopy(plan)
         variant["runs"][-1]["args"][1]["dataset_run"] = f"20261025T031229Z-L32-ramp-x2-s{seed}"
-        reaching.append(f"has seed {seed}: jepa extract never reads" in refused(k, variant))
-    check(f"{label}: a run at any of seeds 6-10 would be refused at load", all(reaching))
+        if why := refused(k, variant):
+            turned[seed] = why
+    check(f"{label}: a run at any of seeds 6-10 is accepted at load", not turned, turned)
 
     # on the mounts Kaggle gives it: the model's bytes are stand-ins here, the runner checks the
     # real ones
@@ -2458,16 +2442,16 @@ def first_read(k: ModuleType, root: Path, model: str) -> None:
         and f"input/{trained}/{k.FINAL}" in key,
         tail,
     )
-    refused_seeds = []
+    unresolved = []
     for r in session.runs:
         try:
-            session.refuse_seeds(r)
+            session.extract_paths(r)
         except k.RunError as exc:
-            refused_seeds.append(str(exc))
+            unresolved.append(str(exc))
     check(
-        f"{label}: every run passes refuse_seeds, on stand-ins built from their ids",
-        not refused_seeds,
-        refused_seeds,
+        f"{label}: every extraction names its checkpoint and its simulator run",
+        not unresolved,
+        unresolved,
     )
     for name in ("x-twin-L16-qs-s1", "x-final-L16-qs-s1"):
         table = ctx.out / "ising" / staircase / "latents" / name

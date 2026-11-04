@@ -39,7 +39,7 @@ STATUS, and the exit-code policy.
   "stage" lists runs a training reads (it finds them by L and seed). Before any run starts, each is
   placed in out/ising/<run id> (inputs are read-only, and an extraction writes inside its run:
   copied, hard linked on one filesystem, or unpacked) and checked with `jepa verify`. A copy that
-  gains no latents leaves the output at the end. `jepa extract` never reads seeds 6-10.
+  gains no latents leaves the output at the end.
 - gpu pins a run to one GPU. The others go to whichever GPU is free, longest first, by the CLI's
   own schedule length at the preflight's measured rate.
 
@@ -142,10 +142,6 @@ SITE_NOISE = ("wrapt==1.17.3",)
 ISING_COMMANDS = ("pilot", "staircase", "ramp", "null")
 COMMANDS = (*ISING_COMMANDS, "jepa train", "jepa extract")
 RUNNER_FLAGS = ("--device", "--data-dir", "-h", "--help")
-# shortcut: refuses the confirmatory seeds outright, lift it in the change that follows the
-# ising-latent-v1 freeze tag (#28 call 11), which slice 4's extraction needs
-NO_EXTRACT_SEEDS = range(6, 11)
-SEED_TAG = re.compile(r"-s(\d+)$")  # every run tag the CLI writes ends in -s<seed>
 # what tipping_point.jepa.train names (TWIN, FINAL, LEDGER); the self-test holds them to it
 TWIN, FINAL, LEDGER = "ckpt/step_0000000.pt", "final.pt", "gpu_hours.jsonl"
 SESSION_S = 9 * 3600  # Kaggle's session cap
@@ -471,38 +467,15 @@ def ref_problems(ref: dict, earlier: dict[str, dict], inputs: dict, sourced: boo
     ]
 
 
-def extract_seeds(args: list, earlier: dict[str, dict]) -> list[tuple[object, int | None]]:
-    """The seeds of the simulator runs a `jepa extract` reads: a dataset run's from its run id's
-    -s<seed> tag, an earlier simulator run's from its --seed as argparse reads it: --seed N or
-    --seed=N, any prefix of the flag, the last one given, the CLI's 1 when it gives none."""
-    found: list[tuple[object, int | None]] = []
-    for arg in args:
-        if not isinstance(arg, dict):
-            continue
-        if "dataset_run" in arg:
-            tag = SEED_TAG.search(str(arg["dataset_run"]))
-            found.append((arg["dataset_run"], int(tag[1]) if tag else None))
-        elif earlier.get(str(arg.get("run")), {}).get("command") in ISING_COMMANDS:
-            seed = "1"
-            for item, after in itertools.pairwise([*earlier[arg["run"]]["args"], None]):
-                flag, equals, value = str(item).partition("=")
-                if len(flag) > 2 and "--seed".startswith(flag):
-                    seed = value if equals else str(after)
-            found.append((arg["run"], int(seed) if seed.isdecimal() else None))
-    return found
-
-
 def extract_problems(args: list, earlier: dict[str, dict]) -> list[str]:
-    """A `jepa extract` reads one checkpoint and one simulator run, each a reference, and never
-    seeds 6-10 (#28: no latents of them before the freeze)."""
+    """A `jepa extract` reads one checkpoint and one simulator run, each a reference."""
     problems = []
-    runs = extract_seeds(args, earlier)
-    for target, seed in runs:
-        if seed is None:
-            problems.append(f"{target}: no seed to read, and jepa extract never reads 6-10")
-        elif seed in NO_EXTRACT_SEEDS:
-            problems.append(f"{target} has seed {seed}: jepa extract never reads seeds 6-10")
     refs = [a for a in args if isinstance(a, dict)]
+    runs = [
+        a
+        for a in refs
+        if "dataset_run" in a or earlier.get(str(a.get("run")), {}).get("command") in ISING_COMMANDS
+    ]
     checkpoints = [
         a
         for a in refs
@@ -1494,8 +1467,6 @@ class Session:
         prefix = f"[gpu{gpu} {run.name}] "
         try:
             tail, run.key = self.resolve(run)
-            if run.command == "jepa extract":
-                self.refuse_seeds(run)
         except RunError as exc:
             return "failed", str(exc)
         found, how = self.adopt(run)
@@ -1545,14 +1516,6 @@ class Session:
             if (params.get("checkpoint") or {}).get("sha256") == digest:
                 return manifest.parent
         return None
-
-    def refuse_seeds(self, run: Run) -> None:
-        """#28's hard rule, read again from the simulator run's own manifest: no latents of
-        seeds 6-10 (the confirmatory runs) before the freeze."""
-        _, target = self.extract_paths(run)
-        seed = ((read_json(target / "manifest.json") or {}).get("params") or {}).get("seed")
-        if not isinstance(seed, int) or seed in NO_EXTRACT_SEEDS:
-            raise RunError(f"{target.name} has seed {seed}: jepa extract never reads seeds 6-10")
 
     def adopt(self, run: Run) -> tuple[Path | None, str | None]:
         """The previous session's folder for this run, carried into this output, when it was made
