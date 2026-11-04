@@ -14,23 +14,69 @@ API, answers fixed questions about a JSON summary of the measurements, and a too
 investigates only when its answer is confident. The desktop app and the agent layer are product,
 not part of the paper's claim.
 
-## Status as of 25 October 2026
+## Status as of 4 November 2026
 
 - Built and tested: the Rust market-data engine, with live and archive venues, storage and replay,
   and the engine API; the GPU Ising simulator, validated against exact results; the classic
-  early-warning scoring, with its pre-registration tooling; the JEPA world-model core.
-- In progress: the pre-registered confirmatory datasets at L = 16, 32 and 64, generated only after
-  the pre-registration is frozen as a git tag; JEPA training.
+  early-warning scoring, with its pre-registration tooling; the JEPA world-model core; the
+  pre-registered confirmatory datasets at L = 16, 32 and 64, and the classic baseline scored on
+  them (below).
+- In progress: the latent experiment, pre-registered and frozen as `prereg/ising-latent-v1`
+  (extraction on Kaggle, then scoring).
 - Planned: the market experiments, the desktop app and the paper, aimed at an ICLR 2027 workshop.
 
 The plan lives on the issue tracker, starting from the map in [#1](https://github.com/GabrielEzerzer/tipping-point/issues/1).
 The pre-registration's design and the decisions behind it are in [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26).
 
-## Results so far (exploratory, not pre-registered)
+## Results: the pre-registered classic baseline (ising-ews-v1)
 
-- At Tc the Binder ratio is 1.1709 at L = 16 and 1.1625 at L = 32, and both 95% CIs contain the exact value, 1.1679.
-- From L = 16 to 32, L^2 Var(|m|) scales as L^1.67 [1.57, 1.76] and the mean |m| as L^-0.113 [-0.125, -0.101]; the exact exponents, 7/4 and -1/8, lie inside these 95% CIs, -1/8 at the edge.
-- Two sizes give a slope, not a test: the pre-registered test at L = 16, 32 and 64 is next ([full tables on #26](https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6390788147)).
+The pre-registration `paper/prereg/ising-ews-v1.toml`, frozen as the tag `prereg/ising-ews-v1`
+(commit aa29cbc), was scored on 4 November 2026 at commit 22da489 from a clean tree, with seed 26
+for the bootstrap and surrogate draws. It read the 75 confirmatory runs generated on Kaggle from the
+tagged commit (seeds 6-10 at L = 16, 32 and 64: slow ramps, fixed-T null runs and staircases), and
+no null block or staircase plateau was dropped. The result is run `20261104T095100Z-ising-ews-v1`,
+and that one scoring spent the whole budget of 972 trials.
+
+![The five judged exponents against their exact values, and the eps_L at which the rolling variance of |m| peaks at each L](paper/figures/ising-ews-v1.png)
+
+Left, each judged exponent minus its exact value, with its 95% CI and its pre-registered tolerance in grey (1 - AC1 is judged on its sign alone, so it has no band); right, the median eps_L at which each replica's rolling Var(|m|) peaks, with interquartile ranges, where a flat line in L means finite-size scaling.
+
+All five hypotheses pass.
+
+1. **static-positive-control: pass.** At the staircase plateau nearest Tc, the fitted exponent of
+   L^2 Var(|m|) is 1.766 [1.739, 1.792] against 7/4 (tolerance 0.1), that of the mean |m| is
+   -0.1253 [-0.1289, -0.1219] against -1/8 (tolerance 0.02), and that of the skewness of |m| is
+   -0.011 [-0.022, 0.002] against 0 (tolerance 0.1). The exponent of tau_int(|m|), reported without
+   a verdict, is 2.199 [2.147, 2.252]; the dynamic exponent z of local Metropolis is about 2.17.
+2. **classic-rise: pass.** At the headline cell (window 20 tau_c, bandwidth 10 tau_c), on the dense
+   cadence, the AUC of Var(|m|) and of the lag-1 autocorrelation of |m| against the fixed-T nulls is
+   1.000, with CI [1.000, 1.000], at every L and at every horizon h = 0, 1 and 2.
+3. **skewness-falls: pass.** In the same cell, the AUC of the skewness of |m| lies between 0.000 and
+   0.028, and every CI lies below 0.5.
+4. **dynamic-fss: pass.** 1/nu, fitted on the eps_L at which each replica's rolling Var(|m|) peaks
+   on the dense cadence, is 1.007 [0.930, 1.143], with every bootstrap draw used. The median peak
+   eps_L is 0.63, 0.57 and 0.62 at L = 16, 32 and 64, and every replica's peak was located inside
+   the search band (edge fraction 0). The matched cadence's robustness row, reported without a
+   verdict, gives 0.935 [0.792, 1.095].
+5. **ac1-reference: pass.** The exponent of 1 - AC1(|m|) at a one-sweep lag is -1.728
+   [-1.757, -1.700], negative with a CI that excludes 0. It tracks -gamma/nu = -7/4, not -z.
+
+Reported without a verdict: with the alarm threshold set for one false alarm per 1000 tau_c, the
+held-out half of the null runs gives 0.72 to 1.29 false alarms per 1000 tau_c. On the dense
+cadence, Var and AC1 of |m| are already above their thresholds in every replica when the alarm band
+opens at eps_L = 2. The skewness is too in 76 to 80% of the replicas, and the rest alarm inside the
+band at a median eps_L of about 1.7. At the headline cell, the matched cadence weakens AC1 of |m| at
+L = 64 (AUC 0.80 to 0.83). With the energy as the observable, on the dense cadence, Var reaches an
+AUC of 0.999 to 1.000 and AC1 0.83 to 1.00, while the skewness is weak (0.18 to 0.46). The surrogate
+tests give 3.8 to 6.9% false positives at alpha = 0.05. At this ramp rate (x = 0.02) the classic
+indicators are a saturated positive control: the judged discrimination questions (hypotheses 2
+and 3) land at or near AUC 1 and 0, so the exponents are the informative numbers.
+
+To reproduce: with the 75 runs in the data dir, `uv run python -m tipping_point.ews score --prereg paper/prereg/ising-ews-v1.toml` scores them, and `uv run --with matplotlib==3.10.3 python harness/ews_v1_figure.py <result folder> paper/figures/ising-ews-v1.png` redraws the figure from the result.
+
+The exploratory tables from the seeds 1-5 datasets at L = 16 and 32, on
+[#26](https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6390788147), are
+superseded by this result.
 
 ## Quick start
 
