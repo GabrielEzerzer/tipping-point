@@ -5,12 +5,17 @@ freeze    refuse a file with placeholders, or one that is untracked or differs f
           the commit prereg/<id>-v<k> (an annotated tag: it carries its own timestamp)
 frozen    the file's sha256 must equal that of the blob at its tag; scoring refuses otherwise
 stamp     what a result's manifest records: the prereg's id, version, sha256, tag and commit
-write_result  <data dir>/ews/<run_id>/ in #22's layout: manifest.json (stamped), one Parquet
-          file per table, its trials logged, complete.json last: a crash leaves a folder with no
-          complete.json, or one whose every trial is logged
+begin_result  <data dir>/ews/<run_id>/ and its manifest.json (stamped, with the resume key a
+          scoring must share to carry the folder on after a crash), before anything is scored
+save_part a finished unit of a scoring (a checkpoint's pass, a probe) in the folder's parts/, which
+          a resumed scoring reads back instead of computing again
+finish_result  the rest of #22's layout: one Parquet file per table, its trials logged,
+          complete.json last: a crash leaves a folder with no complete.json, or one whose every
+          trial is logged. write_result is both at once
 log_trials append evaluations to <data dir>/ews/trials.jsonl in one write; every evaluation counts
           as a trial, sensitivity cells included, and the count goes in the paper
-charge    refuse a scoring past the file's budget, or past a torn result of its own version
+charge    refuse a scoring past the file's budget, or past a torn result of its own version other
+          than the one it carries on (resumable)
 
 An amendment is a new file, <id>-v<k+1>.toml, whose `supersedes` names the version it replaces
 and whose `reason` says why; results scored under an earlier version stay bound to it.
@@ -29,7 +34,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pickle
 import re
+import socket
 import subprocess
 import time
 import tomllib
@@ -787,12 +794,13 @@ def log_trial(data_dir: Path, record: dict[str, Any]) -> None:
     log_trials(data_dir, [record])
 
 
-def trials(data_dir: Path, prereg: Prereg) -> int:
-    """Evaluations logged so far under this prereg's id and version. A line that is no whole record,
-    as a power cut inside log_trials' one write leaves, is refused: no count can rest on it. Its
-    repair replaces it, never cuts it: a cut would leave a version whose first record tore with no
-    line and its budget back, and with its folder deleted, as charge offers, it could be scored
-    again. A blank line is skipped, since that repair is a hand edit; a zeroed tail is not blank."""
+def trials(data_dir: Path, prereg: Prereg, result: str | None = None) -> int:
+    """Evaluations logged so far under this prereg's id and version; with `result`, those naming
+    that result folder alone. A line that is no whole record, as a power cut inside log_trials' one
+    write leaves, is refused: no count can rest on it. Its repair replaces it, never cuts it: a cut
+    would leave a version whose first record tore with no line and its budget back, and with its
+    folder deleted, as charge offers, it could be scored again. A blank line is skipped, since that
+    repair is a hand edit; a zeroed tail is not blank."""
     path = trials_path(data_dir)
     if not path.exists():
         return 0
@@ -801,8 +809,9 @@ def trials(data_dir: Path, prereg: Prereg) -> int:
         if not line.strip():
             continue
         try:
-            stamp = json.loads(line)["prereg"]
-            count += (stamp["id"], stamp["version"]) == own
+            record = json.loads(line)
+            stamp = record["prereg"]
+            mine = (stamp["id"], stamp["version"]) == own
         except (ValueError, KeyError, TypeError) as exc:  # ValueError: bad JSON, or bad UTF-8
             raise PreregError(
                 f"{path}, line {number}: not a whole trial record, a write torn by a crash. The "
@@ -816,14 +825,15 @@ def trials(data_dir: Path, prereg: Prereg) -> int:
                 '{"prereg": {"id": "<id>", "version": <k>}} for the file that was being scored, '
                 "or, if that cannot be told, one such record for each file it could have been"
             ) from exc
+        count += mine and (result is None or record.get("result") == result)
     return count
 
 
 def _torn_results(data_dir: Path, prereg: Prereg) -> list[str]:
     """The folders of <data dir>/ews stamped with this prereg's id and version and with no
-    complete.json: scorings that died inside write_result. The manifest's stamp decides, since a
-    folder's name ends alike under another id (x-demo-v1, demo-v1). A folder with no manifest yet
-    holds no table either: write_result writes that first."""
+    complete.json: scorings that died before finish_result wrote it. The manifest's stamp decides,
+    since a folder's name ends alike under another id (x-demo-v1, demo-v1). A folder with no
+    manifest yet holds no table either: begin_result writes that first."""
     own, found = (prereg.id, prereg.version), []
     for manifest in sorted((Path(data_dir) / "ews").glob("*/manifest.json")):
         stamp = io.read_json(manifest)["params"]["prereg"]
@@ -833,21 +843,41 @@ def _torn_results(data_dir: Path, prereg: Prereg) -> list[str]:
     return found
 
 
-def charge(data_dir: Path, prereg: Prereg, planned: int) -> int:
+def resumable(data_dir: Path, prereg: Prereg) -> str | None:
+    """The torn result of this version that --resume carries on: the one there is, or None when
+    there is none, or several, which charge then refuses."""
+    torn = _torn_results(data_dir, prereg)
+    return torn[0] if len(torn) == 1 else None
+
+
+def charge(data_dir: Path, prereg: Prereg, planned: int, own: str | None = None) -> int:
     """Refuse a scoring whose `planned` cells would take this version past its budget, so that
     cell budget + 1 is never evaluated, or that would score past a torn result of this version,
-    whose tables can be read with their cells unlogged; returns the trials logged so far. It runs
-    before write_result makes a folder, so a scoring never finds its own. A torn log speaks first:
-    its folder's trials are part charged, and deleting the folder is not its repair."""
+    whose tables can be read with their cells unlogged; returns the trials logged so far by other
+    results. `own` names the folder the scoring writes or carries on (begin_result): no torn result
+    to it, and the trials it logged are its own cells, taken off the count. They are all of them or
+    none, as a crash after the log or before it leaves them; some alone is a torn log's repair,
+    which spends the folder, so it is refused. A torn log speaks first: its folder's trials are part
+    charged, and deleting the folder is not its repair."""
     logged, budget = trials(data_dir, prereg), prereg.doc["trials"]["budget"]
-    torn = _torn_results(data_dir, prereg)
+    torn = [name for name in _torn_results(data_dir, prereg) if name != own]
     if torn:
         raise PreregError(
             f"{prereg.name}: {', '.join(torn)} in {Path(data_dir) / 'ews'} has no complete.json: "
             "a torn result from a crash, or one being written right now. Its tables can be read "
-            "whether or not its trials were logged, so nothing scores past it: delete it or amend "
-            "the pre-registration. Deleting it gives back no trial already logged"
+            "whether or not its trials were logged, so nothing scores past it: once nothing writes "
+            "it, carry it on with --resume, which refuses one it cannot end as it began, or "
+            "delete it or amend the pre-registration. Deleting it gives back no trial already "
+            "logged"
         )
+    mine = trials(data_dir, prereg, own) if own else 0
+    if mine not in (0, planned):
+        raise PreregError(
+            f"{prereg.name}: {own} has {mine} of its {planned} trials logged, which only a torn "
+            "log's repair leaves: its trials are part spent, so it is not carried on. Count it as "
+            "spent and amend the pre-registration"
+        )
+    logged -= mine
     if logged + planned > budget:
         raise PreregError(
             f"{prereg.name}: {logged} trials logged and {planned} more would exceed its budget of "
@@ -872,43 +902,121 @@ def cells(doc: dict[str, Any]) -> int:
     return 2 * sizes * sum(primary if role == "primary" else len(ind["pairs"]) for role in roles)
 
 
-def write_result(
+def _differences(began: dict[str, Any], key: dict[str, Any]) -> dict[str, str]:
+    """Each part of a resume key that is not the one a result began under: both values, or of the
+    inputs the runs whose differ."""
+    found = {}
+    for part in sorted(began.keys() | key.keys()):
+        then, now = began.get(part), key.get(part)
+        if then == now:
+            continue
+        if part == "inputs":
+            then, now = then or {}, now or {}
+            runs = sorted(r for r in then.keys() | now.keys() if then.get(r) != now.get(r))
+            found[part] = f"the runs {', '.join(runs)}"
+        else:
+            found[part] = f"{then!r} when it began, {now!r} now"
+    return found
+
+
+def begin_result(
+    data_dir: Path, prereg: Prereg, freeze_ref: Frozen, key: dict[str, Any], own: str | None = None
+) -> Path:
+    """A result's folder and manifest.json, before anything is scored into it: the prereg's stamp,
+    the resume key, which is `key` and the commit of the running code when its checkout is clean,
+    and a record of this start. With `own`, the torn result --resume carries on (resumable), that
+    folder instead, given one more record: refused, naming what differs, unless it began under this
+    very key, since only then can it end in the bytes an uninterrupted scoring would write."""
+    code = io.code_version()
+    key = key | {"code": code["git_sha"] if code["dirty"] is False else None}
+    started = {
+        "started_ns": time.time_ns(),
+        "host": socket.gethostname(),
+        **code,
+        "pid": os.getpid(),
+    }
+    if own is not None:
+        run_dir = Path(data_dir) / "ews" / own
+        manifest = io.read_json(run_dir / "manifest.json")
+        found = _differences(manifest.get("resume") or {}, key)
+        if key["code"] is None:
+            found["code"] = "this checkout has changes not committed, which no key can tell apart"
+        if found:
+            raise PreregError(
+                f"{prereg.name}: {own} in {run_dir.parent} is not carried on, since it began "
+                "otherwise and could not end in the bytes an uninterrupted scoring writes: "
+                + "; ".join(f"{part}: {why}" for part, why in found.items())
+                + ". Score it as it began, or delete it or amend the pre-registration"
+            )
+        manifest["resumptions"].append(started)
+        io.write_json(run_dir / "manifest.json", manifest, replace=True)
+        return run_dir
+    run_id = engine.run_id(prereg.name)
+    run_dir = Path(data_dir) / "ews" / run_id
+    run_dir.mkdir(parents=True)
+    manifest = {
+        "format": 1,
+        "domain": "ews",
+        "run_id": run_id,
+        "producer": {"name": "tipping_point.ews", "version": __version__, **code},
+        "started_ns": started["started_ns"],
+        "key": "cell",
+        "tables": [],
+        "params": {"prereg": stamp(prereg, freeze_ref)},
+        "resume": key,
+        "resumptions": [started],
+    }
+    io.write_json(run_dir / "manifest.json", manifest)
+    return run_dir
+
+
+def save_part(run_dir: Path | None, unit: str, part: Any) -> None:
+    """A finished unit of a scoring (a checkpoint's pass, a probe) as <result>/parts/<unit>.pkl,
+    whole or not at all, so that --resume skips it; nothing without a folder. Pickle, since a
+    Parquet table takes its columns from its first row and a round trip can lose a value: the
+    folder is the scorer's own, so what is read back is trusted."""
+    if run_dir is not None:
+        (run_dir / "parts").mkdir(exist_ok=True)
+        io.write_file(run_dir / "parts" / f"{unit}.pkl", lambda f: pickle.dump(part, f))
+
+
+def load_part(run_dir: Path | None, unit: str) -> Any:
+    """What save_part kept of a unit, or None."""
+    path = None if run_dir is None else run_dir / "parts" / f"{unit}.pkl"
+    return pickle.loads(path.read_bytes()) if path is not None and path.is_file() else None
+
+
+def finish_result(
     data_dir: Path,
     prereg: Prereg,
-    freeze_ref: Frozen,
+    run_dir: Path,
     tables: dict[str, list[dict[str, Any]]],
     inputs: list[dict[str, Any]],
     params: dict[str, Any],
     records: Sequence[dict[str, Any]] = (),
 ) -> Path:
-    """A scoring run's output in the shared layout: manifest.json first, each non-empty table as
-    <table>/00000000000000000000.parquet keyed by `cell`, the trial `records` it evaluated logged
-    in one write, each naming this result, and complete.json once all are synced. A crash so leaves
-    a folder with no complete.json, its trials logged or not, or a complete one with all of them."""
-    run_id = engine.run_id(prereg.name)
-    run_dir = Path(data_dir) / "ews" / run_id
-    run_dir.mkdir(parents=True)
+    """The rest of a result begin_result made, in the shared layout: the manifest given its tables,
+    inputs and params, each non-empty table as <table>/00000000000000000000.parquet keyed by `cell`,
+    the trial `records` it evaluated logged in one write, each naming this result, and complete.json
+    once all are synced. A crash so leaves a folder with no complete.json, its trials logged or not,
+    or a complete one with all of them. Carried on, it writes the same bytes over what an earlier
+    attempt left, and logs nothing if that attempt logged it all (charge allows all or none)."""
     filled = {name: rows for name, rows in tables.items() if rows}
-    manifest = {
-        "format": 1,
-        "domain": "ews",
-        "run_id": run_id,
-        "producer": {"name": "tipping_point.ews", "version": __version__, **io.code_version()},
-        "started_ns": time.time_ns(),
-        "key": "cell",
-        "tables": list(filled),
-        "params": {"prereg": stamp(prereg, freeze_ref), "inputs": inputs, **params},
-    }
-    io.write_json(run_dir / "manifest.json", manifest)
+    manifest = io.read_json(run_dir / "manifest.json")
+    manifest["tables"] = list(filled)
+    manifest["params"] = {"prereg": manifest["params"]["prereg"], "inputs": inputs, **params}
+    io.write_json(run_dir / "manifest.json", manifest, replace=True)
     files: dict[str, str] = {}
     for name, rows in filled.items():
         table = pa.Table.from_pylist([{"cell": i, **row} for i, row in enumerate(rows)])
         path = run_dir / name / f"{0:020d}.parquet"
-        path.parent.mkdir()
-        io.write_file(path, lambda f, table=table: pq.write_table(table, f, compression="zstd"))
+        path.parent.mkdir(exist_ok=True)
+        io.write_file(
+            path, lambda f, table=table: pq.write_table(table, f, compression="zstd"), replace=True
+        )
         files[path.relative_to(run_dir).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
-    if records:
-        log_trials(data_dir, [trial | {"result": run_id} for trial in records])
+    if records and not trials(data_dir, prereg, run_dir.name):
+        log_trials(data_dir, [trial | {"result": run_dir.name} for trial in records])
     record = {
         "ended_ns": time.time_ns(),
         "last_key": max((len(rows) - 1 for rows in filled.values()), default=-1),
@@ -918,3 +1026,18 @@ def write_result(
     }
     io.write_json(run_dir / "complete.json", record)
     return run_dir
+
+
+def write_result(
+    data_dir: Path,
+    prereg: Prereg,
+    freeze_ref: Frozen,
+    tables: dict[str, list[dict[str, Any]]],
+    inputs: list[dict[str, Any]],
+    params: dict[str, Any],
+    records: Sequence[dict[str, Any]] = (),
+) -> Path:
+    """begin_result and finish_result at once: a result written whole, by a scoring that saves no
+    part of itself on the way."""
+    run_dir = begin_result(data_dir, prereg, freeze_ref, {})
+    return finish_result(data_dir, prereg, run_dir, tables, inputs, params, records)

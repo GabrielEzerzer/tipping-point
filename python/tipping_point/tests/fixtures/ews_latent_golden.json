@@ -1,0 +1,41 @@
+{
+  "made_by": "5f94ac15cc52065ffa28a09eed186a98ce39e9d2",
+  "tables": {
+    "auc": {
+      "rows": 168,
+      "sha256": "5a26b0f292728bf88c9511b212c12aa2a3e59b907c84c863f5dc159232da3b24"
+    },
+    "surrogates": {
+      "rows": 294,
+      "sha256": "151bc4cc4b5cdb8e9e0ab1342f905a63688eac40f4560f80859abed24a9de4de"
+    },
+    "alarms": {
+      "rows": 168,
+      "sha256": "f8c4b2ab69540788d02e38f3787c85bd2dd8e37b8cf10dbd6760257cadd9f375"
+    },
+    "peaks": {
+      "rows": 168,
+      "sha256": "cc768ff433f7186fe32de0c83c4e6dbd394145f529e68eec28e6f0299aaf823c"
+    },
+    "fss": {
+      "rows": 112,
+      "sha256": "660bda5bef151332d85d6cd7e8e6b117d7573de9c6e5a17b4095c47f5ed5b156"
+    },
+    "margins": {
+      "rows": 69,
+      "sha256": "44429aa94b3c1d5ee8c5df4e0e69d0d897d3b6f14680cb8e42d1f0a4e5573a08"
+    },
+    "probes": {
+      "rows": 378,
+      "sha256": "520610b8707a20a27430cfec3c9d544b805769dda3c7f68707267eceea84eb4f"
+    },
+    "curves": {
+      "rows": 654,
+      "sha256": "ecb36eca09f40d21e152829f7849008c96ef25321aad55a90d05c579d95818b8"
+    },
+    "baseline": {
+      "rows": 7,
+      "sha256": "15077e2b761ef3cefe9622a3901a67d13237e5d70c3b317b527be3225a9ad403"
+    }
+  }
+}

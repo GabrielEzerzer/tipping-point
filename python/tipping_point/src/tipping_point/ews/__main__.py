@@ -14,7 +14,10 @@
                        whole by harness/ising_experiment.py, so here it is refused without
                        --cells-only, which would spend its trial budget on a partial result. A
                        result of the same version with no complete.json, torn by a crash, refuses
-                       the scoring until it is deleted or the file amended (prereg.charge)
+                       the scoring until it is deleted or the file amended (prereg.charge), unless
+                       --resume carries it on from the passes it saved, which it does only for a
+                       scoring of the same file, seed, inputs and libraries, from a clean checkout
+                       of the commit that began it (prereg.begin_result)
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside
@@ -31,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
 
 from .. import engine
 from . import ising, prereg, scoring, surrogates
@@ -135,6 +139,11 @@ def _parser() -> argparse.ArgumentParser:
         help="a latent file's cell tables alone, without the probes and margins of "
         "harness/ising_experiment.py, spending its trials all the same",
     )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="carry on the result of this file a crash left, from the passes it saved",
+    )
     p.set_defaults(command=_score)
 
     p = sub.add_parser("prereg", help="pre-registration files")
@@ -159,6 +168,38 @@ def _calibrate(args: argparse.Namespace) -> int:
     return 0 if all(r["inside"] for r in rows) else 1
 
 
+def begin(
+    pre: prereg.Prereg,
+    ref: prereg.Frozen,
+    data_dir: Path,
+    seed: int,
+    admitted: ising.Admitted,
+    own: str | None = None,
+    **extra: Any,
+) -> Path:
+    """The folder a scoring writes into, made once nothing is left to refuse (prereg.begin_result):
+    a new one, or `own`, the torn result --resume carries on. Its resume key is what must be the
+    same for a scoring to carry it on and end in the bytes an uninterrupted one writes: the file,
+    the seed, every input with each latents table read over it, the pilot record, the libraries
+    that draw and write, and whatever the caller adds in `extra` (the runner: its embedding)."""
+    if pre.doc["data"]["domain"] != "ising":
+        raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
+    read = [c.name for c in admitted.passes if c.name]
+    key = {
+        "prereg": prereg.stamp(pre, ref),
+        "seed": seed,
+        "inputs": {
+            r.run_id: {"complete_sha256": r.complete_sha256, "latents": ising._digests(r, read)}
+            for r in admitted.scored
+        },
+        "pilot": admitted.pilot.sha256,
+        "numpy": np.__version__,
+        "pyarrow": pa.__version__,
+        **extra,
+    }
+    return prereg.begin_result(data_dir, pre, ref, key, own)
+
+
 def score(
     pre: prereg.Prereg,
     ref: prereg.Frozen,
@@ -166,16 +207,18 @@ def score(
     seed: int,
     allow_stale: bool = False,
     more: Callable[[ising.Evaluation], dict[str, list[dict[str, Any]]]] | None = None,
+    run_dir: Path | None = None,
 ) -> tuple[Path, ising.Evaluation, int]:
     """One scoring run: refused past the trial budget, evaluated, then written and logged as one
-    (prereg.write_result, whose last step is complete.json). `more` adds tables from the evaluation
-    (harness/ising_experiment.py: a latent file's probes and margins). A ref without a commit, a
-    scoring of planted data only that runner allows, asks no commit of the runs. Returns the
-    result's folder, the evaluation and the trials logged before it."""
+    (prereg.finish_result, whose last step is complete.json). Into `run_dir`, the folder `begin`
+    made, each checkpoint's pass is saved as it ends, so that --resume can carry the scoring on,
+    and a pass saved there already is read back; with none, the folder is made at the end.
+    `more` adds tables from the evaluation (harness/ising_experiment.py: a latent file's probes
+    and margins). A ref without a commit, a scoring of planted data only that runner allows, asks
+    no commit of the runs. Returns the result's folder, the evaluation and the trials logged
+    before it by other results."""
     planned = prereg.cells(pre.doc)
-    logged = prereg.charge(data_dir, pre, planned)
-    if pre.doc["data"]["domain"] != "ising":
-        raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
+    logged = prereg.charge(data_dir, pre, planned, run_dir.name if run_dir else None)
     rng = np.random.default_rng(seed)
     evaluation = ising.evaluate(
         pre.doc,
@@ -184,6 +227,7 @@ def score(
         allow_stale=allow_stale,
         commit=ref.commit or None,
         runs_commit=prereg.baseline_commit(pre) if ref.commit else None,
+        store=run_dir,
     )
     if len(evaluation.tables["auc"]) != planned:  # the budget is only as good as this count
         raise prereg.PreregError(
@@ -226,7 +270,8 @@ def score(
         }
         for row in evaluation.tables["auc"]
     ]
-    run_dir = prereg.write_result(data_dir, pre, ref, tables, inputs, params, trials)
+    run_dir = run_dir or prereg.begin_result(data_dir, pre, ref, {})
+    prereg.finish_result(data_dir, pre, run_dir, tables, inputs, params, trials)
     return run_dir, evaluation, logged
 
 
@@ -240,7 +285,20 @@ def _score(args: argparse.Namespace) -> int:
             f"with its probes and margins. This would spend its {planned} trials on the cells "
             "alone; --cells-only says that is meant"
         )
-    run_dir, evaluation, logged = score(pre, ref, args.data_dir, args.seed, args.allow_stale_pilot)
+    own = prereg.resumable(args.data_dir, pre) if args.resume else None
+    prereg.charge(args.data_dir, pre, planned, own)
+    admitted = ising.admit(
+        pre.doc,
+        args.data_dir,
+        say=lambda _: None,  # evaluate admits again, and says it then
+        allow_stale=args.allow_stale_pilot,
+        commit=ref.commit,
+        runs_commit=prereg.baseline_commit(pre),
+    )
+    run_dir = begin(pre, ref, args.data_dir, args.seed, admitted, own)
+    run_dir, evaluation, logged = score(
+        pre, ref, args.data_dir, args.seed, args.allow_stale_pilot, run_dir=run_dir
+    )
     for row in evaluation.tables["auc"]:
         if row["headline"]:
             print(

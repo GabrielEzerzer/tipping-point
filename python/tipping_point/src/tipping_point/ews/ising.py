@@ -50,7 +50,7 @@ import pyarrow.parquet as pq
 from ..ising import autocorr, io
 from ..ising.pilot import stale as _stale
 from . import fss, indicators, scoring, surrogates
-from .prereg import SELECTIONS
+from .prereg import SELECTIONS, load_part, save_part
 from .trend import RAW, Pipeline, trailing_score
 
 PILOT = "pilot.json"
@@ -702,6 +702,7 @@ def evaluate(
     allow_stale: bool = False,
     commit: str | None = None,
     runs_commit: str | None = None,
+    store: Path | None = None,
 ) -> Evaluation:
     """Score a pre-registration's Ising experiment: the AUC of every cell, the surrogate tests,
     alarms and peak positions at the headline cell, and static and dynamic finite-size scaling.
@@ -713,27 +714,37 @@ def evaluate(
     the exploratory L = 16 null runs name no record. With `runs_commit` too, the commit of a
     baseline's tag, the runs must come from that commit instead (a latent prereg reads the runs of
     the version it compares with), and each latents table from `commit` and the checkpoint the
-    prereg pins (_same_latents). A prereg with a [latents] section is scored once per checkpoint."""
+    prereg pins (_same_latents). A prereg with a [latents] section is scored once per checkpoint.
+    With `store`, a result folder, each pass is saved there as it ends (prereg.save_part): its rows,
+    its dropped plateaus and the generator's state after it. A pass saved already is read back, not
+    scored again, and the generator set to that state, so a resumed scoring draws what an
+    uninterrupted one would."""
     pilot, chosen, scored, passes = admit(doc, data_dir, say, allow_stale, commit, runs_commit)
     read = {c.name: c.sha256 for c in passes if c.name}
     tables: dict[str, list[Row]] = {name: [] for name in (*_CELL_TABLES, "fss")}
     plateaus_dropped = 0
-    for checkpoint in passes:
-        own = _scored_as(doc, checkpoint.role)
-        slots = {L: replace(i, latents=checkpoint.name or None) for L, i in chosen.items()}
-        part: dict[str, list[Row]] = {name: [] for name in _CELL_TABLES}
-        peaks: Peaks = {}
-        for L, inputs in slots.items():
-            for cadence in own["indicators"]["cadences"]:
-                prep = _cells(own, L, inputs, cadence, pilot.tau(L), part, peaks, rng)
-                say(
-                    f"L = {L}, {cadence}: {prep.sweeps:g} sweeps per sample, "
-                    f"tau_c = {pilot.tau(L):g}"
-                )
-        static, lost = _static(own, slots, rng, checkpoint.trained)
-        part["fss"] = static + _dynamic(own, peaks, rng, checkpoint.trained)
-        plateaus_dropped = max(plateaus_dropped, lost)  # the same plateaus, table after table
-        for table, rows in part.items():
+    for index, checkpoint in enumerate(passes):
+        unit = f"pass-{index:02d}"
+        saved = load_part(store, unit)
+        if saved is None:
+            own = _scored_as(doc, checkpoint.role)
+            slots = {L: replace(i, latents=checkpoint.name or None) for L, i in chosen.items()}
+            part: dict[str, list[Row]] = {name: [] for name in _CELL_TABLES}
+            peaks: Peaks = {}
+            for L, inputs in slots.items():
+                for cadence in own["indicators"]["cadences"]:
+                    prep = _cells(own, L, inputs, cadence, pilot.tau(L), part, peaks, rng)
+                    say(
+                        f"L = {L}, {cadence}: {prep.sweeps:g} sweeps per sample, "
+                        f"tau_c = {pilot.tau(L):g}"
+                    )
+            static, lost = _static(own, slots, rng, checkpoint.trained)
+            part["fss"] = static + _dynamic(own, peaks, rng, checkpoint.trained)
+            saved = {"part": part, "lost": lost, "rng": rng.bit_generator.state}
+            save_part(store, unit, saved)
+        rng.bit_generator.state = saved["rng"]  # where the pass left it, read back or not
+        plateaus_dropped = max(plateaus_dropped, saved["lost"])  # the same plateaus, each pass
+        for table, rows in saved["part"].items():
             tables[table] += [row | {"checkpoint": checkpoint.name} for row in rows]
     null_blocks = [block for i in chosen.values() for block in i.dropped]
     dropped = {"null_blocks": null_blocks, "plateaus": plateaus_dropped}

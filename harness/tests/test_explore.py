@@ -386,6 +386,7 @@ def test_no_script_can_log_a_trial_or_write_a_result() -> None:
     """By the code, not by the run: no script names what would make a number count as a trial, and
     none imports the module that holds them."""
     banned = {"log_trial", "log_trials", "write_result", "freeze", "trials_path", "stamp", "frozen"}
+    banned |= {"begin_result", "finish_result"}
     for path in (ROOT / "harness" / "explore").glob("*.py"):
         tree = ast.parse(path.read_text("utf-8"))
         for node in ast.walk(tree):

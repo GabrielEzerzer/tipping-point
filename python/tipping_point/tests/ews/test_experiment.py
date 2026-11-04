@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -278,6 +279,47 @@ def test_twice_on_the_planted_data_gives_byte_identical_tables(
     for relative in (Path(name) / f"{0:020d}.parquet", Path("csv") / f"{name}.csv"):
         first, second = (scored / relative).read_bytes(), (again / relative).read_bytes()
         assert first and first == second, relative
+
+
+LATENT_GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "ews_latent_golden.json"
+
+
+def _fingerprint(rows: list[dict[str, Any]]) -> str:
+    """A table's rows in order, every float to 7 significant digits, hashed: no machine's rounding
+    reaches the 7th digit, and a draw moved anywhere moves the CIs after it at the 2nd or 3rd."""
+
+    def rounded(value: Any) -> Any:
+        if isinstance(value, list):
+            return [rounded(v) for v in value]
+        return f"{value + 0.0:.6e}" if isinstance(value, float) else value  # + 0.0: no -0.0
+
+    plain = [{k: rounded(v) for k, v in row.items()} for row in ews_v1_golden.plain(rows)]
+    return hashlib.sha256(json.dumps(plain).encode()).hexdigest()
+
+
+def test_the_planted_tables_are_the_ones_taken_at_5f94ac1(scored: Path) -> None:
+    """The golden is this fixture's tables at 5f94ac1, before the scorer saved any part of itself
+    (their rows dumped from that tree, then fingerprinted as here). Every table, row for row: saving
+    each pass and probe as it ends moved no draw of the one generator nor of any keyed stream."""
+    golden = json.loads(LATENT_GOLDEN.read_text("utf-8"))
+    assert golden["made_by"] == "5f94ac15cc52065ffa28a09eed186a98ce39e9d2"
+    found = {}
+    for name in TABLES:
+        rows = _rows(scored, name)
+        found[name] = {"rows": len(rows), "sha256": _fingerprint(rows)}
+    assert found == golden["tables"]
+
+
+def test_the_fingerprint_moves_with_a_value_and_not_with_rounding(scored: Path) -> None:
+    """The control for the golden: a CI bound off by a part in 10^12, rounding between machines, is
+    the same fingerprint, and off by a part in 10^5, less than any moved draw, is another."""
+    rows = _rows(scored, "auc")
+    first = _fingerprint(rows)
+    i = next(i for i, row in enumerate(rows) if math.isfinite(row["auc_lo"]) and row["auc_lo"])
+    for nudge, same in ((1e-12, True), (1e-5, False)):
+        nudged = [dict(row) for row in rows]
+        nudged[i]["auc_lo"] *= 1 + nudge
+        assert (_fingerprint(nudged) == first) is same, nudge
 
 
 # ---------------------------------------------------------------- 3: the counter
@@ -571,6 +613,376 @@ def test_a_torn_log_stops_a_scoring_as_a_refusal_not_a_traceback(
     err = capsys.readouterr().err
     assert f"{log}, line 2:" in err and "count it as spent and amend the pre-registration" in err
     assert not _results(copy)
+
+
+# ---------------------------------------------------------------- 3c: a killed run, resumed
+
+CLEAN = {"git_sha": "c" * 40, "dirty": False}  # what a resume asks of the code, whatever this is
+RUNNER_KILLED = """
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import ews_planted as planted
+import ising_experiment as runner
+from tipping_point.ews import ising, prereg
+from tipping_point.ews.__main__ import main as ews_main
+from tipping_point.ising import io
+
+harness, path, data, kill, entry, *extra = sys.argv[1:]
+io.code_version = lambda: {"git_sha": "c" * 40, "dirty": False}
+save_part, write_json = prereg.save_part, io.write_json
+
+
+def save_then_die(run_dir, unit, part):
+    save_part(run_dir, unit, part)
+    if unit == kill:
+        os._exit(3)
+
+
+def before_complete(path, record, replace=False):
+    if path.name == "complete.json" and kill == "complete.json":
+        os._exit(3)
+    write_json(path, record, replace)
+
+
+prereg.save_part = ising.save_part = save_then_die
+io.write_json = before_complete
+argv = ["--prereg", path, "--data-dir", data, *extra]
+if entry == "the runner":
+    sys.exit(runner.main([*argv, "--no-figures"], embed=planted.planted_embedding()))
+sys.exit(ews_main(["score", *argv, "--cells-only"]))
+"""
+LAST_PASS = f"pass-{len(CHECKPOINTS) - 1:02d}"
+UNITS = len(CHECKPOINTS) * (len(V1_SIZES) + 1)  # a probe per L and checkpoint, and its pass
+
+
+def _killed_run(
+    path: Path, data: V1, kill: str, *extra: str, entry: str = "the runner"
+) -> subprocess.CompletedProcess[str]:
+    """A scoring by the runner, or by `ews score --cells-only`, in its own process and from a clean
+    checkout, killed by os._exit once it has saved the unit `kill` (pass-<i>, probes-<L>-<j>), or
+    as it is about to write complete.json, or let end: "nowhere"."""
+    harness = Path(runner.__file__).parent
+    command = [sys.executable, "-c", RUNNER_KILLED, str(harness), str(path), str(data.root), kill,
+               entry, *extra]  # fmt: skip
+    return subprocess.run(command, capture_output=True, text=True, timeout=900)
+
+
+@pytest.fixture
+def clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every result here is begun and carried on from one clean checkout, the only kind a resume
+    trusts, whatever state the worktree running the tests is in."""
+    monkeypatch.setattr(io, "code_version", lambda: dict(CLEAN))
+
+
+class _Killed(Exception):
+    """What stops a run in this process where a crash would."""
+
+
+def _crash(path: Path, data: V1, unit: str, *extra: str) -> Path:
+    """The runner in this process, stopped as soon as it saves `unit`: the torn folder it leaves."""
+    save = prereg.save_part
+
+    def save_then_stop(run_dir: Path | None, name: str, part: Any) -> None:
+        save(run_dir, name, part)
+        if name == unit:
+            raise _Killed
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(prereg, "save_part", save_then_stop)
+        patch.setattr(ising, "save_part", save_then_stop)
+        with pytest.raises(_Killed):
+            _run(path, data, "--no-figures", *extra)
+    (run_dir,) = _results(data)
+    assert not (run_dir / "complete.json").exists()
+    return run_dir
+
+
+def _ews_files(data: V1) -> dict[str, bytes]:
+    """Every file under <data dir>/ews, the trial log among them: what a refusal leaves alone."""
+    root = data.root / "ews"
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+RESUMES = {
+    "during the probes": [f"probes-{V1_SIZES[1]}-06"],
+    "after pass 1": ["pass-00"],
+    "after the last pass": [LAST_PASS],
+    "between the log and complete.json": ["complete.json"],
+    "killed twice": [f"probes-{V1_SIZES[0]}-03", "pass-08"],
+}
+
+
+@pytest.mark.parametrize("kills", RESUMES.values(), ids=RESUMES.keys())
+def test_a_killed_run_resumed_writes_the_bytes_of_one_never_killed(
+    frozen: Frozen, scored: Path, tmp_path: Path, kills: list[str]
+) -> None:
+    """The runner killed by os._exit, nothing flushed for it: during the probes, after the first
+    pass, after the last, between the trial log and complete.json, and twice. Each time the same
+    command runs again with --resume (the twice-killed run passes it from its first start, where it
+    finds nothing to carry on and begins a result of its own), with a part torn as it was saved
+    left beside the rest. It ends in the result the unbroken run wrote, every Parquet and CSV file
+    to the byte. What was saved before a kill is read back, never computed or written again, and
+    every unit is saved by the end; the log holds the budget, each line naming this folder, in one
+    write, logged once even where the kill came after the log; the manifest records each start."""
+    copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
+    pre = prereg.load(frozen.path)
+    budget = pre.doc["trials"]["budget"]
+    first = ["--resume"] if len(kills) > 1 else []
+    for i, kill in enumerate(kills):
+        done = _killed_run(frozen.path, copy, kill, *(["--resume"] if i else first))
+        assert done.returncode == 3, done.stderr
+        assert [(r / "complete.json").exists() for r in _results(copy)] == [False]
+    (run_dir,) = _results(copy)
+    parts = run_dir / "parts"
+    saved = {p.name: p.read_bytes() for p in parts.iterdir()}
+    assert kills[-1] == "complete.json" or f"{kills[-1]}.pkl" in saved
+    (parts / "pass-01.pkl.tmp").write_bytes(b"half a part")
+    assert prereg.trials(copy.root, pre) == (budget if kills[-1] == "complete.json" else 0)
+    done = _killed_run(frozen.path, copy, "nowhere", "--resume")
+    assert done.returncode == 0, done.stderr
+    assert _results(copy) == [run_dir] and (run_dir / "complete.json").is_file()
+    for name in TABLES:
+        for relative in (Path(name) / f"{0:020d}.parquet", Path("csv") / f"{name}.csv"):
+            assert (run_dir / relative).read_bytes() == (scored / relative).read_bytes(), relative
+    assert {name: (parts / name).read_bytes() for name in saved} == saved
+    assert len(list(parts.glob("*.pkl"))) == UNITS
+    log = prereg.trials_path(copy.root).read_text("utf-8").splitlines()
+    lines = [json.loads(line) for line in log]
+    assert len(lines) == budget == prereg.trials(copy.root, pre)
+    assert {line["result"] for line in lines} == {run_dir.name}
+    assert len({line["logged_ns"] for line in lines}) == 1
+    manifest = io.read_json(run_dir / "manifest.json")
+    starts = manifest["resumptions"]
+    assert [{k: s[k] for k in CLEAN} for s in starts] == [CLEAN] * (len(kills) + 1)
+    assert [s["started_ns"] for s in starts] == sorted(s["started_ns"] for s in starts)
+    assert manifest["tables"] == io.read_json(scored / "manifest.json")["tables"]
+
+
+def test_ews_score_resumes_a_killed_scoring_to_the_same_cell_tables(
+    frozen: Frozen, scored: Path, tmp_path: Path
+) -> None:
+    """The other entry, `ews score --cells-only`, killed after its sixth pass and run again with
+    --resume: its five tables are the runner's to the byte, its trials logged once."""
+    copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
+    done = _killed_run(frozen.path, copy, "pass-05", entry="ews score")
+    assert done.returncode == 3, done.stderr
+    (run_dir,) = _results(copy)
+    done = _killed_run(frozen.path, copy, "nowhere", "--resume", entry="ews score")
+    assert done.returncode == 0, done.stderr
+    assert _results(copy) == [run_dir] and (run_dir / "complete.json").is_file()
+    for name in ("auc", "surrogates", "alarms", "peaks", "fss"):
+        relative = Path(name) / f"{0:020d}.parquet"
+        assert (run_dir / relative).read_bytes() == (scored / relative).read_bytes(), name
+    pre = prereg.load(frozen.path)
+    budget = pre.doc["trials"]["budget"]
+    assert prereg.trials(copy.root, pre) == prereg.trials(copy.root, pre, run_dir.name) == budget
+    assert len(io.read_json(run_dir / "manifest.json")["resumptions"]) == 2
+
+
+REFUSED = {  # what changed since the crash: what the refusal says
+    "seed": "seed: 26 when it began, 27 now",
+    "a latents table": "inputs: the runs ",
+    "a run": "latents tables not made by",
+    "a dirty checkout": "code: this checkout has changes not committed",
+    "another commit": f"code: '{'c' * 40}' when it began, '{'d' * 40}' now",
+    "the prereg stamp": "prereg: {",
+    "the device": "'cuda:7' now",
+    "the other entry": "device: ",
+}
+
+
+@pytest.mark.parametrize(("change", "said"), REFUSED.items(), ids=REFUSED.keys())
+def test_a_resume_under_another_key_is_refused_and_touches_nothing(
+    frozen: Frozen,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    clean: None,
+    change: str,
+    said: str,
+) -> None:
+    """--resume carries a torn result on only for a scoring that would end in the bytes it began to
+    write: the same seed, inputs, file and stamp, code and embedding, and the same entry. Anything
+    else is refused before any work, saying what differs, and nothing is written or logged. A run
+    whose complete.json changed is refused before its key is read, by the latents tables made
+    over the run as it was (and the baseline read it as it was): the key holds it too, for v1."""
+    copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
+    planted_ = ["--planted"] if change == "the prereg stamp" else []
+    run_dir = _crash(frozen.path, copy, f"probes-{V1_SIZES[0]}-00", *planted_)
+    resume = ["--resume"]
+    ramp = copy.runs["ramp", V1_SIZES[0], V1_SEEDS[0]]
+    if change == "seed":
+        resume += ["--seed", "27"]
+    elif change in ("a latents table", "a run"):
+        folder = ramp / ising.LATENTS / TRAINED[0] if change == "a latents table" else ramp
+        done = io.read_json(folder / "complete.json") | {"ended_ns": 1}
+        io.write_json(folder / "complete.json", done, replace=True)  # a new file: links stay apart
+    elif change == "a dirty checkout":
+        monkeypatch.setattr(io, "code_version", lambda: CLEAN | {"dirty": True})
+    elif change == "another commit":
+        monkeypatch.setattr(io, "code_version", lambda: CLEAN | {"git_sha": "d" * 40})
+    elif change == "the device":
+        resume += ["--device", "cuda:7"]
+    before = _ews_files(copy)
+    if change == "the other entry":
+        argv = ["score", "--prereg", str(frozen.path), "--data-dir", str(copy.root), "--cells-only"]
+        code = ews_main([*argv, "--resume"])
+    else:
+        code = _run(frozen.path, copy, "--no-figures", *resume)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert said in err, err
+    if change == "a run":
+        assert ramp.name in err, err
+    else:
+        assert f"{run_dir.name} in" in err and "is not carried on, since it began otherwise" in err
+    if change == "a latents table":  # the run named, the one part that differs
+        assert f"scoring writes: inputs: the runs {ramp.name}. Score" in err, err
+    assert _ews_files(copy) == before and not prereg.trials_path(copy.root).exists()
+
+
+@pytest.mark.parametrize("entry", ["the runner", "ews score"])
+def test_without_resume_a_killed_runs_folder_is_still_refused_as_torn(
+    frozen: Frozen, tmp_path: Path, capsys: pytest.CaptureFixture[str], clean: None, entry: str
+) -> None:
+    """The torn rule as it was: a folder a crash left, its parts saved, refuses a scoring that does
+    not ask to carry it on, whichever entry, and nothing is written or logged. The refusal offers
+    --resume before deletion, which would throw away every part saved."""
+    copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
+    run_dir = _crash(frozen.path, copy, f"probes-{V1_SIZES[0]}-00")
+    before = _ews_files(copy)
+    if entry == "the runner":
+        code = _run(frozen.path, copy, "--no-figures")
+    else:
+        argv = ["score", "--prereg", str(frozen.path), "--data-dir", str(copy.root), "--cells-only"]
+        code = ews_main(argv)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert f"ising-latent-v1: {run_dir.name} in" in err, err
+    assert "has no complete.json: a torn result from a crash" in err
+    assert "carry it on with --resume" in err and "or delete it or amend" in err
+    assert _ews_files(copy) == before
+
+
+def test_a_resume_finding_some_of_its_trials_logged_is_refused(
+    frozen: Frozen, tmp_path: Path, capsys: pytest.CaptureFixture[str], clean: None
+) -> None:
+    """A folder's own lines in the log are none, and it logs them, or all, from a kill between the
+    log and complete.json, and it logs nothing. Some alone is a torn log's repair, which spends the
+    folder: refused, nothing written. A torn line not yet repaired is refused by trials itself."""
+    copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
+    run_dir = _crash(frozen.path, copy, f"probes-{V1_SIZES[0]}-00")
+    stamp = io.read_json(run_dir / "manifest.json")["params"]["prereg"]
+    own = {"prereg": stamp, "result": run_dir.name, "cell": {"checkpoint": TRAINED[0]}}
+    log = prereg.trials_path(copy.root)
+    records = [own, own, own, {"prereg": stamp}]  # the last as the repair writes it: no result
+    log.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    before = _ews_files(copy)
+    assert _run(frozen.path, copy, "--no-figures", "--resume") == 1
+    cells = prereg.cells(prereg.load(frozen.path).doc)
+    assert f"{run_dir.name} has 3 of its {cells} trials logged" in capsys.readouterr().err
+    assert _ews_files(copy) == before
+    log.write_bytes(log.read_bytes() + b'{"prereg": {"id": "ising-lat')
+    before = _ews_files(copy)
+    assert _run(frozen.path, copy, "--no-figures", "--resume") == 1
+    assert f"{log}, line 5:" in capsys.readouterr().err
+    assert _ews_files(copy) == before
+
+
+def test_charge_takes_off_its_own_folder_and_its_own_trials_alone(tmp_path: Path) -> None:
+    """The ledger's rule in charge, on the draft (budget = cells): the folder a scoring carries on
+    is no torn result to it, and every line it logged before a kill is its own and off the count,
+    where without `own` it is refused as torn. Another result's line still counts, some of its own
+    lines alone are refused, and with two torn folders there is none to carry on."""
+    draft = prereg.load(planted.DRAFT)
+    cells, ref = prereg.cells(draft.doc), prereg.Frozen("", "")
+    torn = prereg.begin_result(tmp_path, draft, ref, {})
+    with pytest.raises(prereg.PreregError, match="a torn result from a crash"):
+        prereg.charge(tmp_path, draft, cells)
+    assert prereg.resumable(tmp_path, draft) == torn.name
+    assert prereg.charge(tmp_path, draft, cells, torn.name) == 0
+    stamp = {"id": draft.id, "version": draft.version}
+    prereg.log_trials(tmp_path, [{"prereg": stamp, "result": torn.name}] * cells)
+    assert prereg.trials(tmp_path, draft) == prereg.trials(tmp_path, draft, torn.name) == cells
+    assert prereg.charge(tmp_path, draft, cells, torn.name) == 0
+    with pytest.raises(prereg.PreregError, match="a torn result from a crash"):
+        prereg.charge(tmp_path, draft, cells)
+    prereg.log_trial(tmp_path, {"prereg": stamp, "result": "another"})
+    with pytest.raises(prereg.PreregError, match=f"1 trials logged and {cells} more would exceed"):
+        prereg.charge(tmp_path, draft, cells, torn.name)
+    prereg.trials_path(tmp_path).write_text(
+        json.dumps({"prereg": stamp, "result": torn.name}) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(prereg.PreregError, match=f"has 1 of its {cells} trials logged"):
+        prereg.charge(tmp_path, draft, cells, torn.name)
+    shutil.copytree(torn, tmp_path / "ews" / f"another-{torn.name}")
+    assert prereg.resumable(tmp_path, draft) is None
+    with pytest.raises(prereg.PreregError, match=f"another-{torn.name} in"):
+        prereg.charge(tmp_path, draft, cells, torn.name)
+
+
+def test_a_result_is_carried_on_under_its_own_key_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """begin_result's manifest holds the stamp, the key with the commit of a clean checkout, and one
+    record per start. Carried on under another key it is refused, by what differs (the runs named,
+    not their digests), and so is a dirty checkout, however the rest matches; nothing is written by
+    a refusal. Under its own key it gets one more record."""
+    monkeypatch.setattr(io, "code_version", lambda: dict(CLEAN))
+    draft, ref = prereg.load(planted.DRAFT), prereg.Frozen("", "")
+    inputs = {r: {"complete_sha256": r * 32, "latents": {"t": "e" * 64}} for r in ("a1", "b2")}
+    key = {"seed": 26, "inputs": inputs}
+    run_dir = prereg.begin_result(tmp_path, draft, ref, key)
+    manifest = io.read_json(run_dir / "manifest.json")
+    assert manifest["resume"] == key | {"code": CLEAN["git_sha"]}
+    assert manifest["params"] == {"prereg": prereg.stamp(draft, ref)} and manifest["tables"] == []
+    (start,) = manifest["resumptions"]
+    assert list(start) == ["started_ns", "host", "git_sha", "dirty", "pid"]
+    changed = inputs | {"b2": inputs["b2"] | {"complete_sha256": "f" * 64}}
+    for other, said in (
+        (key | {"inputs": changed}, "inputs: the runs b2. Score it as it began"),
+        (key | {"seed": 27}, "seed: 26 when it began, 27 now"),
+        (key | {"numpy": "0"}, "numpy: None when it began, '0' now"),
+    ):
+        with pytest.raises(prereg.PreregError, match=re.escape(said)):
+            prereg.begin_result(tmp_path, draft, ref, other, run_dir.name)
+    monkeypatch.setattr(io, "code_version", lambda: CLEAN | {"dirty": True})
+    with pytest.raises(prereg.PreregError, match="code: this checkout has changes not committed"):
+        prereg.begin_result(tmp_path, draft, ref, key, run_dir.name)
+    assert io.read_json(run_dir / "manifest.json") == manifest
+    monkeypatch.setattr(io, "code_version", lambda: dict(CLEAN))
+    assert prereg.begin_result(tmp_path, draft, ref, key, run_dir.name) == run_dir
+    assert len(io.read_json(run_dir / "manifest.json")["resumptions"]) == 2
+
+
+def test_the_generator_state_a_part_keeps_continues_its_stream_exactly(tmp_path: Path) -> None:
+    """A pass's part keeps rng.bit_generator.state and a resumed scoring sets it back: the stream
+    goes on exactly where it stopped, with the half of a 64-bit word a 32-bit draw leaves buffered.
+    Through a JSON round trip, and through the part file the scorer writes. The control: without
+    the buffered half, the next 32-bit draws differ."""
+    rng = np.random.default_rng(26)
+    rng.random(3)
+    rng.integers(0, 2**32, size=3, dtype=np.uint32)  # an odd count leaves half a word
+    state = rng.bit_generator.state
+    assert state["has_uint32"] == 1
+    prereg.save_part(tmp_path, "state", state)
+
+    def drawn(generator: np.random.Generator) -> list[np.ndarray]:
+        return [
+            generator.integers(0, 2**32, size=5, dtype=np.uint32),
+            generator.random(5),
+            generator.standard_normal(5),
+            generator.integers(0, 10, size=5),
+        ]
+
+    want = drawn(rng)
+    for kept in (json.loads(json.dumps(state)), prereg.load_part(tmp_path, "state")):
+        other = np.random.default_rng(0)
+        other.bit_generator.state = kept
+        assert all(np.array_equal(a, b) for a, b in zip(drawn(other), want, strict=True))
+    lost = np.random.default_rng(0)
+    lost.bit_generator.state = {**state, "has_uint32": 0}
+    assert not np.array_equal(lost.integers(0, 2**32, size=5, dtype=np.uint32), want[0])
 
 
 # ---------------------------------------------------------------- 4: the margins

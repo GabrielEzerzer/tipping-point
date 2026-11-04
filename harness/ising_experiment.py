@@ -2,7 +2,7 @@
 result folder and its figures.
 
   uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml \
-      [--data-dir D] [--seed 26] [--device cuda] [--allow-stale-pilot] [--no-figures]
+      [--data-dir D] [--seed 26] [--device cuda] [--allow-stale-pilot] [--no-figures] [--resume]
   uv run python harness/ising_experiment.py --figures-only <result folder>
 
 <data dir>/ews/<run_id>/ holds what `ews score` writes, in its layout, and more:
@@ -27,9 +27,10 @@ unlogged.
 
 Refused, before anything is read: a file not frozen, or short of a value (prereg.problems' strict
 check), a scoring whose cells would take the file past its trial budget, and one that would score
-past a torn result of this file (prereg.charge). Then what ising.admit refuses, a table extracted
-under another rule than latents.extraction gives its role among it, and a baseline result that is
-not the file's on these runs, and a checkpoint that is not the one it pins.
+past a torn result of this file (prereg.charge) other than the one --resume carries on, whose
+resume key it must then share (prereg.begin_result). Then what ising.admit refuses, a table
+extracted under another rule than latents.extraction gives its role among it, and a baseline result
+that is not the file's on these runs, and a checkpoint that is not the one it pins.
 Probes and curves run before the cells, so that a fault in either costs minutes rather than a night.
 
 --planted scores a file with no freeze behind it, for the harness alone: it refuses a data dir
@@ -39,7 +40,9 @@ read the confirmatory data early, and frames are embedded by ews_planted.planted
 Run time: see README, "The latent experiment". On the project's laptop the whole of ising-latent-v1
 is projected at days, not a night, and most of it is the surrogate and alarm tables, which no
 hypothesis judges, and the probes' embeddings on the CPU: --device cuda takes those to a GPU, if the
-whole run goes there. There is no resume.
+whole run goes there. A run killed partway is carried on by the same command with --resume: each
+probe (an L and a checkpoint) and each checkpoint's pass of the scorer is saved in the result folder
+as it ends, and read back, so the tables are the bytes an uninterrupted run writes.
 """
 
 import argparse
@@ -58,7 +61,7 @@ import pyarrow.parquet as pq
 import torch
 from tipping_point import engine
 from tipping_point.ews import ising, margins, prereg, scoring
-from tipping_point.ews.__main__ import score
+from tipping_point.ews.__main__ import begin, score
 from tipping_point.ising import io
 from tipping_point.jepa import probes, readout, train
 
@@ -192,6 +195,22 @@ def _arms(doc: dict[str, Any]) -> dict[str, Row]:
     }
 
 
+def fit_runs(doc: dict[str, Any], data_dir: Path) -> dict[int, ising.Run]:
+    """Per L, the validation seed's staircase the probes fit on: one complete run, or refused."""
+    fit_seed = doc["latents"]["validation_seed"]
+    complete, _ = ising.find_runs(data_dir)
+    found = {}
+    for L in sorted(doc["data"]["L"]):
+        runs = [r for r in complete if (r.kind, r.L, r.seed) == ("staircase", L, fit_seed)]
+        if len(runs) != 1:
+            raise ising.IsingDataError(
+                f"probes.fit: {len(runs)} complete staircases of seed {fit_seed} at L = {L}, "
+                "not one"
+            )
+        found[L] = runs[0]
+    return found
+
+
 def probe_tables(
     doc: dict[str, Any],
     data_dir: Path,
@@ -199,27 +218,23 @@ def probe_tables(
     passes: Sequence[ising.Checkpoint],
     embed: Embed,
     seed: int,
+    store: Path | None = None,
 ) -> tuple[list[Row], dict[tuple[str, str, int, str], np.ndarray]]:
     """The probes table, and each quantity's data draws per (target, r2 or selectivity, L,
     checkpoint): fitted on the validation seed's staircase and scored on the scored seeds' at each
     L, on the frames probes.fit and probes.test state, every checkpoint on one draw of them. Each
     quantity resamples seeds, then replicas, from one RNG seed, so column b of the draws is the same
-    resample for every checkpoint: the pairing the margin rule asks for."""
+    resample for every checkpoint: the pairing the margin rule asks for. With `store`, a result
+    folder, each L and checkpoint's rows and draws are saved there once scored (prereg.save_part)
+    and read back rather than embedded again."""
     limit, probe_seed = prereg.probe_protocol(doc)
     alpha, wanted = float(doc["probes"]["ridge_alpha"]), doc["probes"]["targets"]
-    fit_seed, n = doc["latents"]["validation_seed"], int(doc["scoring"]["bootstrap"])
-    complete, _ = ising.find_runs(data_dir)
+    n, fits = int(doc["scoring"]["bootstrap"]), fit_runs(doc, data_dir)
     arms = _arms(doc)
     rows: list[Row] = []
     draws: dict[tuple[str, str, int, str], np.ndarray] = {}
     for L in sorted(doc["data"]["L"]):
-        fit_runs = [r for r in complete if (r.kind, r.L, r.seed) == ("staircase", L, fit_seed)]
-        if len(fit_runs) != 1:
-            raise ising.IsingDataError(
-                f"probes.fit: {len(fit_runs)} complete staircases of seed {fit_seed} at L = {L}, "
-                "not one"
-            )
-        fit = [probes.frames(fit_runs[0], limit, probe_seed)]
+        fit = [probes.frames(fits[L], limit, probe_seed)]
         test = [
             probes.frames(r, limit, probe_seed)
             for r in scored
@@ -230,27 +245,33 @@ def probe_tables(
             "n_fit": sum(len(f.replica) for f in fit),
             "n_test": sum(len(f.replica) for f in test),
         }
-        for checkpoint in passes:
-            x = embed(checkpoint, [*fit, *test])
-            pred = probes.fitted(x[: counts["n_fit"]], x[counts["n_fit"] :], targets, alpha)
-            head = {"checkpoint": checkpoint.name, **arms[checkpoint.name], "L": L}
-            rows += [head | row | counts for row in probes.scored(pred, targets)
-                     if row["target"] in wanted]  # fmt: skip
-            for t, target in enumerate(wanted):
-                raw = probes.replica_sums(test, targets[target, "raw"][1], pred[target, "raw"])
-                shuffled = probes.replica_sums(
-                    test, targets[target, "shuffle_within_T"][1], pred[target, "shuffle_within_T"]
-                )
-                both = [np.hstack(pair) for pair in zip(raw, shuffled, strict=True)]
-                draws[target, "r2", L, checkpoint.name] = scoring.hierarchical_bootstrap(
-                    probes.r2_of, [raw], n, np.random.default_rng([seed, L, t, 0])
-                )
-                draws[target, "selectivity", L, checkpoint.name] = scoring.hierarchical_bootstrap(
-                    lambda a: probes.r2_of(a[:, :4]) - probes.r2_of(a[:, 4:]),
-                    [both],
-                    n,
-                    np.random.default_rng([seed, L, t, 1]),
-                )
+        for index, checkpoint in enumerate(passes):
+            unit, name = f"probes-{L}-{index:02d}", checkpoint.name
+            saved = prereg.load_part(store, unit)
+            if saved is None:
+                x = embed(checkpoint, [*fit, *test])
+                pred = probes.fitted(x[: counts["n_fit"]], x[counts["n_fit"] :], targets, alpha)
+                head = {"checkpoint": name, **arms[name], "L": L}
+                drawn: dict[tuple[str, str, int, str], np.ndarray] = {}
+                saved = {"rows": [head | row | counts for row in probes.scored(pred, targets)
+                                  if row["target"] in wanted], "draws": drawn}  # fmt: skip
+                for t, target in enumerate(wanted):
+                    raw = probes.replica_sums(test, targets[target, "raw"][1], pred[target, "raw"])
+                    control = targets[target, "shuffle_within_T"][1]
+                    shuffled = probes.replica_sums(test, control, pred[target, "shuffle_within_T"])
+                    both = [np.hstack(pair) for pair in zip(raw, shuffled, strict=True)]
+                    drawn[target, "r2", L, name] = scoring.hierarchical_bootstrap(
+                        probes.r2_of, [raw], n, np.random.default_rng([seed, L, t, 0])
+                    )
+                    drawn[target, "selectivity", L, name] = scoring.hierarchical_bootstrap(
+                        lambda a: probes.r2_of(a[:, :4]) - probes.r2_of(a[:, 4:]),
+                        [both],
+                        n,
+                        np.random.default_rng([seed, L, t, 1]),
+                    )
+                prereg.save_part(store, unit, saved)
+            rows += saved["rows"]
+            draws |= saved["draws"]
     return rows, draws
 
 
@@ -338,8 +359,10 @@ def run(
     allow_stale: bool = False,
     embed: Embed | None = None,
     device: str | None = None,
+    resume: bool = False,
 ) -> tuple[Path, list[Row], int]:
-    """Everything but the figures; returns the result folder, its judged rows, the trials logged."""
+    """Everything but the figures; returns the result folder, its judged rows, the trials logged.
+    With `resume`, the torn result of this file a crash left is carried on from what it saved."""
     pre = prereg.load(path)
     if "latents" not in pre.doc:
         raise prereg.PreregError(f"{pre.name} has no [latents]: `ews score` scores it")
@@ -356,19 +379,26 @@ def run(
     else:
         ref = prereg.frozen(pre)
     planned = prereg.cells(doc)
-    prereg.charge(data_dir, pre, planned)
+    own = prereg.resumable(data_dir, pre) if resume else None
+    prereg.charge(data_dir, pre, planned, own)
     runs_commit = prereg.baseline_commit(pre) if ref.commit else None
     admitted = ising.admit(doc, data_dir, allow_stale=allow_stale, commit=ref.commit or None,
                            runs_commit=runs_commit)  # fmt: skip
     baseline = baseline_rows(doc, data_dir, admitted.scored, runs_commit)
+    fit_runs(doc, data_dir)  # refused before the folder is made, not halfway through the probes
     if embed is None:
         embed = (
             ews_planted.planted_embedding()
             if planted
             else checkpoint_embedder(data_dir, admitted.passes, device)
         )
+    # in the resume key too: on another device or torch the probes' embeddings are other bytes
+    embedding = {"torch": torch.__version__, "device": device or train.default_device()}
+    run_dir = begin(pre, ref, data_dir, seed, admitted, own, **embedding)
     curves = curve_rows(doc, admitted.scored, admitted.passes)
-    probe_rows, draws = probe_tables(doc, data_dir, admitted.scored, admitted.passes, embed, seed)
+    probe_rows, draws = probe_tables(
+        doc, data_dir, admitted.scored, admitted.passes, embed, seed, run_dir
+    )
 
     def more(evaluation: ising.Evaluation) -> dict[str, list[Row]]:
         quantities = [
@@ -381,7 +411,7 @@ def run(
         )
         return {"probes": probe_rows, "curves": curves, "baseline": baseline, "margins": table}
 
-    run_dir, evaluation, logged = score(pre, ref, data_dir, seed, allow_stale, more)
+    run_dir, evaluation, logged = score(pre, ref, data_dir, seed, allow_stale, more, run_dir)
     csv_tables(run_dir)
     table = _table(run_dir, "margins")  # none when no role has two model seeds
     judged = [r for r in pq.read_table(table).to_pylist() if r["judged"]] if table.is_file() else []
@@ -465,6 +495,9 @@ def main(argv: Sequence[str] | None = None, embed: Embed | None = None) -> int:
     parser.add_argument("--allow-stale-pilot", action="store_true")
     parser.add_argument("--no-figures", action="store_true")
     parser.add_argument("--planted", action="store_true", help="unfrozen, on planted data alone")
+    parser.add_argument(
+        "--resume", action="store_true", help="carry on the result a crash left, from what it saved"
+    )
     args = parser.parse_args(argv)
     try:
         if args.figures_only:
@@ -478,7 +511,7 @@ def main(argv: Sequence[str] | None = None, embed: Embed | None = None) -> int:
         else:
             run_dir, judged, logged = run(
                 args.prereg, args.data_dir, args.seed, args.planted, args.allow_stale_pilot, embed,
-                args.device,
+                args.device, args.resume,
             )  # fmt: skip
             for row in judged:
                 print(
