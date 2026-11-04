@@ -51,20 +51,16 @@ says inside each event's own days. `liquidations` reads the table #90 will recor
 allLiquidation stream, and reports "not recorded" until it exists. It stays a proxy: the research
 pass found no peer-reviewed validation of one, and the paper is to say so.
 
-Run it with `python -m tipping_point.market.cascade --start <day> --end <day>`.
+Run it with `python -m tipping_point.market cascade --start <day> --end <day>`.
 """
 
 from __future__ import annotations
 
-import argparse
-import dataclasses
 import os
-import sys
 import tomllib
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -73,9 +69,7 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 from numpy.lib.stride_tricks import sliding_window_view
 
-from .. import engine
 from . import archive, bars, msvol
-from .__main__ import ARCHIVE, CONFIRMATORY, DATA_DIR_HELP
 
 HOUR_NS = 3_600 * 10**9
 LONG = "long_cascade"
@@ -337,82 +331,3 @@ def liquidations(
         "last_ts_ns": last_ts,
         "cascades": checked,
     }
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="python -m tipping_point.market.cascade",
-        description="The pooled list of a span's cascade candidates, as a labels run. The first "
-        "28 days only fill the trailing medians. Refuses any day from 2024-01-01, as `labels` "
-        "does: the confirmatory span waits for the frozen market-labels-v1.",
-    )
-    parser.add_argument("--start", type=date.fromisoformat, required=True, help="first UTC day")
-    parser.add_argument("--end", type=date.fromisoformat, required=True, help="last UTC day")
-    parser.add_argument("--symbols", nargs="+", default=list(archive.SYMBOLS))
-    parser.add_argument("--archive", type=Path, default=ARCHIVE)
-    parser.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
-    parser.add_argument("--tag", help="the run id's tag (default cascades-<start>-<end>)")
-    for field in dataclasses.fields(Params):
-        flag = "--" + field.name.replace("_", "-")
-        parser.add_argument(flag, type=type(field.default), default=field.default)
-    args = parser.parse_args(argv)
-    if args.end >= CONFIRMATORY:
-        print(
-            f"error: cascades end on {CONFIRMATORY.year - 1}-12-31: days from {CONFIRMATORY} are "
-            "the confirmatory span, closed until market-labels-v1 is frozen (#29 S5)",
-            file=sys.stderr,
-        )
-        return 1
-    params = Params(**{f.name: getattr(args, f.name) for f in dataclasses.fields(Params)})
-    try:
-        span = archive.collect(args.symbols, args.start, args.end, args.archive)
-    except archive.ArchiveError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    days = (args.end - args.start).days + 1
-    found: dict[str, list[dict[str, Any]]] = {}
-    checks: dict[str, Any] = {}
-    for symbol in args.symbols:
-        bar, checks[symbol] = bars.bars(
-            archive.day_ms(args.start),
-            days,
-            *(span.columns[(symbol, kind)] for kind in archive.KINDS),
-        )
-        found[symbol], windows = candidates(bar, params)
-        checks[symbol] |= windows | {"candidates": len(found[symbol])}
-    rows = pool(found, params)
-    per_symbol = Counter(row["symbol"] for row in rows)
-    checks["asset_instances"] = len(rows)
-    checks["market_events"] = len({row["market_event"] for row in rows})
-    checks["liquidations"] = liquidations(args.data_dir, rows, params)
-    run_params = {
-        "start": args.start.isoformat(),
-        "end": args.end.isoformat(),
-        "symbols": list(args.symbols),
-        "cascade": dataclasses.asdict(params),
-    }
-    run_dir = msvol.write_run(
-        args.data_dir,
-        args.tag or f"cascades-{args.start:%Y%m%d}-{args.end:%Y%m%d}",
-        {"cascades": pa.Table.from_pylist(rows, schema=SCHEMA)},
-        run_params,
-        span.sources,
-        span.missing,
-        checks,
-    )
-    for symbol in args.symbols:
-        c = checks[symbol]
-        print(
-            f"{symbol:<8} {c['windows_evaluated']} of {c['windows']} windows evaluated "
-            f"({c['windows_missing_oi']} missing open interest, {c['windows_missing_bars']} "
-            f"missing bars, {c['windows_no_history']} without history); {c['candidates']} "
-            f"candidates, {per_symbol[symbol]} asset instances"
-        )
-    print(f"{checks['market_events']} market events, {checks['asset_instances']} asset instances")
-    print(f"liquidations: {checks['liquidations']['status']}")
-    print(f"{run_dir}  ({len(span.sources)} files read, {len(span.missing)} not published)")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

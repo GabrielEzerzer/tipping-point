@@ -280,7 +280,7 @@ one; until then the run says `liquidations: not recorded`. The first 28 days onl
 medians, so this span lists 2023 alone:
 
 ```sh
-uv run python -m tipping_point.market.cascade --start 2022-12-04 --end 2023-12-31
+uv run python -m tipping_point.market cascade --start 2022-12-04 --end 2023-12-31
 ```
 
 `market/documented_cascades.toml` lists documented cascades with their sources. With
@@ -305,6 +305,19 @@ the event-time shift and the circularity floor. The floor simulates 10-second re
 gives the AUC a clustering process with no critical dynamics produces by construction. Its GARCH
 parameters, pipelines and `scoring.auc` are inputs: the parameters' fit belongs to the 2023 pilot,
 and no module in `market/` may import the feature code (`tests/market/test_circularity.py`).
+
+`reports` writes the label-count and stability reports of a labels run into the run's `reports/`
+folder. It labels the run's span again from the fetched files and refuses to write anything unless
+that gives back the run's own tables. `--cascades` adds the pooled list of a cascade run of the same
+span and symbols. `harness/market_floor.py` runs the floor with the run's own labeller and the
+variance and AC1 pipelines, and writes it to the same folder, with one AUC per path beside the
+pooled one so that the floor's own spread shows.
+
+```sh
+uv run python -m tipping_point.market reports --run <labels run folder> --cascades <cascade run folder>
+uv run python harness/market_floor.py --run <labels run folder> \
+    --omega <omega> --alpha <alpha> --beta <beta> --nu <nu> --days <days>
+```
 
 ## Engine API
 

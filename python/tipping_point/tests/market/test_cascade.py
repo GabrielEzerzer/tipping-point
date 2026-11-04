@@ -22,7 +22,7 @@ import pytest
 from market_planted import KLINES_HEADER, METRICS_HEADER, Vision, funding_csv
 from tipping_point import engine
 from tipping_point.market import archive, bars, cascade, msvol
-from tipping_point.market.__main__ import ARCHIVE, CONFIRMATORY
+from tipping_point.market.__main__ import ARCHIVE, CONFIRMATORY, main
 from tipping_point.market.cascade import LONG, SHORT, Params
 
 Series = dict[str, np.ndarray]
@@ -736,7 +736,7 @@ def fetched(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def _run(fetched: Path, data: Path, tag: str, *more: str) -> Path:
     where = ["--archive", str(fetched), "--data-dir", str(data), "--tag", tag]
-    assert cascade.main([*SPAN, *where, "--trailing-days", "7", *more]) == 0
+    assert main(["cascade", *SPAN, *where, "--trailing-days", "7", *more]) == 0
     (run_dir,) = (data / "labels").glob(f"*-{tag}")
     return run_dir
 
@@ -819,10 +819,10 @@ def test_the_confirmatory_span_and_unverified_files_are_refused(
     assert date(2024, 1, 1) == CONFIRMATORY
     late = ["--start", "2023-12-30", "--end", "2024-01-02", "--archive", str(fetched)]
     data = tmp_path / "data"
-    assert cascade.main([*late, "--data-dir", str(data)]) == 1
+    assert main(["cascade", *late, "--data-dir", str(data)]) == 1
     assert "market-labels-v1" in capsys.readouterr().err and not data.exists()
     where = ["--archive", str(tmp_path / "nothing-here"), "--data-dir", str(data)]
-    assert cascade.main([*SPAN, *where]) == 1
+    assert main(["cascade", *SPAN, *where]) == 1
     assert "not fetched" in capsys.readouterr().err and not data.exists()
 
 
