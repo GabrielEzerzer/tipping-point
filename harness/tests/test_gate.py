@@ -1056,36 +1056,37 @@ def test_a_failed_check_stays_in_the_record_after_it_leaves_the_tail(tmp_path, m
 # ---------- a section deleted from the self-test must not read as green (#124)
 
 
-# run_all's sections. The leg trusts the closing "N/M checks passed" line, which counts only the
-# checks that ran: delete real_runs, the only real train, resume and extract path and most of the
-# leg's time, and it reads 223/223, exit 0. A minimum count would need bumping on nearly every
-# change and could not say which section went. A new section joins this list.
+# run_all's sections, each with the fewest `check(` calls it may reach (#132). The leg trusts the
+# closing "N/M checks passed" line, which counts only the checks that ran: delete real_runs, the
+# only real train, resume and extract path and most of the leg's time, and it reads 223/223, exit
+# 0. A total would need bumping on nearly every change and could not say which section went. A new
+# section joins this list with its count; a check deleted on purpose lowers its section's.
 SELF_TEST = gate.ROOT / "notebooks" / "kaggle_ising_runs_selftest.py"
-SELF_TEST_SECTIONS = (
-    "plans",
-    "refusals",
-    "cli",
-    "shrinking",
-    "queues",
-    "failed_extractions",
-    "resolution",
-    "previous",
-    "inputs",
-    "input_checkpoints",
-    "wheel",
-    "verification",
-    "kernel_folder",
-    "jepa_entries",
-    "extraction_rates",
-    "kernel_acceptance",
-    "invalid_plans",
-    "pilot_28",
-    "primary_28",
-    "first_reads",
-    "v1_confirmatory",
-    "ablations_28",
-    "real_runs",
-)
+SELF_TEST_SECTIONS = {
+    "plans": 8,
+    "refusals": 3,
+    "cli": 3,
+    "shrinking": 7,
+    "queues": 13,
+    "failed_extractions": 7,
+    "resolution": 7,
+    "previous": 9,
+    "inputs": 8,
+    "input_checkpoints": 6,
+    "wheel": 11,
+    "verification": 18,
+    "kernel_folder": 3,
+    "jepa_entries": 41,
+    "extraction_rates": 7,
+    "kernel_acceptance": 7,
+    "invalid_plans": 5,
+    "pilot_28": 20,
+    "primary_28": 13,
+    "first_reads": 21,
+    "v1_confirmatory": 22,
+    "ablations_28": 20,
+    "real_runs": 21,
+}
 
 
 def _calls_that_always_run(body: list[ast.stmt]) -> Iterator[str]:
@@ -1153,6 +1154,136 @@ def test_a_section_that_may_never_run_counts_as_deleted(guarded: str) -> None:
 
 def test_no_run_all_leaves_every_section_missing() -> None:
     assert _sections_missing("def something_else(k):\n    plans(k)\n") == list(SELF_TEST_SECTIONS)
+
+
+# ---------- a section emptied in the self-test must not read as green (#132)
+
+
+def _live(body: list[ast.stmt]) -> list[ast.stmt]:
+    """These statements up to the first return or raise among them: what follows never runs."""
+    for i, statement in enumerate(body):
+        if isinstance(statement, ast.Return | ast.Raise):
+            return body[: i + 1]
+    return body
+
+
+def _checks_reached(source: str, section: str) -> int:
+    """The `check(` calls written in the section and in each function of the file it calls, through
+    their calls in turn, each function once. Call sites, not checks run: a check in a loop counts
+    once. A call behind an `if` counts, so a guarded check is not caught here; #124's test holds
+    run_all, and this holds the sections under it."""
+    functions = {n.name: n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)}
+    seen, todo, sites = set(), [section], 0
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in functions:
+            continue
+        seen.add(name)
+        for statement in _live(functions[name].body):
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    if node.func.id == "check":
+                        sites += 1
+                    else:
+                        todo.append(node.func.id)
+    return sites
+
+
+def _sections_short(source: str, floors: dict[str, int]) -> dict[str, tuple[int, int]]:
+    """Each section that reaches fewer checks than its floor: (reached, floor)."""
+    reached = {section: _checks_reached(source, section) for section in floors}
+    return {s: (n, floors[s]) for s, n in reached.items() if n < floors[s]}
+
+
+def test_every_section_reaches_its_count_of_checks() -> None:
+    # a red here names the section: restore what went, or lower its count if that was the point
+    assert _sections_short(SELF_TEST.read_text("utf-8"), SELF_TEST_SECTIONS) == {}
+
+
+def test_every_section_reaches_at_least_one_check() -> None:
+    assert [section for section, floor in SELF_TEST_SECTIONS.items() if floor < 1] == []
+
+
+# a self-test's shape: three sections, the last reaching its checks through a helper in a loop
+WHOLE_SELF_TEST = """\
+def check(name, ok, detail=""):
+    results.append(bool(ok))
+
+def plans(k, root):
+    check("a", True)
+    check("b", True)
+
+def queues(k, root):
+    with open(root) as f:
+        if f:
+            check("c", True)
+
+def helper(k, root, model):
+    check("d", True)
+    check("e", True)
+
+def first_reads(k, root):
+    check("f", True)
+    for model in MODELS:
+        helper(k, root, model)
+"""
+WHOLE_FLOORS = {"plans": 2, "queues": 1, "first_reads": 3}
+
+
+def test_a_whole_self_test_has_no_section_short() -> None:
+    assert _sections_short(WHOLE_SELF_TEST, WHOLE_FLOORS) == {}
+
+
+@pytest.mark.parametrize(
+    ("section", "emptied", "reached"),
+    [
+        ("plans", "def plans(k, root):\n    return\n", 0),
+        ("plans", "def plans(k, root): pass\n", 0),
+        ("plans", 'def plans(k, root):\n    return\n    check("a", True)\n', 0),
+        ("plans", 'def plans(k, root):\n    raise SystemExit\n    check("a", True)\n', 0),
+        ("plans", 'def plans(k, root):\n    check("a", True)\n', 1),
+        ("queues", "def queues(k, root):\n    return\n", 0),
+        ("first_reads", 'def first_reads(k, root):\n    check("f", True)\n', 1),
+    ],
+    ids=[
+        "body-gone",
+        "pass",
+        "return-first",
+        "raise-first",
+        "one-check-gone",
+        "nested-check-gone",
+        "helper-loop-gone",
+    ],
+)
+def test_an_emptied_section_is_named(section: str, emptied: str, reached: int) -> None:
+    # #132: `def real_runs(k, root): return` kept #124's call from run_all and ran no checks
+    start = WHOLE_SELF_TEST.index(f"def {section}(")
+    end = WHOLE_SELF_TEST.find("\ndef ", start + 1)
+    end = len(WHOLE_SELF_TEST) if end == -1 else end + 1
+    source = WHOLE_SELF_TEST[:start] + emptied + WHOLE_SELF_TEST[end:]
+    assert _sections_short(source, WHOLE_FLOORS) == {section: (reached, WHOLE_FLOORS[section])}
+
+
+def test_a_helper_emptied_shorts_the_section_that_calls_it() -> None:
+    source = WHOLE_SELF_TEST.replace('    check("d", True)\n    check("e", True)\n', "    pass\n")
+    assert _sections_short(source, WHOLE_FLOORS) == {"first_reads": (1, 3)}
+
+
+def test_a_helper_counts_once_in_a_section_and_in_every_section_that_calls_it() -> None:
+    twice = "\ndef twice(k, root):\n    helper(k, root, 1)\n    helper(k, root, 2)\n"
+    shared = WHOLE_SELF_TEST + twice
+    assert _checks_reached(shared, "twice") == 2
+    assert _checks_reached(shared, "first_reads") == 3
+
+
+def test_a_section_that_calls_itself_ends() -> None:
+    source = "def check(n, ok):\n    pass\n"
+    source += "def plans(k, root):\n    check('a', 1)\n    plans(k, root)\n"
+    assert _checks_reached(source, "plans") == 1
+
+
+def test_a_section_not_in_the_file_reaches_none() -> None:
+    assert _sections_short("def check(n, ok):\n    pass\n", {"plans": 1}) == {"plans": (0, 1)}
 
 
 # ---------- a hung leg ends in a red row, a last line and a record (#125)
