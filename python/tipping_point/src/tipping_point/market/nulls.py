@@ -310,7 +310,7 @@ def circularity_floor(
                         "path": path,
                         "scorer": name,
                         "horizon_bars": h,
-                        "auc": auc(positive, negative),
+                        "auc": _auc(auc, positive, negative),
                         "n_pos": int(np.isfinite(positive).sum()),
                         "n_neg": int(np.isfinite(negative).sum()),
                     }
@@ -340,7 +340,7 @@ def circularity_floor(
     for (name, h), found in pos.items():
         p, n = np.concatenate(found), np.concatenate(neg[name])
         by_draw = np.concatenate(moved[name, h], axis=1)
-        null_aucs = np.array([auc(row, n) for row in by_draw])
+        null_aucs = np.array([_auc(auc, row, n) for row in by_draw])
         null_aucs = null_aucs[~np.isnan(null_aucs)]
         low_auc, mid, high_auc = (
             np.percentile(null_aucs, [2.5, 50, 97.5]) if null_aucs.size else (math.nan,) * 3
@@ -351,7 +351,7 @@ def circularity_floor(
                 "horizon_bars": h,
                 "contaminated": not h >= worst,
                 "delay_p90": worst,
-                "auc": auc(p, n),
+                "auc": _auc(auc, p, n),
                 "n_pos": int(np.isfinite(p).sum()),
                 "n_neg": int(np.isfinite(n).sum()),
                 "shift_auc_median": float(mid),
@@ -365,6 +365,12 @@ def circularity_floor(
 
 def _score(scorer: Scorer, rows: np.ndarray) -> np.ndarray:
     return scorer(rows) if len(rows) else np.empty(0)
+
+
+def _auc(auc: Callable[[np.ndarray, np.ndarray], float], pos: np.ndarray, neg: np.ndarray) -> float:
+    """NaN when either side holds no finite score (n_pos or n_neg 0), whatever `auc` makes of it:
+    an empty floor, as a short half-life can give (#138), is never a number."""
+    return auc(pos, neg) if np.isfinite(pos).any() and np.isfinite(neg).any() else math.nan
 
 
 def refuse_confirmatory(last_ts_ns: int) -> None:

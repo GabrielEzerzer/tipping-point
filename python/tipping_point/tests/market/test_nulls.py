@@ -703,6 +703,41 @@ def test_a_process_with_no_clustering_gives_no_labels_and_no_crash() -> None:
     assert report.tables["cells"]["auc"].null_count == 1
 
 
+def test_a_cell_with_no_positives_has_no_auc_whatever_the_auc_function_returns() -> None:
+    """The empty floor of a short half-life (#138): null slices but no pre-onset segment. A
+    horizon longer than the path leaves every event without one, as a path with no events would.
+    The AUC passed in answers 0.5 even then, so only the floor's own rule keeps the cell empty,
+    and the report says how many are."""
+    seed, days, far = 8, 35, 35 * 288  # this path holds events and null slices
+    found = nulls.circularity_floor(
+        FLOOR_GARCH,
+        {"recording": Recording()},
+        lambda *_: 0.5,
+        (0, far),
+        days=days,
+        paths=1,
+        seed=seed,
+        params=SMALL,
+        draws=3,
+    )
+    (path,) = found.paths
+    near, empty = found.cells
+    assert path["events"] > 0 and near["n_pos"] == path["events"] and near["auc"] == 0.5
+    assert empty["n_pos"] == 0 and empty["n_neg"] == near["n_neg"] > 0
+    assert math.isnan(empty["auc"]) and math.isnan(found.path_cells[1]["auc"])
+    assert found.path_cells[0]["auc"] == 0.5
+    # the far horizon leaves no bar to shift to, so neither horizon has a shift null either
+    assert near["shift_draws"] == empty["shift_draws"] == 0
+    report = reports.floor(found, FLOOR_GARCH, {})
+    assert report.tables["cells"]["auc"].to_pylist() == [0.5, None]
+    paragraph = report.summary.split("\n\n")[1]
+    assert (
+        "1 of the 2 cells and 1 of the 2 AUCs per path have no pre-onset segment or no null "
+        "slice, so their AUC is n/a." in paragraph
+    )
+    assert "no pre-onset segment" not in reports.floor(_small_floor(8), FLOOR_GARCH, {}).summary
+
+
 def test_the_floor_stays_out_of_the_confirmatory_span() -> None:
     assert nulls.CONFIRMATORY == CLI_CONFIRMATORY == date(2024, 1, 1)
     scorers = {"variance": Pipeline("variance", 60, 240)}

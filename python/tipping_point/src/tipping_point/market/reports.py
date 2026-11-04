@@ -457,6 +457,14 @@ def _label_count_summary(
             _markdown(tables["coincidence"]),
             f"## Onsets within +-{RELEASE_NS // (60 * 10**9)} minutes of scheduled releases "
             "(descriptive, no hypothesis)",
+            *(
+                [
+                    "Calendar: market/releases.csv; 11 of the 12 FOMC times are the standard 14:00 "
+                    "Eastern slot, not read off each statement page."
+                ]
+                if releases
+                else []
+            ),
             _optional(tables["releases"], releases),
             f"## Cascade candidates and regime onsets within +-{CASCADE_NS // HOUR_NS} hour",
             _optional(tables["cascades"], cascades),
@@ -706,7 +714,8 @@ def stability(
             rows["aggtrades"].append(_cross_check(symbol, rv, aggtrades[symbol]))
     rows["inputs"] = [{"item": "aggtrades", "status": _status(aggtrades is not None)}]
     tables = {name: _table(STABILITY[name], found) for name, found in rows.items()}
-    return Report("stability", tables, _stability_summary(tables, params, aggtrades is not None))
+    summary = _stability_summary(tables, params, seed, aggtrades is not None)
+    return Report("stability", tables, summary)
 
 
 def _cross_check(symbol: str, rv: np.ndarray, other: np.ndarray) -> Row:
@@ -723,7 +732,7 @@ def _cross_check(symbol: str, rv: np.ndarray, other: np.ndarray) -> Row:
 
 
 def _stability_summary(
-    tables: dict[str, pa.Table], params: msvol.Params, cross_checked: bool
+    tables: dict[str, pa.Table], params: msvol.Params, seed: int, cross_checked: bool
 ) -> str:
     hero = []
     delays = tables["delay"].to_pylist()
@@ -763,7 +772,7 @@ def _stability_summary(
         [
             "# Stability report",
             "\n".join(hero or ["No labelled series."]),
-            f"Labeller parameters: {labeller}.",
+            f"Labeller parameters: {labeller}. The delay simulation drew from seed = {seed}.",
             "## Agreement: the oracle, the declared variants and the plain threshold rule",
             _markdown(tables["agreement"]),
             "## Onset shifts against the oracle (as-of less oracle, in bars: count)",
@@ -802,13 +811,24 @@ def floor(found: nulls.Floor, garch: nulls.Garch, settings: Mapping[str, Any]) -
         if unshifted
         else ""
     )
+    cells, per_path = (
+        sum(not (c["n_pos"] and c["n_neg"]) for c in rows)
+        for rows in (found.cells, found.path_cells)
+    )
+    empty = (
+        f" {cells} of the {len(found.cells)} cells and {per_path} of the "
+        f"{len(found.path_cells)} AUCs per path have no pre-onset segment or no null slice, so "
+        "their AUC is n/a."
+        if cells or per_path
+        else ""
+    )
     summary = "\n\n".join(
         [
             "# Circularity floor",
             f"GARCH(1,1)-t at 10 seconds, {parameters}, through the exact bars and labeller, over "
             f"{len(found.paths)} simulated paths with {events} events. A clustering process with "
             "no critical dynamics gives this AUC by construction: a real AUC counts only above "
-            f"it.{stranded}\nThe floor ran with {ran_with}.",
+            f"it.{stranded}{empty}\nThe floor ran with {ran_with}.",
             "## AUC of pre-onset segments against null slices, and of shifted events",
             _markdown(tables["cells"]),
             "## AUC per path: the floor's own spread",

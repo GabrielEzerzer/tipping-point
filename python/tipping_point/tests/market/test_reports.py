@@ -449,6 +449,15 @@ def test_the_calendar_fills_the_releases_table_on_the_fixture(fixture: Fixture) 
     title = "Onsets within +-15 minutes of scheduled releases (descriptive, no hypothesis)"
     assert reports.NOT_SUPPLIED not in section[title]
     assert "| BTCUSDT | CPI | 1 |" in section[title] and "| ETHUSDT | NFP | 2 |" in section[title]
+    # where the times come from, under the heading and before the table (#142)
+    source, table = section[title].strip().split("\n\n")
+    assert source == (
+        "Calendar: market/releases.csv; 11 of the 12 FOMC times are the standard 14:00 Eastern "
+        "slot, not read off each statement page."
+    )
+    assert table.startswith("| symbol | kind |")
+    caveat = " ".join((reports.release_calendar.__doc__ or "").split())
+    assert source.split("; ")[1] in caveat  # the caveat the calendar's reader states
 
 
 # ---------------------------------------------------------------- the stability report's parts
@@ -833,6 +842,11 @@ def test_the_delay_simulation_is_the_only_thing_the_seed_moves() -> None:
     assert a.tables["delay"].num_rows == 2 and not a.tables["delay"].equals(b.tables["delay"])
     for name in set(reports.STABILITY) - {"delay"}:
         assert a.tables[name].equals(b.tables[name]), name
+    # so the report names its seed (#137): with the run's labeller, enough to repeat it
+    for report, seed in ((a, 1), (b, 2)):
+        line = report.summary.split("\n\n")[2]
+        assert line.startswith("Labeller parameters: ")
+        assert line.endswith(f". The delay simulation drew from seed = {seed}.")
 
 
 def _ending_at(last: np.ndarray) -> dict[str, Any]:
