@@ -219,6 +219,25 @@ def test_reports_refuse_runs_that_do_not_match(
     assert not (cascades / "reports").exists() and sorted(reported.iterdir()) == before
 
 
+def test_reports_take_a_cascade_run_of_the_same_symbols_in_another_order(
+    fetched: Path, run: Path, tmp_path: Path
+) -> None:
+    """The symbols are compared sorted (#140): a cascade run made with ETHUSDT before BTCUSDT
+    covers the labels run's span and symbols, so it is taken, and counted per symbol."""
+    copy = tmp_path / "labels" / run.name
+    shutil.copytree(run, copy, ignore=shutil.ignore_patterns("reports"))
+    reversed_symbols = [*SPAN, "--symbols", *SYMBOLS[::-1]]
+    other = _cascade(fetched, tmp_path, "reversed", reversed_symbols)
+    assert _json(other / "manifest.json")["params"]["symbols"] == SYMBOLS[::-1]
+    argv = ["reports", "--run", str(copy), "--cascades", str(other), "--archive", str(fetched)]
+    assert main(argv) == 0
+    counted = pq.read_table(copy / "reports" / "label_count" / "cascades.parquet").to_pylist()
+    pooled = engine.read(tmp_path, "labels", other.name, "cascades").to_pylist()
+    assert [row["symbol"] for row in counted] == SYMBOLS
+    for row in counted:
+        assert row["candidates"] == sum(r["symbol"] == row["symbol"] for r in pooled) > 0
+
+
 def test_reports_refuse_a_second_run_before_reading_the_archive(
     run: Path, reported: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -254,9 +273,11 @@ def test_reports_take_an_unchanged_run_whose_refits_failed(fetched: Path, tmp_pa
     assert sorted(p.name for p in (run / "reports").iterdir()) == ["label_count", "stability"]
 
 
+FLOOR_ARGS = ["--omega", "1.14e-11", "--alpha", "0.005", "--beta", "0.9949", "--nu", "6"]
+
+
 def test_the_floor_runs_the_labels_runs_own_labeller_into_its_reports(run: Path) -> None:
-    garch = ["--omega", "1.14e-11", "--alpha", "0.005", "--beta", "0.9949", "--nu", "6"]
-    assert market_floor.main(["--run", str(run), *garch, "--days", "28", "--paths", "2"]) == 0
+    assert market_floor.main(["--run", str(run), *FLOOR_ARGS, "--days", "28", "--paths", "2"]) == 0
     folder = run / "reports" / "floor"
     files = sorted(p.name for p in folder.iterdir())
     assert files == sorted([*(f"{table}.parquet" for table in reports.FLOOR), "summary.md"])
@@ -277,3 +298,22 @@ def test_the_floor_runs_the_labels_runs_own_labeller_into_its_reports(run: Path)
     first = (folder / "summary.md").read_text(encoding="utf-8").split("\n\n")[1]
     assert "seed = 29, paths = 2, days = 28" in first
     assert first.count("window=60, length=240") == len(market_floor.SCORERS)
+
+
+def test_the_floor_refuses_a_run_whose_floor_exists_before_reading_it(tmp_path: Path) -> None:
+    """A floor folder already there: refused before the manifest is read (#140), so a run with
+    no manifest at all gets the refusal, not a missing file."""
+    folder = tmp_path / "run" / "reports" / "floor"
+    folder.mkdir(parents=True)
+    with pytest.raises(SystemExit) as refused:
+        market_floor.main(["--run", str(tmp_path / "run"), *FLOOR_ARGS, "--days", "28"])
+    assert refused.value.code == f"error: {folder} exists"
+    assert list(folder.iterdir()) == []
+
+
+def test_the_floor_refuses_a_run_that_is_not_a_labels_run(cascades: Path) -> None:
+    """A cascade run has no labeller to run the floor through (#140): refused, nothing written."""
+    with pytest.raises(SystemExit) as refused:
+        market_floor.main(["--run", str(cascades), *FLOOR_ARGS, "--days", "28"])
+    assert refused.value.code == f"error: {cascades} is not a labels run"
+    assert not (cascades / "reports").exists()
