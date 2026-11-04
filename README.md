@@ -69,8 +69,8 @@ band at a median eps_L of about 1.7. At the headline cell, the matched cadence w
 L = 64 (AUC 0.80 to 0.83). With the energy as the observable, on the dense cadence, Var reaches an
 AUC of 0.999 to 1.000 and AC1 0.83 to 1.00, while the skewness is weak (0.18 to 0.46). The surrogate
 tests give 3.8 to 6.9% false positives at alpha = 0.05. At this ramp rate (x = 0.02) the classic
-indicators are a saturated positive control: the discrimination questions land at AUC 1 or 0, so
-the exponents are the informative numbers.
+indicators are a saturated positive control: the judged discrimination questions (hypotheses 2
+and 3) land at or near AUC 1 and 0, so the exponents are the informative numbers.
 
 To reproduce: with the 75 runs in the data dir, `uv run python -m tipping_point.ews score --prereg paper/prereg/ising-ews-v1.toml` scores them, and `uv run --with matplotlib==3.10.3 python harness/ews_v1_figure.py <result folder> paper/figures/ising-ews-v1.png` redraws the figure from the result.
 
