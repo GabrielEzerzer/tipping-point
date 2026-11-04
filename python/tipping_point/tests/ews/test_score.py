@@ -286,24 +286,30 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     # planted. The bounds sit clear of the draw, not on it (#131): over 205 draws of this dataset
     # (each run's stream and the scorer's seed varied) the lowest of the eight cells at h = 0 is
     # 0.69-0.95 and their mean 0.82-0.97; a dead cell reads 0.5. A horizon out the rise is weak,
-    # a cell there as low as 0.41, no better than a dead one, so h = 1 is held only to sit below
-    # h = 0: by 0.08-0.36 of the mean, and by exactly 0 with the horizon ignored. This draw: 0.82,
-    # 0.88 and 0.19
+    # a cell there as low as 0.41, no better than a dead one, so h = 1 is held by its mean alone:
+    # below h = 0's, by 0.08-0.36 and by exactly 0 with the horizon ignored, and above 0.5, at
+    # 0.525-0.84 and exactly 0.5 with every h = 1 cell dead. This draw: 0.82, 0.88, 0.19 and 0.69
     assert min(near) > 0.6 and np.mean(near) > 0.75, rise
-    assert np.mean(near) - np.mean(out) > 0, rise
+    assert np.mean(near) - np.mean(out) > 0 and np.mean(out) > 0.5, rise
     surrogate = pq.read_table(run_dir / "surrogates" / f"{0:020d}.parquet").to_pylist()
     assert {(r["surrogate"], r["headline"]) for r in surrogate} == {("phase", True), ("ar1", True)}
     # with 19 surrogates p reaches alpha = 1/20 only for a series that beats every one of them
     assert len(surrogate) == 48 and {r["n_surrogates"] for r in surrogate} == {19}
-    rising = [r["detected"] for r in surrogate if r["indicator"] == "variance" and r["h"] == 0]
+    at_h0 = [r for r in surrogate if r["indicator"] == "variance" and r["h"] == 0]
+    rising = {s: [r["detected"] for r in at_h0 if r["surrogate"] == s] for s in ("phase", "ar1")}
     # a share of 16 series, so a cell moves 1/16 a series at a time: over 205 draws one cell reads
-    # as low as 0.06, and the mean of the eight 0.28-0.75 (#131). A test that lost its direction
-    # detects none, one that cannot tell a rise from its surrogates about alpha
-    assert np.mean(rising) >= 0.15, rising
+    # as low as 0.06, and a kind's mean over its four cells 0.27-0.75 (#131). Each kind is held on
+    # its own: one that lost its direction detects none, one that cannot tell a rise from its
+    # surrogates about alpha, and pooled with the other kind's a dead one still reads 0.13-0.38
+    assert all(np.mean(v) >= 0.1 for v in rising.values()), rising
     null = [r["false_positive"] for r in surrogate]
-    assert max(null) <= 0.25 and np.mean(null) <= 0.1, null  # about alpha: 0-0.09 planted
+    # about alpha: over 40 draws a row reads 0-0.22 (at most 7 of 32 null series) and the mean of
+    # the 48 rows 0.03-0.09 (#131)
+    assert max(null) <= 0.25 and np.mean(null) <= 0.1, null
     falling = [r for r in surrogate if r["indicator"] == "skewness"]
-    assert falling and all(r["direction"] == "less" and r["detected"] <= 0.25 for r in falling)
+    # by chance alone a row detects about alpha of its 16 series: over 40 draws at most 4, in 3 of
+    # them (#131), and a binomial at the 0.05 measured has a row at 7 in under 1 draw in 8,000
+    assert falling and all(r["direction"] == "less" and r["detected"] <= 0.375 for r in falling)
     alarms = pq.read_table(run_dir / "alarms" / f"{0:020d}.parquet").to_pylist()
     assert {(r["indicator"], r["cadence"], r["L"]) for r in alarms} == {
         (i, c, L) for i in ("variance", "ac") for c in ("dense", "matched") for L in (16, 32)
@@ -312,12 +318,17 @@ def test_score_writes_stamped_results_and_logs_every_cell(
         assert math.isfinite(r["theta"]), r  # a budget 8 times too loose reaches no theta: NaN
         assert r["attainable"] is True and r["far_max"] >= r["far_set"], r
         # the rate theta was set at is at most the target of 2 per 100 tau_c, and close to it:
-        # 1.90-2.00 planted, 0.17-0.22 when the budget is counted per score instead of per tau_c
-        assert 1.8 <= r["far_set"] <= 2.0 + 1e-9 and 0.5 < r["far_test"] < 6, r
+        # 1.79-2.00 planted, 0.17-0.22 when the budget is counted per score instead of per tau_c.
+        # At L = 32 it moves in steps of 0.11, to 1.79 from 1.90 when two null scores tie at
+        # theta (3 of 40 draws, #131), so the floor leaves it two steps
+        assert 1.6 <= r["far_set"] <= 2.0 + 1e-9 and 0.5 < r["far_test"] < 6, r
         # inside the band [2, -1]; NaN, every replica censored or missed, fails. Where in the
         # band depends on the draw: the band-entry rule is pinned on designed s(t) below
         assert -1.0 <= r["alarm_eps_median"] <= 2.0, r
-        assert 0.0 < r["censored"] < 1.0 and r["miss_rate"] <= 0.25, r
+        # each miss moves the rate by one of the 2-13 replicas measured: over 40 draws at most 2
+        # of 10 (#131), one miss from crossing 0.25. Raised on the other direction's s(t), the
+        # worst row misses 0.67-0.93
+        assert 0.0 < r["censored"] < 1.0 and r["miss_rate"] <= 1 / 3, r
     rows = pq.read_table(run_dir / "fss" / f"{0:020d}.parquet").to_pylist()
     fss = {r["quantity"]: r for r in rows}
     for quantity in ("l2_var_abs_m", "mean_abs_m"):  # planted at the exact exponents
