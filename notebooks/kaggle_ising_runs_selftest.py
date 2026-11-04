@@ -34,6 +34,7 @@ import ast
 import collections
 import contextlib
 import copy
+import dataclasses
 import hashlib
 import inspect
 import io
@@ -824,10 +825,12 @@ def wheel(k: ModuleType, root: Path) -> None:
     (folder / "tipping_point-0.1.0-py3-none-any.whl").write_bytes(b"PK")
     sha = "655949aa79ea32adfc103635d4cfb303ae24b94f"
 
-    def outcome(text: str | None) -> str:
+    def outcome(text: str | bytes | None) -> str:
         note = folder / "COMMIT.txt"
         if text is None:
             note.unlink(missing_ok=True)
+        elif isinstance(text, bytes):
+            note.write_bytes(text)
         else:
             note.write_text(text, encoding="utf-8")
         try:
@@ -845,6 +848,29 @@ def wheel(k: ModuleType, root: Path) -> None:
         outcome("main\n").startswith("refused: COMMIT.txt names no"),
     )
     check("a clean commit: accepted", outcome(f"{sha}\n") == sha)
+    # #134: PowerShell 5.1's `>` writes UTF-16LE with a byte-order mark, and CRLF
+    for what, raw in (
+        (
+            "UTF-16LE with a BOM, as PowerShell 5.1 writes it",
+            b"\xff\xfe" + f"{sha}\r\n".encode("utf-16-le"),
+        ),
+        ("UTF-16BE with a BOM", b"\xfe\xff" + f"{sha}\r\n".encode("utf-16-be")),
+        ("UTF-8 with a BOM", f"﻿{sha}\r\n".encode()),
+    ):
+        said = outcome(raw)
+        check(f"a clean commit in {what}: accepted, naming it", said == sha, said)
+    said = outcome(b"\xff\xfe" + "main\r\n".encode("utf-16-le"))
+    check(
+        "... and one naming no commit: still refused",
+        said.startswith("refused: COMMIT.txt names no"),
+        said,
+    )
+    said = outcome(b"\xff\xfe" + f"{sha}-dirty\r\n".encode("utf-16-le"))
+    check(
+        "... and one marked dirty: still refused",
+        said.startswith("refused: COMMIT.txt marks"),
+        said,
+    )
     (folder / "tipping_point-0.2.0-py3-none-any.whl").write_bytes(b"PK")
     check(
         "two wheels: refused", outcome(f"{sha}\n").startswith("refused: expected one tipping_point")
@@ -1331,6 +1357,36 @@ def jepa_entries(k: ModuleType, root: Path) -> None:
         session.latents(final) == table,
     )
     check("... not the twin's", session.latents(twin) is None)
+
+    def ticked(interrupt: bool, done: bool, running: bool, finished_table: bool) -> bool:
+        """Whether the clock fires the deadline on that begun table (#136): `jepa extract` prints
+        no progress line, so the dry run's deadline cannot wait for one."""
+        at = dataclasses.replace(ctx, interrupt=interrupt)
+        clock = k.Session(at, copy.deepcopy(JEPA_PLAN), {}, COMMIT, TORCH, 2)
+        clock.by_name["m3"].state = "complete" if done else "running"
+        x = clock.by_name["x-final"]
+        x.state, x.folder = ("running" if running else "pending"), f"ising/{NULL}"
+        complete = table / "complete.json"
+        if finished_table:
+            complete.write_text("{}", encoding="utf-8")
+        try:
+            clock.tick()
+        finally:
+            complete.unlink(missing_ok=True)
+        return clock.deadline_hit
+
+    check(
+        "dry run: a run done and an extraction with a begun table fire the deadline (#136)",
+        ticked(interrupt=True, done=True, running=True, finished_table=False),
+    )
+    for what, change in (
+        ("on Kaggle (no --interrupt)", {"interrupt": False}),
+        ("before any run is done", {"done": False}),
+        ("when the extraction is not running", {"running": False}),
+        ("when its table is finished", {"finished_table": True}),
+    ):
+        given = {"interrupt": True, "done": True, "running": True, "finished_table": False}
+        check(f"... and not {what}", not ticked(**{**given, **change}))
     tail, _ = session.resolve(final)
     found = session.latents(final)
     check(
@@ -1705,6 +1761,22 @@ def invalid_plans(k: Any, root: Path) -> None:  # Any: it swaps the module's PLA
     ):
         why = extract_args(args)
         check(f"refused: jepa extract with {what}", "one checkpoint" in why, why or "accepted")
+
+    # #133: a simulator run with no args, read by an extract, is a PlanError naming it, not a
+    # KeyError from the lookup of its args
+    for command in k.ISING_COMMANDS:
+        plan = copy.deepcopy(JEPA_PLAN)
+        plan["runs"].insert(1, {"name": "sim", "command": command})
+        plan["runs"][2]["args"][1] = {"run": "sim"}
+        try:
+            why = refused(k, plan)
+        except Exception as exc:  # what #133 saw: anything but a PlanError escapes `refused`
+            why = f"raised {exc!r}"
+        check(
+            f"refused: jepa extract reading a {command} run with no args, as a PlanError naming it",
+            "run 'sim': args: a list" in why,
+            why or "accepted",
+        )
 
 
 PILOT_RECORD = "20261025T194846Z-tauc-L16-32-64-128"  # #54's record
