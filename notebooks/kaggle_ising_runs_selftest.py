@@ -1803,11 +1803,13 @@ FIRST_READS = {
 }
 DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
 KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
-# Every simulator run a plan here stages or reads from tipping-point-ising-l16-l32 and Job A's
-# output (its L = 64 staircases), written out a third time (#132): the stand-ins below are built
-# from each plan's own ids and a plan is held to another plan's lists, so an id changed alike in
-# every list stayed green here and was first refused by locate_datasets on Kaggle. These are the ids
-# the plans named at 4a0a8ca, after their sessions on Kaggle; a new run joins once it exists there.
+# Every simulator run that pilot-28, primary-28, the first reads and ablations-28 stage or read from
+# tipping-point-ising-l16-l32 and Job A's output (its L = 64 staircases), and no other plan's: the
+# 75 seed 6 to 10 runs that extract-s6 to s10 read are not here. Written out a third time (#132):
+# the stand-ins below are built from each plan's own ids and a plan is held to another plan's lists,
+# so an id changed alike in every list stayed green here and was first refused by locate_datasets on
+# Kaggle. These are the ids those plans named at 4a0a8ca, after their sessions on Kaggle; a new run
+# they stage or read joins once it exists there.
 SIMULATOR_RUNS = frozenset(
     {
         "20261023T010039Z-L16-null-e2-s1",

@@ -1167,11 +1167,22 @@ def _live(body: list[ast.stmt]) -> list[ast.stmt]:
     return body
 
 
+def _outside_nested_functions(node: ast.AST) -> Iterator[ast.AST]:
+    """The node and every node under it, but nothing in a function or lambda defined there, which
+    runs only if something calls it (#141)."""
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        return
+    yield node
+    for child in ast.iter_child_nodes(node):
+        yield from _outside_nested_functions(child)
+
+
 def _checks_reached(source: str, section: str) -> int:
     """The `check(` calls written in the section and in each function of the file it calls, through
     their calls in turn, each function once. Call sites, not checks run: a check in a loop counts
     once. A call behind an `if` counts, so a guarded check is not caught here; #124's test holds
-    run_all, and this holds the sections under it."""
+    run_all, and this holds the sections under it. A function or lambda defined inside one is not
+    counted, called or not."""
     functions = {n.name: n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)}
     seen, todo, sites = set(), [section], 0
     while todo:
@@ -1180,7 +1191,7 @@ def _checks_reached(source: str, section: str) -> int:
             continue
         seen.add(name)
         for statement in _live(functions[name].body):
-            for node in ast.walk(statement):
+            for node in _outside_nested_functions(statement):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     if node.func.id == "check":
                         sites += 1
@@ -1244,6 +1255,19 @@ def test_a_whole_self_test_has_no_section_short() -> None:
         ("plans", 'def plans(k, root):\n    check("a", True)\n', 1),
         ("queues", "def queues(k, root):\n    return\n", 0),
         ("first_reads", 'def first_reads(k, root):\n    check("f", True)\n', 1),
+        (
+            "first_reads",
+            "def first_reads(k, root):\n    def never():\n"
+            '        check("f", True)\n        for model in MODELS:\n'
+            "            helper(k, root, model)\n",
+            0,
+        ),
+        (
+            "first_reads",
+            "def first_reads(k, root):\n"
+            '    never = lambda: (check("f", True), helper(k, root, 1))\n',
+            0,
+        ),
     ],
     ids=[
         "body-gone",
@@ -1253,6 +1277,8 @@ def test_a_whole_self_test_has_no_section_short() -> None:
         "one-check-gone",
         "nested-check-gone",
         "helper-loop-gone",
+        "moved-into-a-function-never-called",
+        "moved-into-a-lambda-never-called",
     ],
 )
 def test_an_emptied_section_is_named(section: str, emptied: str, reached: int) -> None:
