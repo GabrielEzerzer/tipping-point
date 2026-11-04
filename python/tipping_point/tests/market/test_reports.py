@@ -833,6 +833,11 @@ def test_the_delay_simulation_is_the_only_thing_the_seed_moves() -> None:
     assert a.tables["delay"].num_rows == 2 and not a.tables["delay"].equals(b.tables["delay"])
     for name in set(reports.STABILITY) - {"delay"}:
         assert a.tables[name].equals(b.tables[name]), name
+    # so the report names its seed (#137): with the run's labeller, enough to repeat it
+    for report, seed in ((a, 1), (b, 2)):
+        line = report.summary.split("\n\n")[2]
+        assert line.startswith("Labeller parameters: ")
+        assert line.endswith(f". The delay simulation drew from seed = {seed}.")
 
 
 def _ending_at(last: np.ndarray) -> dict[str, Any]:

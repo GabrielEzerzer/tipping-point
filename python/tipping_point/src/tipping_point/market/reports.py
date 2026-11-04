@@ -706,7 +706,8 @@ def stability(
             rows["aggtrades"].append(_cross_check(symbol, rv, aggtrades[symbol]))
     rows["inputs"] = [{"item": "aggtrades", "status": _status(aggtrades is not None)}]
     tables = {name: _table(STABILITY[name], found) for name, found in rows.items()}
-    return Report("stability", tables, _stability_summary(tables, params, aggtrades is not None))
+    summary = _stability_summary(tables, params, seed, aggtrades is not None)
+    return Report("stability", tables, summary)
 
 
 def _cross_check(symbol: str, rv: np.ndarray, other: np.ndarray) -> Row:
@@ -723,7 +724,7 @@ def _cross_check(symbol: str, rv: np.ndarray, other: np.ndarray) -> Row:
 
 
 def _stability_summary(
-    tables: dict[str, pa.Table], params: msvol.Params, cross_checked: bool
+    tables: dict[str, pa.Table], params: msvol.Params, seed: int, cross_checked: bool
 ) -> str:
     hero = []
     delays = tables["delay"].to_pylist()
@@ -763,7 +764,7 @@ def _stability_summary(
         [
             "# Stability report",
             "\n".join(hero or ["No labelled series."]),
-            f"Labeller parameters: {labeller}.",
+            f"Labeller parameters: {labeller}. The delay simulation drew from seed = {seed}.",
             "## Agreement: the oracle, the declared variants and the plain threshold rule",
             _markdown(tables["agreement"]),
             "## Onset shifts against the oracle (as-of less oracle, in bars: count)",

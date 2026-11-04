@@ -167,6 +167,8 @@ def test_reports_land_in_the_labels_runs_reports_folder(reported: Path) -> None:
         for table, schema in schemas.items():
             assert pq.read_table(folder / f"{table}.parquet").schema.equals(schema), table
         assert (folder / "summary.md").read_text(encoding="utf-8").startswith("# ")
+    stability = (reported / "stability" / "summary.md").read_text(encoding="utf-8")
+    assert "The delay simulation drew from seed = 29." in stability.split("\n\n")[2]  # --seed
 
 
 def test_reports_count_the_runs_labels_and_the_cascade_runs_list(
