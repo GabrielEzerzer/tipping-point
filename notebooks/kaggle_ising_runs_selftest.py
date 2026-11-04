@@ -1713,6 +1713,22 @@ def invalid_plans(k: Any, root: Path) -> None:  # Any: it swaps the module's PLA
         why = extract_args(args)
         check(f"refused: jepa extract with {what}", "one checkpoint" in why, why or "accepted")
 
+    # #133: a simulator run with no args, read by an extract, is a PlanError naming it, not a
+    # KeyError from the lookup of its args
+    for command in k.ISING_COMMANDS:
+        plan = copy.deepcopy(JEPA_PLAN)
+        plan["runs"].insert(1, {"name": "sim", "command": command})
+        plan["runs"][2]["args"][1] = {"run": "sim"}
+        try:
+            why = refused(k, plan)
+        except Exception as exc:  # what #133 saw: anything but a PlanError escapes `refused`
+            why = f"raised {exc!r}"
+        check(
+            f"refused: jepa extract reading a {command} run with no args, as a PlanError naming it",
+            "run 'sim': args: a list" in why,
+            why or "accepted",
+        )
+
 
 PILOT_RECORD = "20261025T194846Z-tauc-L16-32-64-128"  # #54's record
 PILOT_SHA256 = "7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698"
