@@ -1616,16 +1616,9 @@ def leaks(folder: Path) -> list[str]:
 
 
 def kernel_acceptance(k: ModuleType, root: Path) -> None:
-    for name in (
-        "job-a",
-        "pilot-28",
-        "primary-28",
-        "first-read-m1",
-        "first-read-m2",
-        "v1-confirmatory",
-        "ablations-28",
-    ):
-        source, folder = PLANS / f"{name}.json", root / name
+    # every plan, found as plans() finds them: a list kept by hand skipped a plan it lost (#132)
+    for source in sorted(PLANS.glob("*.json")):
+        name, folder = source.stem, root / source.stem
         plan = json.loads(source.read_text(encoding="utf-8"))
         code = k.main(["--write-kernel", str(source), str(folder)])
         problems = push_problems(folder)
@@ -1738,6 +1731,105 @@ FIRST_READS = {
 }
 DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
 KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
+# Every simulator run a plan here stages or reads from tipping-point-ising-l16-l32 and Job A's
+# output (its L = 64 staircases), written out a third time (#132): the stand-ins below are built
+# from each plan's own ids and a plan is held to another plan's lists, so an id changed alike in
+# every list stayed green here and was first refused by locate_datasets on Kaggle. These are the ids
+# the plans named at 4a0a8ca, after their sessions on Kaggle; a new run joins once it exists there.
+SIMULATOR_RUNS = frozenset(
+    {
+        "20261023T010039Z-L16-null-e2-s1",
+        "20261023T010331Z-L16-null-e2-s2",
+        "20261023T010508Z-L16-null-e2-s3",
+        "20261023T010625Z-L16-null-e2-s4",
+        "20261023T010816Z-L16-null-e2-s5",
+        "20261023T010913Z-L16-null-e4-s1",
+        "20261023T011010Z-L16-null-e4-s2",
+        "20261023T011106Z-L16-null-e4-s3",
+        "20261023T011203Z-L16-null-e4-s4",
+        "20261023T011259Z-L16-null-e4-s5",
+        "20261023T011355Z-L16-null-e6-s1",
+        "20261023T011452Z-L16-null-e6-s2",
+        "20261023T011551Z-L16-null-e6-s3",
+        "20261023T011653Z-L16-null-e6-s4",
+        "20261023T011756Z-L16-null-e6-s5",
+        "20261023T013107Z-L16-qs-s1",
+        "20261023T013454Z-L16-qs-s2",
+        "20261023T013843Z-L16-qs-s3",
+        "20261023T014211Z-L16-qs-s4",
+        "20261023T014529Z-L16-qs-s5",
+        "20261024T133416Z-L16-qs-s11",
+        "20261024T133934Z-L16-qs-s12",
+        "20261024T134724Z-L16-qs-s13",
+        "20261024T135318Z-L16-qs-s14",
+        "20261024T135601Z-L16-qs-s15",
+        "20261024T135838Z-L16-qs-s16",
+        "20261024T141748Z-L16-ramp-x0p02-s1",
+        "20261024T141852Z-L16-ramp-x0p02-s2",
+        "20261024T142003Z-L16-ramp-x0p02-s3",
+        "20261024T142121Z-L16-ramp-x0p02-s4",
+        "20261024T142227Z-L16-ramp-x0p02-s5",
+        "20261024T140630Z-L16-ramp-x2-s1",
+        "20261024T140718Z-L16-ramp-x2-s2",
+        "20261024T140827Z-L16-ramp-x2-s3",
+        "20261024T140852Z-L16-ramp-x2-s4",
+        "20261024T140927Z-L16-ramp-x2-s5",
+        "20261024T185928Z-L32-null-e2-s1",
+        "20261024T191945Z-L32-null-e2-s2",
+        "20261024T192508Z-L32-null-e2-s3",
+        "20261024T193548Z-L32-null-e2-s4",
+        "20261024T194215Z-L32-null-e2-s5",
+        "20261024T195209Z-L32-null-e4-s1",
+        "20261024T195939Z-L32-null-e4-s2",
+        "20261024T201003Z-L32-null-e4-s3",
+        "20261024T201847Z-L32-null-e4-s4",
+        "20261024T203404Z-L32-null-e4-s5",
+        "20261024T204147Z-L32-null-e6-s1",
+        "20261024T205616Z-L32-null-e6-s2",
+        "20261024T210627Z-L32-null-e6-s3",
+        "20261024T211647Z-L32-null-e6-s4",
+        "20261024T212718Z-L32-null-e6-s5",
+        "20261024T213835Z-L32-qs-s1",
+        "20261024T215210Z-L32-qs-s2",
+        "20261024T220555Z-L32-qs-s3",
+        "20261024T221936Z-L32-qs-s4",
+        "20261024T223325Z-L32-qs-s5",
+        "20261024T224804Z-L32-qs-s11",
+        "20261024T230159Z-L32-qs-s12",
+        "20261024T231625Z-L32-qs-s13",
+        "20261024T232816Z-L32-qs-s14",
+        "20261024T233952Z-L32-qs-s15",
+        "20261024T235120Z-L32-qs-s16",
+        "20261025T001122Z-L32-ramp-x0p02-s1",
+        "20261025T011425Z-L32-ramp-x0p02-s2",
+        "20261025T014247Z-L32-ramp-x0p02-s3",
+        "20261025T020936Z-L32-ramp-x0p02-s4",
+        "20261025T023228Z-L32-ramp-x0p02-s5",
+        "20261025T030408Z-L32-ramp-x2-s1",
+        "20261025T030635Z-L32-ramp-x2-s2",
+        "20261025T030811Z-L32-ramp-x2-s3",
+        "20261025T030944Z-L32-ramp-x2-s4",
+        "20261025T031229Z-L32-ramp-x2-s5",
+        "20261025T222203Z-L64-qs-s11",
+        "20261025T222207Z-L64-qs-s12",
+        "20261025T222706Z-L64-qs-s13",
+        "20261025T222717Z-L64-qs-s14",
+        "20261025T223219Z-L64-qs-s15",
+        "20261025T223231Z-L64-qs-s16",
+    }
+)
+
+
+def unknown_runs(plan: dict) -> list[str]:
+    """Each run id the plan stages or reads as a dataset run that SIMULATOR_RUNS does not hold."""
+    named = {s for r in plan["runs"] for s in r.get("stage", [])}
+    named |= {
+        a["dataset_run"]
+        for r in plan["runs"]
+        for a in r["args"]
+        if isinstance(a, dict) and "dataset_run" in a
+    }
+    return sorted(named - SIMULATOR_RUNS)
 
 
 def flag_ints(args: list, flag: str) -> list[int]:
@@ -1823,6 +1915,8 @@ def pilot_28(k: ModuleType, root: Path) -> None:
         if t and t[1] == "64"
     }
     check("pilot-28: its L = 64 stage ids are the staircases Job A makes", large == made, large)
+    unknown = unknown_runs(plan)
+    check("pilot-28: every run it stages or reads is one of SIMULATOR_RUNS", not unknown, unknown)
     read = [(r["args"][0], r["args"][1]["dataset_run"], r["args"][2:]) for r in extractions]
     untrained = all(c["file"] == k.TWIN for c, _, _ in read if c["run"] == "timing")
     tagged = [DATASET_ID.fullmatch(d) for _, d, _ in read]
@@ -2250,6 +2344,8 @@ def primary_28(k: ModuleType, root: Path) -> None:
     timing = next(r["stage"] for r in pilot["runs"] if r["name"] == "timing")
     apart = [name for name, run in runs.items() if sorted(run["stage"]) != sorted(timing)]
     check("primary-28: each model's stage ids are pilot-28's timing stage ids", not apart, apart)
+    unknown = unknown_runs(plan)
+    check("primary-28: every run it stages is one of SIMULATOR_RUNS", not unknown, unknown)
 
     # on the mounts Kaggle gives it: the record's and the draft's bytes are stand-ins here, the
     # runner checks the real ones there, so only their sha256 change
@@ -2372,6 +2468,8 @@ def first_read(k: ModuleType, root: Path, model: str) -> None:
         len(runs) == 60 and all(pairs[(n, d)] == 1 for n in entries for d in runs),
         len(runs),
     )
+    unknown = unknown_runs(plan)
+    check(f"{label}: every run it reads is one of SIMULATOR_RUNS", not unknown, unknown)
     turned = {}
     for seed in CONFIRMATORY_SEEDS:
         variant = copy.deepcopy(plan)
@@ -3399,6 +3497,8 @@ def ablations_28(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN
         == sorted((L, s) for L in (16, 32, 64) for s in range(11, 17)),
         staged,
     )
+    unknown = unknown_runs(plan)
+    check("ablations-28: every run it stages is one of SIMULATOR_RUNS", not unknown, unknown)
     check(
         "ablations-28: its --prereg is the draft primary-28 trained under, pinned by sha256 as "
         "primary-28 pins it",
