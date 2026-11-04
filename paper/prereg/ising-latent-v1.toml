@@ -1,10 +1,11 @@
 # Pre-registration: the latent signals of a JEPA on the 2D Ising model (#28). Its rules were
 # rewritten on 2 November 2026, after the exploratory reads of primary models m1 and m2, and every
-# placeholder of the draft was filled that day but baseline.result, which takes the run id of
-# ising-ews-v1's result on these runs once that score completes. The decisions, each with its
-# reason, are recorded on #28 and in disclosure.decisions. Units as in ising-ews-v1: time in
-# tau_c(L) as measured per L, temperature in eps_L = L (T - Tc) / Tc, lags in samples of the
-# cadence. Read [disclosure] first.
+# placeholder of the draft was filled that day but baseline.result. ising-ews-v1's result on these
+# runs was scored on 4 November 2026 at commit 22da489, from the frozen tag prereg/ising-ews-v1
+# (commit aa29cbc), and baseline.result holds its run id, 20261104T095100Z-ising-ews-v1. The
+# decisions, each with its reason, are recorded on #28 and in disclosure.decisions. Units as in
+# ising-ews-v1: time in tau_c(L) as measured per L, temperature in eps_L = L (T - Tc) / Tc, lags in
+# samples of the cadence. Read [disclosure] first.
 
 id = "ising-latent"
 version = 1
@@ -88,7 +89,7 @@ temperature = 2.269231
 [baseline]
 prereg = "ising-ews-v1"           # the matched-cadence |m| rows of its result on these runs are the parity reference
 # the run id of ising-ews-v1's result on these runs, scored before this file's freeze
-result = "<ews result run_id, filled when v1 has been scored>"
+result = "20261104T095100Z-ising-ews-v1"
 
 [latents]
 table = "latents"                 # <run>/latents/<training>-step<step>/, keyed like configs
