@@ -14,7 +14,9 @@ primary-28.json and the first-read plans, their stage ids, inputs and kernel sou
 mounts; v1-confirmatory.json against what the frozen file's `ews score` selects and accepts, its
 runs made by the tag's own CLI as manifests, with nothing simulated; ablations-28.json against
 primary-28.json and #28's six ablations, each training's command taken by e598e62's own CLI with
-nothing trained, and each planted fault red by name.
+nothing trained, and each planted fault red by name; extract-s6 to s10 against the 75 runs
+tp-ising-v1-confirmatory made and the checkpoints the frozen ising-latent-v1 file pins, each fault
+planted alike in all five red by name.
 
 Last, the whole path on real children: the written kernel runs two local sessions of a tiny plan
 (a simulator run, a real `jepa train` stopped by a simulated deadline, `jepa resume`, then a real
@@ -1803,11 +1805,13 @@ FIRST_READS = {
 }
 DATASET_ID = re.compile(r"\d{8}T\d{6}Z-L(\d+)-(qs|ramp|null)-(?:[a-z0-9]+-)?s(\d+)")
 KINDS = {"qs": "staircase", "ramp": "ramp", "null": "fixed"}
-# Every simulator run a plan here stages or reads from tipping-point-ising-l16-l32 and Job A's
-# output (its L = 64 staircases), written out a third time (#132): the stand-ins below are built
-# from each plan's own ids and a plan is held to another plan's lists, so an id changed alike in
-# every list stayed green here and was first refused by locate_datasets on Kaggle. These are the ids
-# the plans named at 4a0a8ca, after their sessions on Kaggle; a new run joins once it exists there.
+# Every simulator run that pilot-28, primary-28, the first reads and ablations-28 stage or read from
+# tipping-point-ising-l16-l32 and Job A's output (its L = 64 staircases), and no other plan's: the
+# 75 seed 6 to 10 runs that extract-s6 to s10 read are not here. Written out a third time (#132):
+# the stand-ins below are built from each plan's own ids and a plan is held to another plan's lists,
+# so an id changed alike in every list stayed green here and was first refused by locate_datasets on
+# Kaggle. These are the ids those plans named at 4a0a8ca, after their sessions on Kaggle; a new run
+# they stage or read joins once it exists there.
 SIMULATOR_RUNS = frozenset(
     {
         "20261023T010039Z-L16-null-e2-s1",
@@ -3750,6 +3754,375 @@ def ablations_28(k: Any, root: Path) -> None:  # Any: it swaps the module's PLAN
     )
 
 
+LATENT_PREREG = PLANS.parents[1] / "paper" / "prereg" / "ising-latent-v1.toml"
+LATENT_RUN = (
+    "20261104T102123Z-ising-latent-v1"  # the frozen file's folder in tp-prereg-ising-latent
+)
+LATENT_WHEEL = "gabrielezerzer/tipping-point-wheel-latent-v1"
+EXTRACT_DATASETS = ["gabrielezerzer/tp-prereg-ising-latent"]
+EXTRACT_SOURCES = [
+    "gabrielezerzer/tp-ising-v1-confirmatory",
+    "gabrielezerzer/tp-jepa-primary-28",
+    "gabrielezerzer/tp-jepa-ablations-28",
+]
+EXTRACT_RESUME = (
+    "uv run --no-sync python notebooks/kaggle_ising_runs.py --write-kernel "
+    "notebooks/plans/extract-s{seed}.json ../.wf/kaggle/kernel-extract-s{seed}-resume --resume; "
+    "kaggle kernels push -p ../.wf/kaggle/kernel-extract-s{seed}-resume"
+)
+# Each run tp-ising-v1-confirmatory made, by its name in v1-confirmatory.json: the 75 seed 6 to 10
+# runs that extract-s6 to s10 read. Written out here as well as in those plans (#139), from that
+# kernel's out/kaggle-ising-runs.json after its session ended with all 75 complete and verified, so
+# that an id changed alike in all five plans turns red here and is not first refused on Kaggle.
+V1_CONFIRMATORY_RUNS = {
+    "ramp-L16-s6": "20261102T063922Z-L16-ramp-x0p02-s6",
+    "qs-L16-s6": "20261102T063355Z-L16-qs-s6",
+    "null-L16-e2-s6": "20261102T064139Z-L16-null-e2-s6",
+    "null-L16-e4-s6": "20261102T064217Z-L16-null-e4-s6",
+    "null-L16-e6-s6": "20261102T064231Z-L16-null-e6-s6",
+    "ramp-L16-s7": "20261102T063929Z-L16-ramp-x0p02-s7",
+    "qs-L16-s7": "20261102T063540Z-L16-qs-s7",
+    "null-L16-e2-s7": "20261102T064256Z-L16-null-e2-s7",
+    "null-L16-e4-s7": "20261102T064310Z-L16-null-e4-s7",
+    "null-L16-e6-s7": "20261102T064335Z-L16-null-e6-s7",
+    "ramp-L16-s8": "20261102T064023Z-L16-ramp-x0p02-s8",
+    "qs-L16-s8": "20261102T063546Z-L16-qs-s8",
+    "null-L16-e2-s8": "20261102T064348Z-L16-null-e2-s8",
+    "null-L16-e4-s8": "20261102T064415Z-L16-null-e4-s8",
+    "null-L16-e6-s8": "20261102T064427Z-L16-null-e6-s8",
+    "ramp-L16-s9": "20261102T064034Z-L16-ramp-x0p02-s9",
+    "qs-L16-s9": "20261102T063730Z-L16-qs-s9",
+    "null-L16-e2-s9": "20261102T064453Z-L16-null-e2-s9",
+    "null-L16-e4-s9": "20261102T064504Z-L16-null-e4-s9",
+    "null-L16-e6-s9": "20261102T064533Z-L16-null-e6-s9",
+    "ramp-L16-s10": "20261102T064126Z-L16-ramp-x0p02-s10",
+    "qs-L16-s10": "20261102T063737Z-L16-qs-s10",
+    "null-L16-e2-s10": "20261102T064543Z-L16-null-e2-s10",
+    "null-L16-e4-s10": "20261102T064612Z-L16-null-e4-s10",
+    "null-L16-e6-s10": "20261102T064621Z-L16-null-e6-s10",
+    "ramp-L32-s6": "20261102T060427Z-L32-ramp-x0p02-s6",
+    "qs-L32-s6": "20261102T061149Z-L32-qs-s6",
+    "null-L32-e2-s6": "20261102T062033Z-L32-null-e2-s6",
+    "null-L32-e4-s6": "20261102T062048Z-L32-null-e4-s6",
+    "null-L32-e6-s6": "20261102T062227Z-L32-null-e6-s6",
+    "ramp-L32-s7": "20261102T060441Z-L32-ramp-x0p02-s7",
+    "qs-L32-s7": "20261102T061441Z-L32-qs-s7",
+    "null-L32-e2-s7": "20261102T062239Z-L32-null-e2-s7",
+    "null-L32-e4-s7": "20261102T062422Z-L32-null-e4-s7",
+    "null-L32-e6-s7": "20261102T062430Z-L32-null-e6-s7",
+    "ramp-L32-s8": "20261102T060802Z-L32-ramp-x0p02-s8",
+    "qs-L32-s8": "20261102T061502Z-L32-qs-s8",
+    "null-L32-e2-s8": "20261102T062618Z-L32-null-e2-s8",
+    "null-L32-e4-s8": "20261102T062622Z-L32-null-e4-s8",
+    "null-L32-e6-s8": "20261102T062810Z-L32-null-e6-s8",
+    "ramp-L32-s9": "20261102T060816Z-L32-ramp-x0p02-s9",
+    "qs-L32-s9": "20261102T061736Z-L32-qs-s9",
+    "null-L32-e2-s9": "20261102T062816Z-L32-null-e2-s9",
+    "null-L32-e4-s9": "20261102T063005Z-L32-null-e4-s9",
+    "null-L32-e6-s9": "20261102T063010Z-L32-null-e6-s9",
+    "ramp-L32-s10": "20261102T061129Z-L32-ramp-x0p02-s10",
+    "qs-L32-s10": "20261102T061758Z-L32-qs-s10",
+    "null-L32-e2-s10": "20261102T063156Z-L32-null-e2-s10",
+    "null-L32-e4-s10": "20261102T063204Z-L32-null-e4-s10",
+    "null-L32-e6-s10": "20261102T063348Z-L32-null-e6-s10",
+    "ramp-L64-s6": "20261102T041336Z-L64-ramp-x0p02-s6",
+    "qs-L64-s6": "20261102T054752Z-L64-qs-s6",
+    "null-L64-e2-s6": "20261102T044450Z-L64-null-e2-s6",
+    "null-L64-e4-s6": "20261102T045239Z-L64-null-e4-s6",
+    "null-L64-e6-s6": "20261102T045855Z-L64-null-e6-s6",
+    "ramp-L64-s7": "20261102T041340Z-L64-ramp-x0p02-s7",
+    "qs-L64-s7": "20261102T055321Z-L64-qs-s7",
+    "null-L64-e2-s7": "20261102T050036Z-L64-null-e2-s7",
+    "null-L64-e4-s7": "20261102T050639Z-L64-null-e4-s7",
+    "null-L64-e6-s7": "20261102T050821Z-L64-null-e6-s7",
+    "ramp-L64-s8": "20261102T042846Z-L64-ramp-x0p02-s8",
+    "qs-L64-s8": "20261102T055325Z-L64-qs-s8",
+    "null-L64-e2-s8": "20261102T051437Z-L64-null-e2-s8",
+    "null-L64-e4-s8": "20261102T051611Z-L64-null-e4-s8",
+    "null-L64-e6-s8": "20261102T052214Z-L64-null-e6-s8",
+    "ramp-L64-s9": "20261102T042907Z-L64-ramp-x0p02-s9",
+    "qs-L64-s9": "20261102T055903Z-L64-qs-s9",
+    "null-L64-e2-s9": "20261102T052407Z-L64-null-e2-s9",
+    "null-L64-e4-s9": "20261102T052958Z-L64-null-e4-s9",
+    "null-L64-e6-s9": "20261102T053158Z-L64-null-e6-s9",
+    "ramp-L64-s10": "20261102T044336Z-L64-ramp-x0p02-s10",
+    "qs-L64-s10": "20261102T055908Z-L64-qs-s10",
+    "null-L64-e2-s10": "20261102T053744Z-L64-null-e2-s10",
+    "null-L64-e4-s10": "20261102T054009Z-L64-null-e4-s10",
+    "null-L64-e6-s10": "20261102T054526Z-L64-null-e6-s10",
+}
+
+
+def v1_id_tail(name: str) -> str:
+    """The end of a v1-confirmatory run's id, from its name in the plan: ramp-L16-s6 made a run
+    whose id ends L16-ramp-x0p02-s6, at the slow ramp's x of 0.02, and null-L32-e4-s7 one whose id
+    ends L32-null-e4-s7."""
+    kind, size, *eps, seed = name.split("-")
+    middle = {"ramp": ["ramp", "x0p02"], "qs": ["qs"], "null": ["null", *eps]}[kind]
+    return "-".join([size, *middle, seed])
+
+
+def extract_pins(k: ModuleType, doc: dict, prereg_sha256: str) -> dict[str, dict]:
+    """The inputs an extract plan must name: the frozen file, and each checkpoint's final.pt and
+    twin as the frozen file's [[latents.checkpoints]] pins them."""
+    pins = {"prereg": {"run": LATENT_RUN, "file": LATENT_PREREG.name, "sha256": prereg_sha256}}
+    for entry in doc["latents"]["checkpoints"]:
+        model, run = f"m{entry['model_seed']}", entry["training"]
+        pins[f"{model}_final"] = {"run": run, "file": k.FINAL, "sha256": entry["trained_sha256"]}
+        pins[f"{model}_twin"] = {"run": run, "file": k.TWIN, "sha256": entry["twin_sha256"]}
+    return pins
+
+
+def extract_problems(
+    plan: dict, seed: int, pins: dict[str, dict], primaries: set[str], commit: str
+) -> dict[str, list[str]]:
+    """An extract plan against tp-ising-v1-confirmatory's runs and the frozen file, by what is
+    wrong: a run id that is not one of that kernel's runs at this seed, a checkpoint and run read
+    other than once, a pin that is not the frozen file's, an extraction off latents.extraction's
+    rule (staircases tc-plus for a primary or its twin, tc-only for an ablation's, the rest whole),
+    and the kernel, wheel, commit and sources."""
+    ours = {i: n for n, i in V1_CONFIRMATORY_RUNS.items() if n.endswith(f"-s{seed}")}
+    found: dict[str, list[str]] = {
+        kind: [] for kind in ("runs", "pairs", "inputs", "select", "plan")
+    }
+    reads: collections.Counter[tuple[object, object]] = collections.Counter()
+    for r in plan["runs"]:
+        refs = {key: a[key] for a in r["args"] if isinstance(a, dict) for key in a}
+        checkpoint, run_id = refs.get("input"), refs.get("dataset_run")
+        reads[(checkpoint, run_id)] += 1
+        if run_id not in ours:
+            found["runs"].append(f"{r['name']}: {run_id}")
+        rest = [a for a in r["args"] if not isinstance(a, dict)]
+        tag = DATASET_ID.fullmatch(str(run_id))
+        if tag is not None and tag[2] == "qs":
+            want = ["--select", "tc-plus" if checkpoint in primaries else "tc-only"]
+        else:
+            want = []
+        if rest != want:
+            found["select"].append(f"{r['name']}: {rest}, not {want}")
+        spec = {key: value for key, value in r.items() if key not in ("name", "args")}
+        if spec != {"command": "jepa extract"}:  # another command, or a GPU pin
+            found["plan"].append(f"{r['name']}: {spec}, not a jepa extract")
+    checkpoints = [name for name in pins if name != "prereg"]
+    for checkpoint, run_id in itertools.product(checkpoints, ours):
+        if reads[(checkpoint, run_id)] != 1:
+            times = reads[(checkpoint, run_id)]
+            found["pairs"].append(f"{checkpoint} reads {ours[run_id]} {times} times, not once")
+    found["pairs"] += [f"{c} reads {d}" for c, d in reads if c not in checkpoints or d not in ours]
+    given = plan.get("inputs", {})
+    for name in {*pins, *given}:
+        if given.get(name) != pins.get(name):
+            found["inputs"].append(f"input {name}: {given.get(name)}, not {pins.get(name)}")
+    expected = {
+        "kernel": f"tp-jepa-extract-s{seed}",
+        "wheel": LATENT_WHEEL,
+        "commit": commit,
+        "datasets": EXTRACT_DATASETS,
+        "kernel_sources": EXTRACT_SOURCES,
+    }
+    for key, value in expected.items():
+        if plan.get(key) != value:
+            found["plan"].append(f"{key}: {plan.get(key)!r}, not {value!r}")
+    return found
+
+
+def extract_wrong_plans() -> list[
+    tuple[str, Callable[[dict, int], None], str, Callable[[int], str]]
+]:
+    """Each way an extract plan could go wrong, made alike in all five: what it is, the change to a
+    plan at a seed, where extract_problems must file it, and the name it must give at that seed."""
+
+    def run_named(plan: dict, name: str) -> dict:
+        return next(r for r in plan["runs"] if r["name"] == name)
+
+    def swap_run(slot: str, new: Callable[[int], str]) -> Callable[[dict, int], None]:
+        def change(plan: dict, seed: int) -> None:
+            old = V1_CONFIRMATORY_RUNS[f"{slot}-s{seed}"]
+            for r in plan["runs"]:
+                for a in r["args"]:
+                    if isinstance(a, dict) and a.get("dataset_run") == old:
+                        a["dataset_run"] = new(seed)
+
+        return change
+
+    def other_seed(seed: int) -> str:
+        return V1_CONFIRMATORY_RUNS[f"ramp-L16-s{7 if seed == 6 else 6}"]
+
+    def drop(plan: dict, seed: int) -> None:
+        plan["runs"].remove(run_named(plan, f"x-m1-final-L64-qs-s{seed}"))
+
+    def twice(plan: dict, seed: int) -> None:
+        again = copy.deepcopy(run_named(plan, f"x-m21-twin-L16-null-e6-s{seed}"))
+        again["name"] += "-again"
+        plan["runs"].append(again)
+
+    def pin(name: str, key: str, value: Callable[[dict], str]) -> Callable[[dict, int], None]:
+        def change(plan: dict, seed: int) -> None:
+            plan["inputs"][name][key] = value(plan)
+
+        return change
+
+    def select(name: str, how: list[str]) -> Callable[[dict, int], None]:
+        def change(plan: dict, seed: int) -> None:
+            args = run_named(plan, name.format(seed=seed))["args"]
+            args[:] = [a for a in args if isinstance(a, dict)] + how
+
+        return change
+
+    def field(key: str, value: str) -> Callable[[dict, int], None]:
+        def change(plan: dict, seed: int) -> None:
+            plan[key] = value
+
+        return change
+
+    return [
+        (
+            "a run id of tp-ising-v1-confirmatory's changed",
+            swap_run("qs-L64", lambda seed: f"20261102T000000Z-L64-qs-s{seed}"),
+            "runs",
+            lambda seed: f"20261102T000000Z-L64-qs-s{seed}",
+        ),
+        ("a run of another seed", swap_run("ramp-L16", other_seed), "runs", other_seed),
+        (
+            "a run of seeds 1-5",
+            swap_run("null-L32-e4", lambda seed: "20261024T195209Z-L32-null-e4-s1"),
+            "runs",
+            lambda seed: "20261024T195209Z-L32-null-e4-s1",
+        ),
+        ("an extraction left out", drop, "pairs", lambda seed: "m1_final reads qs-L64"),
+        ("an extraction twice", twice, "pairs", lambda seed: f"null-L16-e6-s{seed} 2 times"),
+        (
+            "a checkpoint pinned by another sha256",
+            pin("m12_twin", "sha256", lambda plan: "0" * 64),
+            "inputs",
+            lambda seed: "input m12_twin",
+        ),
+        (
+            "a checkpoint pinned in another training's run",
+            pin("m3_final", "run", lambda plan: plan["inputs"]["m4_final"]["run"]),
+            "inputs",
+            lambda seed: "input m3_final",
+        ),
+        (
+            "the draft pinned where the frozen file is",
+            pin("prereg", "sha256", lambda plan: DRAFT_SHA256),
+            "inputs",
+            lambda seed: "input prereg",
+        ),
+        (
+            "a primary's staircase read tc-only",
+            select("x-m1-final-L64-qs-s{seed}", ["--select", "tc-only"]),
+            "select",
+            lambda seed: f"x-m1-final-L64-qs-s{seed}",
+        ),
+        (
+            "an ablation's staircase read tc-plus",
+            select("x-m11-final-L32-qs-s{seed}", ["--select", "tc-plus"]),
+            "select",
+            lambda seed: f"x-m11-final-L32-qs-s{seed}",
+        ),
+        (
+            "a ramp read under --select",
+            select("x-m2-twin-L16-ramp-x0p02-s{seed}", ["--select", "tc-plus"]),
+            "select",
+            lambda seed: f"x-m2-twin-L16-ramp-x0p02-s{seed}",
+        ),
+        ("another commit", field("commit", ABLATIONS_COMMIT), "plan", lambda seed: "commit:"),
+        (
+            "the project's other wheel",
+            field("wheel", "gabrielezerzer/tipping-point-wheel"),
+            "plan",
+            lambda seed: "wheel:",
+        ),
+    ]
+
+
+def extract_seeds(k: ModuleType) -> None:
+    from tipping_point.ews import prereg
+
+    written = sorted(path.stem for path in PLANS.glob("extract-*.json"))
+    seeds = list(CONFIRMATORY_SEEDS)
+    check(
+        "extract plans: one per confirmatory seed, extract-s6 to s10, so the checks below reach "
+        "each",
+        written == sorted(f"extract-s{seed}" for seed in seeds),
+        written,
+    )
+    pre = prereg.load(LATENT_PREREG)
+    try:
+        commit, why = prereg.frozen(pre).commit, ""
+    except prereg.PreregError as exc:
+        commit, why = "", str(exc)
+    check("extract plans: ising-latent-v1.toml is the file frozen at its tag", not why, why)
+    if why:
+        return
+    data = pre.doc["data"]
+    wanted = list(v1_wanted(data))
+    misnamed = [
+        name
+        for name, run_id in V1_CONFIRMATORY_RUNS.items()
+        if not re.fullmatch(r"\d{8}T\d{6}Z-" + re.escape(v1_id_tail(name)), run_id)
+    ]
+    check(
+        "extract plans: V1_CONFIRMATORY_RUNS holds one run per slot the frozen file's selection "
+        "needs, 75, each id of its slot's L, kind and seed",
+        sorted(V1_CONFIRMATORY_RUNS) == sorted(wanted) and len(wanted) == 75 and not misnamed,
+        misnamed or sorted(set(wanted) ^ set(V1_CONFIRMATORY_RUNS)),
+    )
+    pins = extract_pins(k, pre.doc, pre.sha256)
+    primaries = {
+        f"m{entry['model_seed']}_{file}"
+        for entry in pre.doc["latents"]["checkpoints"]
+        if entry["role"] == "primary"
+        for file in ("final", "twin")
+    }
+    check(
+        "extract plans: the frozen file pins 22 checkpoints, ten of them primaries and their twins",
+        len(pins) == 23 and len(primaries) == 10,
+        sorted(pins),
+    )
+    plans = {}
+    for seed in seeds:
+        path = PLANS / f"extract-s{seed}.json"
+        plan = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"runs": []}
+        why = refused(k, plan)
+        check(f"extract-s{seed}: the plan loads", not why, why)
+        if why:
+            continue
+        plans[seed] = plan
+        found = extract_problems(plan, seed, pins, primaries, commit)
+        for kind, what in (
+            ("runs", f"every run it reads is one of tp-ising-v1-confirmatory's at seed {seed}"),
+            ("pairs", "each of the 22 checkpoints reads each of its 15 runs, once"),
+            ("inputs", "every pin is the frozen file's: the file itself and each checkpoint"),
+            (
+                "select",
+                "staircases tc-plus for the primaries and twins, tc-only for the ablations', "
+                "ramps and null runs whole",
+            ),
+            ("plan", "its kernel is its own, the latent wheel, the tag's commit and its sources"),
+        ):
+            check(f"extract-s{seed}: {what}", not found[kind], found[kind])
+        check(
+            f"extract-s{seed}: the description holds the one line that resumes it",
+            EXTRACT_RESUME.format(seed=seed) in plan.get("description", ""),
+            plan.get("description"),
+        )
+    for what, change, kind, named in extract_wrong_plans():
+        missed = {}
+        for seed, plan in plans.items():
+            wrong = copy.deepcopy(plan)
+            change(wrong, seed)
+            problems = extract_problems(wrong, seed, pins, primaries, commit)
+            if refused(k, wrong) or not any(named(seed) in p for p in problems[kind]):
+                missed[seed] = problems
+        check(
+            f"... {what}, alike in all five plans, goes red under {kind} in each",
+            len(plans) == len(seeds) and not missed,
+            missed,
+        )
+
+
 def run_all(k: ModuleType) -> int:
     with tempfile.TemporaryDirectory(prefix="tp-self-test-", ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -3775,6 +4148,7 @@ def run_all(k: ModuleType) -> int:
         first_reads(k, root / "first-reads")
         v1_confirmatory(k, root / "v1-confirmatory")
         ablations_28(k, root / "ablations-28")
+        extract_seeds(k)
         real_runs(k, root / "real")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1
