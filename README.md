@@ -299,19 +299,22 @@ as-of labels with an oracle (the final theta, smoothed over the whole sample) an
 variant and a plain threshold rule, follows theta over the refits with its flagged fits and the
 jumps they make in P, and gives the filter's detection delay. The calendar of CPI, NFP and FOMC
 releases, the cascade candidates and the aggTrades cross-check are optional inputs; a report without
-one says "not supplied". `market/nulls.py` holds the GARCH(1,1)-t simulator, the delay simulation,
-the event-time shift and the circularity floor. The floor simulates 10-second returns, builds
-1-minute OHLC, runs the real bars and labeller, and scores 1-minute close-to-close returns, which
+one says "not supplied". `market/releases.csv` is the committed calendar: the 18 CPI, 18 payroll
+and 12 FOMC statement times of July 2022 to December 2023 in UTC, each with the BLS or Federal
+Reserve page that gives its date. `market/nulls.py` holds the GARCH(1,1)-t simulator, the delay
+simulation, the event-time shift and the circularity floor.
+The floor simulates 10-second returns, builds 1-minute OHLC, runs the real bars and labeller, and scores 1-minute close-to-close returns, which
 gives the AUC a clustering process with no critical dynamics produces by construction. Its GARCH
 parameters, pipelines and `scoring.auc` are inputs: the parameters' fit belongs to the 2023 pilot,
 and no module in `market/` may import the feature code (`tests/market/test_circularity.py`).
 
 `reports` writes the label-count and stability reports of a labels run into the run's `reports/`
 folder. It labels the run's span again from the fetched files and refuses to write anything unless
-that gives back the run's own tables. `--cascades` adds the pooled list of a cascade run of the same
-span and symbols. `harness/market_floor.py` runs the floor with the run's own labeller and the
-variance and AC1 pipelines, and writes it to the same folder, with one AUC per path beside the
-pooled one so that the floor's own spread shows.
+that gives back the run's own tables. The label-count report always counts the committed calendar.
+`--cascades` adds the pooled list of a cascade run of the same span and symbols.
+`harness/market_floor.py` runs the floor with the run's own labeller and the variance and AC1
+pipelines, and writes it to the same folder, with one AUC per path beside the pooled one so that
+the floor's own spread shows.
 
 ```sh
 uv run python -m tipping_point.market reports --run <labels run folder> --cascades <cascade run folder>

@@ -13,9 +13,9 @@ summary for the issue. Nothing in them reads a clock, so a report repeats byte f
 The out dir is the reports/ folder of the labels run they describe: `python -m tipping_point.market
 reports` writes the first two there, and harness/market_floor.py the floor.
 
-An input that comes from elsewhere is optional: the committed CPI, NFP and FOMC calendar (call 10),
-the cascade candidates (S4) and the aggTrades RV. Without it the report's `inputs` table and its
-summary say "not supplied", and its table is empty.
+An input that comes from elsewhere is optional: the committed CPI, NFP and FOMC calendar (call 10;
+releases.csv, read by release_calendar), the cascade candidates (S4) and the aggTrades RV. Without
+it the report's `inputs` table and its summary say "not supplied", and its table is empty.
 
 An onset is a bar's start: `events` counts event onsets, `onsets` every run of H = 1. A variant's
 agreement is read over the bars both label, and only their onsets are matched. Shifts are the as-of
@@ -24,11 +24,13 @@ onset less the other's, in bars: positive when the as-of label comes later.
 
 from __future__ import annotations
 
+import csv
 import itertools
 import math
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,7 @@ THRESHOLDS = ((0.7, 0.3), (0.8, 0.2), (0.9, 0.1))
 BASELINES = (14, 28, 56)
 PLAIN_K = 0.5  # the plain rule: z above k sd(z), for D_min bars at least
 NOT_SUPPLIED = "not supplied"
+CALENDAR = Path(__file__).with_name("releases.csv")
 
 Series = Mapping[str, tuple[dict[str, np.ndarray], msvol.Labels]]
 Row = dict[str, Any]
@@ -262,6 +265,23 @@ def _near(a: np.ndarray, b: np.ndarray, window: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- the label-count report
+
+
+def release_calendar(path: Path = CALENDAR) -> dict[str, np.ndarray]:
+    """The committed calendar's release times per kind (CPI, NFP, FOMC), sorted, in ts_ns: the BLS
+    and Federal Reserve page each row names gives its date. 11 of the 12 FOMC times are the
+    standard 14:00 Eastern slot, not read off each statement page."""
+    found: dict[str, list[datetime]] = {}
+    with path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            when = datetime.fromisoformat(row["time_utc"])
+            if when.utcoffset() != timedelta(0):
+                raise ValueError(f"{path.name}: {row['kind']} at {row['time_utc']} is not UTC")
+            found.setdefault(row["kind"], []).append(when.replace(tzinfo=None))
+    return {
+        kind: np.sort(np.array(times, "datetime64[ns]").astype(np.int64))
+        for kind, times in sorted(found.items())
+    }
 
 
 def label_count(
