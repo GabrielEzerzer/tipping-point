@@ -803,13 +803,24 @@ def floor(found: nulls.Floor, garch: nulls.Garch, settings: Mapping[str, Any]) -
         if unshifted
         else ""
     )
+    cells, per_path = (
+        sum(not (c["n_pos"] and c["n_neg"]) for c in rows)
+        for rows in (found.cells, found.path_cells)
+    )
+    empty = (
+        f" {cells} of the {len(found.cells)} cells and {per_path} of the "
+        f"{len(found.path_cells)} AUCs per path have no pre-onset segment or no null slice, so "
+        "their AUC is n/a."
+        if cells or per_path
+        else ""
+    )
     summary = "\n\n".join(
         [
             "# Circularity floor",
             f"GARCH(1,1)-t at 10 seconds, {parameters}, through the exact bars and labeller, over "
             f"{len(found.paths)} simulated paths with {events} events. A clustering process with "
             "no critical dynamics gives this AUC by construction: a real AUC counts only above "
-            f"it.{stranded}\nThe floor ran with {ran_with}.",
+            f"it.{stranded}{empty}\nThe floor ran with {ran_with}.",
             "## AUC of pre-onset segments against null slices, and of shifted events",
             _markdown(tables["cells"]),
             "## AUC per path: the floor's own spread",
