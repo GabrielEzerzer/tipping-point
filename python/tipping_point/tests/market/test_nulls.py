@@ -510,7 +510,7 @@ def test_each_paths_auc_reads_its_own_segments_against_its_own_slices() -> None:
     for cell in found.cells:
         own = [c for c in found.path_cells if c["horizon_bars"] == cell["horizon_bars"]]
         assert sum(c["n_pos"] for c in own) == cell["n_pos"]
-    report = reports.floor(found, FLOOR_GARCH)
+    report = reports.floor(found, FLOOR_GARCH, {})
     table = report.tables["path_cells"]
     assert table.schema.equals(reports.FLOOR["path_cells"])
     assert table.to_pylist() == found.path_cells
@@ -544,7 +544,7 @@ def test_an_event_that_cannot_move_a_day_is_counted_and_the_rest_stay_on_eligibl
     shifted = recording.calls[-1]
     assert shifted.shape == (draws * (onsets.size - 1), 299)
     assert np.isin(_moved_bars(minutes, shifted, h), near).all()
-    report = reports.floor(found, FLOOR_GARCH)
+    report = reports.floor(found, FLOOR_GARCH, {})
     assert report.tables["paths"]["unshifted_events"].to_pylist() == [1]
     assert f"1 of the {onsets.size} events had no eligible bar a day away" in report.summary
 
@@ -571,7 +571,7 @@ def test_a_path_too_short_to_move_any_event_a_day_says_so_and_shifts_nothing() -
     assert cell["n_pos"] == path["events"]
     assert cell["shift_draws"] == 0 and math.isnan(cell["shift_auc_median"])
     assert sum(len(rows) for rows in recording.calls) == cell["n_pos"] + cell["n_neg"]
-    report = reports.floor(found, FLOOR_GARCH)
+    report = reports.floor(found, FLOOR_GARCH, {})
     assert report.tables["cells"]["shift_auc_median"].null_count == 1
     assert report.tables["paths"]["unshifted_events"].to_pylist() == [path["events"]]
     n = path["events"]
@@ -660,7 +660,7 @@ def test_the_floor_and_its_report_repeat_under_a_seed(tmp_path: Any) -> None:
     assert repr(_small_floor(9)) != repr(a)
     assert a.cells[0]["n_pos"] > 0 and a.cells[0]["n_neg"] > 0  # something to repeat
     written = [
-        reports.write(reports.floor(found, FLOOR_GARCH), tmp_path / name)
+        reports.write(reports.floor(found, FLOOR_GARCH, {}), tmp_path / name)
         for found, name in ((a, "a"), (b, "b"))
     ]
     names = sorted(p.name for p in written[0].iterdir())
@@ -699,7 +699,7 @@ def test_a_process_with_no_clustering_gives_no_labels_and_no_crash() -> None:
     assert path["events"] == path["unshifted_events"] == 0 and math.isnan(path["delay_p90"])
     assert math.isnan(cell["auc"]) and cell["n_pos"] == cell["n_neg"] == 0
     assert cell["contaminated"] and cell["shift_draws"] == 0
-    report = reports.floor(found, Garch(1e-7, 0.0, 0.0, 6.0))
+    report = reports.floor(found, Garch(1e-7, 0.0, 0.0, 6.0), {})
     assert report.tables["cells"]["auc"].null_count == 1
 
 

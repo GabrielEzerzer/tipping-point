@@ -253,7 +253,8 @@ def _reports(args: argparse.Namespace) -> int:
     found = None
     if args.cascades is not None:
         other = _run_params(args.cascades)
-        same = all(other.get(key) == run_params[key] for key in ("start", "end", "symbols"))
+        same = all(other.get(key) == run_params[key] for key in ("start", "end"))
+        same = same and sorted(other.get("symbols") or []) == sorted(run_params["symbols"])
         if "cascade" not in other or not same:
             print(
                 f"error: {args.cascades} is not a cascade run of {args.run.name}'s span and "
@@ -266,6 +267,11 @@ def _reports(args: argparse.Namespace) -> int:
             symbol: np.array([r["ts_ns"] for r in rows if r["symbol"] == symbol], np.int64)
             for symbol in run_params["symbols"]
         }
+    out = args.run / "reports"
+    for folder in (out / "label_count", out / "stability"):
+        if folder.exists():
+            print(f"error: {folder} exists", file=sys.stderr)
+            return 1
     start, end = date.fromisoformat(run_params["start"]), date.fromisoformat(run_params["end"])
     days = (end - start).days + 1
     params = msvol.Params(**run_params["labeller"])
@@ -284,7 +290,6 @@ def _reports(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-    out = args.run / "reports"
     print(reports.write(reports.label_count(series, cascades=found), out))
     print(reports.write(reports.stability(series, params, parkinson, seed=args.seed), out))
     return 0

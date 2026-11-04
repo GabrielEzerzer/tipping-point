@@ -42,7 +42,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--paths", type=int, default=PATHS)
     parser.add_argument("--seed", type=int, default=29)
     args = parser.parse_args(argv)
+    folder = args.run / "reports" / "floor"
+    if folder.exists():
+        sys.exit(f"error: {folder} exists")
     manifest = json.loads((args.run / "manifest.json").read_text(encoding="utf-8"))
+    if "labeller" not in manifest["params"]:
+        sys.exit(f"error: {args.run} is not a labels run")
     params = msvol.Params(**manifest["params"]["labeller"])
     garch = nulls.Garch(args.omega, args.alpha, args.beta, args.nu)
     found = nulls.circularity_floor(
@@ -55,7 +60,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
         params=params,
     )
-    print(reports.write(reports.floor(found, garch), args.run / "reports"))
+    settings = {"seed": args.seed, "paths": args.paths, "days": args.days, **SCORERS}
+    print(reports.write(reports.floor(found, garch, settings), args.run / "reports"))
     return 0
 
 

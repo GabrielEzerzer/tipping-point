@@ -331,3 +331,7 @@ def liquidations(
         "last_ts_ns": last_ts,
         "cascades": checked,
     }
+
+
+if __name__ == "__main__":
+    raise SystemExit("moved: python -m tipping_point.market cascade")

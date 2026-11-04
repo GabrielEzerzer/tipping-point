@@ -762,8 +762,9 @@ def _stability_summary(
 # ---------------------------------------------------------------- the floor's tables
 
 
-def floor(found: nulls.Floor, garch: nulls.Garch) -> Report:
-    """The floor's tables and summary. `garch` is what the floor ran on, kept with its result."""
+def floor(found: nulls.Floor, garch: nulls.Garch, settings: Mapping[str, Any]) -> Report:
+    """The floor's tables and summary. `garch` and `settings` (its seed, paths, days and scorers)
+    are what the floor ran on, kept with its result."""
     values = asdict(garch)
     tables = {
         "garch": _table(FLOOR["garch"], [{"parameter": k, "value": v} for k, v in values.items()]),
@@ -772,6 +773,7 @@ def floor(found: nulls.Floor, garch: nulls.Garch) -> Report:
         "path_cells": _table(FLOOR["path_cells"], found.path_cells),
     }
     parameters = ", ".join(f"{k} = {v:g}" for k, v in values.items())
+    ran_with = ", ".join(f"{k} = {v}" for k, v in settings.items())
     events = sum(p["events"] for p in found.paths)
     unshifted = sum(p["unshifted_events"] for p in found.paths)
     stranded = (
@@ -786,7 +788,7 @@ def floor(found: nulls.Floor, garch: nulls.Garch) -> Report:
             f"GARCH(1,1)-t at 10 seconds, {parameters}, through the exact bars and labeller, over "
             f"{len(found.paths)} simulated paths with {events} events. A clustering process with "
             "no critical dynamics gives this AUC by construction: a real AUC counts only above "
-            f"it.{stranded}",
+            f"it.{stranded}\nThe floor ran with {ran_with}.",
             "## AUC of pre-onset segments against null slices, and of shifted events",
             _markdown(tables["cells"]),
             "## AUC per path: the floor's own spread",

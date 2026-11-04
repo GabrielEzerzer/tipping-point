@@ -197,9 +197,10 @@ def test_reports_count_the_runs_labels_and_the_cascade_runs_list(
 
 
 def test_reports_refuse_runs_that_do_not_match(
-    fetched: Path, run: Path, cascades: Path, capsys: pytest.CaptureFixture[str]
+    fetched: Path, run: Path, cascades: Path, reported: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     where = ["--archive", str(fetched)]
+    before = sorted(reported.iterdir())
     assert main(["reports", "--run", str(cascades), *where]) == 1
     assert "is not a labels run" in capsys.readouterr().err
     assert main(["reports", "--run", str(run), "--cascades", str(run), *where]) == 1
@@ -208,7 +209,15 @@ def test_reports_refuse_runs_that_do_not_match(
     shorter = _cascade(fetched, run.parent.parent, "short", later)
     assert main(["reports", "--run", str(run), "--cascades", str(shorter), *where]) == 1
     assert "is not a cascade run of" in capsys.readouterr().err
-    assert not (cascades / "reports").exists() and not (shorter / "reports").exists()
+    assert not (cascades / "reports").exists() and sorted(reported.iterdir()) == before
+
+
+def test_reports_refuse_a_second_run_before_reading_the_archive(
+    run: Path, reported: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The run's reports exist: refused before the fetched files are read (none here)."""
+    assert main(["reports", "--run", str(run), "--archive", str(tmp_path)]) == 1
+    assert f"error: {reported / 'label_count'} exists" in capsys.readouterr().err
 
 
 def test_reports_refuse_a_run_the_fetched_files_no_longer_give(
@@ -224,6 +233,18 @@ def test_reports_refuse_a_run_the_fetched_files_no_longer_give(
     assert main(["reports", "--run", str(copy), "--archive", str(fetched)]) == 1
     assert "no longer give" in capsys.readouterr().err
     assert not (copy / "reports").exists()
+
+
+def test_reports_take_an_unchanged_run_whose_refits_failed(fetched: Path, tmp_path: Path) -> None:
+    """A refit with no valid start stores NaN in its theta, log-likelihood and shares. Written as
+    null, labelling the same files again gives back the run's tables, so the reports go through."""
+    where = ["--archive", str(fetched), "--data-dir", str(tmp_path), "--tag", "failed"]
+    assert main(["labels", *SPAN, *where, "--warmup-days", "7", "--baseline-days", "14"]) == 0
+    (run,) = (tmp_path / "labels").glob("*-failed")
+    reasons = engine.read(tmp_path, "labels", run.name, "refits")["reason"].to_pylist()
+    assert reasons.count("no valid start: too few observed bars") == 4  # 01-09 and 01-16
+    assert main(["reports", "--run", str(run), "--archive", str(fetched)]) == 0
+    assert sorted(p.name for p in (run / "reports").iterdir()) == ["label_count", "stability"]
 
 
 def test_the_floor_runs_the_labels_runs_own_labeller_into_its_reports(run: Path) -> None:
@@ -246,3 +267,6 @@ def test_the_floor_runs_the_labels_runs_own_labeller_into_its_reports(run: Path)
     pairs = [(c["scorer"], c["horizon_bars"]) for c in cells]
     assert pairs == [(s, h) for s in ("variance", "ac") for h in market_floor.HORIZONS]
     assert pq.read_table(folder / "path_cells.parquet").num_rows == 2 * len(cells)
+    first = (folder / "summary.md").read_text(encoding="utf-8").split("\n\n")[1]
+    assert "seed = 29, paths = 2, days = 28" in first
+    assert first.count("window=60, length=240") == len(market_floor.SCORERS)
