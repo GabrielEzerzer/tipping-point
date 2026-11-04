@@ -64,7 +64,8 @@ unfinished ones (`ising resume`, `jepa resume`, or the same `jepa extract` again
 Every session first copies the previous output's runs and the GPU-hour ledger into its own, so
 each version's output holds the whole plan so far. So one version's 20 GB caps the whole chain: it
 stops at 18 GB however it is split across versions. A plan whose output would exceed 18 GB must be
-cut into separate plans; #28 slice 4's 23 GB of latents will be.
+cut into separate plans, as #28 slice 4's latents are: plans/extract-s6.json to extract-s10.json,
+one per confirmatory seed.
 
 --dry-run really executes the plan on the CPU in a temporary folder, with sizes divided by
 --shrink (8: L = 4 and 8 for Job A) and sweep counts by its square. It builds a wheel from HEAD in a
