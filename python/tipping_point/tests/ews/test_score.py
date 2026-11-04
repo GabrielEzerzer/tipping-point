@@ -274,18 +274,32 @@ def test_score_writes_stamped_results_and_logs_every_cell(
         assert inputs[run_folder.name]["pilot"] == (stamp and stamp | {"sha256": pinned})
     auc = pq.read_table(run_dir / "auc" / f"{0:020d}.parquet").to_pylist()
     assert len(auc) == prereg.cells(demo.doc) == 48
-    rise = {(r["cadence"], r["L"], r["h"]): r["auc"] for r in auc if r["indicator"] == "variance"}
-    # planted. One cell moves with the draw: over 30 draws of this dataset the lowest at h = 0 is
-    # 0.75-0.94 (0.79-0.91 with the streams its runs used to share, #110) and the mean of the four
-    # 0.84-0.94 either way. This draw: 0.82 and 0.88
-    assert all(v > (0.8 if h == 0 else 0.6) for (_, _, h), v in rise.items()), rise
-    assert np.mean([v for (_, _, h), v in rise.items() if h == 0]) > 0.85, rise
+    # every bandwidth's cell: keyed without it, the last bandwidth's rows hid the first's (#131)
+    rise = {
+        (r["cadence"], r["L"], r["h"], r["bandwidth_taus"]): r["auc"]
+        for r in auc
+        if r["indicator"] == "variance"
+    }
+    assert len(rise) == 16, rise
+    near = [v for (_, _, h, _), v in rise.items() if h == 0]
+    out = [v for (_, _, h, _), v in rise.items() if h == 1]
+    # planted. The bounds sit clear of the draw, not on it (#131): over 205 draws of this dataset
+    # (each run's stream and the scorer's seed varied) the lowest of the eight cells at h = 0 is
+    # 0.69-0.95 and their mean 0.82-0.97; a dead cell reads 0.5. A horizon out the rise is weak,
+    # a cell there as low as 0.41, no better than a dead one, so h = 1 is held only to sit below
+    # h = 0: by 0.08-0.36 of the mean, and by exactly 0 with the horizon ignored. This draw: 0.82,
+    # 0.88 and 0.19
+    assert min(near) > 0.6 and np.mean(near) > 0.75, rise
+    assert np.mean(near) - np.mean(out) > 0, rise
     surrogate = pq.read_table(run_dir / "surrogates" / f"{0:020d}.parquet").to_pylist()
     assert {(r["surrogate"], r["headline"]) for r in surrogate} == {("phase", True), ("ar1", True)}
     # with 19 surrogates p reaches alpha = 1/20 only for a series that beats every one of them
     assert len(surrogate) == 48 and {r["n_surrogates"] for r in surrogate} == {19}
     rising = [r["detected"] for r in surrogate if r["indicator"] == "variance" and r["h"] == 0]
-    assert min(rising) >= 0.25 and np.mean(rising) >= 0.4, rising  # planted rise: 0.25-0.81
+    # a share of 16 series, so a cell moves 1/16 a series at a time: over 205 draws one cell reads
+    # as low as 0.06, and the mean of the eight 0.28-0.75 (#131). A test that lost its direction
+    # detects none, one that cannot tell a rise from its surrogates about alpha
+    assert np.mean(rising) >= 0.15, rising
     null = [r["false_positive"] for r in surrogate]
     assert max(null) <= 0.25 and np.mean(null) <= 0.1, null  # about alpha: 0-0.09 planted
     falling = [r for r in surrogate if r["indicator"] == "skewness"]
