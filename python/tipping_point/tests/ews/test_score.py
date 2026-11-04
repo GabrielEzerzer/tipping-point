@@ -301,7 +301,7 @@ def test_score_writes_stamped_results_and_logs_every_cell(
     # as low as 0.06, and a kind's mean over its four cells 0.27-0.75 (#131). Each kind is held on
     # its own: one that lost its direction detects none, one that cannot tell a rise from its
     # surrogates about alpha, and pooled with the other kind's a dead one still reads 0.13-0.38
-    assert all(np.mean(v) >= 0.1 for v in rising.values()), rising
+    assert all(np.mean(v) >= 0.15 for v in rising.values()), rising
     null = [r["false_positive"] for r in surrogate]
     # about alpha: over 40 draws a row reads 0-0.22 (at most 7 of 32 null series) and the mean of
     # the 48 rows 0.03-0.09 (#131)
