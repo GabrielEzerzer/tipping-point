@@ -1,11 +1,16 @@
 """The label-count and stability reports (#29 S3; research pass section 4): every item the section
 lists, by hand on a path small enough to count and on a synthetic fixture run through the real bars
-and labeller; what an optional input changes; byte-for-byte repeats; the confirmatory refusal."""
+and labeller; what an optional input changes; the committed release calendar; byte-for-byte
+repeats; the confirmatory refusal."""
 
+import csv
 import hashlib
+import importlib.resources
 import math
+import subprocess
+import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -312,6 +317,138 @@ def test_the_null_table_holds_slices_for_30(fixture: Fixture, counted: reports.R
         assert row["hours"] == pytest.approx(sum(s["bars"] for s in out.nulls) / 12)
         assert row["slices_4h"] == sum(s["bars"] // 48 for s in out.nulls) > 0
         assert row["slices_4h_gapless"] <= row["slices_4h"]
+
+
+# ---------------------------------------------------------------- the committed release calendar
+
+KINDS = ("CPI", "FOMC", "NFP")
+EASTERN = {"CPI": (8, 30), "NFP": (8, 30), "FOMC": (14, 0)}  # the release slots, Eastern time
+
+
+def _ns(text: str) -> int:
+    return int(datetime.fromisoformat(text).timestamp()) * 10**9
+
+
+def _utc_of(ts_ns: int) -> datetime:
+    return datetime.fromtimestamp(ts_ns // 10**9, UTC)
+
+
+def _eastern_offset(day: date) -> int:
+    """Hours behind UTC: US daylight time runs from the second Sunday of March to the first Sunday
+    of November (no release here falls on a Sunday, so the 2 a.m. change needs no hour)."""
+
+    def sunday(month: int, nth: int) -> date:
+        first = date(day.year, month, 1)
+        return first + timedelta(days=(6 - first.weekday()) % 7 + 7 * (nth - 1))
+
+    return 4 if sunday(3, 2) <= day < sunday(11, 1) else 5
+
+
+def test_the_committed_calendar_holds_18_cpi_18_nfp_and_12_fomc_times() -> None:
+    calendar = reports.release_calendar()
+    assert tuple(calendar) == KINDS  # the names label_count's `releases` takes
+    assert {kind: len(times) for kind, times in calendar.items()} == {
+        "CPI": 18,
+        "FOMC": 12,
+        "NFP": 18,
+    }
+    first, last = _ns("2022-07-01T00:00:00Z"), _ns("2024-01-01T00:00:00Z")
+    for kind, times in calendar.items():
+        assert times.dtype == np.int64
+        assert np.all(np.diff(times) > 0), kind  # sorted, no repeats
+        assert first <= times[0] and times[-1] < last, kind
+        for ts in times.tolist():
+            when = _utc_of(ts)
+            assert ts % (60 * 10**9) == 0 and when.weekday() < 5, (kind, when)
+            local = when - timedelta(hours=_eastern_offset(when.date()))
+            assert (local.hour, local.minute) == EASTERN[kind], (kind, when)
+    # first, last and the clock changes, as the research record gives them
+    for kind, text in [
+        ("CPI", "2022-07-13T12:30:00Z"),
+        ("CPI", "2022-11-10T13:30:00Z"),  # first EST row
+        ("CPI", "2023-03-14T12:30:00Z"),  # first EDT row
+        ("CPI", "2023-12-12T13:30:00Z"),
+        ("NFP", "2022-07-08T12:30:00Z"),
+        ("NFP", "2022-11-04T12:30:00Z"),  # still EDT
+        ("NFP", "2023-03-10T13:30:00Z"),  # still EST
+        ("NFP", "2023-12-08T13:30:00Z"),
+        ("FOMC", "2022-07-27T18:00:00Z"),
+        ("FOMC", "2022-12-14T19:00:00Z"),
+        ("FOMC", "2023-11-01T18:00:00Z"),  # the time read off the statement page
+        ("FOMC", "2023-12-13T19:00:00Z"),
+    ]:
+        assert _ns(text) in calendar[kind], (kind, text)
+    assert calendar["CPI"][0] == _ns("2022-07-13T12:30:00Z")
+    assert calendar["FOMC"][-1] == _ns("2023-12-13T19:00:00Z")
+
+
+def test_every_calendar_row_names_its_primary_source() -> None:
+    with reports.CALENDAR.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert list(rows[0]) == ["kind", "time_utc", "source"] and len(rows) == 48
+    for row in rows:
+        year = row["time_utc"][:4]
+        if row["kind"] == "FOMC":
+            assert row["source"] in {
+                f"https://www.federalreserve.gov/newsevents/pressreleases/{year}-press-fomc.htm",
+                "https://www.federalreserve.gov/newsevents/pressreleases/monetary20231101a.htm",
+            }, row
+        else:
+            assert row["source"] == f"https://www.bls.gov/schedule/{year}/home.htm", row
+
+
+def test_the_calendar_refuses_a_time_that_is_not_utc(tmp_path: Path) -> None:
+    path = tmp_path / "releases.csv"
+    head = "kind,time_utc,source\n"
+    path.write_text(head + "CPI,2022-07-13T12:30:00+00:00,x\nNFP,2022-07-08T12:30:00Z,x\n")
+    found = {kind: times.tolist() for kind, times in reports.release_calendar(path).items()}
+    assert found == {"CPI": [_ns("2022-07-13T12:30:00Z")], "NFP": [_ns("2022-07-08T12:30:00Z")]}
+    for stamp in ("2022-07-13T08:30:00-04:00", "2022-07-13T12:30:00"):
+        path.write_text(head + f"CPI,{stamp},x\n")
+        with pytest.raises(ValueError, match="is not UTC"):
+            reports.release_calendar(path)
+
+
+def test_the_calendar_is_read_from_the_installed_package(tmp_path: Path) -> None:
+    """Through the package, not the checkout: from a folder outside the repository, by a fresh
+    interpreter, as a kernel installing the wheel reads it."""
+    packaged = importlib.resources.files("tipping_point.market") / "releases.csv"
+    assert Path(str(packaged)) == reports.CALENDAR and packaged.is_file()
+    code = (
+        "from tipping_point.market import reports\n"
+        "print({k: len(v) for k, v in reports.release_calendar().items()})"
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code], cwd=tmp_path, capture_output=True, text=True, check=True
+    )
+    assert done.stdout.strip() == "{'CPI': 18, 'FOMC': 12, 'NFP': 18}"
+
+
+def test_the_calendar_fills_the_releases_table_on_the_fixture(fixture: Fixture) -> None:
+    calendar = reports.release_calendar()
+    report = reports.label_count(fixture.series, releases=calendar)
+    rows = report.tables["releases"].to_pylist()
+    assert [(r["symbol"], r["kind"]) for r in rows] == [(s, k) for s in SYMBOLS for k in KINDS]
+    window = reports.RELEASE_NS
+    for row in rows:
+        bar, out = fixture.series[row["symbol"]]
+        ts, times = bar["ts_ns"], calendar[row["kind"]]
+        labelled = ts[out.h >= 0]
+        inside = (times >= labelled[0]) & (times <= labelled[-1])
+        assert row["releases_in_span"] == int(inside.sum())
+        for population, kind in (("events_near", "event"), ("onsets_near", None)):
+            at = ts[[e["onset"] for e in out.episodes if kind is None or e["kind"] == kind]]
+            near = np.abs(at[:, None] - times[None, :]).min(axis=1) <= window
+            assert row[population] == int(near.sum()), (row, population)
+    # the labelled span, 2022-08-01 to 2022-09-11, holds CPI on 08-10 and payrolls on 08-05 and
+    # 09-02; the FOMC statements of 07-27 and 09-21 fall outside it
+    spans = {(r["symbol"], r["kind"]): r["releases_in_span"] for r in rows}
+    assert spans == {(s, k): n for s in SYMBOLS for k, n in zip(KINDS, (1, 0, 2), strict=True)}
+    assert _rows(report, "inputs", item="releases")[0]["status"] == "supplied"
+    section = _sections(report.summary)
+    title = "Onsets within +-15 minutes of scheduled releases (descriptive, no hypothesis)"
+    assert reports.NOT_SUPPLIED not in section[title]
+    assert "| BTCUSDT | CPI | 1 |" in section[title] and "| ETHUSDT | NFP | 2 |" in section[title]
 
 
 # ---------------------------------------------------------------- the stability report's parts

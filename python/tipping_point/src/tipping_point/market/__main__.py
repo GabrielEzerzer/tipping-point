@@ -20,8 +20,9 @@
            (reports.py). It labels the run's span again from the fetched files and refuses unless
            that gives back the run's own tables; the Parkinson variant reads the same klines.
            --cascades names a cascade run of the same span and symbols, whose pooled list the
-           label-count report counts; the release calendar and the aggTrades cross-check are not
-           wired yet, so the reports say "not supplied" for them
+           label-count report counts, as it counts the committed CPI, NFP and FOMC calendar
+           (reports.CALENDAR). The aggTrades cross-check is not wired yet, so the stability report
+           says "not supplied" for it
 
 The floor (reports.floor) needs the feature pipelines, which no module here may import:
 harness/market_floor.py runs it. The data dir is --data-dir, else the engine's own ($TP_DATA_DIR,
@@ -290,7 +291,8 @@ def _reports(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-    print(reports.write(reports.label_count(series, cascades=found), out))
+    releases = reports.release_calendar()
+    print(reports.write(reports.label_count(series, releases=releases, cascades=found), out))
     print(reports.write(reports.stability(series, params, parkinson, seed=args.seed), out))
     return 0
 

@@ -186,9 +186,14 @@ def test_reports_count_the_runs_labels_and_the_cascade_runs_list(
         assert row["events"] == len(events)
     inputs = pq.read_table(reported / "label_count" / "inputs.parquet").to_pylist()
     assert {r["item"]: r["status"] for r in inputs} == {
-        "releases": "not supplied",
+        "releases": "supplied",  # the committed calendar, always
         "cascades": "supplied",
     }
+    releases = pq.read_table(reported / "label_count" / "releases.parquet").to_pylist()
+    kinds = ("CPI", "FOMC", "NFP")
+    assert [(r["symbol"], r["kind"]) for r in releases] == [(s, k) for s in SYMBOLS for k in kinds]
+    # labelled 01-16 to 01-29: CPI came on 01-12, payrolls on 01-06, the FOMC statement on 02-01
+    assert all(r["releases_in_span"] == 0 for r in releases)
     agreement = pq.read_table(reported / "stability" / "agreement.parquet").to_pylist()
     assert sorted(r["symbol"] for r in agreement if r["against"] == "oracle") == SYMBOLS
     assert any(r["against"] == "parkinson" for r in agreement)
