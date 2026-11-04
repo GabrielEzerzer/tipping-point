@@ -1,0 +1,180 @@
+% Tipping Point: the Ising-only preprint and workshop version.
+% A skeleton: the headings follow paper/outline.md, and each "% TODO" is one outline bullet to write,
+% in order. Build instructions are in paper/README.md.
+
+\documentclass{article}
+
+% Preprint form. The ICLR 2027 style has no "preprint" option: it has two modes, chosen by the
+% \iclrfinalcopy line below.
+%   - With \iclrfinalcopy (as here): the author block is shown and the line numbers are dropped. The
+%     style then heads every page "Published as a conference paper at ICLR 2027", which is not true of
+%     a preprint, so the \lhead line straight after \maketitle replaces it with "Preprint".
+%   - Anonymous submission form: comment out \iclrfinalcopy and delete the \lhead line after
+%     \maketitle. The style then prints "Anonymous authors" in place of the author block, heads the
+%     pages "Under review as a conference paper at ICLR 2027" and adds line numbers. Also replace the
+%     repository link in the Reproducibility Statement with an anonymised one.
+\usepackage{iclr2027_conference,times}
+
+% Optional notation macros shipped with the style (Goodfellow et al., Deep Learning).
+\input{math_commands.tex}
+
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{url}
+
+\title{TODO: title}
+
+% No email address in this file, by choice.
+\author{Gabriel Ezerzer \\
+Durham University}
+
+\iclrfinalcopy
+
+\begin{document}
+
+\maketitle
+\lhead{Preprint}
+
+\begin{abstract}
+% TODO: written last. The question, what we did, the headline result, and why it matters.
+TODO: abstract.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+% TODO: The problem: systems that tip suddenly, and why early warning matters.
+% TODO: The gap: learned early-warning signals are claimed on synthetic data without ground truth;
+%       nothing forces them to be right.
+% TODO: Our claim: finite-size scaling on Ising, where Tc and the exponents are exact, is a
+%       falsification test any learned early-warning signal must pass.
+% TODO: Contributions, as two or three bullets: the test, and its result on JEPA latent signals and
+%       on the classic indicators.
+% TODO: What we do not claim: being first at latent-space warnings (Fang & Li 2025 and others,
+%       \citep{fang2025}); that latent warnings beat classic indicators on Ising (that is the
+%       question, not the premise); anything about the agent layer or the app.
+
+The same pre-registered protocol applied to crypto markets will be reported in a later version.
+
+\section{Background and related work}
+\label{sec:background}
+
+% TODO: Critical slowing down and classic early-warning signals (\citep{bury2021}).
+% TODO: Machine learning that finds phase transitions in physics models.
+% TODO: JEPA and self-supervised world models.
+% TODO: Prior work on warnings in learned representations, and how ours differs (\citep{fang2025}).
+% TODO: Early warnings in financial markets.
+
+\section{Method}
+\label{sec:method}
+
+% TODO: The world model: what it is, and how collapse is prevented.
+% TODO: The warning signals we read from it: prediction-error surprise, latent variance, latent AC1.
+% TODO: The falsification test: finite-size scaling as ground truth, plus linear probes for
+%       magnetisation and susceptibility.
+% TODO: The classic raw-signal indicators, tested under the same protocol.
+% TODO: The scoring protocol: what was fixed in advance, the surrogate tests, ROC, lead time, false
+%       alarms.
+% TODO: The key design decisions and why we made them.
+
+\section{Experiment: Ising, the falsification test}
+\label{sec:ising}
+
+% TODO: The setup: all-temperature training is primary; the held-out Tc band is the ablation.
+% TODO: The results: does the latent signal obey finite-size scaling? Which signals peak at the
+%       critical point, and which are monotone in T?
+% TODO: What the model's internals encode (the probes and their controls).
+% TODO: Ablations.
+% TODO: What failed or surprised us.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=\linewidth]{figures/ising-ews-v1.png}
+\end{center}
+\caption{TODO: caption.}
+% TODO: caption. The README's description of this figure, for reference: left, each judged exponent
+%       minus its exact value, with its 95% CI and its pre-registered tolerance in grey (1 - AC1 is
+%       judged on its sign alone, so it has no band); right, the median eps_L at which each replica's
+%       rolling Var(|m|) peaks, with interquartile ranges, where a flat line in L means finite-size
+%       scaling.
+\label{fig:ising-ews-v1}
+\end{figure}
+
+% Numbers copied from the README's "Results: the pre-registered classic baseline (ising-ews-v1)"
+% section (run 20261104T095100Z-ising-ews-v1). Tolerances from paper/prereg/ising-ews-v1.toml.
+% Do not round or restate them.
+\begin{table}[t]
+\caption{Classic baseline under ising-ews-v1. The first three rows are static exponents at the
+staircase plateau nearest $T_c$. The $1 - \mathrm{AC1}$ row passes if its CI excludes 0; the
+pre-registered 0.1 is the CI width below which a CI that holds 0 fails rather than being
+inconclusive.}
+\label{tab:ising-ews-v1}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Fitted exponent & Value [95\% CI] & Exact & Tolerance \\
+\midrule
+$L^2\,\mathrm{Var}(|m|)$ & $1.766$ $[1.739, 1.792]$ & $7/4$ & $0.1$ \\
+Mean $|m|$ & $-0.1253$ $[-0.1289, -0.1219]$ & $-1/8$ & $0.02$ \\
+Skewness of $|m|$ & $-0.011$ $[-0.022, 0.002]$ & $0$ & $0.1$ \\
+$1/\nu$ from the rolling $\mathrm{Var}(|m|)$ peak & $1.007$ $[0.930, 1.143]$ & $1$ & $0.5$ \\
+$1 - \mathrm{AC1}(|m|)$, one-sweep lag & $-1.728$ $[-1.757, -1.700]$ & $-7/4$ & sign only \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\section{Discussion and limitations}
+\label{sec:discussion}
+
+% TODO: When the learned signals help, and when they don't.
+% TODO: What a fail would mean for the field: learned early-warning claims made without ground truth.
+% TODO: Honest limits: one domain in this version; the market results come later.
+% TODO: Future work: one shared model, and other domains such as seizures.
+
+The market experiments, run under the same pre-registered protocol, will be reported in a later
+version.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+% TODO: conclusion.
+
+% The two statements below sit outside the ICLR page limit.
+
+\section*{Reproducibility Statement}
+
+% TODO: a paragraph that points to, without repeating, the material below:
+%   - the public repository (link; anonymise it for the submission form);
+%   - the frozen pre-registration tags prereg/ising-ews-v1 and prereg/ising-latent-v1;
+%   - the run ids (for the classic baseline: 20261104T095100Z-ising-ews-v1; the latent run to add);
+%   - the seeds (simulation and bootstrap/surrogate seeds);
+%   - a one-command reproduction of the figures (to be built).
+TODO: reproducibility statement.
+
+\section*{Use of AI}
+
+TODO (author to confirm): The code, tests and documentation for this project were written with an AI assistant (Anthropic's
+Claude, used through Claude Code) under the author's direction. The author set the research
+question, the hypotheses and the pre-registered protocol, reviewed every change, and ran the
+experiments. The assistant also drafted parts of the text of this paper, which the author edited.
+The author takes responsibility for the final content of this work.
+
+% The citations above are still inside comments, so \nocite keeps BibTeX from failing on an empty
+% bibliography. Remove it once the text cites its sources.
+\nocite{*}
+\bibliography{references}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+
+\section{Appendix}
+\label{sec:appendix}
+
+% TODO: Hyperparameters.
+% TODO: The number of configurations tried.
+% TODO: Extra figures.
+% TODO: Reproducibility details: code, data sources and seeds.
+
+\end{document}

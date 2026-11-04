@@ -9,6 +9,17 @@ harness/out/
 dist/
 .worktrees/
 
+# LaTeX build outputs for the paper
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/*.synctex.gz
+paper/*.fdb_latexmk
+paper/*.fls
+paper/main.pdf
+
 # raw Binance recordings stay local: the repo goes public and republishing book data is a licensing risk (#4)
 harness/fixtures/recorded/
 # so do downloaded archive days (#23): the import tests read any found here
