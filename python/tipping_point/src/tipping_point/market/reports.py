@@ -457,6 +457,14 @@ def _label_count_summary(
             _markdown(tables["coincidence"]),
             f"## Onsets within +-{RELEASE_NS // (60 * 10**9)} minutes of scheduled releases "
             "(descriptive, no hypothesis)",
+            *(
+                [
+                    "Calendar: market/releases.csv; 11 of the 12 FOMC times are the standard 14:00 "
+                    "Eastern slot, not read off each statement page."
+                ]
+                if releases
+                else []
+            ),
             _optional(tables["releases"], releases),
             f"## Cascade candidates and regime onsets within +-{CASCADE_NS // HOUR_NS} hour",
             _optional(tables["cascades"], cascades),

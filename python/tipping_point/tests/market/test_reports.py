@@ -449,6 +449,15 @@ def test_the_calendar_fills_the_releases_table_on_the_fixture(fixture: Fixture) 
     title = "Onsets within +-15 minutes of scheduled releases (descriptive, no hypothesis)"
     assert reports.NOT_SUPPLIED not in section[title]
     assert "| BTCUSDT | CPI | 1 |" in section[title] and "| ETHUSDT | NFP | 2 |" in section[title]
+    # where the times come from, under the heading and before the table (#142)
+    source, table = section[title].strip().split("\n\n")
+    assert source == (
+        "Calendar: market/releases.csv; 11 of the 12 FOMC times are the standard 14:00 Eastern "
+        "slot, not read off each statement page."
+    )
+    assert table.startswith("| symbol | kind |")
+    caveat = " ".join((reports.release_calendar.__doc__ or "").split())
+    assert source.split("; ")[1] in caveat  # the caveat the calendar's reader states
 
 
 # ---------------------------------------------------------------- the stability report's parts
