@@ -696,13 +696,14 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   (`scoring.alarms.every = 5`) and runs its surrogate tests at h = 0 only, so both parts will take
   less; the total has not been projected again. Scoring runs on up to 8 threads by default; on a
   host with more cores, `TP_THREADS=<n>` sets the count to n, and the results do not depend on it.
-  The runner has no
-  resume: a run interrupted before it writes its result starts again. Its trials are logged in one
+  A run's folder is made before its probes, so a run interrupted anywhere leaves a folder with no
+  `complete.json`, which `--resume` (below) carries on. Its trials are logged in one
   write after its tables and before `complete.json`, so a crash in that write leaves a folder with no
   `complete.json`, its trials logged or not, or a complete result with all of them. `prereg.charge`,
   for any file, `ews score` included, refuses to score past a folder stamped with the file's id and
   version and with no `complete.json`, since its tables can be read whether or not their cells were
-  logged: delete it or amend the file. Deleting it gives back no trial the log holds, so a crash after
+  logged: carry it on with `--resume`, or delete it or amend the file. Deleting it gives back no trial
+  the log holds, so a crash after
   the log spends the budget: the tables are there, and scoring again means amending the file. A crash
   inside the log's one write leaves a line that is no whole record, which `prereg.trials` refuses by
   file and line: count that run as spent and amend the file. Every count reads the whole log, so first,
@@ -712,6 +713,17 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   folder, wherever `trials.budget` equals the file's cells, as both files' do. If no folder is left,
   the record gives the id and version of the file that was being scored, or there is one for each file
   it could have been. A blank line in the log is skipped.
+- **Resuming.** A run stopped partway, by a crash, a reboot or a sleep it never woke from, is carried
+  on by the same command with `--resume`, which `ews score` takes too. Each probe (one L and one
+  checkpoint) and each checkpoint's pass of the scorer is saved in the result folder's `parts/` as it
+  ends, the pass with the random generator's state, and a resumed run reads them back, so its tables
+  are the bytes an uninterrupted run writes. It refuses, saying what differs, unless the torn folder
+  began under the same file and stamp, seed, inputs, pilot record, numpy and pyarrow versions and
+  (for the runner) torch and device, from a clean checkout of the same commit: commit everything,
+  untracked files included, before a long run starts. Resume only once the run that began the folder
+  has stopped, since two at once would both write it. Its trials are logged once, at the end, even
+  when the crash came between the log and `complete.json`, and the manifest lists every start under
+  `resumptions`.
 
 ### The exploratory pipeline
 
