@@ -12,7 +12,8 @@ result folder's fss, peaks and auc tables alone:
 
 A line under the panels gives the AUC of the classic indicators of |m| at the headline cell, dense
 cadence, over every L and h: the numbers hypotheses 2 and 3 judge. A missing table, column or row
-stops the script with its name, rather than leaving a panel without it.
+stops the script with its name, rather than leaving a panel without it; so does a headline cell
+missing at an L and h the auc table scores elsewhere, rather than a line that says every L and h.
 
 matplotlib is not a project dependency and pyarrow is, so this runs in the project's environment
 with matplotlib layered on (3.10.3, the version harness/ising_figures.py pins, drew the committed
@@ -43,8 +44,8 @@ COLUMNS = {
             "checkpoint"),
     "peaks": ("indicator", "observable", "cadence", "L", "peak_eps_median", "peak_eps_q1",
               "peak_eps_q3", "checkpoint"),
-    "auc": ("indicator", "observable", "cadence", "headline", "window_taus", "bandwidth_taus",
-            "auc", "checkpoint"),
+    "auc": ("indicator", "observable", "cadence", "L", "h", "headline", "window_taus",
+            "bandwidth_taus", "auc", "checkpoint"),
 }  # fmt: skip
 # The five judged exponents, top to bottom: fss quantity, cadence, label, the exact value, as text.
 EXPONENTS = (
@@ -164,11 +165,18 @@ def headline_auc(auc: list[Row]) -> str:
     if len(pairs) != 1:
         raise ValueError(f"the auc table's headline rows of |m|, dense, hold cells {sorted(pairs)}")
     ((window, bandwidth),) = pairs
+    # every cell is scored at every L and h, so the table's own rows name the grid the footer claims
+    scored = where(auc, observable="abs_m", cadence="dense", checkpoint="")
+    grid = sorted({(r["L"], r["h"]) for r in scored})
     parts = []
     for indicator, label in AUC_INDICATORS:
+        held = sorted((r["L"], r["h"]) for r in cell if r["indicator"] == indicator)
+        if held != grid:
+            raise ValueError(
+                f"the auc table's headline {indicator} rows of |m|, dense, hold (L, h) {held}, "
+                f"not one each of {grid}"
+            )
         values = [r["auc"] for r in cell if r["indicator"] == indicator]
-        if not values:
-            raise ValueError(f"the auc table has no headline {indicator} row of |m|, dense")
         low, high = f"{min(values):.3f}", f"{max(values):.3f}"
         parts.append(f"{label} {low}" if low == high else f"{label} {low} to {high}")
     return (
