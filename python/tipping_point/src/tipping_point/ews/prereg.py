@@ -38,6 +38,7 @@ import pickle
 import re
 import socket
 import subprocess
+import sys
 import time
 import tomllib
 from collections.abc import Sequence
@@ -860,15 +861,18 @@ def charge(data_dir: Path, prereg: Prereg, planned: int, own: str | None = None)
     which spends the folder, so it is refused. A torn log speaks first: its folder's trials are part
     charged, and deleting the folder is not its repair."""
     logged, budget = trials(data_dir, prereg), prereg.doc["trials"]["budget"]
-    torn = [name for name in _torn_results(data_dir, prereg) if name != own]
+    every = _torn_results(data_dir, prereg)
+    torn = [name for name in every if name != own]
     if torn:
+        one = len(every) == 1  # resumable carries on a torn result only when it is the one
+        offer = "carry it on with --resume, which refuses one it cannot end as it began, or "
         raise PreregError(
             f"{prereg.name}: {', '.join(torn)} in {Path(data_dir) / 'ews'} has no complete.json: "
             "a torn result from a crash, or one being written right now. Its tables can be read "
             "whether or not its trials were logged, so nothing scores past it: once nothing writes "
-            "it, carry it on with --resume, which refuses one it cannot end as it began, or "
-            "delete it or amend the pre-registration. Deleting it gives back no trial already "
-            "logged"
+            f"it, {offer if one else ''}delete it or amend the pre-registration. Deleting it gives "
+            "back no trial already logged"
+            + ("" if one else f". Only one torn folder can be carried on: {', '.join(every)}")
         )
     mine = trials(data_dir, prereg, own) if own else 0
     if mine not in (0, planned):
@@ -926,8 +930,16 @@ def begin_result(
     the resume key, which is `key` and the commit of the running code when its checkout is clean,
     and a record of this start. With `own`, the torn result --resume carries on (resumable), that
     folder instead, given one more record: refused, naming what differs, unless it began under this
-    very key, since only then can it end in the bytes an uninterrupted scoring would write."""
+    very key, since only then can it end in the bytes an uninterrupted scoring would write. A new
+    result with a key, of a frozen file, from a checkout no commit names is warned of on stderr:
+    a resume of it would be refused."""
     code = io.code_version()
+    if own is None and key and freeze_ref.commit and code["dirty"] is not False:
+        print(
+            "warning: this checkout has uncommitted changes, so a crash in this run cannot be "
+            "resumed",
+            file=sys.stderr,
+        )
     key = key | {"code": code["git_sha"] if code["dirty"] is False else None}
     started = {
         "started_ns": time.time_ns(),

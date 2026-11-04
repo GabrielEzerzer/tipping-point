@@ -381,19 +381,26 @@ def run(
     planned = prereg.cells(doc)
     own = prereg.resumable(data_dir, pre) if resume else None
     prereg.charge(data_dir, pre, planned, own)
+    if resume and own is None:  # after charge, which refuses several torn folders
+        print("--resume: no torn result folder found, starting a fresh run", file=sys.stderr)
     runs_commit = prereg.baseline_commit(pre) if ref.commit else None
     admitted = ising.admit(doc, data_dir, allow_stale=allow_stale, commit=ref.commit or None,
                            runs_commit=runs_commit)  # fmt: skip
     baseline = baseline_rows(doc, data_dir, admitted.scored, runs_commit)
-    fit_runs(doc, data_dir)  # refused before the folder is made, not halfway through the probes
+    fits = fit_runs(doc, data_dir)  # refused before the folder is made, not during the probes
     if embed is None:
         embed = (
             ews_planted.planted_embedding()
             if planted
             else checkpoint_embedder(data_dir, admitted.passes, device)
         )
-    # in the resume key too: on another device or torch the probes' embeddings are other bytes
-    embedding = {"torch": torch.__version__, "device": device or train.default_device()}
+    # in the resume key too: on another device or torch, or fitted on other staircases, the probes
+    # are other bytes
+    embedding = {
+        "torch": torch.__version__,
+        "device": device or train.default_device(),
+        "fit_runs": {r.run_id: r.complete_sha256 for r in fits.values()},
+    }
     run_dir = begin(pre, ref, data_dir, seed, admitted, own, **embedding)
     curves = curve_rows(doc, admitted.scored, admitted.passes)
     probe_rows, draws = probe_tables(

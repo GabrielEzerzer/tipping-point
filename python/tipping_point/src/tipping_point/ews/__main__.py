@@ -181,7 +181,8 @@ def begin(
     a new one, or `own`, the torn result --resume carries on. Its resume key is what must be the
     same for a scoring to carry it on and end in the bytes an uninterrupted one writes: the file,
     the seed, every input with each latents table read over it, the pilot record, the libraries
-    that draw and write, and whatever the caller adds in `extra` (the runner: its embedding)."""
+    that draw and write, and whatever the caller adds in `extra` (the runner: its embedding and
+    the runs its probes fit on)."""
     if pre.doc["data"]["domain"] != "ising":
         raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
     read = [c.name for c in admitted.passes if c.name]
@@ -287,6 +288,8 @@ def _score(args: argparse.Namespace) -> int:
         )
     own = prereg.resumable(args.data_dir, pre) if args.resume else None
     prereg.charge(args.data_dir, pre, planned, own)
+    if args.resume and own is None:  # after charge, which refuses several torn folders
+        print("--resume: no torn result folder found, starting a fresh run", file=sys.stderr)
     admitted = ising.admit(
         pre.doc,
         args.data_dir,

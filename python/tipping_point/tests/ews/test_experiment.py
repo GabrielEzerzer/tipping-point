@@ -719,7 +719,7 @@ def test_a_killed_run_resumed_writes_the_bytes_of_one_never_killed(
     """The runner killed by os._exit, nothing flushed for it: during the probes, after the first
     pass, after the last, between the trial log and complete.json, and twice. Each time the same
     command runs again with --resume (the twice-killed run passes it from its first start, where it
-    finds nothing to carry on and begins a result of its own), with a part torn as it was saved
+    finds nothing to carry on, says so and begins a result of its own), with a part torn as saved
     left beside the rest. It ends in the result the unbroken run wrote, every Parquet and CSV file
     to the byte. What was saved before a kill is read back, never computed or written again, and
     every unit is saved by the end; the log holds the budget, each line naming this folder, in one
@@ -731,6 +731,8 @@ def test_a_killed_run_resumed_writes_the_bytes_of_one_never_killed(
     for i, kill in enumerate(kills):
         done = _killed_run(frozen.path, copy, kill, *(["--resume"] if i else first))
         assert done.returncode == 3, done.stderr
+        fresh = "--resume: no torn result folder found, starting a fresh run" in done.stderr
+        assert fresh == (i == 0 and bool(first)), done.stderr
         assert [(r / "complete.json").exists() for r in _results(copy)] == [False]
     (run_dir,) = _results(copy)
     parts = run_dir / "parts"
@@ -762,10 +764,12 @@ def test_ews_score_resumes_a_killed_scoring_to_the_same_cell_tables(
     frozen: Frozen, scored: Path, tmp_path: Path
 ) -> None:
     """The other entry, `ews score --cells-only`, killed after its sixth pass and run again with
-    --resume: its five tables are the runner's to the byte, its trials logged once."""
+    --resume: its five tables are the runner's to the byte, its trials logged once. Its first
+    start passes --resume too, finds nothing to carry on and says so."""
     copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
-    done = _killed_run(frozen.path, copy, "pass-05", entry="ews score")
+    done = _killed_run(frozen.path, copy, "pass-05", "--resume", entry="ews score")
     assert done.returncode == 3, done.stderr
+    assert "--resume: no torn result folder found, starting a fresh run" in done.stderr
     (run_dir,) = _results(copy)
     done = _killed_run(frozen.path, copy, "nowhere", "--resume", entry="ews score")
     assert done.returncode == 0, done.stderr
@@ -783,6 +787,7 @@ REFUSED = {  # what changed since the crash: what the refusal says
     "seed": "seed: 26 when it began, 27 now",
     "a latents table": "inputs: the runs ",
     "a run": "latents tables not made by",
+    "a fit run": "fit_runs: {",
     "a dirty checkout": "code: this checkout has changes not committed",
     "another commit": f"code: '{'c' * 40}' when it began, '{'d' * 40}' now",
     "the prereg stamp": "prereg: {",
@@ -802,10 +807,11 @@ def test_a_resume_under_another_key_is_refused_and_touches_nothing(
     said: str,
 ) -> None:
     """--resume carries a torn result on only for a scoring that would end in the bytes it began to
-    write: the same seed, inputs, file and stamp, code and embedding, and the same entry. Anything
-    else is refused before any work, saying what differs, and nothing is written or logged. A run
-    whose complete.json changed is refused before its key is read, by the latents tables made
-    over the run as it was (and the baseline read it as it was): the key holds it too, for v1."""
+    write: the same seed, inputs and fit runs, file and stamp, code and embedding, and the same
+    entry. Anything else is refused before any work, saying what differs, and nothing is written or
+    logged. A scored run whose complete.json changed is refused before its key is read, by the
+    latents tables made over the run as it was (and the baseline read it as it was): the key holds
+    it too, for v1. A fit run has no latents table, so the key alone refuses it."""
     copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
     planted_ = ["--planted"] if change == "the prereg stamp" else []
     run_dir = _crash(frozen.path, copy, f"probes-{V1_SIZES[0]}-00", *planted_)
@@ -817,6 +823,10 @@ def test_a_resume_under_another_key_is_refused_and_touches_nothing(
         folder = ramp / ising.LATENTS / TRAINED[0] if change == "a latents table" else ramp
         done = io.read_json(folder / "complete.json") | {"ended_ns": 1}
         io.write_json(folder / "complete.json", done, replace=True)  # a new file: links stay apart
+    elif change == "a fit run":  # the staircase the probes fit on, read by no scored cell
+        fit = copy.runs["fit", V1_SIZES[0], planted.FIT_SEED]
+        done = io.read_json(fit / "complete.json") | {"ended_ns": 1}
+        io.write_json(fit / "complete.json", done, replace=True)
     elif change == "a dirty checkout":
         monkeypatch.setattr(io, "code_version", lambda: CLEAN | {"dirty": True})
     elif change == "another commit":
@@ -919,6 +929,53 @@ def test_charge_takes_off_its_own_folder_and_its_own_trials_alone(tmp_path: Path
     assert prereg.resumable(tmp_path, draft) is None
     with pytest.raises(prereg.PreregError, match=f"another-{torn.name} in"):
         prereg.charge(tmp_path, draft, cells, torn.name)
+
+
+def test_the_torn_refusal_offers_resume_only_when_one_torn_folder_is_there(tmp_path: Path) -> None:
+    """With one torn folder the refusal offers --resume; with two, resumable finds none, so --resume
+    would only repeat the refusal: it is not offered, and the refusal names every torn folder as
+    the ones of which only one can be carried on, whether or not a scoring carries one on."""
+    draft = prereg.load(planted.DRAFT)
+    cells, ref = prereg.cells(draft.doc), prereg.Frozen("", "")
+    torn = prereg.begin_result(tmp_path, draft, ref, {})
+    with pytest.raises(prereg.PreregError) as one:
+        prereg.charge(tmp_path, draft, cells)
+    assert "carry it on with --resume" in str(one.value)
+    assert "Only one torn folder" not in str(one.value)
+    other = tmp_path / "ews" / f"another-{torn.name}"
+    shutil.copytree(torn, other)
+    names = ", ".join(sorted([torn.name, other.name]))
+    for own in (None, torn.name):
+        with pytest.raises(prereg.PreregError) as two:
+            prereg.charge(tmp_path, draft, cells, own)
+        assert "--resume, which" not in str(two.value), two.value
+        assert f"Only one torn folder can be carried on: {names}" in str(two.value), two.value
+
+
+def test_a_new_result_from_a_dirty_checkout_warns_it_cannot_be_resumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run begun from a checkout no commit names is refused --resume later (the code part of its
+    key is None), so begin_result says so on stderr as it starts, and only then: not from a clean
+    checkout, not for a result with no key (written whole, nothing to resume), not for planted
+    data (an unfrozen ref), and not on a resume, which refuses instead."""
+    warning = "warning: this checkout has uncommitted changes, so a crash in this run cannot be"
+    draft, real = prereg.load(planted.DRAFT), prereg.Frozen("prereg/x-v1", "a" * 40)
+    key = {"seed": 26}
+    for dirty in (True, None):  # None: nothing names the commit, which a resume refuses alike
+        monkeypatch.setattr(io, "code_version", lambda d=dirty: CLEAN | {"dirty": d})
+        prereg.begin_result(tmp_path / f"dirty-{dirty}", draft, real, key)
+        assert warning in capsys.readouterr().err
+    for ref, k in ((real, {}), (prereg.Frozen("", ""), key)):
+        prereg.begin_result(tmp_path / f"quiet-{bool(k)}", draft, ref, k)
+        assert capsys.readouterr().err == ""
+    monkeypatch.setattr(io, "code_version", lambda: dict(CLEAN))
+    run_dir = prereg.begin_result(tmp_path / "clean", draft, real, key)
+    assert capsys.readouterr().err == ""
+    monkeypatch.setattr(io, "code_version", lambda: CLEAN | {"dirty": True})
+    with pytest.raises(prereg.PreregError, match="changes not committed"):
+        prereg.begin_result(tmp_path / "clean", draft, real, key, run_dir.name)
+    assert capsys.readouterr().err == ""
 
 
 def test_a_result_is_carried_on_under_its_own_key_alone(
