@@ -23,7 +23,9 @@ not part of the paper's claim.
   them (below).
 - In progress: the latent experiment, pre-registered and frozen as `prereg/ising-latent-v1`
   (extraction on Kaggle, then scoring).
-- Planned: the market experiments, the desktop app and the paper, aimed at an ICLR 2027 workshop.
+- Planned: an Ising-only preprint in December 2026 and a workshop submission in early 2027. The
+  market experiments and the desktop app follow, with the market results as a later version of the
+  paper.
 
 The plan lives on the issue tracker, starting from the map in [#1](https://github.com/GabrielEzerzer/tipping-point/issues/1).
 The pre-registration's design and the decisions behind it are in [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26).
