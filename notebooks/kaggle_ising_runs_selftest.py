@@ -824,10 +824,12 @@ def wheel(k: ModuleType, root: Path) -> None:
     (folder / "tipping_point-0.1.0-py3-none-any.whl").write_bytes(b"PK")
     sha = "655949aa79ea32adfc103635d4cfb303ae24b94f"
 
-    def outcome(text: str | None) -> str:
+    def outcome(text: str | bytes | None) -> str:
         note = folder / "COMMIT.txt"
         if text is None:
             note.unlink(missing_ok=True)
+        elif isinstance(text, bytes):
+            note.write_bytes(text)
         else:
             note.write_text(text, encoding="utf-8")
         try:
@@ -845,6 +847,29 @@ def wheel(k: ModuleType, root: Path) -> None:
         outcome("main\n").startswith("refused: COMMIT.txt names no"),
     )
     check("a clean commit: accepted", outcome(f"{sha}\n") == sha)
+    # #134: PowerShell 5.1's `>` writes UTF-16LE with a byte-order mark, and CRLF
+    for what, raw in (
+        (
+            "UTF-16LE with a BOM, as PowerShell 5.1 writes it",
+            b"\xff\xfe" + f"{sha}\r\n".encode("utf-16-le"),
+        ),
+        ("UTF-16BE with a BOM", b"\xfe\xff" + f"{sha}\r\n".encode("utf-16-be")),
+        ("UTF-8 with a BOM", f"﻿{sha}\r\n".encode()),
+    ):
+        said = outcome(raw)
+        check(f"a clean commit in {what}: accepted, naming it", said == sha, said)
+    said = outcome(b"\xff\xfe" + "main\r\n".encode("utf-16-le"))
+    check(
+        "... and one naming no commit: still refused",
+        said.startswith("refused: COMMIT.txt names no"),
+        said,
+    )
+    said = outcome(b"\xff\xfe" + f"{sha}-dirty\r\n".encode("utf-16-le"))
+    check(
+        "... and one marked dirty: still refused",
+        said.startswith("refused: COMMIT.txt marks"),
+        said,
+    )
     (folder / "tipping_point-0.2.0-py3-none-any.whl").write_bytes(b"PK")
     check(
         "two wheels: refused", outcome(f"{sha}\n").startswith("refused: expected one tipping_point")

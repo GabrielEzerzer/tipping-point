@@ -780,7 +780,8 @@ def find_wheel(ctx: Ctx, source: str = DEFAULT_WHEEL) -> tuple[Path, dict]:
             f"expected one COMMIT.txt beside the wheel in {root}, found {len(notes)}: "
             "nothing else names the commit the runs would record"
         )
-    text = notes[0].read_text(encoding="utf-8").strip()
+    raw = notes[0].read_bytes()  # PowerShell 5.1's `>` writes UTF-16 with a byte-order mark (#134)
+    text = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig").strip()
     if "dirty" in text.lower():
         raise Refused(f"COMMIT.txt marks the commit dirty ({text!r}): build from a clean checkout")
     if not COMMIT.fullmatch(text):
