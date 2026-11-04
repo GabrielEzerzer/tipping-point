@@ -559,8 +559,8 @@ and the scorer takes both through every table, once per checkpoint.
   must come from that tag's commit, and each table from the file's own tag and the checkpoint it
   pins: the freeze comes before any extraction on a scored seed. `paper/prereg/ising-latent-v1.toml`
   was rewritten on 2 November after the m1 and m2 reads, with its eleven checkpoints pinned and
-  `scoring.margins.tolerance` set. `baseline.result` is its one placeholder, which the freeze
-  refuses until it holds the run id of ising-ews-v1's result on these runs.
+  `scoring.margins.tolerance` set. On 4 November its last placeholder, `baseline.result`, took
+  `20261104T095100Z-ising-ews-v1`, the run id of ising-ews-v1's result on these runs.
   `python/tipping_point/tests/fixtures/ising_latent_draft.toml` is the schema's fixture, with every
   value the pass was to set left open.
 - **What a file may say.** Frozen text must not claim what the scorer ignores, so a key outside the

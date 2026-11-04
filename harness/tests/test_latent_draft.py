@@ -1,7 +1,7 @@
 """ising-latent-v1 as rewritten after the m1 and m2 reads (#28), and the plans that trained under
-its draft: the file loads, the freeze's strict check names baseline.result alone, its rules and pins
-are the ones the rewrite decided, its disclosure says what was read, and the plans still pin the
-draft the trainings ran under, whose sha256 the filled file no longer has."""
+its draft: the file loads and passes the freeze's strict check with baseline.result filled, its
+rules and pins are the ones the rewrite decided, its disclosure says what was read, and the plans
+still pin the draft the trainings ran under, whose sha256 the filled file no longer has."""
 
 import copy
 import json
@@ -24,7 +24,7 @@ PLAN = ROOT / "notebooks" / "plans" / "primary-28.json"
 ABLATIONS_PLAN = ROOT / "notebooks" / "plans" / "ablations-28.json"
 # the draft the trainings ran under; the file's sha256 differs because its placeholders were filled
 TRAINED_UNDER = "4d9fd3ed79e02f3e0ec535dd02e2b4f8c6a716ceed5476a6a00fcc72e95552ad"
-BASELINE = "<ews result run_id, filled when v1 has been scored>"  # until ising-ews-v1's score ends
+BASELINE = "20261104T095100Z-ising-ews-v1"  # the run id of ising-ews-v1's result on these runs
 PINS = [  # role, model seed, training, final.pt's sha256, ckpt/step_0000000.pt's sha256 (#28)
     (
         "primary",
@@ -112,13 +112,16 @@ def test_the_file_loads_and_names_its_trials() -> None:
     assert prereg.cells(doc) == 3132 == doc["trials"]["budget"]
 
 
-def test_strict_refuses_baseline_result_alone() -> None:
-    """Every placeholder of the draft is filled but baseline.result: ising-ews-v1's score of these
-    runs has not completed, so no run id exists to name, and no value stands in for one. The test
-    changes with the file when it is filled."""
-    found = prereg.problems(prereg.load(PREREG).doc, strict=True)
-    assert found == [f"baseline.result: placeholder {BASELINE!r}"]
-    assert PREREG.read_text("utf-8").count(BASELINE) == 1
+def test_strict_passes_the_file_and_refuses_a_placeholder_in_baseline_result() -> None:
+    """baseline.result, the draft's last placeholder, holds the run id of ising-ews-v1's result on
+    these runs, scored on 4 November, so the freeze's strict check passes the file. With the
+    placeholder put back in memory, the check refuses it again, and names that key alone."""
+    doc = prereg.load(PREREG).doc
+    assert doc["baseline"]["result"] == BASELINE
+    assert prereg.problems(doc, strict=True) == []
+    placeholder = "<ews result run_id, filled when v1 has been scored>"
+    doc["baseline"]["result"] = placeholder  # in memory only; the file keeps the run id
+    assert prereg.problems(doc, strict=True) == [f"baseline.result: placeholder {placeholder!r}"]
 
 
 def _thin(doc: dict[str, Any]) -> None:
