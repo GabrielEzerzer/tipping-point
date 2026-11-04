@@ -23,7 +23,9 @@ not part of the paper's claim.
   them (below).
 - In progress: the latent experiment, pre-registered and frozen as `prereg/ising-latent-v1`
   (extraction on Kaggle, then scoring).
-- Planned: the market experiments, the desktop app and the paper, aimed at an ICLR 2027 workshop.
+- Planned: an Ising-only preprint in December 2026 and a workshop submission in early 2027. The
+  market experiments and the desktop app follow, with the market results as a later version of the
+  paper.
 
 The plan lives on the issue tracker, starting from the map in [#1](https://github.com/GabrielEzerzer/tipping-point/issues/1).
 The pre-registration's design and the decisions behind it are in [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26).
@@ -96,12 +98,12 @@ Tipping Point is released under the MIT licence; see [LICENSE](LICENSE).
 
 ## Layout
 
-- `engine/` — Rust core, a member of the root Cargo workspace (`Cargo.toml`).
-- `python/tipping_point/` — the Python package (src layout), a member of the root uv workspace (`pyproject.toml`).
-- `app/` — the Tauri desktop app (not yet started).
-- `notebooks/` — the Kaggle kernel runner (`kaggle_ising_runs.py`) and the plans it runs (`plans/`).
-- `paper/` — the paper.
-- `harness/` — supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
+- `engine/`: the Rust core, a member of the root Cargo workspace (`Cargo.toml`).
+- `python/tipping_point/`: the Python package (src layout), a member of the root uv workspace (`pyproject.toml`).
+- `app/`: the Tauri desktop app (not yet started).
+- `notebooks/`: the Kaggle kernel runner (`kaggle_ising_runs.py`) and the plans it runs (`plans/`).
+- `paper/`: the paper outline, the pre-registrations (`prereg/`) and the figures (`figures/`).
+- `harness/`: supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
   a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries, the
   replay-equals-live checks and the API's contract, parity, Python and load checks (production code
   never depends on it).
@@ -154,9 +156,9 @@ cargo run --release -p engine-harness --bin soak -- --hours 24        # gaps/res
 
 ## Market data on disk
 
-`engine/src/store/` is the storage. The live loop logs every input right before applying it —
-depth and trade frames as received, snapshots, and control events (connects, disconnects, frames
-dropped under backpressure, failed snapshots) — to an append-only binary log: 36-byte header, raw
+`engine/src/store/` is the storage. The live loop logs every input right before applying it
+(depth and trade frames as received, snapshots, and control events: connects, disconnects, frames
+dropped under backpressure, failed snapshots) to an append-only binary log: 36-byte header, raw
 payload, CRC-32C, one `write_all` per frame, `sync_data` every second, a new segment every UTC hour
 or 1 GiB. A crash can only tear the tail; recovery cuts it back to the last good frame and refuses
 damage in the middle. An offline step rotates closed segments into Parquet (`frames`,
@@ -606,7 +608,8 @@ and the scorer takes both through every table, once per checkpoint.
   pins: the freeze comes before any extraction on a scored seed. `paper/prereg/ising-latent-v1.toml`
   was rewritten on 2 November after the m1 and m2 reads, with its eleven checkpoints pinned and
   `scoring.margins.tolerance` set. On 4 November its last placeholder, `baseline.result`, took
-  `20261104T095100Z-ising-ews-v1`, the run id of ising-ews-v1's result on these runs.
+  `20261104T095100Z-ising-ews-v1`, the run id of ising-ews-v1's result on these runs, and the file
+  was frozen as the tag `prereg/ising-latent-v1` on commit b19c2df (sha256 `33cf5917a224ca6583ceedf1469cf3e921ce9decd968d7638ba0e5b69343dc23`).
   `python/tipping_point/tests/fixtures/ising_latent_draft.toml` is the schema's fixture, with every
   value the pass was to set left open.
 - **What a file may say.** Frozen text must not claim what the scorer ignores, so a key outside the
@@ -772,7 +775,10 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
   commit-stamped wheel from a wheel dataset (no clone and no token), stages the dataset runs a
   plan reads, checks every run with `jepa verify`, and resumes from the previous version's output.
   `--write-kernel <plan> <dir>` writes the folder `kaggle kernels push` takes; `--dry-run-jepa`
-  rehearses training, resume and extraction on the CPU. Its docstring is the manual.
+  rehearses training, resume and extraction on the CPU. Its docstring is the manual. ising-latent-v1's
+  extraction runs from five plans, `extract-s6.json` to `extract-s10.json`, one per confirmatory
+  seed so that each kernel's output stays under 18 GB, from the wheel built at the freeze tag's
+  commit, which each plan's `commit` key pins.
 
 The harness trains a planted-stripe toy on the CPU (`harness/jepa_toy.py`: validation error 1.37
 to 0.34 in 150 steps; probes cannot tell it from its twin, prediction error can), breaks the loss
