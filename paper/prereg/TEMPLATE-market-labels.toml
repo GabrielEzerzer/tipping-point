@@ -49,11 +49,13 @@ d_min = 12               # one of 6, 12, 36: the bars an episode needs to be an 
 clean = 72               # C: bars with H = 0 before an event's onset
 refractory = 288         # Q: bars after an event onset in which no other event begins
 
-# The null-stretch rule. "refractory-from-episodes" keeps null stretches `refractory` bars from
-# every episode but flickers and `clean` bars from every flicker, which is what the labeller does
-# today. The S5 pilot read left this to the owner, with an amendment.
+# The null-stretch rule. "matched-calm-windows": a null stretch is a maximal run of calm bars
+# (H = 0) with no event onset within `refractory` bars either side, at least `refractory` bars
+# from the first label and from the end, so any `clean`-bar window inside one is calm as a
+# pre-event window is, with no event near it. Flickers and other episodes break a stretch only
+# where H = 1. The owner chose it after the S5 pilot.
 [nulls]
-rule = "<the null-stretch rule, settled by the owner after the pilot>"
+rule = "matched-calm-windows"
 
 # The liquidation-cascade proxy, field for field the options of `market cascade`
 # (market.cascade.Params).
