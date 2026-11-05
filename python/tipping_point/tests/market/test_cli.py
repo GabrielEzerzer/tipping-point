@@ -229,6 +229,13 @@ def test_reports_refuse_runs_that_do_not_match(
         (wider / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         assert main(["reports", "--run", str(run), "--cascades", str(wider), *where]) == 1
         assert "is not a cascade run of" in capsys.readouterr().err
+    endless = tmp_path / "endless" / "labels" / cascades.name
+    shutil.copytree(cascades, endless)
+    manifest = _json(endless / "manifest.json")
+    del manifest["params"]["end"]
+    (endless / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert main(["reports", "--run", str(run), "--cascades", str(endless), *where]) == 1
+    assert "is not a cascade run of" in capsys.readouterr().err
     assert not (cascades / "reports").exists() and sorted(reported.iterdir()) == before
 
 
@@ -251,7 +258,8 @@ def test_reports_take_a_cascade_run_inside_the_labels_span(
     summary = (copy / "reports" / "label_count" / "summary.md").read_text(encoding="utf-8")
     note = (
         "The cascade candidates cover 2023-01-09 to 2023-01-29 only, inside the labels span of "
-        "2023-01-02 to 2023-01-29; the events columns count the whole span."
+        "2023-01-02 to 2023-01-29; the table counts only the events whose onset falls inside the "
+        "candidates' span."
     )
     cascade_section = summary.split("## Cascade candidates")[1].split("\n\n")
     assert cascade_section[1] == note

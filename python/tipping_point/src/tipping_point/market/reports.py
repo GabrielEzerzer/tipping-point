@@ -293,17 +293,20 @@ def label_count(
 ) -> Report:
     """`releases` holds each kind's release times (CPI, NFP, FOMC), `cascades` each symbol's
     candidate onsets, both in ts_ns; a symbol absent from `cascades` has no row. `cascade_span`
-    is the candidates' first and last UTC day (ISO); the summary names it when it is narrower
-    than the series'."""
+    is the candidates' first and last UTC day (ISO); when it is narrower than the series', the
+    cascades table counts only the events whose onset falls inside it and the summary says so."""
     _refuse_confirmatory(series)
-    note = ""
+    note, window = "", None
     if cascades is not None and cascade_span is not None and series:
         ts = next(iter(series.values()))[0]["ts_ns"]
         first, last = ts[[0, -1]].astype("datetime64[ns]").astype("datetime64[D]").astype(str)
         if cascade_span != (first, last):
+            lo, hi = np.array(cascade_span, "datetime64[ns]").astype(np.int64)
+            window = lo, hi + msvol.DAY_NS  # first day 00:00 UTC to last day 24:00 UTC
             note = (
                 f"The cascade candidates cover {cascade_span[0]} to {cascade_span[1]} only, inside "
-                f"the labels span of {first} to {last}; the events columns count the whole span."
+                f"the labels span of {first} to {last}; the table counts only the events whose "
+                "onset falls inside the candidates' span."
             )
     rows: dict[str, list[Row]] = {name: [] for name in LABEL_COUNT}
     stamps: dict[str, tuple[np.ndarray, np.ndarray]] = {}
@@ -329,14 +332,17 @@ def label_count(
             )
         if cascades is not None and symbol in cascades:
             found = np.asarray(cascades[symbol], np.int64)
+            counted = events
+            if window is not None:
+                counted = events[(events >= window[0]) & (events < window[1])]
             rows["cascades"].append(
                 {
                     "symbol": symbol,
                     "candidates": len(found),
                     "candidates_near_event": int(_near(found, events, CASCADE_NS).sum()),
                     "candidates_near_onset": int(_near(found, onsets, CASCADE_NS).sum()),
-                    "events": len(events),
-                    "events_near_candidate": int(_near(events, found, CASCADE_NS).sum()),
+                    "events": len(counted),
+                    "events_near_candidate": int(_near(counted, found, CASCADE_NS).sum()),
                 }
             )
     for a, b in itertools.combinations(sorted(series), 2):
