@@ -1160,10 +1160,26 @@ def test_no_run_all_leaves_every_section_missing() -> None:
 # ---------- a section emptied in the self-test must not read as green (#132)
 
 
+def _ends(statement: ast.stmt) -> bool:
+    """A return, a raise, a `sys.exit(...)` call, or a `with` whose own body has one of these at its
+    top level (#143): nothing after it runs."""
+    if isinstance(statement, ast.With | ast.AsyncWith):
+        return any(_ends(s) for s in statement.body)
+    if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+        func = statement.value.func
+        return (
+            isinstance(func, ast.Attribute)
+            and func.attr == "exit"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "sys"
+        )
+    return isinstance(statement, ast.Return | ast.Raise)
+
+
 def _live(body: list[ast.stmt]) -> list[ast.stmt]:
-    """These statements up to the first return or raise among them: what follows never runs."""
+    """These statements up to the first that ends the function: what follows never runs."""
     for i, statement in enumerate(body):
-        if isinstance(statement, ast.Return | ast.Raise):
+        if _ends(statement):
             return body[: i + 1]
     return body
 
@@ -1181,9 +1197,15 @@ def _outside_nested_functions(node: ast.AST) -> Iterator[ast.AST]:
 def _checks_reached(source: str, section: str) -> int:
     """The `check(` calls written in the section and in each function of the file it calls, through
     their calls in turn, each function once. Call sites, not checks run: a check in a loop counts
-    once. A call behind an `if` counts, so a guarded check is not caught here; #124's test holds
-    run_all, and this holds the sections under it. A function or lambda defined inside one is not
-    counted, called or not."""
+    once. A function or lambda defined inside one is not counted, called or not. Counting stops
+    after a top-level return, raise or `sys.exit(...)`, or a top-level `with` whose body holds one
+    of those at its own top level.
+
+    Not caught: a call behind an `if` counts, so a guarded check is not caught here (#124's test
+    holds run_all, and this holds the sections under it); checks after a return inside a `with`
+    body, or inside an `if`, `for` or `try`, still count; `exit()`, `os._exit()`, an imported
+    `exit` or `sys` under another name does not stop the count. A `with` that suppresses the
+    raise in its body is taken as ending the function, which can only undercount."""
     functions = {n.name: n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)}
     seen, todo, sites = set(), [section], 0
     while todo:
@@ -1253,6 +1275,17 @@ def test_a_whole_self_test_has_no_section_short() -> None:
         ("plans", "def plans(k, root): pass\n", 0),
         ("plans", 'def plans(k, root):\n    return\n    check("a", True)\n', 0),
         ("plans", 'def plans(k, root):\n    raise SystemExit\n    check("a", True)\n', 0),
+        (
+            "plans",
+            "def plans(k, root):\n    with open(root):\n        return\n"
+            '    check("a", True)\n    check("b", True)\n',
+            0,
+        ),
+        (
+            "plans",
+            'def plans(k, root):\n    sys.exit(0)\n    check("a", True)\n    check("b", True)\n',
+            0,
+        ),
         ("plans", 'def plans(k, root):\n    check("a", True)\n', 1),
         ("queues", "def queues(k, root):\n    return\n", 0),
         ("first_reads", 'def first_reads(k, root):\n    check("f", True)\n', 1),
@@ -1275,6 +1308,8 @@ def test_a_whole_self_test_has_no_section_short() -> None:
         "pass",
         "return-first",
         "raise-first",
+        "with-return-first",
+        "sys-exit-first",
         "one-check-gone",
         "nested-check-gone",
         "helper-loop-gone",
