@@ -311,7 +311,8 @@ and no module in `market/` may import the feature code (`tests/market/test_circu
 `reports` writes the label-count and stability reports of a labels run into the run's `reports/`
 folder. It labels the run's span again from the fetched files and refuses to write anything unless
 that gives back the run's own tables. The label-count report always counts the committed calendar.
-`--cascades` adds the pooled list of a cascade run of the same span and symbols.
+`--cascades` adds the pooled list of a cascade run of the same symbols whose span lies inside the
+labels run's, and the summary says when the candidates cover less than the labels span.
 `harness/market_floor.py` runs the floor with the run's own labeller and the variance and AC1
 pipelines, and writes it to the same folder, with one AUC per path beside the pooled one so that
 the floor's own spread shows.

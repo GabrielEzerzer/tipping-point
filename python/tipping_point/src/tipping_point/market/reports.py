@@ -289,10 +289,22 @@ def label_count(
     *,
     releases: Mapping[str, np.ndarray] | None = None,
     cascades: Mapping[str, np.ndarray] | None = None,
+    cascade_span: tuple[str, str] | None = None,
 ) -> Report:
     """`releases` holds each kind's release times (CPI, NFP, FOMC), `cascades` each symbol's
-    candidate onsets, both in ts_ns; a symbol absent from `cascades` has no row."""
+    candidate onsets, both in ts_ns; a symbol absent from `cascades` has no row. `cascade_span`
+    is the candidates' first and last UTC day (ISO); the summary names it when it is narrower
+    than the series'."""
     _refuse_confirmatory(series)
+    note = ""
+    if cascades is not None and cascade_span is not None and series:
+        ts = next(iter(series.values()))[0]["ts_ns"]
+        first, last = ts[[0, -1]].astype("datetime64[ns]").astype("datetime64[D]").astype(str)
+        if cascade_span != (first, last):
+            note = (
+                f"The cascade candidates cover {cascade_span[0]} to {cascade_span[1]} only, inside "
+                f"the labels span of {first} to {last}; the events columns count the whole span."
+            )
     rows: dict[str, list[Row]] = {name: [] for name in LABEL_COUNT}
     stamps: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for symbol, (bar, out) in sorted(series.items()):
@@ -346,7 +358,7 @@ def label_count(
         {"item": "cascades", "status": _status(cascades is not None)},
     ]
     tables = {name: _table(LABEL_COUNT[name], found) for name, found in rows.items()}
-    summary = _label_count_summary(tables, stamps, releases is not None, cascades is not None)
+    summary = _label_count_summary(tables, stamps, releases is not None, cascades is not None, note)
     return Report("label_count", tables, summary)
 
 
@@ -424,6 +436,7 @@ def _label_count_summary(
     stamps: dict[str, tuple[np.ndarray, np.ndarray]],
     releases: bool,
     cascades: bool,
+    cascade_note: str,
 ) -> str:
     months = tables["monthly"].to_pylist()
     hero = []
@@ -467,6 +480,7 @@ def _label_count_summary(
             ),
             _optional(tables["releases"], releases),
             f"## Cascade candidates and regime onsets within +-{CASCADE_NS // HOUR_NS} hour",
+            *([cascade_note] if cascade_note else []),
             _optional(tables["cascades"], cascades),
             "## Null stretches",
             _markdown(tables["nulls"]),
