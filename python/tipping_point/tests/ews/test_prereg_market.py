@@ -15,7 +15,7 @@ import pytest
 from tipping_point.ews import __main__ as ews_cli
 from tipping_point.ews import prereg
 from tipping_point.market import __main__ as market_cli
-from tipping_point.market import archive, cascade, msvol
+from tipping_point.market import archive, cascade, msvol, reports
 
 REPO = Path(__file__).resolve().parents[4]
 TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE-market-labels.toml"
@@ -91,7 +91,13 @@ def test_the_template_holds_the_code_parameters(doc: dict[str, Any]) -> None:
     assert prereg.MARKET_SYMBOLS == archive.SYMBOLS
     assert doc["data"]["symbols"] == list(archive.SYMBOLS)
     span = doc["data"]["span"]
-    assert span["confirmatory"] == market_cli.CONFIRMATORY
+    assert span["confirmatory"] == market_cli.CONFIRMATORY == prereg.CONFIRMATORY
+    # the freeze's declared ranges are the stability report's variants
+    assert prereg.D_MIN == reports.D_MINS
+    assert prereg.THRESHOLDS == reports.THRESHOLDS
+    assert prereg.BASELINE_DAYS == reports.BASELINES
+    assert (msvol.Params().clean,) == prereg.CLEAN
+    assert (msvol.Params().refractory,) == prereg.REFRACTORY
     assert (span["confirmatory"] - span["start"]).days > doc["labeller"]["warmup_days"]
     assert doc["bars"] == {"estimator": "garman-klass", "missing": prereg.MISSING}
 
@@ -170,6 +176,10 @@ def _set(doc: dict[str, Any], where: str, value: Any) -> dict[str, Any]:
         ("labeller.start_low", 80.0, "labeller.start_low, start_high"),
         ("labeller.min_share", 0.5, "labeller.min_share"),
         ("labeller.refractory", 0, "labeller.refractory: at least 1"),
+        ("labeller.refractory", 144, "labeller.refractory: one of [288]"),
+        ("labeller.clean", 36, "labeller.clean: one of [72]"),
+        ("data.span.confirmatory", date(2023, 7, 1), "data.span.confirmatory: 2024-01-01"),
+        ("data.span.confirmatory", date(2025, 1, 1), "data.span.confirmatory: 2024-01-01"),
         ("labeller.tol", 0.0, "labeller.tol: positive"),
         ("labeller.warmup_days", 600, "data.span: start, then labeller.warmup_days"),
         ("data.span.end", date(2023, 12, 31), "data.span.end: on or after confirmatory"),

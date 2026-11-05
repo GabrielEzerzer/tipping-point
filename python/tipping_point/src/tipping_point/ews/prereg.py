@@ -33,7 +33,9 @@ whose domain is missing or not a string, which those checks then report. "market
 _MARKET_SCHEMA (#29 S0): the parameters of the market labeller and the cascade proxy, its [labeller]
 and [cascade] tables field for field those of market.msvol.Params and market.cascade.Params, the
 span and its pilot/confirmatory boundary, and the null-stretch rule and smallest horizon, which a
-draft may leave as placeholders (_market_problems). Any other domain is refused. load, freeze,
+draft may leave as placeholders (_market_problems). The research pass's "source files' manifest
+hash" is left out: the fetch manifest grows with every fetch, and a labels run records each
+file's sha256 itself. Any other domain is refused. load, freeze,
 frozen and stamp take a file of either domain; cells, charge and the result functions are the Ising
 scorer's.
 """
@@ -129,6 +131,11 @@ NULL_RULES = ("refractory-from-episodes",)
 D_MIN = (6, 12, 36)
 THRESHOLDS = ((0.7, 0.3), (0.8, 0.2), (0.9, 0.1))  # (enter, exit)
 BASELINE_DAYS = (14, 28, 56)
+# C and Q at their start values: #29 declares no range for them, and the S5 pilot read sends a
+# shorter Q to the owner with an amendment, so a frozen file may not change them on its own
+CLEAN = (72,)
+REFRACTORY = (288,)
+CONFIRMATORY = date(2024, 1, 1)  # market.__main__.CONFIRMATORY: the first day the pilot never saw
 
 
 class PreregError(ValueError):
@@ -772,6 +779,11 @@ def _market_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     days = [key for key, day in span.items() if isinstance(day, datetime)]
     if days:
         found += [f"data.span.{key}: a UTC day, with no time of day" for key in days]
+    elif span["confirmatory"] != CONFIRMATORY:
+        found.append(
+            f"data.span.confirmatory: {CONFIRMATORY.isoformat()}, the first day the pilot never "
+            "labelled and the market command refuses to label before the freeze"
+        )
     elif (span["confirmatory"] - span["start"]).days <= lab["warmup_days"]:
         found.append(
             "data.span: start, then labeller.warmup_days of warm-up, must end before confirmatory; "
@@ -801,6 +813,11 @@ def _market_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         found.append(f"labeller.enter, exit: one of {list(THRESHOLDS)}, the declared range")
     if lab["baseline_days"] not in BASELINE_DAYS:
         found.append(f"labeller.baseline_days: one of {list(BASELINE_DAYS)}, the declared range")
+    for key, allowed in (("clean", CLEAN), ("refractory", REFRACTORY)):
+        if lab[key] not in allowed:
+            found.append(
+                f"labeller.{key}: one of {list(allowed)}; another value needs an amendment"
+            )
     rule = doc["nulls"]["rule"]
     if rule not in NULL_RULES and not _placeholder(rule):
         found.append(f"nulls.rule: one of {list(NULL_RULES)}, the rules the labeller carries out")
