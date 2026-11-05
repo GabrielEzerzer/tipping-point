@@ -278,6 +278,8 @@ def score(
 
 def _score(args: argparse.Namespace) -> int:
     pre = prereg.load(args.prereg)
+    if pre.doc["data"]["domain"] != "ising":  # before cells, which reads Ising keys
+        raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
     ref = prereg.frozen(pre)
     planned = prereg.cells(pre.doc)
     if "latents" in pre.doc and not args.cells_only:

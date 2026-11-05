@@ -1,0 +1,87 @@
+# Pre-registration template for the market regime and cascade labels (#29): copy to
+# <id>-v<k>.toml, replace every "<...>" and "TBD", commit, then
+# `python -m tipping_point.ews prereg freeze <id>` tags the commit prereg/<id>-v<k>. The freeze
+# refuses a file that still holds a placeholder. To change anything after the freeze, write
+# <id>-v<k+1>.toml with `supersedes` and `reason`. Units: bars are 5-minute bars on the UTC grid,
+# days are UTC days. The numbers below are the research pass's start values, which are also the
+# defaults of `python -m tipping_point.market labels` and `cascade`; the 2023 pilot sets the
+# final ones.
+
+id = "<lowercase-slug>"
+version = 1
+supersedes = ""          # "<id>-v<k>" this version amends, or ""
+reason = ""              # why it amends that version (required when supersedes is set)
+question = "<what these labels are for, in one sentence>"
+
+[data]
+domain = "market-labels"
+symbols = ["BTCUSDT", "ETHUSDT"]   # Binance USD-M perpetuals
+
+# The labelled days are those from start + labeller.warmup_days. Days before confirmatory are the
+# pilot, on which the parameters are chosen; no label from confirmatory on is generated before
+# the freeze.
+[data.span]
+start = 2022-07-01       # first day read: the warm-up begins
+confirmatory = 2024-01-01
+end = 2026-09-30         # last day labelled
+
+[bars]
+estimator = "garman-klass"   # realised variance from the 1-minute klines' open, high, low, close
+missing = "a bar short of any of its five 1-minute klines, with no minute traded, or with a Garman-Klass variance of 0 is a missing observation: the filter carries its prediction without an update, and nothing is floored"
+
+# The regime labeller, field for field the options of `market labels` (market.msvol.Params).
+[labeller]
+warmup_days = 184        # the first fit comes after these days
+refit_days = 7           # refit at every 7th UTC midnight, counted from a Monday
+baseline_days = 28       # one of 14, 28, 56: the trailing median z is measured against
+start_low = 25.0         # the first fit starts mu at these percentiles of z
+start_high = 75.0
+start_p = 0.95           # and p00 = p11 = start_p
+tol = 1e-6               # EM stops at a relative log-likelihood gain below this
+max_iter = 200           # M-steps from the deterministic start
+max_iter_warm = 50       # M-steps from a warm start
+min_sigma = 0.05         # degeneracy guard: a sigma below this keeps the previous theta
+min_share = 0.02         # degeneracy guard: a state's smoothed share below this
+min_gap = 0.25           # degeneracy guard: mu1 - mu0 below this
+enter = 0.8              # enter and exit: one of 0.7/0.3, 0.8/0.2, 0.9/0.1; H rises at
+exit = 0.2               # P >= enter and falls at P <= exit
+d_min = 12               # one of 6, 12, 36: the bars an episode needs to be an event
+clean = 72               # C: bars with H = 0 before an event's onset
+refractory = 288         # Q: bars after an event onset in which no other event begins
+
+# The null-stretch rule. "refractory-from-episodes" keeps null stretches `refractory` bars from
+# every episode but flickers and `clean` bars from every flicker, which is what the labeller does
+# today. The S5 pilot read left this to the owner, with an amendment.
+[nulls]
+rule = "<the null-stretch rule, settled by the owner after the pilot>"
+
+# The liquidation-cascade proxy, field for field the options of `market cascade`
+# (market.cascade.Params).
+[cascade]
+a = 0.03                 # the fall in open interest over the window, as a log ratio
+b = 0.025                # the move in price over the window, as a log ratio
+c = 0.15                 # the flow imbalance, in [-1, 1]
+v = 3.0                  # the window's volume over its trailing median
+window = 6               # W, in bars: 30 minutes
+trailing_days = 28       # the days the volume median and the onset percentile read
+onset_percentile = 99.0  # a one-bar return above this percentile marks the onset
+merge_hours = 24         # a symbol's candidates within this many hours merge into one
+both_hours = 1           # both symbols' instances within this many hours are one market event
+bounds_hours = 12        # the L2 download window either side of an onset
+
+# The smallest warning horizon a scoring of these labels may use without being marked
+# contaminated: at least the p90 detection delay the pilot's report measures under the fitted
+# theta.
+[horizon]
+smallest = "<bars: at least the pilot's p90 detection delay>"
+
+# What was seen before the freeze, and what the frozen version labels.
+[disclosure]
+exploratory = "<the pilot runs seen before the freeze>"
+decisions = "<which parameters were chosen with those runs in view>"
+confirmatory = "<which days this version labels>"
+links = []               # where the pilot results and the decisions are recorded
+
+[deviations]
+policy = "<how a deviation is handled>"
+log = []                 # [{ date = "...", change = "...", reason = "..." }]
