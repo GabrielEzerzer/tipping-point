@@ -102,7 +102,7 @@ Tipping Point is released under the MIT licence; see [LICENSE](LICENSE).
 - `python/tipping_point/`: the Python package (src layout), a member of the root uv workspace (`pyproject.toml`).
 - `app/`: the Tauri desktop app (not yet started).
 - `notebooks/`: the Kaggle kernel runner (`kaggle_ising_runs.py`) and the plans it runs (`plans/`).
-- `paper/`: the paper outline, the pre-registrations (`prereg/`) and the figures (`figures/`).
+- `paper/`: the pre-registrations (`prereg/`) and the result figures (`figures/`).
 - `harness/`: supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
   a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries, the
   replay-equals-live checks and the API's contract, parity, Python and load checks (production code
