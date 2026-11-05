@@ -79,3 +79,38 @@ event onset within Q = 288 bars either side. The old rule, "refractory-from-epis
 - Market pilot data and the archive (local data dir). The cross-check above is already done.
 - The study note `docs/study/29-*.md` and the vault project note, both outside git.
 - Opening or updating the PR, issues and merging.
+
+## Cloud session, 2026-11-05
+
+### Suite on head b1c330a
+
+`uv sync --extra cpu` failed: the sandbox's network policy blocks download-r2.pytorch.org (torch wheel,
+"tunnel error"). Plain `uv sync` succeeded without torch. The gate, `harness/gate.py`, gave these summary lines:
+
+- cargo-fmt     GREEN  no diff reported
+- cargo-clippy  RED    failed to run custom build command for `libduckdb-sys` (sandbox has no DuckDB library). Environment, not the change.
+- cargo-test    RED    same build failure (exit 101). Environment.
+- ruff-check    GREEN  All checks passed!
+- ruff-format   GREEN  142 files already formatted
+- pyright       RED    40 errors: 39 are `Import "torch" could not be resolved`, and 1 is `subprocess.BELOW_NORMAL_PRIORITY_CLASS`
+  (Windows-only attribute, harness/tests/test_gate.py:843). On the changed files, pyright reports 0 errors.
+- pytest        RED    torch is missing, so collection errors. With `--continue-on-collection-errors`:
+  7 failed, 655 passed, 33 skipped, 13 errors. Every failure and error is `ModuleNotFoundError: No module named 'torch'`
+  (test_explore, the ising, jepa and latent tests). The branch does not touch any of them.
+- self-test     RED    No module named 'torch'.
+
+Builder's focused set, `pytest python/tipping_point/tests/market tests/ews/test_prereg_market.py harness/tests`:
+442 passed, 33 skipped, 7 failed and 4 errors, all of them torch in harness/tests/test_explore.py. All market and prereg tests pass.
+
+A full green gate still needs the laptop, where torch and DuckDB are installed.
+
+### Review gate
+
+- Round 1, `reviewer` (Opus, fresh context): APPROVE, no blockers. It left two nits:
+  1. test_msvol.py:186-204: the planted-series test checks only C-length windows. Assert `member(t)` for every bar of each stretch.
+  2. msvol.py:404: `confirm = onset + d_min` is one bar later than the o+d_min-1 the lookahead docstring uses. This is harmless.
+- Round 1, `sol` (gpt-6.1-sol, high, via Codex, `-s workspace-write` after the auto-mode classifier denied
+  `danger-full-access`): APPROVE, no new findings. Codex session 01a1accc-d6d3-7660-9e07-780040754a39.
+- The loop stopped early because both seats approved and returned only nits. The nits were not applied and are follow-ups.
+
+State: Waiting. Next step: the laptop runs the full gate with torch and DuckDB, then the owner merges.
