@@ -204,7 +204,12 @@ def test_reports_count_the_runs_labels_and_the_cascade_runs_list(
 
 
 def test_reports_refuse_runs_that_do_not_match(
-    fetched: Path, run: Path, cascades: Path, reported: Path, capsys: pytest.CaptureFixture[str]
+    fetched: Path,
+    run: Path,
+    cascades: Path,
+    reported: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     where = ["--archive", str(fetched)]
     before = sorted(reported.iterdir())
@@ -212,11 +217,54 @@ def test_reports_refuse_runs_that_do_not_match(
     assert "is not a labels run" in capsys.readouterr().err
     assert main(["reports", "--run", str(run), "--cascades", str(run), *where]) == 1
     assert "is not a cascade run of" in capsys.readouterr().err
-    later = ["--start", "2023-01-09", "--end", "2023-01-29"]
-    shorter = _cascade(fetched, run.parent.parent, "short", later)
-    assert main(["reports", "--run", str(run), "--cascades", str(shorter), *where]) == 1
+    btc = _cascade(fetched, run.parent.parent, "btc", [*SPAN, "--symbols", "BTCUSDT"])
+    assert main(["reports", "--run", str(run), "--cascades", str(btc), *where]) == 1
+    assert "is not a cascade run of" in capsys.readouterr().err
+    # a day either side of the labels span: the manifest is all the check reads (#144)
+    for key, day in (("start", "2023-01-01"), ("end", "2023-01-30")):
+        wider = tmp_path / key / "labels" / cascades.name
+        shutil.copytree(cascades, wider)
+        manifest = _json(wider / "manifest.json")
+        manifest["params"][key] = day
+        (wider / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        assert main(["reports", "--run", str(run), "--cascades", str(wider), *where]) == 1
+        assert "is not a cascade run of" in capsys.readouterr().err
+    endless = tmp_path / "endless" / "labels" / cascades.name
+    shutil.copytree(cascades, endless)
+    manifest = _json(endless / "manifest.json")
+    del manifest["params"]["end"]
+    (endless / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert main(["reports", "--run", str(run), "--cascades", str(endless), *where]) == 1
     assert "is not a cascade run of" in capsys.readouterr().err
     assert not (cascades / "reports").exists() and sorted(reported.iterdir()) == before
+
+
+def test_reports_take_a_cascade_run_inside_the_labels_span(
+    fetched: Path, run: Path, reported: Path, tmp_path: Path
+) -> None:
+    """The cascade rule's first days only fill its trailing medians, so its run starts later than
+    the labels run (#144): taken, counted, and the summary names the narrower span. A cascade run
+    of the labels run's own span gets no such sentence."""
+    copy = tmp_path / "labels" / run.name
+    shutil.copytree(run, copy, ignore=shutil.ignore_patterns("reports"))
+    later = _cascade(fetched, tmp_path, "later", ["--start", "2023-01-09", "--end", "2023-01-29"])
+    argv = ["reports", "--run", str(copy), "--cascades", str(later), "--archive", str(fetched)]
+    assert main(argv) == 0
+    counted = pq.read_table(copy / "reports" / "label_count" / "cascades.parquet").to_pylist()
+    pooled = engine.read(tmp_path, "labels", later.name, "cascades").to_pylist()
+    assert [row["symbol"] for row in counted] == SYMBOLS
+    for row in counted:
+        assert row["candidates"] == sum(r["symbol"] == row["symbol"] for r in pooled) > 0
+    summary = (copy / "reports" / "label_count" / "summary.md").read_text(encoding="utf-8")
+    note = (
+        "The cascade candidates cover 2023-01-09 to 2023-01-29 only, inside the labels span of "
+        "2023-01-02 to 2023-01-29; the table counts only the events whose onset falls inside the "
+        "candidates' span."
+    )
+    cascade_section = summary.split("## Cascade candidates")[1].split("\n\n")
+    assert cascade_section[1] == note
+    full = (reported / "label_count" / "summary.md").read_text(encoding="utf-8")
+    assert "only, inside the labels span" not in full
 
 
 def test_reports_take_a_cascade_run_of_the_same_symbols_in_another_order(

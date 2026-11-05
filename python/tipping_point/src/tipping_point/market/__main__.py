@@ -19,8 +19,8 @@
   reports  the label-count and stability reports of the labels run --run, into <run>/reports/
            (reports.py). It labels the run's span again from the fetched files and refuses unless
            that gives back the run's own tables; the Parkinson variant reads the same klines.
-           --cascades names a cascade run of the same span and symbols, whose pooled list the
-           label-count report counts, as it counts the committed CPI, NFP and FOMC calendar
+           --cascades names a cascade run of the same symbols inside the run's span, whose pooled
+           list the label-count report counts, as it counts the committed CPI, NFP and FOMC calendar
            (reports.CALENDAR). The aggTrades cross-check is not wired yet, so the stability report
            says "not supplied" for it
 
@@ -251,15 +251,16 @@ def _reports(args: argparse.Namespace) -> int:
     if "labeller" not in run_params:
         print(f"error: {args.run} is not a labels run", file=sys.stderr)
         return 1
-    found = None
+    found = cascade_span = None
     if args.cascades is not None:
         other = _run_params(args.cascades)
-        same = all(other.get(key) == run_params[key] for key in ("start", "end"))
-        same = same and sorted(other.get("symbols") or []) == sorted(run_params["symbols"])
-        if "cascade" not in other or not same:
+        cascade_span = (other.get("start", ""), other.get("end", ""))  # ISO dates sort as text
+        inside = run_params["start"] <= cascade_span[0] <= cascade_span[1] <= run_params["end"]
+        same = sorted(other.get("symbols") or []) == sorted(run_params["symbols"])
+        if "cascade" not in other or not inside or not same:
             print(
-                f"error: {args.cascades} is not a cascade run of {args.run.name}'s span and "
-                "symbols",
+                f"error: {args.cascades} is not a cascade run of {args.run.name}'s symbols "
+                "inside its span",
                 file=sys.stderr,
             )
             return 1
@@ -292,7 +293,10 @@ def _reports(args: argparse.Namespace) -> int:
             )
             return 1
     releases = reports.release_calendar()
-    print(reports.write(reports.label_count(series, releases=releases, cascades=found), out))
+    counts = reports.label_count(
+        series, releases=releases, cascades=found, cascade_span=cascade_span
+    )
+    print(reports.write(counts, out))
     print(reports.write(reports.stability(series, params, parkinson, seed=args.seed), out))
     return 0
 

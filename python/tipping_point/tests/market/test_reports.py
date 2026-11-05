@@ -263,6 +263,27 @@ def test_cascade_candidates_overlap_regime_onsets_by_hand(hand: dict[str, Any]) 
     assert _rows(report, "inputs", item="releases")[0]["status"] == reports.NOT_SUPPLIED
 
 
+def test_a_narrower_cascade_span_counts_only_the_events_inside_it_by_hand(
+    hand: dict[str, Any],
+) -> None:
+    """BTC's events start on the 31st (bar 300) and the 1st (bar 600); candidates from the 1st on
+    can never be near the first, so it leaves the cascades table (#144). The others do not move."""
+    candidates = np.array([HAND_TS[600] + 30 * MINUTE_NS, HAND_TS[1500]])
+    span = ("2023-02-01", "2023-02-08")
+    report = reports.label_count(hand, cascades={"BTCUSDT": candidates}, cascade_span=span)
+    (row,) = report.tables["cascades"].to_pylist()
+    assert (row["events"], row["events_near_candidate"]) == (1, 1)
+    whole = reports.label_count(hand, cascades={"BTCUSDT": candidates})
+    assert whole.tables["cascades"].to_pylist()[0]["events"] == 2
+    for name in report.tables.keys() - {"cascades"}:
+        assert report.tables[name] == whole.tables[name]
+    assert (
+        "The cascade candidates cover 2023-02-01 to 2023-02-08 only, inside the labels span of "
+        "2023-01-30 to 2023-02-08; the table counts only the events whose onset falls inside the "
+        "candidates' span."
+    ) in report.summary
+
+
 # ---------------------------------------------------------------- the label-count report, whole
 
 
