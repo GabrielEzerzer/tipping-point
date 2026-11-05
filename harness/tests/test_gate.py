@@ -1203,9 +1203,9 @@ def _checks_reached(source: str, section: str) -> int:
 
     Not caught: a call behind an `if` counts, so a guarded check is not caught here (#124's test
     holds run_all, and this holds the sections under it); checks after a return inside a `with`
-    body, or inside an `if`, `for` or `try`, still count; `exit()`, `os._exit()` or an imported
-    `exit` does not stop the count. A `with` that suppresses the raise in its body is taken as
-    ending the function, which can only undercount."""
+    body, or inside an `if`, `for` or `try`, still count; `exit()`, `os._exit()`, an imported
+    `exit` or `sys` under another name does not stop the count. A `with` that suppresses the
+    raise in its body is taken as ending the function, which can only undercount."""
     functions = {n.name: n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)}
     seen, todo, sites = set(), [section], 0
     while todo:
