@@ -27,6 +27,17 @@ runs it reads. As a draft it may leave as a placeholder a direction, an extremum
 tolerance, which the file's experiment sets before the freeze; the freeze's strict check refuses
 every placeholder, whichever key holds it. Frozen text must not claim what the scorer ignores: a key
 outside the schema is refused, and so is a value the scorer would not act on (_latent_problems).
+
+A file's data.domain picks its schema. "ising" takes the checks above, unchanged, and so does a file
+whose domain is missing or not a string, which those checks then report. "market-labels" takes
+_MARKET_SCHEMA (#29 S0): the parameters of the market labeller and the cascade proxy, its [labeller]
+and [cascade] tables field for field those of market.msvol.Params and market.cascade.Params, the
+span and its pilot/confirmatory boundary, and the null-stretch rule and smallest horizon, which a
+draft may leave as placeholders (_market_problems). The research pass's "source files' manifest
+hash" is left out: the fetch manifest grows with every fetch, and a labels run records each
+file's sha256 itself. Any other domain is refused. load, freeze,
+frozen and stamp take a file of either domain; cells, charge and the result functions are the Ising
+scorer's.
 """
 
 from __future__ import annotations
@@ -43,6 +54,7 @@ import time
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +114,28 @@ TREND = "surprise-trend"  # the hypothesis that states the level's direction in 
 _PLACEHOLDER = re.compile(r"TBD|<[a-z][^<>|]*>|<[a-z]+(\|[a-z]+)+,[^<>]*>")
 _SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+# a market-labels file (#29): tuples, so that membership never hashes whatever a file holds there
+MARKET_LABELS = "market-labels"
+DOMAINS = ("ising", MARKET_LABELS)
+MARKET_SYMBOLS = ("BTCUSDT", "ETHUSDT")  # market.archive.SYMBOLS
+RV_ESTIMATORS = ("garman-klass",)  # what market.bars computes; Parkinson is a reported variant
+# what market.bars and market.msvol do with a bar they cannot use, word for word
+MISSING = (
+    "a bar short of any of its five 1-minute klines, with no minute traded, or with a Garman-Klass "
+    "variance of 0 is a missing observation: the filter carries its prediction without an update, "
+    "and nothing is floored"
+)
+# what market.msvol.nulls does: the rule the S5 pilot read sends to the owner for an amendment
+NULL_RULES = ("refractory-from-episodes",)
+# the ranges the 2023 pilot chooses inside (#29 research pass, section 2, item 13)
+D_MIN = (6, 12, 36)
+THRESHOLDS = ((0.7, 0.3), (0.8, 0.2), (0.9, 0.1))  # (enter, exit)
+BASELINE_DAYS = (14, 28, 56)
+# C and Q at their start values: #29 declares no range for them, and the S5 pilot read sends a
+# shorter Q to the owner with an amendment, so a frozen file may not change them on its own
+CLEAN = (72,)
+REFRACTORY = (288,)
+CONFIRMATORY = date(2024, 1, 1)  # market.__main__.CONFIRMATORY: the first day the pilot never saw
 
 
 class PreregError(ValueError):
@@ -279,6 +313,55 @@ _LATENT_KEYS: dict[str, Any] = _LATENT_SCHEMA | {
         "dynamic": _LATENT_SCHEMA["fss"]["dynamic"]
         | {"statistics": [_LATENT_SCHEMA["fss"]["dynamic"]["statistics"][0] | {"judged": str}]},
     },
+}
+# a file whose data.domain is "market-labels": every key it holds, none optional
+_MARKET_SCHEMA: dict[str, Any] = {
+    "id": str,
+    "version": int,
+    "supersedes": str,
+    "reason": str,
+    "question": str,
+    "data": {
+        "domain": str,
+        "symbols": [str],
+        "span": {"start": date, "confirmatory": date, "end": date},
+    },
+    "bars": {"estimator": str, "missing": str},
+    "labeller": {  # market.msvol.Params
+        "warmup_days": int,
+        "refit_days": int,
+        "baseline_days": int,
+        "start_low": _NUMBER,
+        "start_high": _NUMBER,
+        "start_p": _NUMBER,
+        "tol": _NUMBER,
+        "max_iter": int,
+        "max_iter_warm": int,
+        "min_sigma": _NUMBER,
+        "min_share": _NUMBER,
+        "min_gap": _NUMBER,
+        "enter": _NUMBER,
+        "exit": _NUMBER,
+        "d_min": int,
+        "clean": int,
+        "refractory": int,
+    },
+    "nulls": {"rule": str},
+    "cascade": {  # market.cascade.Params
+        "a": _NUMBER,
+        "b": _NUMBER,
+        "c": _NUMBER,
+        "v": _NUMBER,
+        "window": int,
+        "trailing_days": int,
+        "onset_percentile": _NUMBER,
+        "merge_hours": int,
+        "both_hours": int,
+        "bounds_hours": int,
+    },
+    "horizon": {"smallest": (int, str)},  # a string only as a placeholder: _market_problems
+    "disclosure": _SCHEMA["disclosure"],
+    "deviations": _SCHEMA["deviations"],
 }
 
 
@@ -522,7 +605,7 @@ def _latent_problems(doc: dict[str, Any]) -> list[str]:
     return found
 
 
-def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
+def _ising_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     """Everything wrong with a pre-registration document; strict also refuses placeholders."""
     found: list[str] = []
     latent = "latents" in doc
@@ -669,6 +752,109 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
                 if not _SHA256.fullmatch(entry[key]):
                     found.append(f"latents.checkpoints[{i}].{key}: a sha256 (64 hex digits)")
     return found
+
+
+def _market_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
+    """Everything wrong with a market-labels document. A draft may leave a placeholder in any text,
+    in nulls.rule and in horizon.smallest; strict refuses every placeholder."""
+    found: list[str] = []
+    _check(doc, _MARKET_SCHEMA, "", found)
+    if found:
+        return found
+    found += [
+        f"{key}: nothing reads this key in a market-labels file; take it out"
+        for key in _unread(doc, _MARKET_SCHEMA)
+    ]
+    if not _SLUG.fullmatch(doc["id"]) and not _PLACEHOLDER.search(doc["id"]):
+        found.append(f"id: {doc['id']!r} is not a lowercase slug")
+    if doc["version"] < 1:
+        found.append("version: must be >= 1")
+    if doc["supersedes"] and not doc["reason"].strip():
+        found.append("reason: an amendment must say why it supersedes " + doc["supersedes"])
+    symbols, span, lab = doc["data"]["symbols"], doc["data"]["span"], doc["labeller"]
+    if not symbols or len(set(symbols)) != len(symbols) or not set(symbols) <= set(MARKET_SYMBOLS):
+        found.append(
+            f"data.symbols: distinct symbols, a non-empty subset of {list(MARKET_SYMBOLS)}"
+        )
+    days = [key for key, day in span.items() if isinstance(day, datetime)]
+    if days:
+        found += [f"data.span.{key}: a UTC day, with no time of day" for key in days]
+    elif span["confirmatory"] != CONFIRMATORY:
+        found.append(
+            f"data.span.confirmatory: {CONFIRMATORY.isoformat()}, the first day the pilot never "
+            "labelled and the market command refuses to label before the freeze"
+        )
+    elif (span["confirmatory"] - span["start"]).days <= lab["warmup_days"]:
+        found.append(
+            "data.span: start, then labeller.warmup_days of warm-up, must end before confirmatory; "
+            "the pilot is the labelled days between"
+        )
+    elif span["confirmatory"] > span["end"]:
+        found.append("data.span.end: on or after confirmatory, the first confirmatory day")
+    if doc["bars"]["estimator"] not in RV_ESTIMATORS:
+        found.append(f"bars.estimator: one of {list(RV_ESTIMATORS)}, what the labels compute")
+    if doc["bars"]["missing"] != MISSING:
+        found.append(f"bars.missing: {MISSING!r}, the rule the labeller carries out")
+    for key in ("warmup_days", "refit_days", "max_iter", "max_iter_warm", "clean", "refractory"):
+        if lab[key] < 1:
+            found.append(f"labeller.{key}: at least 1")
+    for key in ("tol", "min_sigma", "min_gap"):
+        if lab[key] <= 0:
+            found.append(f"labeller.{key}: positive")
+    if not 0 < lab["start_low"] < lab["start_high"] < 100:
+        found.append("labeller.start_low, start_high: percentiles of z, 0 < low < high < 100")
+    if not 0 < lab["start_p"] < 1:
+        found.append("labeller.start_p: a probability, in (0, 1)")
+    if not 0 < lab["min_share"] < 0.5:
+        found.append("labeller.min_share: in (0, 0.5), since two states cannot both pass more")
+    if lab["d_min"] not in D_MIN:
+        found.append(f"labeller.d_min: one of {list(D_MIN)}, the declared range")
+    if (lab["enter"], lab["exit"]) not in THRESHOLDS:
+        found.append(f"labeller.enter, exit: one of {list(THRESHOLDS)}, the declared range")
+    if lab["baseline_days"] not in BASELINE_DAYS:
+        found.append(f"labeller.baseline_days: one of {list(BASELINE_DAYS)}, the declared range")
+    for key, allowed in (("clean", CLEAN), ("refractory", REFRACTORY)):
+        if lab[key] not in allowed:
+            found.append(
+                f"labeller.{key}: one of {list(allowed)}; another value needs an amendment"
+            )
+    rule = doc["nulls"]["rule"]
+    if rule not in NULL_RULES and not _placeholder(rule):
+        found.append(f"nulls.rule: one of {list(NULL_RULES)}, the rules the labeller carries out")
+    cas = doc["cascade"]
+    for key in ("a", "b", "c", "v", "window", "trailing_days"):
+        if cas[key] <= 0:
+            found.append(f"cascade.{key}: positive")
+    for key in ("merge_hours", "both_hours", "bounds_hours"):
+        if cas[key] < 1:
+            found.append(f"cascade.{key}: at least 1")
+    if cas["c"] >= 1:
+        found.append("cascade.c: below 1, since the flow imbalance lies in [-1, 1]")
+    if not 0 < cas["onset_percentile"] < 100:
+        found.append("cascade.onset_percentile: a percentile, in (0, 100)")
+    smallest = doc["horizon"]["smallest"]
+    if not _placeholder(smallest) and (isinstance(smallest, str) or smallest < 1):
+        found.append("horizon.smallest: a number of bars, at least 1")
+    if strict:
+        found += [
+            f"{where}: placeholder {text!r}"
+            for where, text in _strings(doc)
+            if _PLACEHOLDER.search(text)
+        ]
+    return found
+
+
+def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
+    """Everything wrong with a pre-registration document, checked against the schema of its
+    data.domain; strict also refuses placeholders. A file with no domain, or with one that is not
+    a string, is checked as an Ising file, whose schema reports it."""
+    data = doc.get("data")
+    domain = data.get("domain") if isinstance(data, dict) else None
+    if not isinstance(domain, str) or domain == "ising":
+        return _ising_problems(doc, strict)
+    if domain == MARKET_LABELS:
+        return _market_problems(doc, strict)
+    return [f"data.domain: {domain!r} is not one of {list(DOMAINS)}"]
 
 
 def load(path: Path) -> Prereg:
