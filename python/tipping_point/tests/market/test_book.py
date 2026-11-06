@@ -2,9 +2,10 @@
 each range keeps its own manifest, no zip or sample is kept unless asked, a day imported before is
 skipped, the reducer runs on each day's samples (`python` meaning this interpreter, checked once
 before any download, its format deciding whether a day is done), a failed or missing day is
-recorded while the range goes on, whatever failed, and what a day put in staging goes when it ends
-(a file that will not go is listed with its day). Synthetic small zips served by a fake archive
-and a fake importer; no network (tests/conftest.py).
+recorded while the range goes on, whatever failed, what a day put in staging goes when it ends (a
+file that will not go is listed with its day, and again when the day is retried), and a staging
+folder that is a link is refused (a link inside it goes as a link). Synthetic small zips served by
+a fake archive and a fake importer; no network (tests/conftest.py).
 The engine's own import runs only when TP_STORE_BIN names a built store binary."""
 
 import hashlib
@@ -118,6 +119,22 @@ def _files(tmp_path: Path) -> list[str]:
     """Every file under the output root but the manifests."""
     found = (p for p in tmp_path.rglob("*") if p.is_file() and p.name != "manifest.json")
     return sorted(p.relative_to(tmp_path).as_posix() for p in found)
+
+
+def _link(link: Path, target: Path, kind: str) -> None:
+    """Makes `link` a junction or a symlink to the folder `target`, or skips the test where that
+    kind cannot be made (a junction off Windows, a symlink on Windows without the privilege)."""
+    if kind == "symlink":
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            pytest.skip(f"cannot make a symlink here: {error.strerror}")
+    elif sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        pytest.skip("a junction is a Windows link")
 
 
 def test_the_confirmatory_range_is_refused_without_confirmatory(tmp_path: Path) -> None:
@@ -324,6 +341,85 @@ def test_a_file_that_will_not_go_is_listed_with_its_day_and_the_range_goes_on(
     assert "not deleted" in book.summary(done["BTCUSDT/2023-03-02"])
     assert _files(tmp_path) == [f"training/{held}"]
     assert _fetch(tmp_path, archive, importer) == done  # the next run starts with it still there
+
+
+def test_a_retry_of_the_day_lists_its_file_that_still_will_not_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file a failed day could not delete is still that day's when the day is tried again, though
+    the retry found it there before the day began; once it can go, the day lists it no more."""
+    held = f"staging/market/2023-03-01_BTCUSDT_ob500/{book.TABLE.as_posix()}"
+    real_unlink, holding = os.unlink, {"on": True}
+
+    def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if holding["on"] and Path(path).as_posix().endswith(held):
+            raise PermissionError(13, "in use", str(path))
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(book.time, "sleep", lambda _: None)
+    archive, importer = Archive(), Importer()
+    importer.half.add(book.url("BTCUSDT", START))  # writes the samples, then fails: tried again
+    for still_held in (True, True, False):  # the first run, a retry, a retry once it lets go
+        holding["on"] = still_held
+        _fetch(tmp_path, archive, importer, end=START)
+        entry = _manifest(tmp_path)["days"]["BTCUSDT/2023-03-01"]
+        assert entry["status"] == "failed"
+        assert entry.get("leftover") == ([held] if still_held else None)
+    assert len(importer.imported) == 3 and _files(tmp_path) == []
+
+
+@pytest.mark.parametrize("kind", ["junction", "symlink"])
+def test_a_staging_folder_that_is_a_link_is_refused_before_anything(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+) -> None:
+    """The run deletes everything in staging, so when staging is a link to a folder elsewhere the
+    command exits 1 before it downloads anything, leaving the link and that folder as they are."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel.txt").write_text("not the run's")
+    staging = tmp_path / "out" / "training" / "staging"
+    staging.parent.mkdir(parents=True)
+    _link(staging, outside, kind)
+    store = tmp_path / "store"
+    store.write_bytes(b"")
+    archive = Archive()
+    monkeypatch.setattr(book, "http_open", archive)
+    monkeypatch.setattr(book, "engine_importer", lambda _: Importer())
+    argv = ["book", "--range", "training", "--start", "2023-03-01", "--end", "2023-03-01"]
+    argv += ["--symbols", "BTCUSDT", "--store", str(store), "--out", str(tmp_path / "out")]
+    assert main(argv) == 1
+    assert "is a link" in capsys.readouterr().err
+    assert archive.opened == []
+    assert _files(outside) == ["sentinel.txt"]
+    assert staging.is_symlink() or staging.is_junction()  # left as it was
+    assert not (staging.parent / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("kind", ["junction", "symlink"])
+def test_a_link_is_deleted_as_a_link_never_followed(tmp_path: Path, kind: str) -> None:
+    """A link inside staging goes as a link, leaving the folder it led to; a folder that is itself
+    a link is not cleared at all."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel.txt").write_text("not the run's")
+    staging = tmp_path / "staging"
+    run = staging / "market" / "2023-03-01_BTCUSDT_ob500"
+    run.mkdir(parents=True)
+    (run / "complete.json").write_text("{}")
+    _link(run / "book_samples", outside, kind)
+    book._clear(staging)
+    assert list(staging.iterdir()) == []
+    assert _files(outside) == ["sentinel.txt"]
+    linked = tmp_path / "linked"
+    _link(linked, outside, kind)
+    with pytest.raises(book.BookError, match="is a link"):
+        book._clear(linked)
+    assert _files(outside) == ["sentinel.txt"]
+    assert linked.is_symlink() or linked.is_junction()
 
 
 def test_a_day_reduced_with_another_format_is_not_done(tmp_path: Path) -> None:

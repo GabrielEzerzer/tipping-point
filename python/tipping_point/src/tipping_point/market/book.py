@@ -18,7 +18,9 @@ import wrote before it failed too), so at most one day's zip and samples exist a
 manifest records each day's peak (`peak_bytes`: the zip and the run on disk together, after the
 import). A file something (a virus scanner) still holds after a few tries stays: the day's
 `leftover` lists it, relative to the range folder, and it is tried again after each later day and
-when the next run starts.
+when the next run starts (a retry of the day lists it again while it is there). Staging must be a
+plain folder: a link there (a symlink or a junction) is refused before anything else happens, and
+a link inside it is deleted as a link, never followed.
 
 The reducer. When its last line of output is a JSON object, the manifest keeps it as the day's
 `reduced` (tipping_point.book prints its feature file's path, relative to the range folder, its
@@ -173,11 +175,11 @@ def fetch(
     """Fetches and imports the days of range `name` for each symbol (see the module notes).
     Returns this run's manifest entries, keyed `<SYMBOL>/<day>`."""
     days = span(name, start, end, confirmatory)
+    where = out / name
+    staging = _plain(where / "staging")
     given = list(reduce) if reduce else None  # as recorded in the manifest
     reducer = _interpreter(given) if given else None  # as run
     version = _probe(reducer) if reducer else None
-    where = out / name
-    staging = where / "staging"
     shutil.rmtree(staging, ignore_errors=True)  # whatever a stopped run left
     staging.mkdir(parents=True, exist_ok=True)  # still there if a file in it would not go
     manifest_path = where / "manifest.json"
@@ -195,11 +197,13 @@ def fetch(
                 done[key] = entry
                 log(f"{key}: imported before, skipped")
                 continue
+            earlier = set(entry.get("leftover", [])) if entry else set()  # this day's own
             data_dir = where / "samples" if keep_samples else staging
             before = _files_in(staging, where)  # what earlier days left, listed with those days
             entry = _day(symbol, day, where, data_dir, open_url, importer, keep_samples, reducer)
             _clear(staging)  # all the day put there, imported or failed, named by a run or not
-            if leftover := sorted(_files_in(staging, where) - before):
+            left = _files_in(staging, where)
+            if leftover := sorted((left - before) | (left & earlier)):
                 entry["leftover"] = leftover
             entry["reduce"] = given
             done[key] = manifest["days"][key] = entry
@@ -317,10 +321,24 @@ def _unlink(path: Path, tries: int = 5, wait_s: float = 0.5) -> None:
             time.sleep(wait_s)
 
 
+def _plain(folder: Path) -> Path:
+    """`folder`, unless it is a link (a symlink or a junction): BookError, the link left as it is.
+    What the run deletes in staging must not be another folder's contents."""
+    if folder.is_symlink() or folder.is_junction():
+        raise BookError(
+            f"{folder} is a link (a symlink or a junction); staging must be a plain folder, since "
+            "the run deletes everything in it. Remove the link; to stage on another drive, point "
+            "--out there."
+        )
+    return folder
+
+
 def _clear(folder: Path) -> None:
     """Deletes what `folder` holds, each file with _unlink's tries; what will not go stays.
-    Path.walk counts a link as a file, so nothing outside `folder` is deleted."""
-    for parent, dirs, files in folder.walk(top_down=False):
+    Nothing outside `folder` is deleted: `folder` itself is refused if it is a link (_plain), and
+    Path.walk lists a link inside it (a junction too) as a file, which os.unlink deletes as a link
+    without following it."""
+    for parent, dirs, files in _plain(folder).walk(top_down=False):
         for name in files:
             with contextlib.suppress(OSError):  # it stays, and the caller lists it
                 _unlink(parent / name)
