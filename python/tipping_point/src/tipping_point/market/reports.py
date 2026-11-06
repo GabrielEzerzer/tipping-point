@@ -845,7 +845,8 @@ def floor(found: nulls.Floor, garch: nulls.Garch, settings: Mapping[str, Any]) -
     summary = "\n\n".join(
         [
             "# Circularity floor",
-            f"GARCH(1,1)-t at 10 seconds, {parameters}, through the exact bars and labeller, over "
+            f"GARCH(1,1)-t per minute, {parameters}, bridged to 10 seconds, through the exact bars "
+            f"and labeller, over "
             f"{len(found.paths)} simulated paths with {events} events. A clustering process with "
             "no critical dynamics gives this AUC by construction: a real AUC counts only above "
             f"it.{stranded}{empty}\nThe floor ran with {ran_with}.",

@@ -303,10 +303,13 @@ one says "not supplied". `market/releases.csv` is the committed calendar: the 18
 and 12 FOMC statement times of July 2022 to December 2023 in UTC, each with the BLS or Federal
 Reserve page that gives its date. `market/nulls.py` holds the GARCH(1,1)-t simulator, the delay
 simulation, the event-time shift and the circularity floor.
-The floor simulates 10-second returns, builds 1-minute OHLC, runs the real bars and labeller, and scores 1-minute close-to-close returns, which
+The floor simulates a minute GARCH(1,1)-t, bridges each minute to 10-second sub-steps, builds
+1-minute OHLC, runs the real bars and labeller, and scores 1-minute close-to-close returns, which
 gives the AUC a clustering process with no critical dynamics produces by construction. Its GARCH
-parameters, pipelines and `scoring.auc` are inputs: the parameters' fit belongs to the 2023 pilot,
-and no module in `market/` may import the feature code (`tests/market/test_circularity.py`).
+parameters, pipelines and `scoring.auc` are inputs, and no module in `market/` may import the
+feature code (`tests/market/test_circularity.py`). `harness/market_garch.py` fits the parameters
+per symbol on the 2023 pilot year's 1-minute returns and writes them as the report `garch` of a
+labels run; `harness/market_floor.py` holds them frozen in `PILOT_GARCH`.
 
 `reports` writes the label-count and stability reports of a labels run into the run's `reports/`
 folder. It labels the run's span again from the fetched files and refuses to write anything unless
@@ -319,8 +322,8 @@ the floor's own spread shows.
 
 ```sh
 uv run python -m tipping_point.market reports --run <labels run folder> --cascades <cascade run folder>
-uv run python harness/market_floor.py --run <labels run folder> \
-    --omega <omega> --alpha <alpha> --beta <beta> --nu <nu> --days <days>
+uv run python harness/market_garch.py --run <labels run folder>
+uv run python harness/market_floor.py --run <labels run folder> --garch BTCUSDT --days 546
 ```
 
 ## Engine API

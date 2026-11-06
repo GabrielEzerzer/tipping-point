@@ -321,7 +321,7 @@ def test_reports_take_an_unchanged_run_whose_refits_failed(fetched: Path, tmp_pa
     assert sorted(p.name for p in (run / "reports").iterdir()) == ["label_count", "stability"]
 
 
-FLOOR_ARGS = ["--omega", "1.14e-11", "--alpha", "0.005", "--beta", "0.9949", "--nu", "6"]
+FLOOR_ARGS = ["--omega", "4.1e-10", "--alpha", "0.012", "--beta", "0.9874", "--nu", "6"]
 
 
 def test_the_floor_runs_the_labels_runs_own_labeller_into_its_reports(run: Path) -> None:
@@ -331,9 +331,9 @@ def test_the_floor_runs_the_labels_runs_own_labeller_into_its_reports(run: Path)
     assert files == sorted([*(f"{table}.parquet" for table in reports.FLOOR), "summary.md"])
     values = pq.read_table(folder / "garch.parquet").to_pylist()
     assert values == [
-        {"parameter": "omega", "value": 1.14e-11},
-        {"parameter": "alpha", "value": 0.005},
-        {"parameter": "beta", "value": 0.9949},
+        {"parameter": "omega", "value": 4.1e-10},
+        {"parameter": "alpha", "value": 0.012},
+        {"parameter": "beta", "value": 0.9874},
         {"parameter": "nu", "value": 6.0},
     ]
     paths = pq.read_table(folder / "paths.parquet").to_pylist()
@@ -346,6 +346,41 @@ def test_the_floor_runs_the_labels_runs_own_labeller_into_its_reports(run: Path)
     first = (folder / "summary.md").read_text(encoding="utf-8").split("\n\n")[1]
     assert "seed = 29, paths = 2, days = 28" in first
     assert first.count("window=60, length=240") == len(market_floor.SCORERS)
+
+
+def test_a_frozen_pilot_fit_runs_as_its_own_floor(run: Path) -> None:
+    """--garch takes the symbol's frozen pilot-year fit and writes floor-<symbol>, so both
+    symbols' floors sit side by side in one run."""
+    assert (
+        market_floor.main(["--run", str(run), "--garch", "BTCUSDT", "--days", "28", "--paths", "1"])
+        == 0
+    )
+    folder = run / "reports" / "floor-BTCUSDT"
+    files = sorted(p.name for p in folder.iterdir())
+    assert files == sorted([*(f"{table}.parquet" for table in reports.FLOOR), "summary.md"])
+    values = pq.read_table(folder / "garch.parquet").to_pylist()
+    pilot = market_floor.PILOT_GARCH["BTCUSDT"]
+    assert values == [{"parameter": k, "value": getattr(pilot, k)} for k in market_floor.GIVEN]
+    assert sorted(market_floor.PILOT_GARCH) == ["BTCUSDT", "ETHUSDT"]
+
+
+@pytest.mark.parametrize(
+    "garch",
+    [
+        [],
+        ["--omega", "4.1e-10", "--alpha", "0.012", "--beta", "0.9874"],
+        ["--garch", "BTCUSDT", *FLOOR_ARGS[:2]],
+    ],
+    ids=["none", "three of four", "both"],
+)
+def test_the_floor_takes_one_garch_exactly(
+    tmp_path: Path, garch: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as refused:
+        market_floor.main(["--run", str(tmp_path / "run"), *garch, "--days", "28"])
+    assert refused.value.code == 2
+    assert "give --garch, or all four of --omega" in capsys.readouterr().err
+    assert not (tmp_path / "run").exists()
 
 
 def test_the_floor_refuses_a_run_whose_floor_exists_before_reading_it(tmp_path: Path) -> None:
