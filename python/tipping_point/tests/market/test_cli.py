@@ -109,7 +109,14 @@ def test_the_confirmatory_span_and_unverified_files_are_refused(
 ) -> None:
     late = ["labels", "--start", "2023-12-30", "--end", "2024-01-02", "--archive", str(fetched)]
     assert main([*late, "--data-dir", str(tmp_path)]) == 1
-    assert "market-labels-v1" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert (
+        "--prereg paper/prereg/market-labels-v1.toml" in err
+        and not tmp_path.joinpath("labels").exists()
+    )
+    cascade_late = ["cascade", *late[1:], "--data-dir", str(tmp_path)]
+    assert main(cascade_late) == 1
+    assert "--prereg paper/prereg/market-labels-v1.toml" in capsys.readouterr().err
     spoilt = tmp_path / "archive"
     for path in fetched.rglob("*"):
         if path.is_file():

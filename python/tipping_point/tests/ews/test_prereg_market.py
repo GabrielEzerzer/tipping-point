@@ -124,6 +124,13 @@ def test_a_filled_template_goes_through_freeze_frozen_stamp_and_the_trial_log(
     assert prereg.trials(tmp_path / "data", pre) == 1
 
 
+def test_prereg_holds_the_trend_modules_raw_indicators() -> None:
+    """prereg keeps its own copy of trend.RAW so the market labeller can import it (#29)."""
+    from tipping_point.ews import trend
+
+    assert prereg.RAW == trend.RAW
+
+
 @pytest.mark.parametrize("left", ["nulls.rule", "horizon.smallest", "question"])
 def test_the_freeze_refuses_a_placeholder(tmp_path: Path, left: str) -> None:
     """Every placeholder set but one: the freeze names it and tags nothing."""

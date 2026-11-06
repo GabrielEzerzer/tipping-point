@@ -64,7 +64,10 @@ import pyarrow.parquet as pq
 
 from .. import __version__, engine
 from ..ising import io
-from .trend import RAW
+
+# ews.trend.RAW, held here so that the market labeller can import this module without reaching the
+# feature pipelines (tests/market/test_circularity.py); test_prereg_market holds the two equal
+RAW = frozenset({"level", "slope"})
 
 PREREG_DIR = Path("paper") / "prereg"
 INDICATORS = {"variance", "ac", "skewness"}
@@ -965,6 +968,29 @@ def stamp(prereg: Prereg, freeze_ref: Frozen) -> dict[str, Any]:
         "sha256": prereg.sha256,
         "tag": freeze_ref.tag,
         "commit": freeze_ref.commit,
+    }
+
+
+def code_check(
+    prereg: Prereg, freeze_ref: Frozen, code: Path, skip: Sequence[str] = ()
+) -> dict[str, Any]:
+    """The checkout's HEAD and the files of the folder `code`, but those named in `skip`, that
+    differ from the frozen commit: tracked files `git diff` names and untracked files git would
+    add. A run that reads a frozen file refuses unless `changed` is empty, which is how it runs
+    "from the tagged commit" without checking the tag out."""
+    root = repo_root(prereg.path)
+    try:
+        relative = Path(code).resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise PreregError(f"{code} is not inside {root}, where {prereg.name} is frozen") from exc
+    spec = ["--", relative, *(f":(exclude){relative}/{name}" for name in skip)]
+    diff = _git(root, "diff", "--name-only", freeze_ref.commit, *spec)
+    new = _git(root, "ls-files", "--others", "--exclude-standard", *spec)
+    return {
+        "head": _git(root, "rev-parse", "HEAD"),
+        "path": relative,
+        "skipped": list(skip),
+        "changed": [*diff.splitlines(), *new.splitlines()],
     }
 
 
