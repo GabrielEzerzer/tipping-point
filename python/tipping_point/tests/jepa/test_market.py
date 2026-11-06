@@ -7,7 +7,7 @@ reproducible and resumable on the CPU."""
 
 import copy
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -170,8 +170,8 @@ def test_the_input_contract_is_checked() -> None:
 
 
 def test_chunks_stay_inside_runs_of_consecutive_days(toy_days: days.Dataset) -> None:
-    """Catches a chunk that joins two days with a missing day between them, and a monitor chunk
-    holding an invalid minute."""
+    """Catches a chunk that joins two days with a missing day between them, a monitor chunk
+    holding an invalid minute, and a training chunk holding fewer than two valid minutes."""
     frames = torch.zeros(4 * 10, 1, 1)
     valid = torch.ones(40, dtype=torch.bool)
     valid[25] = False
@@ -180,12 +180,90 @@ def test_chunks_stay_inside_runs_of_consecutive_days(toy_days: days.Dataset) -> 
     starts = m.starts(8).tolist()
     assert starts == list(range(0, 13)) + list(range(20, 33))
     assert m.starts(8, whole=True).tolist() == list(range(0, 13)) + list(range(26, 33))
+    lone = torch.zeros(40, dtype=torch.bool)
+    lone[[2, 5, 15]] = True  # minutes 2 and 5 share chunks of 8; 15 shares one with neither
+    assert days.Minutes(frames, lone, run).starts(8).tolist() == [0, 1, 2]
     assert toy_days.train.run.unique().tolist() == [0]  # six consecutive days, one run
     gapped = [date(2023, 3, 1), date(2023, 3, 3)]
     split = days.load(market_toy.Source(), SPAN, market_toy.SYMBOL, FEATURES, gapped, [VAL])
     assert split.train.run.unique().tolist() == [0, 1]
     with pytest.raises(DataError, match="serve training and validation"):
         days.load(market_toy.Source(), SPAN, market_toy.SYMBOL, FEATURES, gapped, gapped[:1])
+
+
+class Outage(market_toy.Source):
+    """Toy days with the feed down (every second a gap) on the days `up` names, except in the
+    minutes it lists for each; other days are the toy's own."""
+
+    def __init__(self, up: Mapping[date, Sequence[int]]) -> None:
+        super().__init__()
+        self.up = up
+
+    def table(self, day: date) -> pa.Table:
+        table = super().table(day)
+        if day not in self.up:
+            return table
+        down = np.ones(days.MINUTES, bool)
+        down[list(self.up[day])] = False
+        gap = table[days.GAP].to_numpy() | np.repeat(down, days.MINUTE)
+        return table.set_column(table.schema.get_field_index(days.GAP), days.GAP, pa.array(gap))
+
+
+# The feed down over all six training days but a 30-minute stretch and two lone minutes: 99.6% of
+# the training minutes are invalid, and almost every chunk of consecutive minutes holds none.
+OUTAGE = {day: () for day in market_toy.TRAIN_DAYS} | {
+    market_toy.TRAIN_DAYS[0]: (300,),
+    market_toy.TRAIN_DAYS[2]: range(600, 630),
+    market_toy.TRAIN_DAYS[4]: (1300,),
+}
+
+
+@pytest.fixture(scope="module")
+def outage_days() -> days.Dataset:
+    return market_toy.dataset(Outage(OUTAGE))
+
+
+@pytest.mark.parametrize("chunks", [1, minutes.Config().chunks])
+def test_a_long_feed_outage_trains_on_finite_losses(outage_days: days.Dataset, chunks: int) -> None:
+    """Catches sampling that draws chunks with nothing to learn from. With the feed down over most
+    of the training days, a batch without a valid target minute divided the prediction loss by
+    zero, one with fewer than two valid minutes did the same to VICReg, and the optimiser applied
+    NaN gradients from the first update on, with one chunk a batch as with the default eight.
+    Every update's loss terms, gradients and weights are finite, and every chunk drawn holds two
+    valid minutes."""
+    assert outage_days.train.valid.double().mean() < 0.01
+    config = market_toy.config(chunks=chunks)
+    trainer = train._Trainer(Path("unused"), "r", config, outage_days, torch.device("cpu"))
+    terms = ("loss", "prediction", "variance", "covariance", "grad_norm")
+    for _ in range(5):
+        trainer.update()
+        row = trainer.train_rows[-1]
+        assert all(np.isfinite(row[name]) for name in terms), row
+        grads = [p.grad for p in trainer.model.trainable()]
+        assert all(g is not None and torch.isfinite(g).all() for g in grads)
+    assert all(torch.isfinite(p).all() for p in trainer.model.parameters())
+    gen = torch.Generator().manual_seed(0)
+    for _ in range(50):
+        valid = trainer.domain.sample(None, gen, trainer.aug_gen)["valid"]
+        assert (valid.sum(1) >= 2).all()
+
+
+def test_days_with_nothing_to_learn_from_are_refused(tmp_path: Path) -> None:
+    """Catches a training that starts on days it cannot learn from and divides its losses by zero
+    at its first update: training days in which no chunk holds two valid minutes (the feed down
+    all day, or up for lone minutes further apart than a chunk) are refused before any file is
+    written, as validation days without a wholly valid chunk for the monitor already were."""
+    lone = range(0, days.MINUTES, 2 * market_toy.SPEC.context)
+    cases = (
+        ({day: () for day in market_toy.TRAIN_DAYS}, "two valid minutes"),
+        ({day: lone for day in market_toy.TRAIN_DAYS}, "two valid minutes"),
+        ({day: () for day in market_toy.VAL_DAYS}, "wholly valid"),
+    )
+    for up, refusal in cases:
+        data = market_toy.dataset(Outage(up))
+        with pytest.raises(DataError, match=refusal):
+            train.start(market_toy.CONFIG, data, tmp_path, "refused", "cpu")
+    assert not (tmp_path / "jepa").exists()
 
 
 # ---------------------------------------------------------------- the model

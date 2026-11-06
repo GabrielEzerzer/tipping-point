@@ -8,7 +8,8 @@ hands over the table with the sha256 of the bytes it came from, which the traini
 A minute is valid when none of its 60 seconds is a gap. Invalid minutes are never trained on:
 their latents are left out of every loss term, the predictor sees a mask token in their place, and
 readouts give them NaN. Their gap seconds are zeroed (the other seconds keep their values), so no
-value behind a gap reaches the model.
+value behind a gap reaches the model. Training draws only chunks that hold two valid minutes
+(`Minutes.starts`): however long a feed outage, no batch divides a loss term by zero.
 
 Leakage (#30 research pass 4.3, tests 1 and 2): `load` refuses any day outside the model's training
 span [start, end), any day on or after 2024-01-01 whatever the span says (the confirmatory span is
@@ -106,28 +107,22 @@ class Minutes:
         return int(self.frames.shape[0])
 
     def starts(self, length: int, whole: bool = False) -> Tensor:
-        """The first minutes of every chunk of `length` consecutive minutes inside one run; with
-        `whole`, only chunks whose every minute is valid."""
+        """The first minutes of every chunk of `length` consecutive minutes inside one run that
+        holds at least two valid minutes; with `whole`, only chunks whose every minute is valid.
+        Two, so that the later one is a prediction target with a valid minute before it and VICReg
+        pools at least two latents in any batch: a chunk with fewer leaves a loss term 0 / 0."""
         if len(self) < length:
             return torch.zeros(0, dtype=torch.int64)
         first = torch.arange(len(self) - length + 1)
-        ok = self.run[first] == self.run[first + length - 1]
-        if whole:
-            invalid = torch.cat([torch.zeros(1, dtype=torch.int64), (~self.valid).cumsum(0)])
-            ok &= invalid[first + length] == invalid[first]
+        count = torch.cat([torch.zeros(1, dtype=torch.int64), self.valid.cumsum(0)])
+        held = count[first + length] - count[first]
+        ok = (self.run[first] == self.run[first + length - 1]) & (held >= (length if whole else 2))
         return first[ok]
 
     def chunks(self, first: Tensor, length: int) -> tuple[Tensor, Tensor]:
         """(frames (B, length, MINUTE, F), valid (B, length)) of the chunks starting at `first`."""
         index = first.unsqueeze(1) + torch.arange(length)
         return self.frames[index], self.valid[index]
-
-    def sample(self, count: int, length: int, gen: torch.Generator) -> tuple[Tensor, Tensor]:
-        """`count` chunks drawn uniformly, with replacement, by `gen` (a CPU generator)."""
-        starts = self.starts(length)
-        if len(starts) == 0:
-            raise DataError(f"no run of {length} consecutive minutes to sample from")
-        return self.chunks(starts[torch.randint(len(starts), (count,), generator=gen)], length)
 
 
 @dataclass

@@ -112,11 +112,14 @@ class Source:
         self.seed = seed
         self.reads: list[tuple[str, date]] = []
 
-    def read(self, symbol: str, day: date) -> tuple[pa.Table, str]:
-        self.reads.append((symbol, day))
+    def table(self, day: date) -> pa.Table:
         values, gap = features(day, self.seed)
         columns = {name: pa.array(values[:, k]) for k, name in enumerate(FEATURES)}
-        table = pa.table({**columns, days.GAP: pa.array(gap)})
+        return pa.table({**columns, days.GAP: pa.array(gap)})
+
+    def read(self, symbol: str, day: date) -> tuple[pa.Table, str]:
+        self.reads.append((symbol, day))
+        table = self.table(day)
         sink = pa.BufferOutputStream()
         with pa.ipc.new_stream(sink, table.schema) as writer:
             writer.write_table(table)

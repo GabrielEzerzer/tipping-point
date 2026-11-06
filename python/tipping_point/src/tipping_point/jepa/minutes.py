@@ -15,7 +15,8 @@ t + 1 ... t + horizons from z_1 ... z_t.
              pre-norm causal attention blocks, LayerNorm, one linear head per delta = 1..horizons
   loss       objective.prediction_loss and objective.vicreg unchanged: a chunk's predictions pass
              as (B, dim, context, horizons) with the valid targets as the hidden cells, its frame
-             latents as (B, dim, context, 1) with the valid minutes as the kept cells
+             latents as (B, dim, context, 1) with the valid minutes as the kept cells; every
+             chunk drawn holds two valid minutes, so neither term divides by zero
 
 Readouts: at minute t the predictor sees exactly the previous context - 1 minutes and z_t is
 predicted from them, so surprise has no position effect. The latent is the target encoder's z_t,
@@ -342,7 +343,8 @@ def preset(name: str, **changes: Any) -> Config:
 
 class Domain:
     """The market half of a training (train.Domain): chunks of consecutive minutes from one
-    symbol's training span, one group, tables keyed by step alone."""
+    symbol's training span, each holding two valid minutes (days.Minutes.starts), one group,
+    tables keyed by step alone. Days with no such chunk are refused before training starts."""
 
     name = "jepa-market"
     keys: tuple[tuple[str, Any], ...] = ()
@@ -365,6 +367,10 @@ class Domain:
             raise DataError(
                 f"{len(sources['features'])} features, the model takes {config.model.features}"
             )
+        C = config.model.context
+        self.starts = data.train.starts(C)  # found once; every training batch is drawn from them
+        if len(self.starts) == 0:
+            raise DataError(f"no {C}-minute chunk of the training days holds two valid minutes")
         model = MarketJepa(config.model)
         model.initialise(torch.Generator().manual_seed(seeds["init"]))
         self.model = model.to(device)
@@ -388,9 +394,10 @@ class Domain:
     def sample(
         self, group: None, data_gen: torch.Generator, aug_gen: torch.Generator
     ) -> dict[str, Tensor]:
-        frames, valid = self.data.train.sample(
-            self.config.chunks, self.config.model.context, data_gen
-        )
+        """`chunks` chunks drawn from `self.starts` uniformly, with replacement, by `data_gen` (a
+        CPU generator)."""
+        draw = torch.randint(len(self.starts), (self.config.chunks,), generator=data_gen)
+        frames, valid = self.data.train.chunks(self.starts[draw], self.config.model.context)
         return {"frames": frames.to(self.device), "valid": valid.to(self.device)}
 
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
