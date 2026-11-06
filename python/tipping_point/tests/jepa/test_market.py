@@ -1,9 +1,11 @@
 """The market JEPA (#30 M3): the loader's refusals and input contract, the manifest of input days,
-the model's shapes through the generic objective and monitors, causality of the predictor and the
-readout, and the market toy (fixtures/market_toy.py) as the known answer: it is learned, its latent
-tracks the planted slow variable where the untrained twin's does not, a collapse mutant is caught,
-and runs are bitwise reproducible and resumable on the CPU."""
+the model's shapes through the generic objective and monitors, an encoder that reads a change in
+variance alone, causality of the predictor and the readout, and the market toy
+(fixtures/market_toy.py) as the known answer: it is learned, its latent tracks the planted slow
+variable where the untrained twin's does not, a collapse mutant is caught, and runs are bitwise
+reproducible and resumable on the CPU."""
 
+import copy
 import dataclasses
 from collections.abc import Callable
 from datetime import date
@@ -91,6 +93,23 @@ def test_a_model_cannot_declare_a_span_reaching_the_confirmatory_data(
         train._Trainer(Path("unused"), "r", other, toy_days, torch.device("cpu"))
 
 
+def test_the_model_refuses_a_hand_built_dataset_listing_a_day_outside_its_span(
+    toy_days: days.Dataset,
+) -> None:
+    """A Dataset made without days.load, whose sources list a training day on the span's end or a
+    validation day in the confirmatory span, is refused when the training starts."""
+    cases = (
+        ("train", "2023-10-01", "outside the training span"),
+        ("val", "2024-01-02", "confirmatory span"),
+    )
+    for role, day, refusal in cases:
+        sources = copy.deepcopy(toy_days.sources)
+        sources[role][-1]["day"] = day
+        forged = dataclasses.replace(toy_days, sources=sources)
+        with pytest.raises(DataError, match=refusal):
+            train._Trainer(Path("unused"), "r", market_toy.CONFIG, forged, torch.device("cpu"))
+
+
 def test_the_manifest_lists_every_input_day_with_its_sha256(market_run: Path) -> None:
     """Leakage test 2: every day the training read is named with the sha256 of its source bytes,
     lies inside [2023-01-18, 2023-10-01) and belongs to the model's one symbol."""
@@ -173,7 +192,8 @@ def test_chunks_stay_inside_runs_of_consecutive_days(toy_days: days.Dataset) -> 
 
 
 def test_presets_have_the_research_pass_sizes() -> None:
-    """Decision 4: S about 0.24M parameters, M about 0.6M (encoder 0.23M, predictor 0.40M)."""
+    """Decision 4: S about 0.24M parameters, M about 0.6M. Counted: S 0.245M (encoder 0.113M,
+    predictor 0.131M), M 0.651M (encoder 0.250M, predictor 0.401M), the pooling layer included."""
     counts = {}
     for name, spec in minutes.PRESETS.items():
         model = minutes.MarketJepa(spec)
@@ -182,6 +202,39 @@ def test_presets_have_the_research_pass_sizes() -> None:
     assert 0.20e6 <= s_enc + s_pred <= 0.28e6
     assert 0.55e6 <= m_enc + m_pred <= 0.70e6
     assert 0.20e6 <= m_enc <= 0.26e6 and 0.36e6 <= m_pred <= 0.44e6
+
+
+def test_the_encoder_reads_a_change_in_variance_alone() -> None:
+    """Catches an encoder blind to second moments, as one that pools its tokens by their mean alone
+    is: minutes that differ only in how their variance is shared among the features (f00-f07
+    scaled by exp(0.7 s), f08-f15 by exp(-0.7 s), so every mean and the total variance are the
+    same for s = +1 and -1) are told apart by a ridge probe on the untrained latent. Measured
+    on init seeds 1-5: accuracy 0.80-0.87 with the mean and log-std pooling, 0.52-0.57 with
+    the mean alone. A minute whose tokens are all equal reads a finite latent and gradient."""
+    model = minutes.MarketJepa(market_toy.SPEC)
+    model.initialise(torch.Generator().manual_seed(1))
+
+    def shared_out(seed: int) -> tuple[torch.Tensor, np.ndarray]:
+        rng = np.random.default_rng(seed)
+        s = np.repeat([1.0, -1.0], 500)
+        x = rng.standard_normal((len(s), days.MINUTE, len(FEATURES)))
+        x[:, :, :8] *= np.exp(0.7 * s)[:, None, None]
+        x[:, :, 8:] *= np.exp(-0.7 * s)[:, None, None]
+        return torch.from_numpy(x.astype(np.float32)), s
+
+    (xa, sa), (xb, sb) = shared_out(10), shared_out(11)
+    with torch.no_grad():
+        za, zb = (model.target(x).double().numpy() for x in (xa, xb))
+    guess = probes.ridge(za, sa).predict(zb)
+    assert ((guess > 0) == (sb > 0)).mean() >= 0.7
+    # no blocks, so a zeroed minute's tokens are exactly equal: their variance is 0
+    flat = minutes.MarketJepa(dataclasses.replace(market_toy.SPEC, depth=0))
+    flat.initialise(torch.Generator().manual_seed(1))
+    z = flat.context(torch.zeros(2, days.MINUTE, len(FEATURES)))
+    (z * torch.randn(z.shape, generator=torch.Generator().manual_seed(2))).sum().backward()
+    grads = [p.grad for p in flat.context.parameters()]
+    assert torch.isfinite(z).all()
+    assert all(g is not None and torch.isfinite(g).all() for g in grads)
 
 
 def test_the_objective_and_monitors_take_the_market_shapes() -> None:
@@ -240,7 +293,7 @@ def test_the_predictor_is_causal_and_ignores_invalid_minutes() -> None:
 def test_readouts_have_no_position_effect_and_never_look_ahead() -> None:
     """Catches surprise that depends on where a minute sits in its batch, and any readout that a
     later minute changes (leakage test 3 for the latent): reading a truncated or a perturbed series
-    gives bitwise the same values up to the cut."""
+    gives bitwise the same values up to the cut. An invalid minute reads NaN in both readouts."""
     spec = market_toy.SPEC
     model = minutes.MarketJepa(spec)
     model.initialise(torch.Generator().manual_seed(1))
@@ -249,6 +302,9 @@ def test_readouts_have_no_position_effect_and_never_look_ahead() -> None:
     latent, surprise = minutes.readouts(model, frames, valid, windows=64)
     C = spec.context
     assert torch.isnan(surprise[: C - 1]).all() and torch.isfinite(surprise[C - 1 : 100]).all()
+    assert torch.nonzero(~valid).flatten().tolist() == [100]  # the toy's gap second
+    assert torch.isnan(latent[~valid]).all() and torch.isnan(surprise[~valid]).all()
+    assert torch.isfinite(latent[valid]).all()
     t = 150
     with torch.no_grad():
         out = model.chunk(
@@ -264,7 +320,7 @@ def test_readouts_have_no_position_effect_and_never_look_ahead() -> None:
     noisy[cut:] += torch.randn(noisy[cut:].shape, generator=torch.Generator().manual_seed(4))
     perturbed = minutes.readouts(model, noisy, valid, windows=64)
     for z, s in (short, perturbed):
-        assert torch.equal(z[:cut], latent[:cut])
+        assert torch.equal(z[:cut].nan_to_num(-1.0), latent[:cut].nan_to_num(-1.0))
         assert torch.equal(s[:cut].nan_to_num(-1.0), surprise[:cut].nan_to_num(-1.0))
 
 
@@ -285,7 +341,8 @@ def test_the_market_toy_is_learned_within_its_step_budget(market_run: Path) -> N
 def test_the_latent_tracks_the_slow_variable_and_the_twins_does_not(market_run: Path) -> None:
     """The planted slow variable is read off the trained latent by a ridge probe fitted on one
     unseen day and tested on another, and by its first principal component alone; the untrained
-    twin's latent reads it far worse (its probe still beats chance, on f03 and f04's weak level)."""
+    twin's latent reads it far worse. s shows only in second moments, so this fails for an encoder
+    that pools its tokens by their mean alone (trained accuracy 0.51-0.52 on seeds 30-32)."""
     (fa, va, sa), (fb, vb, sb) = (_probe_day(d) for d in market_toy.PROBE_DAYS)
     va_np, vb_np = va.numpy(), vb.numpy()
     scores = {}
@@ -302,8 +359,12 @@ def test_the_latent_tracks_the_slow_variable_and_the_twins_does_not(market_run: 
             "pc1": abs(float(np.corrcoef(pc1[vb_np], sb[vb_np])[0, 1])),
         }
     trained, untrained = scores["trained"], scores["untrained"]
-    assert trained["accuracy"] >= 0.85 and trained["accuracy"] >= untrained["accuracy"] + 0.1
-    assert trained["pc1"] >= 0.5 and untrained["pc1"] <= 0.3, scores
+    # measured on seeds 30 (this run's), 31 and 32: trained accuracy 0.996, 0.847, 0.939 and PC1
+    # |r| 0.935, 0.597, 0.792; twin accuracy 0.595, 0.567, 0.608 and PC1 |r| 0.038, 0.046, 0.044.
+    # Each bound clears the weakest trained seed and the strongest twin by 0.09 or more.
+    assert trained["accuracy"] >= 0.75 and trained["accuracy"] >= untrained["accuracy"] + 0.15
+    assert trained["pc1"] >= 0.45 and untrained["accuracy"] <= 0.7, scores
+    assert untrained["pc1"] <= 0.15, scores
 
 
 def test_the_detector_catches_a_market_collapse_on_its_floors(

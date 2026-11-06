@@ -7,8 +7,9 @@ so neighbouring latents share no input (their AC1 is not inflated by constructio
 transformer over a chunk of `context` minutes predicts the target encoder's latent of minutes
 t + 1 ... t + horizons from z_1 ... z_t.
 
-  encoder    Conv1d patch embedding (`patch` seconds a token), `depth` 1-D ConvNeXt blocks (zero
-             padding: a minute is not periodic), mean over tokens, LayerNorm -> z_t (dim,)
+  encoder    Conv1d patch embedding (`patch` seconds a token), LayerNorm, `depth` 1-D ConvNeXt
+             blocks (zero padding: a minute is not periodic), the mean and the log standard
+             deviation over tokens, linear 2 dim -> dim, LayerNorm -> z_t (dim,)
   target     the encoder's EMA copy, no gradient, LayerNorm'd without affine parameters (I-JEPA)
   predictor  z_t projected, a mask token at invalid minutes, a learned position, `pred_depth`
              pre-norm causal attention blocks, LayerNorm, one linear head per delta = 1..horizons
@@ -21,7 +22,7 @@ predicted from them, so surprise has no position effect. The latent is the targe
 as Ising's embedding is the target features averaged over cells.
 
 Sizes (decision 4): S (dim 64, two predictor blocks, 0.24M parameters) and M (dim 96, three
-blocks, 0.63M); the CPU pilot (M4) picks one.
+blocks, 0.65M); the CPU pilot (M4) picks one.
 """
 
 from __future__ import annotations
@@ -79,8 +80,18 @@ class Block(nn.Module):
         return x + y.transpose(1, 2)
 
 
+# Added to a channel's variance over a minute's tokens before its log, a fixed constant: a channel
+# constant over the minute reads log(1e-4) / 2 with a finite gradient, never -inf.
+VAR_FLOOR = 1e-4
+
+
 class Encoder(nn.Module):
-    """One minute (N, MINUTE, features) -> z (N, dim)."""
+    """One minute (N, MINUTE, features) -> z (N, dim).
+
+    The tokens are pooled by their mean and their log standard deviation over the minute. With the
+    mean alone, a change in the variance of the seconds reached the latent only weakly (a
+    LayerNorm precedes every nonlinearity), and the market toy's slow variable, which shows only
+    in second moments, was read at chance after training."""
 
     def __init__(self, spec: MinuteSpec) -> None:
         super().__init__()
@@ -89,6 +100,7 @@ class Encoder(nn.Module):
         self.patchify = nn.Conv1d(spec.features, spec.dim, spec.patch, stride=spec.patch)
         self.stem = nn.LayerNorm(spec.dim)
         self.blocks = nn.ModuleList([Block(spec.dim, spec.kernel) for _ in range(spec.depth)])
+        self.pool = nn.Linear(2 * spec.dim, spec.dim)
         self.norm = nn.LayerNorm(spec.dim)
 
     def forward(self, frames: Tensor) -> Tensor:
@@ -96,7 +108,9 @@ class Encoder(nn.Module):
         x = self.stem(x.transpose(1, 2)).transpose(1, 2)
         for block in self.blocks:
             x = block(x)
-        return self.norm(x.mean(-1))
+        mean = x.mean(-1)
+        var = (x - mean.unsqueeze(-1)).square().mean(-1)  # torch.var_mean is 3x slower on a CPU
+        return self.norm(self.pool(torch.cat([mean, 0.5 * torch.log(var + VAR_FLOOR)], -1)))
 
 
 class CausalBlock(nn.Module):
@@ -225,8 +239,9 @@ def readouts(
 ) -> tuple[Tensor, Tensor]:
     """For a contiguous series of minutes (M, MINUTE, F) with valid (M,): the latent z_t (M, dim)
     and the surprise (M, horizons), [t, k] the error of the delta = k + 1 prediction of z_t from
-    the minutes before it in the window [t - context + 1, t]. Surprise is NaN where minute t is
-    invalid or fewer than context - 1 minutes precede it. Float32 on the CPU, autocast off."""
+    the minutes before it in the window [t - context + 1, t]. The latent is NaN where minute t is
+    invalid, the surprise too and where fewer than context - 1 minutes precede it. Computed in
+    float32 with autocast off on the model's device, returned on the CPU."""
     device = next(model.parameters()).device
     C, H = model.spec.context, model.spec.horizons
     M = len(frames)
@@ -251,6 +266,7 @@ def readouts(
                 cells = torch.ones(len(end), 1, 1, dtype=torch.bool, device=device)
                 surprise[end, k] = objective.errors(guess, truth, cells)
         surprise[~ok] = float("nan")
+        latent_t[~ok] = float("nan")
     return latent_t.cpu(), surprise.cpu()
 
 
@@ -342,6 +358,9 @@ class Domain:
             raise DataError(f"a {config.symbol} model reads {config.symbol} days only")
         if sources["span"] != [span.start.isoformat(), span.end.isoformat()]:
             raise DataError(f"days were loaded for span {sources['span']}, not this model's")
+        # days.load checks every day before reading it; a Dataset built by hand is checked here
+        for record in (*sources["train"], *sources["val"]):
+            span.check(config.symbol, date.fromisoformat(record["day"]))
         if len(sources["features"]) != config.model.features:
             raise DataError(
                 f"{len(sources['features'])} features, the model takes {config.model.features}"

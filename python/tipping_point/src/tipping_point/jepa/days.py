@@ -6,8 +6,9 @@ column, True for a second without valid book data (a feature gap or an unsynced 
 hands over the table with the sha256 of the bytes it came from, which the training manifest pins.
 
 A minute is valid when none of its 60 seconds is a gap. Invalid minutes are never trained on:
-their frames are zeroed, their latents are left out of every loss term, and the predictor sees a
-mask token in their place. Gap seconds are zeroed too, so no value behind a gap reaches the model.
+their latents are left out of every loss term, the predictor sees a mask token in their place, and
+readouts give them NaN. Their gap seconds are zeroed (the other seconds keep their values), so no
+value behind a gap reaches the model.
 
 Leakage (#30 research pass 4.3, tests 1 and 2): `load` refuses any day outside the model's training
 span [start, end), any day on or after 2024-01-01 whatever the span says (the confirmatory span is

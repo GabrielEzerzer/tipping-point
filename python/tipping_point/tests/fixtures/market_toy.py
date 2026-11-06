@@ -6,16 +6,17 @@ The slow variable s is +1 or -1 per minute and holds for 60-240 minutes between 
 per day from its date (`switches`). It shows in the structure of the seconds inside a minute:
   f00, f01   share a per-second factor, with correlation +0.5 when s = +1 and -0.5 when s = -1
   f02        MA(1) noise e_t + 0.8 s e_(t-1), so its lag-1 autocorrelation is +-0.49
-  f03, f04   unit noise scaled by exp(0.35 s) (a 2:1 variance ratio) plus a weak level 0.1 s
+  f03, f04   unit noise scaled by exp(0.35 s), a 2:1 ratio of standard deviations
   f05-f08    unit noise scaled per minute by exp(N(0, 0.7^2)): big, minute-level and unpredictable
              from one minute to the next, the variance an untrained encoder soaks up
   f09-f15    unit noise
-The weak level in f03 and f04 is the seed an encoder at initialisation can see at all (LayerNorm
-per token and mean pooling hide variance-only signals at first); without it the toy is not learned
-in its step budget. A minute's s is predictable from the minutes before it (it persists), the
-distractors are not, so a JEPA has a reason to keep s and drop the rest. Gaps: each day has a gap
-second in minutes 100 and 700 and a 5-minute gap block from minute 1,000 (`GAP_MINUTES` are the
-minutes this leaves invalid); their values are NaN, as a real gap's may be.
+Every feature has mean 0 whatever s is: s shows only in second moments (a correlation, an
+autocorrelation, a variance), so the toy is learned only by an encoder that reads them. With the
+tokens pooled by their mean alone, a trained latent read s at chance. A minute's s is predictable
+from the minutes before it (it persists), the distractors are not, so a JEPA has a reason to keep s
+and drop the rest. Gaps: each day has a gap second in minutes 100 and 700 and a 5-minute gap block
+from minute 1,000 (`GAP_MINUTES` are the minutes this leaves invalid); their values are NaN, as a
+real gap's may be.
 """
 
 from __future__ import annotations
@@ -93,7 +94,7 @@ def features(day: date, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     e = rng.standard_normal(n + 1)
     theta = 0.8 * s
     x[:, 2] = (e[1:] + theta * e[:-1]) / np.sqrt(1 + theta**2)
-    x[:, 3:5] = x[:, 3:5] * np.exp(0.35 * s)[:, None] + 0.1 * s[:, None]
+    x[:, 3:5] *= np.exp(0.35 * s)[:, None]
     scale = np.exp(0.7 * rng.standard_normal((days.MINUTES, 4)))
     x[:, 5:9] *= np.repeat(scale, days.MINUTE, axis=0)
     gap = np.zeros(n, bool)
