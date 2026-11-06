@@ -11,10 +11,14 @@ parameter (by default <data dir>/bybit-book); nothing else is written anywhere.
 Per day, `fetch` downloads the zip into `<range>/staging/`, checks it, has the engine's
 `store import` (engine/src/store/import.rs) write the day's `book_samples` Parquet (20 levels a
 side on the 100 ms grid), deletes the zip, runs the `reduce` command if one is given (its argv
-with the Parquet's path appended; a non-zero exit fails the day), records the day and deletes the
-samples. With `keep_samples`, the samples are imported into `<range>/samples/` and kept instead.
-At most one day's zip and samples exist at a time; the manifest records each day's peak
-(`peak_bytes`: the zip and the run on disk together, after the import).
+with the Parquet's path appended; a non-zero exit fails the day), deletes the samples and records
+the day. With `keep_samples`, the samples are imported into `<range>/samples/` and kept instead.
+Whatever the day put in staging is deleted when the day ends, imported or failed (samples an
+import wrote before it failed too), so at most one day's zip and samples exist at a time; the
+manifest records each day's peak (`peak_bytes`: the zip and the run on disk together, after the
+import). A file something (a virus scanner) still holds after a few tries stays: the day's
+`leftover` lists it, relative to the range folder, and it is tried again after each later day and
+when the next run starts.
 
 The reducer. When its last line of output is a JSON object, the manifest keeps it as the day's
 `reduced` (tipping_point.book prints its feature file's path, relative to the range folder, its
@@ -175,7 +179,7 @@ def fetch(
     where = out / name
     staging = where / "staging"
     shutil.rmtree(staging, ignore_errors=True)  # whatever a stopped run left
-    staging.mkdir(parents=True)
+    staging.mkdir(parents=True, exist_ok=True)  # still there if a file in it would not go
     manifest_path = where / "manifest.json"
     manifest = (
         io.read_json(manifest_path)
@@ -192,7 +196,11 @@ def fetch(
                 log(f"{key}: imported before, skipped")
                 continue
             data_dir = where / "samples" if keep_samples else staging
+            before = _files_in(staging, where)  # what earlier days left, listed with those days
             entry = _day(symbol, day, where, data_dir, open_url, importer, keep_samples, reducer)
+            _clear(staging)  # all the day put there, imported or failed, named by a run or not
+            if leftover := sorted(_files_in(staging, where) - before):
+                entry["leftover"] = leftover
             entry["reduce"] = given
             done[key] = manifest["days"][key] = entry
             manifest["days"] = dict(sorted(manifest["days"].items()))
@@ -257,7 +265,6 @@ def _day(
         "at": datetime.now(UTC).isoformat(timespec="seconds"),
         "reduce": reduce,
     }
-    run: Path | None = None
     try:
         began = time.monotonic()
         try:
@@ -296,12 +303,6 @@ def _day(
         return {**entry, "status": "imported"}
     except (BookError, OSError, KeyError, ValueError) as error:
         return {**entry, "status": "failed", "error": f"{type(error).__name__}: {error}"}
-    finally:
-        for leftover in (archive, archive.with_name(archive.name + ".part")):
-            with contextlib.suppress(OSError):  # the day's result stands; staging goes next run
-                _unlink(leftover)
-        if run is not None and not keep:
-            shutil.rmtree(run, ignore_errors=True)
 
 
 def _unlink(path: Path, tries: int = 5, wait_s: float = 0.5) -> None:
@@ -314,6 +315,23 @@ def _unlink(path: Path, tries: int = 5, wait_s: float = 0.5) -> None:
             if attempt == tries - 1:
                 raise
             time.sleep(wait_s)
+
+
+def _clear(folder: Path) -> None:
+    """Deletes what `folder` holds, each file with _unlink's tries; what will not go stays.
+    Path.walk counts a link as a file, so nothing outside `folder` is deleted."""
+    for parent, dirs, files in folder.walk(top_down=False):
+        for name in files:
+            with contextlib.suppress(OSError):  # it stays, and the caller lists it
+                _unlink(parent / name)
+        for name in dirs:
+            with contextlib.suppress(OSError):  # not empty: a file in it stayed
+                (parent / name).rmdir()
+
+
+def _files_in(folder: Path, where: Path) -> set[str]:
+    """The files under `folder` (a link counted as one), relative to `where`."""
+    return {(p / f).relative_to(where).as_posix() for p, _, files in folder.walk() for f in files}
 
 
 def _reported(stdout: str) -> dict[str, Any] | None:
@@ -366,13 +384,14 @@ def _bytes(folder: Path) -> int:
 
 
 def summary(entry: dict[str, Any]) -> str:
+    left = f"; not deleted: {entry['leftover']}" if entry.get("leftover") else ""
     if entry["status"] != "imported":
-        return f"{entry['status']}: {entry.get('error', '')}"
+        return f"{entry['status']}: {entry.get('error', '')}{left}"
     return (
         f"imported, {entry['bytes'] / 1e6:.0f} MB in {entry['download_s']:.0f} s, "
         f"imported in {entry['import_s']:.0f} s, {entry['samples']} samples, "
         f"{entry['parquet_bytes'] / 1e6:.1f} MB Parquet, peak {entry['peak_bytes'] / 1e6:.0f} MB, "
-        f"id_gaps {entry['integrity']['id_gaps']}"
+        f"id_gaps {entry['integrity']['id_gaps']}{left}"
     )
 
 

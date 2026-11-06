@@ -1,8 +1,9 @@
 """The Bybit order-book fetcher (#30 M1): the confirmatory range is refused without --confirmatory,
 each range keeps its own manifest, no zip or sample is kept unless asked, a day imported before is
 skipped, the reducer runs on each day's samples (`python` meaning this interpreter, checked once
-before any download, its format deciding whether a day is done), and a failed or missing day is
-recorded while the range goes on, whatever failed. Synthetic small zips served by a fake archive
+before any download, its format deciding whether a day is done), a failed or missing day is
+recorded while the range goes on, whatever failed, and what a day put in staging goes when it ends
+(a file that will not go is listed with its day). Synthetic small zips served by a fake archive
 and a fake importer; no network (tests/conftest.py).
 The engine's own import runs only when TP_STORE_BIN names a built store binary."""
 
@@ -81,16 +82,21 @@ class Importer:
         self.imported: list[str] = []
         self.refuse: set[str] = set()
         self.no_rows: set[str] = set()  # complete.json without its row counts
+        self.half: set[str] = set()  # writes the samples, then fails without naming its run
+        self.found: list[list[str]] = []  # the files in its data dir as each import starts
 
     def __call__(self, archive: Path, url: str, data_dir: Path) -> Path:
         with zipfile.ZipFile(archive) as opened:
             assert opened.testzip() is None
         self.imported.append(url)
+        self.found.append(_files(data_dir))
         if url in self.refuse:
             raise book.BookError("store import exited 1: line 3: u ran back")
         run = data_dir / "market" / archive.name.removesuffix(".data.zip")
         (run / "book_samples").mkdir(parents=True, exist_ok=True)
         (run / book.TABLE).write_bytes(PARQUET)
+        if url in self.half:  # as when writing complete.json fails
+            raise book.BookError("store import exited 1: complete.json: no space left")
         complete = {"rows": {"book_samples": 864_000}, "integrity": {"id_gaps": 0, "errors": 0}}
         if url in self.no_rows:
             del complete["rows"]
@@ -273,6 +279,51 @@ def test_any_failure_after_the_download_is_recorded_and_the_range_goes_on(
     done = _fetch(tmp_path, archive, importer, start=date(2023, 3, 3))
     assert done["BTCUSDT/2023-03-03"]["status"] == "failed"
     assert "PermissionError" in done["BTCUSDT/2023-03-03"]["error"]
+    assert done["BTCUSDT/2023-03-03"]["leftover"] == ["staging/2023-03-03_BTCUSDT_ob500.data.zip"]
+
+
+def test_samples_an_import_wrote_before_failing_go_with_the_day(tmp_path: Path) -> None:
+    """`store import` can write a day's samples and then fail (on complete.json, say) without
+    naming its run: they go when the day ends all the same, however many days fail in a row."""
+    archive, importer = Archive(), Importer()
+    days = [date(2023, 3, d) for d in (1, 2, 3, 4)]
+    importer.half = {book.url("BTCUSDT", d) for d in days[:3]}
+    staging = tmp_path / "training" / "staging"
+    after: list[list[str]] = []  # what staging holds as each day is logged
+    done = _fetch(
+        tmp_path, archive, importer, end=days[-1], log=lambda _: after.append(_files(staging))
+    )
+    assert [e["status"] for e in done.values()] == ["failed"] * 3 + ["imported"]
+    assert after == [[]] * 4
+    # Each import found its own zip and nothing else: no earlier day's samples.
+    assert importer.found == [[book.file_name("BTCUSDT", d)] for d in days]
+    assert not any("leftover" in e for e in done.values())
+
+
+def test_a_file_that_will_not_go_is_listed_with_its_day_and_the_range_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A day's samples that something never lets go stay, listed in that day's `leftover` once the
+    tries are spent; the later days are imported and list nothing, and the next run starts."""
+    held = f"staging/market/2023-03-02_BTCUSDT_ob500/{book.TABLE.as_posix()}"
+    real_unlink = os.unlink
+
+    def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path).as_posix().endswith(held):
+            raise PermissionError(13, "in use", str(path))
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)  # shutil.rmtree's too, so it outlasts the run
+    monkeypatch.setattr(book.time, "sleep", lambda _: None)
+    archive, importer = Archive(), Importer()
+    done = _fetch(tmp_path, archive, importer)
+    assert {e["status"] for e in done.values()} == {"imported"}
+    left = {key[-2:]: entry.get("leftover") for key, entry in done.items()}
+    assert left == {"01": None, "02": [held], "03": None}
+    assert _manifest(tmp_path)["days"]["BTCUSDT/2023-03-02"]["leftover"] == [held]
+    assert "not deleted" in book.summary(done["BTCUSDT/2023-03-02"])
+    assert _files(tmp_path) == [f"training/{held}"]
+    assert _fetch(tmp_path, archive, importer) == done  # the next run starts with it still there
 
 
 def test_a_day_reduced_with_another_format_is_not_done(tmp_path: Path) -> None:
