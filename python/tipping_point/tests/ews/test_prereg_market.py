@@ -7,6 +7,7 @@ import copy
 import dataclasses
 import re
 import subprocess
+import tomllib
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -205,6 +206,28 @@ def _set(doc: dict[str, Any], where: str, value: Any) -> dict[str, Any]:
 def test_each_problem_is_named(doc: dict[str, Any], where: str, value: Any, named: str) -> None:
     found = prereg.problems(_set(doc, where, value))
     assert any(named in p for p in found), found
+
+
+@pytest.mark.parametrize(
+    ("line", "bad", "named"),
+    [
+        ("tol = 1e-6 ", "tol = nan ", "labeller.tol: a finite number, not nan"),
+        ("c = 0.15 ", "c = inf ", "cascade.c: a finite number, not inf"),
+    ],
+)
+def test_the_freeze_refuses_a_number_that_is_not_finite(
+    tmp_path: Path, line: str, bad: str, named: str
+) -> None:
+    """#147: TOML allows nan and inf, and every comparison with nan is false, so the range checks
+    alone would let one freeze. The strict check names it and the freeze tags nothing."""
+    text = _filled(TEMPLATE.read_text("utf-8"))
+    assert text.count(line) == 1
+    path = _repo(tmp_path, text.replace(line, bad))
+    with pytest.raises(prereg.PreregError, match=re.escape(named)):
+        prereg.freeze(tmp_path, "market-labels")
+    assert _git(tmp_path, "tag", "--list") == ""
+    doc = tomllib.loads(path.read_text("utf-8"))
+    assert named in prereg.problems(doc, strict=True)
 
 
 def test_load_reports_a_broken_file(tmp_path: Path) -> None:

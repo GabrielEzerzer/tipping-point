@@ -4,10 +4,11 @@ The GARCH simulator against its closed forms; 1-minute OHLC from it, through the
 delay simulation by brute force; segments and slices that never see the onset; the shift null; and
 the floor end to end with the real labeller, the real variance and AC1 Pipelines and scoring.auc.
 
-The floor's parameters here are stated synthetic ones, not a fit: 60% a year in 10-second variance,
-a half-life of 19 hours. S5 fits the 2023 pilot year. Their expected ranges come from eleven seeds
-of three paths each (variance at 6 bars 0.61-0.71, AC1 0.45-0.57, shift medians 0.46-0.58 for the
-trends and 0.40-0.62 for the level control), widened to hold any seed rather than this one.
+The floor's parameters here are stated synthetic ones, not a fit: a minute GARCH of 60% a year
+with a half-life of 19 hours, bridged to 10 seconds. The pilot year's fit is
+harness/market_garch.py's (test_garch_fit.py). The expected ranges come from eleven seeds of three
+paths each (variance at 6 bars 0.61-0.73, AC1 0.35-0.69, shift medians 0.46-0.56 for the trends and
+0.44-0.54 for the level control), widened to hold any seed rather than this one.
 """
 
 import math
@@ -25,7 +26,7 @@ from tipping_point.market.nulls import Garch
 MODERATE = Garch(5e-9, 0.05, 0.90, 10.0)
 PERSISTENT = Garch(5e-10, 0.01, 0.985, 10.0)
 STEPS = 1_000_000
-FLOOR_GARCH = Garch(1.14e-11, 0.005, 0.9949, 6.0)
+FLOOR_GARCH = Garch(4.1e-10, 0.012, 0.9874, 6.0)
 PARAMS = msvol.Params(warmup_days=28, baseline_days=14)
 HORIZONS = (0, 3, 6, 12, 24)
 SMALL = msvol.Params(warmup_days=14, baseline_days=7, max_iter_warm=10)
@@ -405,7 +406,7 @@ def _rebuilt(seed: int, days: int, params: msvol.Params) -> tuple[np.ndarray, ms
     """A floor's first path rebuilt from its seed by the documented steps: its 1-minute
     close-to-close returns, its labels and its event onsets."""
     rng = np.random.default_rng([seed, 0])
-    returns = nulls.simulate(FLOOR_GARCH, days * nulls.DAY_STEPS, rng)
+    returns = nulls.simulate(FLOOR_GARCH, days * nulls.DAY_MINUTES, rng, nulls.STEPS_PER_MINUTE)
     klines = nulls.minute_klines(START_MS, returns)
     bar, _ = bars.bars(START_MS, days, klines, nulls._NO_METRICS, nulls._NO_FUNDING)
     out = msvol.label(bar["ts_ns"], bar["rv"], params)
@@ -562,7 +563,7 @@ def test_a_path_too_short_to_move_any_event_a_day_says_so_and_shifts_nothing() -
         (0,),
         days=15,
         paths=1,
-        seed=7,  # this path holds events; not all do
+        seed=1,  # this path holds events; not all do
         params=params,
         draws=20,
     )
@@ -580,7 +581,7 @@ def test_a_path_too_short_to_move_any_event_a_day_says_so_and_shifts_nothing() -
 
 def test_a_shifted_segment_always_has_the_history_its_span_needs() -> None:
     """A span longer than the warm-up: bars too early to hold one are not drawn at all."""
-    seed, days, h, draws, span = 8, 35, 6, 5, 25_000
+    seed, days, h, draws, span = 1, 35, 6, 5, 25_000
     recording = Recording(span)
     found = nulls.circularity_floor(
         FLOOR_GARCH,
@@ -605,8 +606,8 @@ def test_the_variance_floor_sits_above_chance_and_falls_with_the_horizon(
     floor: nulls.Floor,
 ) -> None:
     """What the floor is for: a clustering process with no critical dynamics hands the variance
-    pipeline this AUC by construction. Over ten seeds its mean ran from 0.72 at no horizon to 0.58
-    at two hours."""
+    pipeline this AUC by construction. Over eleven seeds its mean ran from 0.75 at no horizon to
+    0.62 at two hours."""
     assert 0.60 <= _cell(floor, "variance", 0)["auc"] <= 0.85
     assert 0.55 <= _cell(floor, "variance", 6)["auc"] <= 0.80
     assert 0.42 <= _cell(floor, "variance", 24)["auc"] <= 0.72
@@ -614,16 +615,17 @@ def test_the_variance_floor_sits_above_chance_and_falls_with_the_horizon(
 
 
 def test_the_ac1_floor_sits_at_chance(floor: nulls.Floor) -> None:
-    """GARCH returns have no autocorrelation to trend: 0.41-0.60 over eleven seeds, any horizon."""
+    """GARCH returns have no autocorrelation to trend: 0.35-0.69 over eleven seeds, any horizon, the
+    minute returns' t tails making AC1 noisy, and about 0.50 on average."""
     for h in HORIZONS:
-        assert 0.38 <= _cell(floor, "ac", h)["auc"] <= 0.66
+        assert 0.30 <= _cell(floor, "ac", h)["auc"] <= 0.74
 
 
 def test_the_shift_null_sits_at_chance_for_every_scorer(floor: nulls.Floor) -> None:
     """A shifted segment sits where a real one could, inside the clean window, so only its alignment
     differs. That holds for a scorer of the level too: it read 0.73 when segments could land
-    anywhere, and now runs 0.47-0.49 on this fixture. Over eleven seeds every median lay in
-    0.40-0.62, about 0.50 on average."""
+    anywhere, and now runs 0.44-0.47 on this fixture. Over eleven seeds every median lay in
+    0.43-0.56, about 0.50 on average."""
     for cell in floor.cells:
         assert cell["shift_auc_lo"] <= cell["shift_auc_median"] <= cell["shift_auc_hi"]
         assert 0.38 <= cell["shift_auc_median"] <= 0.64
@@ -674,7 +676,7 @@ def test_the_floor_and_its_report_repeat_under_a_seed(tmp_path: Any) -> None:
     for name in names:
         assert (written[0] / name).read_bytes() == (written[1] / name).read_bytes()
     summary = (written[0] / "summary.md").read_text(encoding="utf-8")
-    assert "alpha = 0.005" in summary and "beta = 0.9949" in summary
+    assert "alpha = 0.012" in summary and "beta = 0.9874" in summary
     assert "no eligible bar" not in summary  # every event here could move
 
 
