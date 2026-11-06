@@ -6,19 +6,23 @@ run's scales; engine/src/store/samples.rs), and the run's manifest.json beside i
 the day). Output: one row per UTC second of the day, 86,400 rows, second s covering the samples at
 s + 0.0, 0.1, ..., 0.9 s.
 
-Causality. Every feature of second s is computed from the samples in [s, s + 1) and nothing else:
-no carry from the second before, no statistic over the day. Returns and order flow therefore use
-the 9 steps between the second's 10 samples; the step from s - 0.1 to s is in neither second.
-Each minute frame of the JEPA then reads only its own minute's samples.
+Causality. Every feature of second s is computed from the samples in [s - 0.1, s + 1) and nothing
+else: no statistic over the day, nothing later than the second. The means read the second's own
+10 samples; returns and order flow read its 10 steps, each from the sample before, so the first
+step comes from the previous second's last sample. Neighbouring seconds (and so neighbouring
+minute frames of the JEPA) share that one boundary sample; in exchange no 100 ms step is lost and
+the day's `ret` adds up to the log change of the mid from the day's first sample to its last when
+nothing is missing. The day's first sample has no step before it.
 
 Gaps. A sample counts only when the book was synced, both sides have a best level and the book is
 not crossed. `samples` is the count of those (0 to 10) and `gap` is set when it is below 10. A
 second with some samples missing is masked by `gap` and its features use only the samples present
-(steps only between two present neighbours); nothing is filled in. A second with none is NaN.
+(steps only between two neighbouring samples that are both present, so none across an unsynced
+or missing sample or a missing second); nothing is filled in. A second with none is NaN.
 
 Features, per second (a "sample" is one 100 ms book; means are over the second's samples):
 
-  ret        sum of the 100 ms log mid returns between the second's samples
+  ret        sum of the 100 ms log mid returns into the second's samples
   rv100      sum of their squares
   moves      count of those steps where the mid moved
   micro_dev  mean of (Stoikov micro-price - mid) in ticks; micro = (bid ask_qty + ask bid_qty) /
@@ -32,9 +36,11 @@ Features, per second (a "sample" is one 100 ms book; means are over the second's
   depth_asym mean of log(bid notional / ask notional), top 20 levels
   slope_b,   mean distance from the mid, in bps, of the level where the side's cumulative notional
   slope_a    first reaches half of its top-20 notional: how far from the touch the side's
-             liquidity sits. (The research pass named "a fixed notional"; a fixed amount needs a
-             cross-day calibration per asset and is undefined whenever 20 levels hold less, so
-             the half-depth distance stands in for it.)
+             liquidity sits. It replaces the research pass's distance to a fixed notional, which
+             would need an amount calibrated per asset across days (BTC and ETH books, and each
+             of them from 2023 to 2026, hold very different notionals), and which is undefined
+             whenever the 20 levels hold less than that amount. The half-depth distance is defined
+             within every sample and is scale-free, leaving the size of the book to `depth_*`.
   wide       fraction of samples with a spread above one tick
 
 Cross-day steps, not done here (they are fitted later, on the training span only, #30 4.1):
@@ -156,8 +162,10 @@ def reduce(
     count = np.isfinite(grid["mid"]).sum(axis=1)
 
     with np.errstate(invalid="ignore", divide="ignore"):
-        step = np.diff(np.log(grid["mid"]), axis=1)  # NaN unless both neighbours are present
-        flow = _ofi(grid["bp0"], grid["bq0"], grid["ap0"], grid["aq0"])
+        # The step into each sample from the one before it, across second boundaries too; NaN
+        # unless both are present. Row s holds the 10 steps into second s's samples.
+        step = _by_second(np.diff(np.log(flat["mid"])))
+        flow = _by_second(_ofi(flat["bp0"], flat["bq0"], flat["ap0"], flat["aq0"]))
         stepped = np.isfinite(step)
         out = {
             "ret": _sum(step),
@@ -223,11 +231,11 @@ def _half_depth_price(price: np.ndarray, notional: np.ndarray) -> np.ndarray:
 
 
 def _ofi(bp: np.ndarray, bq: np.ndarray, ap: np.ndarray, aq: np.ndarray) -> np.ndarray:
-    """Cont, Kukanov and Stoikov (2014) e_n for each step between neighbouring samples at the best
-    level: e = 1{Pb' >= Pb} qb' - 1{Pb' <= Pb} qb - 1{Pa' <= Pa} qa' + 1{Pa' >= Pa} qa, primes
-    for the later sample. NaN where either sample is missing."""
-    b0, b1, qb0, qb1 = bp[:, :-1], bp[:, 1:], bq[:, :-1], bq[:, 1:]
-    a0, a1, qa0, qa1 = ap[:, :-1], ap[:, 1:], aq[:, :-1], aq[:, 1:]
+    """Cont, Kukanov and Stoikov (2014) e_n for each step between neighbouring grid instants at
+    the best level: e = 1{Pb' >= Pb} qb' - 1{Pb' <= Pb} qb - 1{Pa' <= Pa} qa' + 1{Pa' >= Pa} qa,
+    primes for the later sample. NaN where either sample is missing."""
+    b0, b1, qb0, qb1 = bp[:-1], bp[1:], bq[:-1], bq[1:]
+    a0, a1, qa0, qa1 = ap[:-1], ap[1:], aq[:-1], aq[1:]
     e = (
         np.where(b1 >= b0, qb1, 0.0)
         - np.where(b1 <= b0, qb0, 0.0)
@@ -236,6 +244,12 @@ def _ofi(bp: np.ndarray, bq: np.ndarray, ap: np.ndarray, aq: np.ndarray) -> np.n
     )
     present = np.isfinite(b0) & np.isfinite(b1)
     return np.where(present, e, np.nan)
+
+
+def _by_second(steps: np.ndarray) -> np.ndarray:
+    """The day's steps between neighbouring grid instants as (second, 10): the step into instant j
+    goes to j's second, and the day's first instant has none."""
+    return np.concatenate([[np.nan], steps]).reshape(DAY, PER)
 
 
 def _sum(x: np.ndarray) -> np.ndarray:

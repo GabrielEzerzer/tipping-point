@@ -1,5 +1,6 @@
 """The 1-second book features (#30 M2): known answers on a hand-built book, gaps and unsynced
-samples masked and never filled, causality by perturbation, determinism, and the reducer wired
+samples masked and never filled, no step across a gap, the day's returns adding up, causality by
+perturbation (second s reads the samples in [s - 0.1, s + 1)), determinism, and the reducer wired
 into `market book --reduce`. Synthetic books only; no network (conftest). The engine's own import
 runs only when TP_STORE_BIN names a built store binary."""
 
@@ -83,7 +84,8 @@ def _shift(levels: list[Level], ticks: int) -> list[Level]:
 
 
 def _book() -> list[Row]:
-    """Second 0 moves at the touch; second 1 is the deep book, still; second 2 has three samples
+    """Second 0 moves at the touch; second 1 is the deep book, still after the step into it from
+    second 0's last sample; second 2 has three samples
     of the deep book, an unsynced one, one of the deep book a tick higher, and five absent;
     second 3 is unsynced throughout; nothing after. Two samples fall outside the day."""
     rows: list[Row] = [(-1, True, BIDS, ASKS)]
@@ -129,7 +131,8 @@ def test_known_answers_on_a_hand_built_book() -> None:
     approx = lambda x: pytest.approx(x, rel=1e-6, abs=1e-9)  # noqa: E731  float32 output
 
     # Second 0, the touch moving: mids in ticks 1000.5 1000.5 1001 1001.5 1001.5 1001 1000.5
-    # 1000.5 1000.5 1001; five of the nine steps move.
+    # 1000.5 1000.5 1001; five of the nine steps move. The sample just before the day gives no
+    # step into 0.0 s: the day's first sample has none.
     mids = [(b + a) / 2 for b, _, a, _ in TOP]
     steps = [math.log(mids[k] / mids[k - 1]) for k in range(1, 10)]
     assert f["ret"][0] == approx(math.log(1001 / 1000.5))
@@ -161,11 +164,16 @@ def test_known_answers_on_a_hand_built_book() -> None:
     )
     assert (f["samples"][0], f["gap"][0]) == (10, False)
 
-    # Second 1, the deep book standing still: no return, no flow, every level counted.
+    # Second 1, the deep book standing still, every level counted. Its one moving step is the
+    # boundary step from second 0's last sample (1000 x 1 | 1002 x 7, mid 1001) to its first
+    # (1000 x 3 | 1001 x 1, mid 1000.5): the bid stays, e = +3 - 1; the ask falls, e = -1. So
+    # e = +1 over a mean top-5 quantity of 7 + 5 lots.
     for name, value in _deep(BIDS, ASKS).items():
         assert f[name][1] == approx(value), name
-    for name in ("ret", "rv100", "moves", "ofi", "wide"):
-        assert f[name][1] == 0, name
+    assert f["ret"][1] == approx(math.log(1000.5 / 1001))
+    assert f["rv100"][1] == approx(math.log(1000.5 / 1001) ** 2)
+    assert (f["moves"][1], f["wide"][1]) == (1, 0)
+    assert f["ofi"][1] == approx(1 / 12)
     assert (f["samples"][1], f["gap"][1]) == (10, False)
 
 
@@ -187,7 +195,8 @@ def test_ofi_is_positive_for_buying_pressure_and_negative_for_selling() -> None:
 def test_a_partly_missing_second_is_masked_and_never_filled() -> None:
     f = _reduce(_book())
     # Second 2: samples at 0.0, 0.1, 0.2 and 0.4 s (0.3 unsynced, 0.5 to 0.9 absent). The book at
-    # 0.4 s is a tick higher; no step bridges the unsynced sample, so the mid never "moved".
+    # 0.4 s is a tick higher; no step bridges the unsynced sample, so the mid never "moved" (the
+    # boundary step from second 1 is between two equal books).
     assert (f["samples"][2], f["gap"][2]) == (4, True)
     for name in ("ret", "rv100", "moves", "ofi"):
         assert f[name][2] == 0, name
@@ -203,6 +212,46 @@ def test_a_partly_missing_second_is_masked_and_never_filled() -> None:
     assert f["samples"].sum() == 10 + 10 + 4
 
 
+def test_no_step_crosses_a_missing_second_or_an_unsynced_sample() -> None:
+    def second(s: int, ticks: int) -> list[Row]:
+        return [(10 * s + k, True, _shift(BIDS, ticks), _shift(ASKS, ticks)) for k in range(10)]
+
+    rows = second(0, 0) + second(2, 5)  # second 1 missing
+    rows += [(30, False, [], []), *second(3, 7)[1:]]  # second 3 starts unsynced
+    rows += second(4, 8)  # a good boundary step, one tick up
+    f = _reduce(rows)
+    for s in (2, 3):
+        assert (f["ret"][s], f["rv100"][s], f["moves"][s], f["ofi"][s]) == (0, 0, 0, 0), s
+    assert np.isnan(f["ret"][1]) and f["gap"][1]
+    assert f["ret"][4] == pytest.approx(math.log(1008.5 / 1007.5), rel=1e-6)
+    assert f["moves"][4] == 1 and not f["gap"][4]
+    # The boundary step: bid and ask both move up, e = +3 (new bid) + 1 (old ask), over 12 lots.
+    assert f["ofi"][4] == pytest.approx(4 / 12, rel=1e-6)
+
+
+def test_a_gap_free_days_returns_add_up_to_its_log_change() -> None:
+    n = features.DAY * features.PER
+    rng = np.random.default_rng(32)
+    bid = 200_000 + np.cumsum(rng.integers(-1, 2, n))
+    columns: dict[str, Any] = {
+        "sample_ts_ns": DAY0 + np.arange(n, dtype=np.int64) * features.STEP_NS,
+        "synced": np.ones(n, dtype=bool),
+    }
+    for name, values in (("bid", bid), ("ask", bid + 1 + (rng.random(n) < 0.1))):
+        columns[f"{name}_px_0"] = values
+        columns[f"{name}_qty_0"] = rng.integers(1, 1000, n)
+        for i in range(1, features.LEVELS):
+            columns[f"{name}_px_{i}"] = pa.nulls(n, pa.int64())
+            columns[f"{name}_qty_{i}"] = pa.nulls(n, pa.int64())
+    table = pa.table(columns)
+    f = features.reduce(table, DAY0, 2, 3)
+    assert not f["gap"].to_numpy().any()
+    mid = (bid + columns["ask_px_0"]) / 2
+    total = f["ret"].to_numpy().astype(np.float64).sum()
+    assert total == pytest.approx(math.log(mid[-1] / mid[0]), abs=1e-7)
+    assert f["moves"].to_numpy().sum() == np.count_nonzero(np.diff(mid))
+
+
 def test_a_crossed_or_one_sided_sample_counts_as_missing() -> None:
     rows: list[Row] = [(k, True, BIDS, ASKS) for k in range(10)]
     rows[3] = (3, True, [(1002, 1)], ASKS)  # bid above the ask
@@ -212,18 +261,20 @@ def test_a_crossed_or_one_sided_sample_counts_as_missing() -> None:
     assert f["imb_1"][0] == 0.5 and f["ret"][0] == 0
 
 
-def _random_book(seconds: int, rng: np.random.Generator, day0: int = DAY0) -> list[Row]:
+def _random_book(
+    seconds: int, rng: np.random.Generator, absent: float = 0.05, unsynced: float = 0.05
+) -> list[Row]:
     rows: list[Row] = []
     mid = 2000
     for slot in range(seconds * 10):
-        if rng.random() < 0.05:
+        if rng.random() < absent:
             continue  # absent
         mid += int(rng.integers(-1, 2))
         spread = 1 + int(rng.random() < 0.2)
         depth = int(rng.integers(1, 21))
         bids = [(mid - i, int(rng.integers(1, 500))) for i in range(depth)]
         asks = [(mid + spread + i, int(rng.integers(1, 500))) for i in range(depth)]
-        rows.append((slot, bool(rng.random() > 0.05), bids, asks))
+        rows.append((slot, bool(rng.random() >= unsynced), bids, asks))
     return rows
 
 
@@ -231,7 +282,9 @@ def _columns(table: pa.Table, s: slice) -> dict[str, bytes]:
     return {name: table[name].to_numpy()[s].tobytes() for name in table.column_names}
 
 
-def test_features_of_a_second_depend_only_on_its_own_samples() -> None:
+def test_features_of_a_second_depend_only_on_samples_from_its_boundary_on() -> None:
+    """Second s reads [s - 0.1, s + 1): perturbing or cutting everything from s + 1 on leaves
+    every second up to s identical; perturbing everything before s - 0.1 leaves s on identical."""
     rng = np.random.default_rng(30)
     rows = _random_book(8, rng)
     full = features.reduce(_table(rows), DAY0, 2, 3)
@@ -241,7 +294,8 @@ def test_features_of_a_second_depend_only_on_its_own_samples() -> None:
         later = [r for r in rows if r[0] < (s + 1) * 10] + [
             r for r in noise if r[0] >= (s + 1) * 10
         ]
-        earlier = [r for r in noise if r[0] < s * 10] + [r for r in rows if r[0] >= s * 10]
+        boundary = s * 10 - 1  # the last sample of second s - 1
+        earlier = [r for r in noise if r[0] < boundary] + [r for r in rows if r[0] >= boundary]
         cut = features.reduce(_table(later), DAY0, 2, 3)
         assert _columns(cut, slice(0, s + 1)) == _columns(full, slice(0, s + 1)), s
         truncated = features.reduce(_table([r for r in rows if r[0] < (s + 1) * 10]), DAY0, 2, 3)
@@ -249,6 +303,26 @@ def test_features_of_a_second_depend_only_on_its_own_samples() -> None:
         cut = features.reduce(_table(earlier), DAY0, 2, 3)
         assert _columns(cut, slice(s, None)) == _columns(full, slice(s, None)), s
     assert _columns(cut, slice(0, 1)) != _columns(full, slice(0, 1))  # the noise did change it
+
+
+def test_the_last_sample_of_a_second_changes_that_second_and_the_next_only() -> None:
+    rows = _random_book(6, np.random.default_rng(33), absent=0, unsynced=0)
+    full = features.reduce(_table(rows), DAY0, 2, 3)
+    for s in range(5):
+        moved = list(rows)
+        slot, synced, bids, asks = moved[s * 10 + 9]
+        moved[s * 10 + 9] = (slot, synced, _shift(bids, 3), _shift(asks, 3))
+        cut = features.reduce(_table(moved), DAY0, 2, 3)
+        assert _changed(cut, full) == [s, s + 1], s
+
+
+def _changed(a: pa.Table, b: pa.Table) -> list[int]:
+    """The seconds where any column of two feature tables differs bitwise (NaN equal to NaN)."""
+    rows = np.zeros(a.num_rows, dtype=bool)
+    for name in a.column_names:
+        x, y = a[name].to_numpy(), b[name].to_numpy()
+        rows |= x.view(f"u{x.itemsize}") != y.view(f"u{y.itemsize}")
+    return np.flatnonzero(rows).tolist()
 
 
 def test_two_runs_write_the_same_bytes(tmp_path: Path) -> None:
