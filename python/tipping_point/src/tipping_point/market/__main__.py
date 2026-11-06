@@ -12,15 +12,20 @@
            Any day from 2024-01-01 is the confirmatory span, which only --prereg opens:
            --prereg paper/prereg/market-labels-v1.toml takes the span, the symbols and every
            labeller parameter from that file, and refuses unless the file is the one frozen at
-           its tag, this market/ folder holds the tag's commit's code (all but this file, the
-           command line, which gained --prereg after the freeze), and no --start, --end,
-           --symbols or labeller option is given. The run's manifest records the file's stamp
+           its tag, the modules that make labels and cascades (HELD: market/'s __init__,
+           archive, bars, cascade and msvol) are byte for byte the tag's commit's, this command
+           line, which gained --prereg after the freeze, and ews/prereg.py, which runs the check
+           (CLEAN), have no change beyond HEAD, and no --start, --end, --symbols or labeller
+           option is given. The run's manifest records the file's stamp, HEAD, both lists and
+           uv.lock's sha256
   cascade  the pooled list of the cascade candidates of --start..--end from the fetched files, as
            a run in <data dir>/labels/<run_id>/ holding the one table `cascades` (cascade.py).
            Every rule parameter is an option (--a, --merge-hours, ...) at the research pass's
            start value; the first --trailing-days only fill the trailing medians. Any day from
-           2024-01-01 needs --prereg, as labels does; with it the span runs from the file's
-           confirmatory day minus cascade.trailing_days to its end, with its symbols and [cascade]
+           2024-01-01 needs --prereg, as labels does; with it, it reads the days from
+           cascade.trailing_days + 1 before the file's confirmatory day to its end, as
+           cascade.recall reads, and lists only the windows that close from the confirmatory
+           day's 00:00 UTC on, with the file's symbols and [cascade]
   reports  the label-count and stability reports of the labels run --run, into <run>/reports/
            (reports.py). It labels the run's span again from the fetched files and refuses unless
            that gives back the run's own tables; the Parkinson variant reads the same klines.
@@ -55,10 +60,15 @@ from . import archive, bars, cascade, msvol, reports
 
 ARCHIVE = Path("harness") / "fixtures" / "archives" / "binance"
 CONFIRMATORY = date(2024, 1, 1)  # no label from here on but through the frozen market-labels-v1
-CODE = Path(__file__).resolve().parent  # the labelling code, held to the frozen tag's commit
-# but this command line, which gained --prereg after the freeze: with --prereg it only passes the
-# file's span, symbols and parameters to the modules the check holds
-CLI = (Path(__file__).name,)
+SRC = Path(__file__).resolve().parents[1]  # tipping_point/, whose files --prereg checks
+# Held to their blobs at the frozen tag's commit: every module of market/ that _labels and _cascade
+# reach, and the package's __init__, which importing any of them runs (test_confirmatory holds the
+# list to their imports). Other files of market/ may change and new ones may come: no run reads them
+HELD = tuple(f"market/{name}.py" for name in ("__init__", "archive", "bars", "cascade", "msvol"))
+# Held to HEAD, which the manifest records: this command line, which gained --prereg after the
+# freeze and with it only passes the file's span, symbols and parameters to the held modules, and
+# the module that runs the checks
+CLEAN = ("market/__main__.py", "ews/prereg.py")
 SPAN = ("start", "end", "symbols")  # the options --prereg takes from the file instead
 DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
 BAD = ("refused", "failed", "unreadable")  # the fetch statuses that make it exit 1
@@ -149,9 +159,10 @@ def _fetch(args: argparse.Namespace) -> int:
 
 
 def _settings(args: argparse.Namespace, section: str, kind: type) -> dict[str, Any]:
-    """The run's start, end, symbols and Params (`kind`, the file's table `section`) and what its
-    manifest records of the prereg: from the command line before the confirmatory span, or all
-    from the frozen file --prereg names. Raises PreregError for what it refuses."""
+    """The run's start, end, symbols and Params (`kind`, the file's table `section`), the first bar
+    whose windows a cascade run lists (`since`), and what its manifest records of the prereg: from
+    the command line before the confirmatory span, or all from the frozen file --prereg names.
+    Raises PreregError for what it refuses."""
     names = [f.name for f in dataclasses.fields(kind)]
     if args.prereg is None:
         if args.start is None or args.end is None:
@@ -168,6 +179,7 @@ def _settings(args: argparse.Namespace, section: str, kind: type) -> dict[str, A
             "end": args.end,
             "symbols": list(args.symbols or archive.SYMBOLS),
             "params": dataclasses.replace(kind(), **given),
+            "since": 0,
             "record": {},
         }
     given = [n for n in (*SPAN, *names) if getattr(args, n) is not None]
@@ -180,23 +192,34 @@ def _settings(args: argparse.Namespace, section: str, kind: type) -> dict[str, A
     if pre.doc["data"]["domain"] != prereg.MARKET_LABELS:
         raise prereg.PreregError(f"{args.prereg} is not a {prereg.MARKET_LABELS} file")
     ref = prereg.frozen(pre)
-    code = prereg.code_check(pre, ref, CODE, skip=CLI)
+    code = prereg.code_check(pre, ref, SRC, HELD, CLEAN)
     if code["changed"]:
         raise prereg.PreregError(
-            f"{code['path']} differs from {ref.tag}'s commit {ref.commit[:12]} in "
+            f"these files differ from {ref.tag}'s commit {ref.commit[:12]}: "
             + ", ".join(code["changed"])
-            + ": the labels are made from the tagged commit's code"
+            + "; the labels and cascades are made from the tagged commit's code"
+        )
+    if code["uncommitted"]:
+        raise prereg.PreregError(
+            "changes not committed in "
+            + ", ".join(code["uncommitted"])
+            + ": commit them, so that the manifest's code.head pins what ran"
         )
     params = kind(**pre.doc[section])
     span = pre.doc["data"]["span"]
-    start = span["start"]
-    if section == "cascade":  # the list covers the confirmatory days; the first fill the medians
-        start = span["confirmatory"] - timedelta(days=params.trailing_days)
+    start, since = span["start"], 0
+    if section == "cascade":
+        # As cascade.recall reads: a day more than the trailing days early, so that the windows
+        # closing from the confirmatory day's 00:00 on all have their history, and only those are
+        # listed, so that no earlier candidate enters the list or takes one of its candidates in
+        start = span["confirmatory"] - timedelta(days=params.trailing_days + 1)
+        since = (span["confirmatory"] - start).days * bars.DAY_BARS
     return {
         "start": start,
         "end": span["end"],
         "symbols": list(pre.doc["data"]["symbols"]),
         "params": params,
+        "since": since,
         "record": {"prereg": prereg.stamp(pre, ref), "code": code},
     }
 
@@ -256,7 +279,7 @@ def _cascade(args: argparse.Namespace) -> int:
             days,
             *(span.columns[(symbol, kind)] for kind in archive.KINDS),
         )
-        found[symbol], windows = cascade.candidates(bar, params)
+        found[symbol], windows = cascade.candidates(bar, params, got["since"])
         checks[symbol] |= windows | {"candidates": len(found[symbol])}
     rows = cascade.pool(found, params)
     per_symbol = Counter(row["symbol"] for row in rows)

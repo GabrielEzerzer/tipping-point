@@ -5,6 +5,9 @@ freeze    refuse a file with placeholders, or one that is untracked or differs f
           the commit prereg/<id>-v<k> (an annotated tag: it carries its own timestamp)
 frozen    the file's sha256 must equal that of the blob at its tag; scoring refuses otherwise
 stamp     what a result's manifest records: the prereg's id, version, sha256, tag and commit
+code_check  what a run reading a frozen file records of its code and refuses on: the files that
+          make its output held to the frozen commit, the others it runs held to HEAD, and the
+          sha256 of uv.lock
 begin_result  <data dir>/ews/<run_id>/ and its manifest.json (stamped, with the resume key a
           scoring must share to carry the folder on after a crash), before anything is scored
 save_part a finished unit of a scoring (a checkpoint's pass, a probe) in the folder's parts/, which
@@ -972,26 +975,46 @@ def stamp(prereg: Prereg, freeze_ref: Frozen) -> dict[str, Any]:
 
 
 def code_check(
-    prereg: Prereg, freeze_ref: Frozen, code: Path, skip: Sequence[str] = ()
+    prereg: Prereg, freeze_ref: Frozen, src: Path, held: Sequence[str], clean: Sequence[str]
 ) -> dict[str, Any]:
-    """The checkout's HEAD and the files of the folder `code`, but those named in `skip`, that
-    differ from the frozen commit: tracked files `git diff` names and untracked files git would
-    add. A run that reads a frozen file refuses unless `changed` is empty, which is how it runs
-    "from the tagged commit" without checking the tag out."""
+    """What a run that reads a frozen file records of the code it runs, as paths in the repository:
+    the files `held` (relative to the folder `src`), which make its output, and `clean`, the
+    others it runs, such as its command line. It refuses unless `changed` and `uncommitted` are
+    empty: every held file must be its blob at the frozen commit and every clean one its blob at
+    HEAD, which `head` then pins. That is how it runs "from the tagged commit" without checking
+    the tag out. Files beside these, new ones included, are not checked, since the run reads none
+    of them. The record also holds the sha256 of the repository's uv.lock, which pins the
+    libraries."""
     root = repo_root(prereg.path)
     try:
-        relative = Path(code).resolve().relative_to(root.resolve()).as_posix()
+        base = Path(src).resolve().relative_to(root.resolve()).as_posix()
     except ValueError as exc:
-        raise PreregError(f"{code} is not inside {root}, where {prereg.name} is frozen") from exc
-    spec = ["--", relative, *(f":(exclude){relative}/{name}" for name in skip)]
-    diff = _git(root, "diff", "--name-only", freeze_ref.commit, *spec)
-    new = _git(root, "ls-files", "--others", "--exclude-standard", *spec)
+        raise PreregError(f"{src} is not inside {root}, where {prereg.name} is frozen") from exc
+    lock = root / "uv.lock"
+    if not lock.is_file():
+        raise PreregError(f"no uv.lock in {root}: the run records its sha256 to pin the libraries")
+    held_paths = [f"{base}/{name}" for name in held]
+    clean_paths = [f"{base}/{name}" for name in clean]
     return {
         "head": _git(root, "rev-parse", "HEAD"),
-        "path": relative,
-        "skipped": list(skip),
-        "changed": [*diff.splitlines(), *new.splitlines()],
+        "held": held_paths,
+        "clean": clean_paths,
+        "uv_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+        "changed": _not_at(root, freeze_ref.commit, held_paths),
+        "uncommitted": _not_at(root, "HEAD", clean_paths),
     }
+
+
+def _not_at(root: Path, commit: str, paths: Sequence[str]) -> list[str]:
+    """Those of `paths` (relative to `root`) whose file in the working tree is not their blob at
+    `commit`. Each file's bytes are read and hashed as `git add` would store them, so no stat the
+    index caches can hide an edit, and git's line-end rule applies: a file checked out with CRLF
+    is still its LF blob. A path missing from either side is not at the commit."""
+    listed = _git(root, "ls-tree", "-z", commit, "--", *paths).split("\0")
+    blobs = {path: meta.split()[2] for meta, _, path in (e.partition("\t") for e in listed if e)}
+    present = [p for p in paths if (root / p).is_file()]
+    local = dict(zip(present, _git(root, "hash-object", "--", *present).split(), strict=True))
+    return [p for p in paths if p not in local or local[p] != blobs.get(p)]
 
 
 def trials_path(data_dir: Path) -> Path:
