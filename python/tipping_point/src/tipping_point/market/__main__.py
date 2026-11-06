@@ -9,13 +9,23 @@
   labels   the regime labels of --start..--end from the fetched files (--archive, same default),
            as a run in <data dir>/labels/<run_id>/. Every labeller parameter is an option
            (--d-min, --enter, ...) whose default is the research pass's start value (#29).
-           Refuses any day from 2024-01-01: the confirmatory labels wait for the frozen
-           market-labels-v1 pre-registration (#29 S5)
+           Any day from 2024-01-01 is the confirmatory span, which only --prereg opens:
+           --prereg paper/prereg/market-labels-v1.toml takes the span, the symbols and every
+           labeller parameter from that file, and refuses unless the file is the one frozen at
+           its tag, the modules that make labels and cascades (HELD: market/'s __init__,
+           archive, bars, cascade and msvol) are byte for byte the tag's commit's, this command
+           line, which gained --prereg after the freeze, and ews/prereg.py, which runs the check
+           (CLEAN), have no change beyond HEAD, and no --start, --end, --symbols or labeller
+           option is given. The run's manifest records the file's stamp, HEAD, both lists and
+           uv.lock's sha256
   cascade  the pooled list of the cascade candidates of --start..--end from the fetched files, as
            a run in <data dir>/labels/<run_id>/ holding the one table `cascades` (cascade.py).
            Every rule parameter is an option (--a, --merge-hours, ...) at the research pass's
-           start value; the first --trailing-days only fill the trailing medians. Refuses any day
-           from 2024-01-01, as labels does
+           start value; the first --trailing-days only fill the trailing medians. Any day from
+           2024-01-01 needs --prereg, as labels does; with it, it reads the days from
+           cascade.trailing_days + 1 before the file's confirmatory day to its end, as
+           cascade.recall reads, and lists only the windows that close from the confirmatory
+           day's 00:00 UTC on, with the file's symbols and [cascade]
   reports  the label-count and stability reports of the labels run --run, into <run>/reports/
            (reports.py). It labels the run's span again from the fetched files and refuses unless
            that gives back the run's own tables; the Parkinson variant reads the same klines.
@@ -53,7 +63,7 @@ import shlex
 import sys
 from collections import Counter
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -61,10 +71,21 @@ import numpy as np
 import pyarrow as pa
 
 from .. import engine
+from ..ews import prereg
 from . import archive, bars, book, cascade, msvol, reports
 
 ARCHIVE = Path("harness") / "fixtures" / "archives" / "binance"
-CONFIRMATORY = date(2024, 1, 1)  # no label from here on until market-labels-v1 is frozen
+CONFIRMATORY = date(2024, 1, 1)  # no label from here on but through the frozen market-labels-v1
+SRC = Path(__file__).resolve().parents[1]  # tipping_point/, whose files --prereg checks
+# Held to their blobs at the frozen tag's commit: every module of market/ that _labels and _cascade
+# reach, and the package's __init__, which importing any of them runs (test_confirmatory holds the
+# list to their imports). Other files of market/ may change and new ones may come: no run reads them
+HELD = tuple(f"market/{name}.py" for name in ("__init__", "archive", "bars", "cascade", "msvol"))
+# Held to HEAD, which the manifest records: this command line, which gained --prereg after the
+# freeze and with it only passes the file's span, symbols and parameters to the held modules, and
+# the module that runs the checks
+CLEAN = ("market/__main__.py", "ews/prereg.py")
+SPAN = ("start", "end", "symbols")  # the options --prereg takes from the file instead
 DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
 BAD = ("refused", "failed", "unreadable")  # the fetch statuses that make it exit 1
 STORE = Path("target") / "release" / ("store.exe" if sys.platform == "win32" else "store")
@@ -74,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return args.command(args)
-    except (archive.ArchiveError, book.BookError) as exc:
+    except (archive.ArchiveError, book.BookError, prereg.PreregError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -84,10 +105,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
     sub = parser.add_subparsers(required=True)
 
-    def span(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--start", type=date.fromisoformat, required=True, help="first UTC day")
-        p.add_argument("--end", type=date.fromisoformat, required=True, help="last UTC day")
-        p.add_argument("--symbols", nargs="+", default=list(archive.SYMBOLS))
+    def span(p: argparse.ArgumentParser, required: bool = True) -> None:
+        # labels and cascade leave them None when not given, which --prereg requires
+        p.add_argument("--start", type=date.fromisoformat, required=required, help="first UTC day")
+        p.add_argument("--end", type=date.fromisoformat, required=required, help="last UTC day")
+        p.add_argument("--symbols", nargs="+", default=list(archive.SYMBOLS) if required else None)
+
+    def labelling(p: argparse.ArgumentParser, params: type, tag: str) -> None:
+        span(p, required=False)
+        p.add_argument("--archive", type=Path, default=ARCHIVE)
+        p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+        p.add_argument("--tag", help=f"the run id's tag (default {tag}-<start>-<end>)")
+        p.add_argument(
+            "--prereg",
+            type=Path,
+            help=f"the frozen market-labels file, which alone opens days from {CONFIRMATORY}",
+        )
+        for field in dataclasses.fields(params):
+            flag = "--" + field.name.replace("_", "-")
+            p.add_argument(flag, type=type(field.default), help=f"default {field.default}")
 
     p = sub.add_parser("fetch", help="download and verify a span's archive files")
     span(p)
@@ -95,23 +131,11 @@ def _parser() -> argparse.ArgumentParser:
     p.set_defaults(command=_fetch)
 
     p = sub.add_parser("labels", help="the regime labels of a span, as a labels run")
-    span(p)
-    p.add_argument("--archive", type=Path, default=ARCHIVE)
-    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
-    p.add_argument("--tag", help="the run id's tag (default binance-<start>-<end>)")
-    for field in dataclasses.fields(msvol.Params):
-        flag = "--" + field.name.replace("_", "-")
-        p.add_argument(flag, type=type(field.default), default=field.default)
+    labelling(p, msvol.Params, "binance")
     p.set_defaults(command=_labels)
 
     p = sub.add_parser("cascade", help="the pooled cascade list of a span, as a run")
-    span(p)
-    p.add_argument("--archive", type=Path, default=ARCHIVE)
-    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
-    p.add_argument("--tag", help="the run id's tag (default cascades-<start>-<end>)")
-    for field in dataclasses.fields(cascade.Params):
-        flag = "--" + field.name.replace("_", "-")
-        p.add_argument(flag, type=type(field.default), default=field.default)
+    labelling(p, cascade.Params, "cascades")
     p.set_defaults(command=_cascade)
 
     p = sub.add_parser("reports", help="the label-count and stability reports of a labels run")
@@ -190,17 +214,76 @@ def _fetch(args: argparse.Namespace) -> int:
     return 1 if bad else 0
 
 
-def _labels(args: argparse.Namespace) -> int:
-    if args.end >= CONFIRMATORY:
-        print(
-            f"error: labels end on {CONFIRMATORY.year - 1}-12-31: days from {CONFIRMATORY} are "
-            "the confirmatory span, closed until market-labels-v1 is frozen (#29 S5)",
-            file=sys.stderr,
+def _settings(args: argparse.Namespace, section: str, kind: type) -> dict[str, Any]:
+    """The run's start, end, symbols and Params (`kind`, the file's table `section`), the first bar
+    whose windows a cascade run lists (`since`), and what its manifest records of the prereg: from
+    the command line before the confirmatory span, or all from the frozen file --prereg names.
+    Raises PreregError for what it refuses."""
+    names = [f.name for f in dataclasses.fields(kind)]
+    if args.prereg is None:
+        if args.start is None or args.end is None:
+            raise prereg.PreregError("--start and --end are required without --prereg")
+        if args.end >= CONFIRMATORY:
+            raise prereg.PreregError(
+                f"days from {CONFIRMATORY} are the confirmatory span, which only --prereg "
+                "paper/prereg/market-labels-v1.toml opens, with the file's own span and "
+                "parameters (#29)"
+            )
+        given = {n: getattr(args, n) for n in names if getattr(args, n) is not None}
+        return {
+            "start": args.start,
+            "end": args.end,
+            "symbols": list(args.symbols or archive.SYMBOLS),
+            "params": dataclasses.replace(kind(), **given),
+            "since": 0,
+            "record": {},
+        }
+    given = [n for n in (*SPAN, *names) if getattr(args, n) is not None]
+    if given:
+        flags = ", ".join("--" + n.replace("_", "-") for n in given)
+        raise prereg.PreregError(
+            f"--prereg takes the span, the symbols and every parameter from the file: drop {flags}"
         )
-        return 1
-    params = msvol.Params(
-        **{f.name: getattr(args, f.name) for f in dataclasses.fields(msvol.Params)}
-    )
+    pre = prereg.load(args.prereg)
+    if pre.doc["data"]["domain"] != prereg.MARKET_LABELS:
+        raise prereg.PreregError(f"{args.prereg} is not a {prereg.MARKET_LABELS} file")
+    ref = prereg.frozen(pre)
+    code = prereg.code_check(pre, ref, SRC, HELD, CLEAN)
+    if code["changed"]:
+        raise prereg.PreregError(
+            f"these files differ from {ref.tag}'s commit {ref.commit[:12]}: "
+            + ", ".join(code["changed"])
+            + "; the labels and cascades are made from the tagged commit's code"
+        )
+    if code["uncommitted"]:
+        raise prereg.PreregError(
+            "changes not committed in "
+            + ", ".join(code["uncommitted"])
+            + ": commit them, so that the manifest's code.head pins what ran"
+        )
+    params = kind(**pre.doc[section])
+    span = pre.doc["data"]["span"]
+    start, since = span["start"], 0
+    if section == "cascade":
+        # As cascade.recall reads: a day more than the trailing days early, so that the windows
+        # closing from the confirmatory day's 00:00 on all have their history, and only those are
+        # listed, so that no earlier candidate enters the list or takes one of its candidates in
+        start = span["confirmatory"] - timedelta(days=params.trailing_days + 1)
+        since = (span["confirmatory"] - start).days * bars.DAY_BARS
+    return {
+        "start": start,
+        "end": span["end"],
+        "symbols": list(pre.doc["data"]["symbols"]),
+        "params": params,
+        "since": since,
+        "record": {"prereg": prereg.stamp(pre, ref), "code": code},
+    }
+
+
+def _labels(args: argparse.Namespace) -> int:
+    got = _settings(args, "labeller", msvol.Params)
+    args.start, args.end, args.symbols = got["start"], got["end"], got["symbols"]
+    params = got["params"]
     span = archive.collect(args.symbols, args.start, args.end, args.archive)
     days = (args.end - args.start).days + 1
     series, checks = {}, {}
@@ -217,6 +300,7 @@ def _labels(args: argparse.Namespace) -> int:
         "symbols": list(args.symbols),
         "bars": "5-minute UTC grid; rv = Garman-Klass variance summed over 1-minute klines",
         "labeller": dataclasses.asdict(params),
+        **got["record"],
     }
     tag = args.tag or f"binance-{args.start:%Y%m%d}-{args.end:%Y%m%d}"
     found = msvol.tables(series)
@@ -238,16 +322,9 @@ def _labels(args: argparse.Namespace) -> int:
 
 
 def _cascade(args: argparse.Namespace) -> int:
-    if args.end >= CONFIRMATORY:
-        print(
-            f"error: cascades end on {CONFIRMATORY.year - 1}-12-31: days from {CONFIRMATORY} are "
-            "the confirmatory span, closed until market-labels-v1 is frozen (#29 S5)",
-            file=sys.stderr,
-        )
-        return 1
-    params = cascade.Params(
-        **{f.name: getattr(args, f.name) for f in dataclasses.fields(cascade.Params)}
-    )
+    got = _settings(args, "cascade", cascade.Params)
+    args.start, args.end, args.symbols = got["start"], got["end"], got["symbols"]
+    params = got["params"]
     span = archive.collect(args.symbols, args.start, args.end, args.archive)
     days = (args.end - args.start).days + 1
     found: dict[str, list[dict[str, Any]]] = {}
@@ -258,7 +335,7 @@ def _cascade(args: argparse.Namespace) -> int:
             days,
             *(span.columns[(symbol, kind)] for kind in archive.KINDS),
         )
-        found[symbol], windows = cascade.candidates(bar, params)
+        found[symbol], windows = cascade.candidates(bar, params, got["since"])
         checks[symbol] |= windows | {"candidates": len(found[symbol])}
     rows = cascade.pool(found, params)
     per_symbol = Counter(row["symbol"] for row in rows)
@@ -270,6 +347,7 @@ def _cascade(args: argparse.Namespace) -> int:
         "end": args.end.isoformat(),
         "symbols": list(args.symbols),
         "cascade": dataclasses.asdict(params),
+        **got["record"],
     }
     run_dir = msvol.write_run(
         args.data_dir,
