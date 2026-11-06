@@ -35,7 +35,7 @@ HORIZONS = (0, 3, 6, 12, 24)
 PATHS = 30  # about 30 paths bring the floor's standard error near 0.017 (#111)
 # Per minute, from harness/market_garch.py on 2023-01-01..2023-12-31 (the report garch of labels
 # run 20261106T182828Z-binance-20220701-20231231-dmin36), recorded in market-labels-v1's
-# disclosure as the pilot fit; #30's pre-registration chooses its floor (#29 S5)
+# disclosure as the pilot fit; #30's pre-registration chooses the floor (#29 S5)
 PILOT_GARCH = {
     "BTCUSDT": nulls.Garch(
         8.651445052105347e-11, 0.07110265726317705, 0.9288274749829264, 5.085328354482213
