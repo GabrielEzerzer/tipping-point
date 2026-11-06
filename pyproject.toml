@@ -35,9 +35,9 @@ include = ["python", "harness", "notebooks"]
 exclude = ["**/.venv", "harness/out", "harness/tests/fixtures"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
-extraPaths = ["harness"]
+extraPaths = ["harness", "python/tipping_point/tests/fixtures"]
 
 [tool.pytest.ini_options]
 testpaths = ["python", "harness/tests"]
-pythonpath = ["harness"]
+pythonpath = ["harness", "python/tipping_point/tests/fixtures"]
 addopts = ["--import-mode=importlib"]
