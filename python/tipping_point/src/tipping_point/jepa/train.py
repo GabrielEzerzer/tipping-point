@@ -1,12 +1,17 @@
-"""The training loop, generic over the bursts it is handed: seeding, precision per device,
-monitors, checkpoints and resume, the run manifest and the GPU-hour ledger.
+"""The training loop, generic over domains: seeding, precision per device, monitors, checkpoints
+and resume, the run manifest and the GPU-hour ledger. A domain (the Domain protocol) brings the
+model, its batches and its readouts: IsingDomain here, the market's in minutes.Domain (#30), chosen
+by the config's type. The Ising path is held bit for bit to the trainer before the split by a
+golden CPU run (tests/jepa/test_golden.py).
 
 <data dir>/jepa/<run_id>/
   manifest.json                     written once at the start (#22's shape)
-  train/<first_step:020>.parquet    one row per (step, L): loss terms, learning rate, weight
-                                    decay, EMA momentum, gradient norm, loss scale
-  monitor/<first_step:020>.parquet  one row per (evaluation, L), from step 0: validation error,
-                                    feature spreads, effective rank, per-dimension std
+  train/<first_step:020>.parquet    one row per (step, L), per step for markets: loss terms,
+                                    learning rate, weight decay, EMA momentum, gradient norm,
+                                    loss scale
+  monitor/<first_step:020>.parquet  one row per (evaluation, L), per evaluation for markets, from
+                                    step 0: validation error, feature spreads, effective rank,
+                                    per-dimension std
   ckpt/step_0000000.pt              the untrained twin with its PCA basis, saved before any update
   checkpoint.pt                     the latest resumable state, replaced atomically; removed at a
                                     clean end
@@ -38,11 +43,12 @@ import os
 import platform
 import time
 import tomllib
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import pyarrow as pa
@@ -51,7 +57,7 @@ import torch
 
 from .. import __version__, engine
 from ..ising import io
-from . import monitor, objective
+from . import minutes, monitor, objective
 from .data import Dataset, reload
 from .lattice import (
     PATCH,
@@ -74,38 +80,46 @@ TABLES = ("train", "monitor")
 TWIN = Path("ckpt") / f"step_{0:07d}.pt"
 FINAL = Path("final.pt")
 LEDGER = "gpu_hours.jsonl"
-TRAIN_SCHEMA = pa.schema(
-    [("step", pa.int64()), ("L", pa.int16())]
-    + [
-        (name, pa.float64())
-        for name in (
-            "loss",
-            "prediction",
-            "variance",
-            "covariance",
-            "lr",
-            "weight_decay",
-            "momentum",
-            "grad_norm",
-            "scale",
-        )
-    ]
-)
-MONITOR_SCHEMA = pa.schema(
-    [("step", pa.int64()), ("L", pa.int16())]
-    + [
-        (name, pa.float64())
-        for name in (
-            "val_error",
-            "token_std",
-            "dim_std_min",
-            "spatial_std",
-            "pooled_std",
-            "effective_rank",
-        )
-    ]
-    + [("dim_std", pa.list_(pa.float64())), ("fired", pa.bool_())]
-)
+
+
+def schemas(keys: Sequence[tuple[str, pa.DataType]]) -> tuple[pa.Schema, pa.Schema]:
+    """The train and monitor tables of a domain whose rows are keyed by step and `keys`."""
+    train = pa.schema(
+        [("step", pa.int64()), *keys]
+        + [
+            (name, pa.float64())
+            for name in (
+                "loss",
+                "prediction",
+                "variance",
+                "covariance",
+                "lr",
+                "weight_decay",
+                "momentum",
+                "grad_norm",
+                "scale",
+            )
+        ]
+    )
+    monitor = pa.schema(
+        [("step", pa.int64()), *keys]
+        + [
+            (name, pa.float64())
+            for name in (
+                "val_error",
+                "token_std",
+                "dim_std_min",
+                "spatial_std",
+                "pooled_std",
+                "effective_rank",
+            )
+        ]
+        + [("dim_std", pa.list_(pa.float64())), ("fired", pa.bool_())]
+    )
+    return train, monitor
+
+
+TRAIN_SCHEMA, MONITOR_SCHEMA = schemas([("L", pa.int16())])
 
 
 @dataclass(frozen=True)
@@ -209,15 +223,16 @@ def sha256(raw: bytes) -> str:
 
 
 @dataclass
-class Checkpoint:
-    """A frozen model, as readouts load it."""
+class Checkpoint[C = Config, M = Jepa]:
+    """A frozen model, as readouts load it: a lattice one (`load_model`) or a market one
+    (`load_market`)."""
 
     path: Path
     sha256: str
     run_id: str
     step: int
-    config: Config
-    model: Jepa
+    config: C
+    model: M
     pca: Pca | None
 
     @property
@@ -225,7 +240,14 @@ class Checkpoint:
         return self.step == 0
 
 
-def save_model(path: Path, run_id: str, step: int, config: Config, model: Jepa, pca: Pca) -> None:
+def save_model(
+    path: Path,
+    run_id: str,
+    step: int,
+    config: Config | minutes.Config,
+    model: torch.nn.Module,
+    pca: Pca,
+) -> None:
     record = {
         "format": 1,
         "run_id": run_id,
@@ -238,19 +260,41 @@ def save_model(path: Path, run_id: str, step: int, config: Config, model: Jepa, 
     io.write_file(path, lambda f: torch.save(record, f), replace=True)
 
 
-def load_model(path: Path, device: str | torch.device = "cpu") -> Checkpoint:
-    """A saved model (final.pt, the step-0 twin) in eval mode on `device`, with its file's
-    sha256 (read once, so the hash is of the bytes loaded)."""
+def _load(path: Path) -> tuple[dict[str, Any], bytes]:
     raw = Path(path).read_bytes()
-    record = torch.load(BytesIO(raw), weights_only=True, map_location="cpu")
-    config = Config.from_json(record["config"])
-    model = Jepa(config.model)
+    return torch.load(BytesIO(raw), weights_only=True, map_location="cpu"), raw
+
+
+def _checkpoint[C, M: torch.nn.Module](
+    path: Path, raw: bytes, record: dict[str, Any], config: C, model: M, device: str | torch.device
+) -> Checkpoint[C, M]:
     model.load_state_dict(record["model"])
     model.to(device).eval()
     pca = Pca.from_record(record["pca"]) if record.get("pca") is not None else None
     return Checkpoint(
         Path(path), sha256(raw), record["run_id"], int(record["step"]), config, model, pca
     )
+
+
+def load_model(path: Path, device: str | torch.device = "cpu") -> Checkpoint[Config, Jepa]:
+    """A saved lattice model (final.pt, the step-0 twin) in eval mode on `device`, with its file's
+    sha256 (read once, so the hash is of the bytes loaded)."""
+    record, raw = _load(path)
+    if record["config"].get("domain") == "market":
+        raise ValueError(f"{path} is a market model: load it with load_market")
+    config = Config.from_json(record["config"])
+    return _checkpoint(path, raw, record, config, Jepa(config.model), device)
+
+
+def load_market(
+    path: Path, device: str | torch.device = "cpu"
+) -> Checkpoint[minutes.Config, minutes.MarketJepa]:
+    """A saved market model, as `load_model` loads a lattice one."""
+    record, raw = _load(path)
+    if record["config"].get("domain") != "market":
+        raise ValueError(f"{path} is a lattice model: load it with load_model")
+    config = minutes.Config.from_json(record["config"])
+    return _checkpoint(path, raw, record, config, minutes.MarketJepa(config.model), device)
 
 
 # ---------------------------------------------------------------- records
@@ -311,18 +355,169 @@ def budget(root: Path, quota: float) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------- the loop
 
 
+class Domain(Protocol):
+    """One domain's half of a training: its model (context and target encoders and a predictor,
+    lattice.Jepa's interface) and how it is fed and judged. The loop owns everything else."""
+
+    name: str  # the manifest's domain
+
+    @property
+    def keys(self) -> Sequence[tuple[str, pa.DataType]]: ...  # columns a group adds after step
+
+    model: Any
+
+    def groups(self) -> list[Any]: ...  # one micro-batch per group each update
+
+    def key(self, group: Any) -> dict[str, Any]: ...  # a group's values for `keys`
+
+    def monitor_batches(self, gen: torch.Generator) -> dict[Any, dict[str, torch.Tensor]]: ...
+
+    def sample(
+        self, group: Any, data_gen: torch.Generator, aug_gen: torch.Generator
+    ) -> dict[str, torch.Tensor]: ...
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Under autocast: pred, target, hidden (prediction_loss) and features, keep (vicreg)."""
+        ...
+
+    def evaluate(self, batch: dict[str, torch.Tensor], /) -> dict[str, Any]:
+        """Autocast off, no gradient: val_error and monitor.spread's statistics."""
+        ...
+
+    def pca(self, gen: torch.Generator) -> Pca: ...
+
+    def params(self) -> dict[str, Any]: ...  # the manifest's params besides config and seeds
+
+    def check_resume(self, manifest: dict[str, Any]) -> None: ...
+
+
+class IsingDomain:
+    """Bursts of every size: a micro-batch per L of about `batch_sites` sites, frame pairs delta
+    apart, torus masks, D4 and roll augmentation."""
+
+    name = "jepa"
+    keys = (("L", pa.int16()),)
+
+    def __init__(
+        self, config: Config, data: Dataset, device: torch.device, seeds: dict[str, int]
+    ) -> None:
+        self.config, self.data, self.device = config, data, device
+        self.sizes = sorted(data.train)
+        model = Jepa(config.model)
+        model.initialise(torch.Generator().manual_seed(seeds["init"]))
+        self.model = model.to(device)
+        for L in self.sizes:  # drawn now: a mask with no context refuses the run before it starts
+            evaluation_masks(config, L)
+
+    def groups(self) -> list[int]:
+        return self.sizes
+
+    def key(self, group: int) -> dict[str, Any]:
+        return {"L": group}
+
+    def monitor_batches(self, gen: torch.Generator) -> dict[int, dict[str, torch.Tensor]]:
+        """A fixed validation batch per size: bursts, pairs and masks drawn once."""
+        batches = {}
+        for L in self.sizes:
+            count = self.config.monitor_frames
+            bursts = canonical(unpack_spins(self.data.val[L].sample(count, gen), L), 3)
+            context, target, delta = pairs(bursts, self.config.model.max_delta, gen)
+            hidden, keep = masks(count, L // PATCH, self.config.mask, gen, "cpu")
+            batch = {"context": context, "target": target, "delta": delta}
+            batches[L] = {
+                k: v.to(self.device) for k, v in (batch | {"hidden": hidden, "keep": keep}).items()
+            }
+        return batches
+
+    def sample(
+        self, group: int, data_gen: torch.Generator, aug_gen: torch.Generator
+    ) -> dict[str, torch.Tensor]:
+        cfg, L = self.config, group
+        packed = self.data.train[L].sample(cfg.batch(L), data_gen).to(self.device)
+        bursts = canonical(unpack_spins(packed, L), 3)
+        bursts = augment(bursts, aug_gen, cfg.d4, cfg.roll)
+        context, target, delta = pairs(bursts, cfg.model.max_delta, aug_gen)
+        hidden, keep = masks(len(bursts), L // PATCH, cfg.mask, aug_gen, self.device)
+        return {
+            "context": context,
+            "target": target,
+            "delta": delta,
+            "hidden": hidden,
+            "keep": keep,
+        }
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        targets = self.model.targets(batch["target"])
+        features, pred = self.model.predict(batch["context"], batch["keep"], batch["delta"])
+        return {
+            "pred": pred,
+            "target": targets,
+            "hidden": batch["hidden"],
+            "features": features,
+            "keep": batch["keep"],
+        }
+
+    def evaluate(self, b: dict[str, torch.Tensor]) -> dict[str, Any]:
+        targets = self.model.targets(b["target"])
+        _, pred = self.model.predict(b["context"], b["keep"], b["delta"])
+        error = float(objective.prediction_loss(pred, targets, b["hidden"]))
+        return {"val_error": error, **monitor.spread(self.model.context(b["context"]))}
+
+    def pca(self, gen: torch.Generator) -> Pca:
+        cfg = self.config
+        return fit_pca(
+            self.model,
+            self.data.train,
+            cfg.pca_frames,
+            cfg.pca_components,
+            gen,
+            self.device,
+            cfg.batch_sites,
+        )
+
+    def params(self) -> dict[str, Any]:
+        cfg, model = self.config, self.model
+        return {
+            "sizes": self.sizes,
+            "batches": {str(L): cfg.batch(L) for L in self.sizes},
+            "parameters": {
+                "encoder": parameters(model.context),
+                "predictor": parameters(model.predictor),
+            },
+            "receptive_field": model.context.receptive_field,
+        }
+
+    def check_resume(self, manifest: dict[str, Any]) -> None:
+        if self.sizes != manifest["params"]["sizes"]:
+            raise RuntimeError(
+                f"{manifest['run_id']} trained on sizes {manifest['params']['sizes']}"
+            )
+
+
+def domain(
+    config: Config | minutes.Config, data: Any, device: torch.device, seeds: dict[str, int]
+) -> Domain:
+    """The domain a config trains: a minutes.Config the market's, an Ising Config the lattice's."""
+    if isinstance(config, minutes.Config):
+        return minutes.Domain(config, data, device, seeds)
+    return IsingDomain(config, data, device, seeds)
+
+
 class _Trainer:
     def __init__(
-        self, run_dir: Path, run_id: str, config: Config, data: Dataset, device: torch.device
+        self,
+        run_dir: Path,
+        run_id: str,
+        config: Config | minutes.Config,
+        data: Any,
+        device: torch.device,
     ) -> None:
         self.run_dir, self.run_id, self.config, self.data = run_dir, run_id, config, data
         self.device = device
         self.amp = amp_dtype(device)
         self.seeds = seeds(config.seed)
-        self.sizes = sorted(data.train)
-        model = Jepa(config.model)
-        model.initialise(torch.Generator().manual_seed(self.seeds["init"]))
-        self.model = model.to(device)
+        self.domain = domain(config, data, device, self.seeds)
+        self.model = model = self.domain.model
         trainable = model.trainable()
         groups = [
             {"params": [p for p in trainable if p.ndim >= 2]},
@@ -336,9 +531,9 @@ class _Trainer:
         self.aug_gen = torch.Generator(device=device).manual_seed(self.seeds["augment"])
         self.detector = Detector(config.floors, config.patience)
         self.step = 0
-        for L in self.sizes:  # drawn now: a mask with no context refuses the run before it starts
-            evaluation_masks(config, L)
-        self.monitor_batches = self._monitor_batches()
+        gen = torch.Generator().manual_seed(self.seeds["monitor"])
+        self.monitor_batches = self.domain.monitor_batches(gen)
+        self.train_schema, self.monitor_schema = schemas(self.domain.keys)
         self.train_rows: list[dict[str, Any]] = []
         self.monitor_rows: list[dict[str, Any]] = []
         self.clock = time.time_ns()
@@ -348,53 +543,27 @@ class _Trainer:
             return contextlib.nullcontext()
         return torch.autocast(self.device.type, dtype=self.amp)
 
-    def _monitor_batches(self) -> dict[int, dict[str, torch.Tensor]]:
-        """A fixed validation batch per size: bursts, pairs and masks drawn once."""
-        gen = torch.Generator().manual_seed(self.seeds["monitor"])
-        batches = {}
-        for L in self.sizes:
-            count = self.config.monitor_frames
-            bursts = canonical(unpack_spins(self.data.val[L].sample(count, gen), L), 3)
-            context, target, delta = pairs(bursts, self.config.model.max_delta, gen)
-            hidden, keep = masks(count, L // PATCH, self.config.mask, gen, "cpu")
-            batch = {"context": context, "target": target, "delta": delta}
-            batches[L] = {
-                k: v.to(self.device) for k, v in (batch | {"hidden": hidden, "keep": keep}).items()
-            }
-        return batches
-
     def pca(self) -> Pca:
-        gen = torch.Generator().manual_seed(self.seeds["pca"])
-        cfg = self.config
-        return fit_pca(
-            self.model,
-            self.data.train,
-            cfg.pca_frames,
-            cfg.pca_components,
-            gen,
-            self.device,
-            cfg.batch_sites,
-        )
+        return self.domain.pca(torch.Generator().manual_seed(self.seeds["pca"]))
 
     @torch.no_grad()
     def evaluate(self) -> bool:
-        """Validation error and feature spreads per size, judged by the detector; returns whether
+        """Validation error and feature spreads per group, judged by the detector; returns whether
         the run has collapsed."""
         stats = {}
         with torch.autocast(self.device.type, enabled=False):
-            for L, b in self.monitor_batches.items():
-                targets = self.model.targets(b["target"])
-                _, pred = self.model.predict(b["context"], b["keep"], b["delta"])
-                error = float(objective.prediction_loss(pred, targets, b["hidden"]))
-                stats[L] = {"val_error": error, **monitor.spread(self.model.context(b["context"]))}
+            for group, b in self.monitor_batches.items():
+                stats[group] = self.domain.evaluate(b)
         self.detector.check(self.step, stats)
-        for L, s in stats.items():
-            row = {"step": self.step, "L": L, **s, "fired": bool(self.config.floors.broken(s))}
-            self.monitor_rows.append(row)
+        for group, s in stats.items():
+            fired = bool(self.config.floors.broken(s))
+            self.monitor_rows.append(
+                {"step": self.step, **self.domain.key(group), **s, "fired": fired}
+            )
         return self.detector.collapsed
 
     def update(self) -> None:
-        """One optimiser update over a micro-batch of every size."""
+        """One optimiser update over a micro-batch of every group."""
         cfg, u = self.config, self.step
         lr = objective.learning_rate(u, cfg.steps, cfg.lr, cfg.lr_final, cfg.warmup)
         wd = objective.cosine(u, cfg.steps, *cfg.weight_decay)
@@ -403,20 +572,16 @@ class _Trainer:
         self.optimizer.param_groups[0]["weight_decay"] = wd
         self.optimizer.zero_grad(set_to_none=True)
         terms = []
-        for L in self.sizes:
-            packed = self.data.train[L].sample(cfg.batch(L), self.data_gen).to(self.device)
-            bursts = canonical(unpack_spins(packed, L), 3)
-            bursts = augment(bursts, self.aug_gen, cfg.d4, cfg.roll)
-            context, target, delta = pairs(bursts, cfg.model.max_delta, self.aug_gen)
-            hidden, keep = masks(len(bursts), L // PATCH, cfg.mask, self.aug_gen, self.device)
+        groups = self.domain.groups()
+        for group in groups:
+            batch = self.domain.sample(group, self.data_gen, self.aug_gen)
             with self._autocast():
-                targets = self.model.targets(target)
-                features, pred = self.model.predict(context, keep, delta)
-            prediction = objective.prediction_loss(pred, targets, hidden)
-            variance, covariance = objective.vicreg(features, keep, cfg.var_gamma)
+                out = self.domain.forward(batch)
+            prediction = objective.prediction_loss(out["pred"], out["target"], out["hidden"])
+            variance, covariance = objective.vicreg(out["features"], out["keep"], cfg.var_gamma)
             loss = prediction + cfg.var_weight * variance + cfg.cov_weight * covariance
-            self.scaler.scale(loss / len(self.sizes)).backward()
-            terms.append((L, loss, prediction, variance, covariance))
+            self.scaler.scale(loss / len(groups)).backward()
+            terms.append((group, loss, prediction, variance, covariance))
         self.scaler.unscale_(self.optimizer)
         grads = [p.grad for p in self.model.trainable() if p.grad is not None]
         norm = float(torch.nn.utils.get_total_norm(grads))
@@ -426,11 +591,11 @@ class _Trainer:
         m = objective.momentum(u, cfg.steps, *cfg.ema)
         objective.ema(self.model.target, self.model.context, m)
         self.step += 1
-        for L, loss, prediction, variance, covariance in terms:
+        for group, loss, prediction, variance, covariance in terms:
             self.train_rows.append(
                 {
                     "step": self.step,
-                    "L": L,
+                    **self.domain.key(group),
                     "loss": loss.item(),
                     "prediction": prediction.item(),
                     "variance": variance.item(),
@@ -464,8 +629,8 @@ class _Trainer:
 
     def flush(self) -> None:
         for name, rows, schema in (
-            ("train", self.train_rows, TRAIN_SCHEMA),
-            ("monitor", self.monitor_rows, MONITOR_SCHEMA),
+            ("train", self.train_rows, self.train_schema),
+            ("monitor", self.monitor_rows, self.monitor_schema),
         ):
             if rows:
                 table = pa.Table.from_pylist(rows, schema=schema)
@@ -545,26 +710,16 @@ def _manifest(
     pilot: dict[str, Any] | None,
     prereg: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    dev, model, cfg = trainer.device, trainer.model, trainer.config
+    dev, cfg = trainer.device, trainer.config
     return {
         "format": 1,
-        "domain": "jepa",
+        "domain": trainer.domain.name,
         "run_id": trainer.run_id,
         "producer": {"name": "tipping_point.jepa", "version": __version__, **io.code_version()},
         "started_ns": time.time_ns(),
         "key": "step",
         "tables": list(TABLES),
-        "params": {
-            "config": cfg.to_json(),
-            "sizes": trainer.sizes,
-            "batches": {str(L): cfg.batch(L) for L in trainer.sizes},
-            "seeds": trainer.seeds,
-            "parameters": {
-                "encoder": parameters(model.context),
-                "predictor": parameters(model.predictor),
-            },
-            "receptive_field": model.context.receptive_field,
-        },
+        "params": {"config": cfg.to_json(), "seeds": trainer.seeds, **trainer.domain.params()},
         "data": trainer.data.sources,
         "pilot": pilot,
         "prereg": prereg,
@@ -588,8 +743,8 @@ def _manifest(
 
 
 def start(
-    config: Config,
-    data: Dataset,
+    config: Config | minutes.Config,
+    data: Any,
     root: Path,
     tag: str,
     device: str | None = None,
@@ -597,7 +752,8 @@ def start(
     prereg: dict[str, Any] | None = None,
 ) -> Path:
     """Create <root>/jepa/<run_id>/ with its manifest and the untrained twin, then train to the
-    end (or to a collapse, when the config stops on one)."""
+    end (or to a collapse, when the config stops on one). `data` is a data.Dataset for an Ising
+    Config, a days.Dataset for a minutes.Config."""
     dev = torch.device(device or default_device())
     flags = deterministic(dev)
     run_id = engine.run_id(tag)
@@ -611,10 +767,14 @@ def start(
     return run_dir
 
 
-def resume(run_dir: Path, data: Dataset | None = None, device: str | None = None) -> Path:
+def resume(run_dir: Path, data: Any = None, device: str | None = None) -> Path:
     """Continue a crashed or stopped training from its checkpoint, on the device and torch version
-    it started on. Without `data`, the bursts are reloaded from the runs the manifest names,
-    which must be byte for byte the ones it read (complete.json sha256)."""
+    it started on. Without `data`, Ising bursts are reloaded from the runs the manifest names,
+    which must be byte for byte the ones it read (complete.json sha256). A market training needs
+    its days handed back, and refuses any whose list or sha256 differ from the manifest's.
+
+    shortcut: market days are not reloaded from the manifest; add that once M2's Parquet source
+    exists."""
     run_dir = Path(run_dir)
     manifest = io.read_json(run_dir / "manifest.json")
     if (run_dir / "complete.json").exists():
@@ -626,11 +786,16 @@ def resume(run_dir: Path, data: Dataset | None = None, device: str | None = None
     if dev.type != env["device"] or gpu_name(dev) != env["gpu"]:
         raise RuntimeError(f"{run_dir.name} continues only on {env['device']} {env['gpu'] or ''}")
     deterministic(dev)
-    config = Config.from_json(manifest["params"]["config"])
-    data = data if data is not None else reload(run_dir.parents[1], manifest["data"])
-    if sorted(data.train) != manifest["params"]["sizes"]:
-        raise RuntimeError(f"{run_dir.name} trained on sizes {manifest['params']['sizes']}")
+    config: Config | minutes.Config
+    if manifest["domain"] == minutes.Domain.name:
+        config = minutes.Config.from_json(manifest["params"]["config"])
+        if data is None:
+            raise RuntimeError(f"{run_dir.name} is a market training: hand its days to resume")
+    else:
+        config = Config.from_json(manifest["params"]["config"])
+        data = data if data is not None else reload(run_dir.parents[1], manifest["data"])
     trainer = _Trainer(run_dir, manifest["run_id"], config, data, dev)
+    trainer.domain.check_resume(manifest)
     trainer.restore(torch.load(run_dir / "checkpoint.pt", weights_only=True, map_location="cpu"))
     io.discard_after(run_dir, trainer.step, TABLES)
     trainer.run()

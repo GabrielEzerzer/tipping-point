@@ -113,5 +113,6 @@ if __name__ == "__main__":
 
     with tempfile.TemporaryDirectory() as tmp:
         record = {"environment": environment(), "golden": compute(Path(tmp))}
-    OUT.write_text(json.dumps(record, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    text = json.dumps(record, indent=1, sort_keys=True) + "\n"
+    OUT.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {OUT}")

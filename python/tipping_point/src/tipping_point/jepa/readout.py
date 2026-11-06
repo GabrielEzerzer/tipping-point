@@ -115,7 +115,12 @@ def fit_pca(
         which = torch.randint(len(bursts), (per_size,), generator=gen)
         frame = torch.randint(bursts.frames, (per_size,), generator=gen)
         rows.append(embed(model, bursts.packed[which, frame], L, device, sites))
-    x = torch.cat(rows)
+    return basis(torch.cat(rows), k)
+
+
+def basis(x: Tensor, k: int) -> Pca:
+    """The first k principal components of embeddings x (frames, dim) float64, each signed so its
+    largest loading is positive."""
     mean = x.mean(0)
     _, s, vh = torch.linalg.svd(x - mean, full_matrices=False)
     components = vh[:k]
