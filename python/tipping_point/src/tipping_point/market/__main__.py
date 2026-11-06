@@ -30,9 +30,11 @@
            default target/release/store) and recorded in <out>/<range>/manifest.json (--out,
            default <data dir>/bybit-book); its zip is deleted, and so are its 100 ms samples
            unless --keep-samples. --reduce "<cmd> <args>" runs per day on the samples' Parquet
-           (its path appended) before they go (book.py). A re-run skips the days imported
-           already; a day that fails is recorded and the range goes on; exit 1 when one failed
-           or was missing
+           (its path appended) before they go (book.py); its last line of output, when a JSON
+           object, is kept as the day's `reduced` ("python -m tipping_point.book" writes the
+           day's 1-second features under <out>/<range>/features/). A re-run skips the days
+           imported already; a day that fails is recorded and the range goes on; exit 1 when
+           one failed or was missing
 
 The floor (reports.floor) needs the feature pipelines, which no module here may import:
 harness/market_floor.py runs it. The data dir is --data-dir, else the engine's own ($TP_DATA_DIR,

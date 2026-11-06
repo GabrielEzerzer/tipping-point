@@ -12,7 +12,10 @@ Per day, `fetch` downloads the zip into `<range>/staging/`, checks it, has the e
 `store import` (engine/src/store/import.rs) write the day's `book_samples` Parquet (20 levels a
 side on the 100 ms grid), deletes the zip, runs the `reduce` command if one is given (its argv
 with the Parquet's path appended; a non-zero exit fails the day), records the day and deletes the
-samples. With `keep_samples`, the samples are imported into `<range>/samples/` and kept instead.
+samples. When the reducer's last line of output is a JSON object, the manifest keeps it as the day's
+`reduced` (tipping_point.book prints its feature file's path, relative to the range folder, its
+SHA-256, rows and gap seconds). With `keep_samples`, the samples are imported into
+`<range>/samples/` and kept instead.
 At most one day's zip and samples exist at a time; the manifest records each day's peak
 (`peak_bytes`: the zip and the run on disk together, after the import).
 
@@ -24,11 +27,12 @@ member, fails its CRC or holds a malformed record, and counts Bybit's `u` breaks
 zip's URL, bytes and SHA-256, the sample count, the samples' bytes and SHA-256, and the engine's
 whole integrity record, whether or not the samples are kept.
 
-A day already imported is skipped when it was imported with the same `reduce` command and, if
-this run keeps samples, its Parquet is present. A day that fails (network, a size or MD5
-mismatch, the engine or the reducer refusing it) is recorded with why and the range goes on; the
-next run tries it again, as it does a day the archive does not have (404, `missing`). The
-manifest is rewritten after every day, so a stopped run loses at most the day in hand.
+A day already imported is skipped when it was imported with the same `reduce` command, the file
+its `reduced` record names (if any) is present and, if this run keeps samples, its Parquet is
+present. A day that fails (network, a size or MD5 mismatch, the engine or the reducer refusing
+it) is recorded with why and the range goes on; the next run tries it again, as it does a day the
+archive does not have (404, `missing`). The manifest is rewritten after every day, so a stopped
+run loses at most the day in hand.
 
 The confirmatory range is refused unless `confirmatory` is set (#30 M7).
 """
@@ -186,10 +190,14 @@ def fetch(
 
 
 def _done(entry: dict[str, Any], where: Path, keep: bool, reduce: list[str] | None) -> bool:
-    """Whether a day recorded before needs nothing: imported with the same reducer and, when this
-    run keeps samples, with its Parquet still there."""
+    """Whether a day recorded before needs nothing: imported with the same reducer, with the file
+    its reducer reported still there and, when this run keeps samples, its Parquet still there."""
     kept = entry.get("parquet") and (where / entry["parquet"]).is_file()
-    return entry["status"] == "imported" and entry.get("reduce") == reduce and (kept or not keep)
+    reduced = entry.get("reduced")
+    named = reduced.get("path") if isinstance(reduced, dict) else None
+    output = named is None or (where / named).is_file()
+    same = entry["status"] == "imported" and entry.get("reduce") == reduce
+    return same and output and (kept or not keep)
 
 
 def _day(
@@ -243,6 +251,8 @@ def _day(
             if done.returncode != 0:
                 why = f"reduce exited {done.returncode}: {done.stderr.strip()[-2000:]}"
                 return {**entry, "status": "failed", "error": why}
+            if reported := _reported(done.stdout):
+                entry["reduced"] = reported
         return {**entry, "status": "imported"}
     except BookError as error:
         return {**entry, "status": "failed", "error": str(error)}
@@ -251,6 +261,16 @@ def _day(
         archive.with_name(archive.name + ".part").unlink(missing_ok=True)
         if run is not None and not keep:
             shutil.rmtree(run, ignore_errors=True)
+
+
+def _reported(stdout: str) -> dict[str, Any] | None:
+    """The reducer's record: its last line of output when that is a JSON object."""
+    lines = stdout.strip().splitlines()
+    try:
+        record = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def _download(address: str, archive: Path, open_url: Open) -> dict[str, Any] | None:
