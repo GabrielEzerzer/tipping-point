@@ -1,0 +1,115 @@
+# Pre-registration: the market regime and cascade labels (#29). Written from
+# TEMPLATE-market-labels.toml after the S5 pilot on 2022-07-01..2023-12-31. Every parameter is the
+# research pass's start value except labeller.d_min (12 to 36, inside the declared range),
+# cascade.b (0.025 to 0.03) and the null-stretch rule, which the owner chose after the pilot and
+# which lies outside the declared ranges; [disclosure] says what was seen and when. Units: bars are
+# 5-minute bars on the UTC grid, days are UTC days.
+
+id = "market-labels"
+version = 1
+supersedes = ""
+reason = ""
+question = "Which 5-minute bars of the BTC and ETH perpetuals on Binance are in a high-volatility regime, which of those regimes are events and which calm stretches are their controls, and when did a liquidation cascade happen, so that #30 can test early-warning signals against labels fixed before any confirmatory day is labelled?"
+
+[data]
+domain = "market-labels"
+symbols = ["BTCUSDT", "ETHUSDT"]   # Binance USD-M perpetuals
+
+# The labelled days are those from start + labeller.warmup_days. Days before confirmatory are the
+# pilot, on which the parameters were chosen; no label from confirmatory on is generated before
+# the freeze.
+[data.span]
+start = 2022-07-01       # first day read: the warm-up begins
+confirmatory = 2024-01-01
+end = 2026-09-30         # last day labelled
+
+[bars]
+estimator = "garman-klass"   # realised variance from the 1-minute klines' open, high, low, close
+missing = "a bar short of any of its five 1-minute klines, with no minute traded, or with a Garman-Klass variance of 0 is a missing observation: the filter carries its prediction without an update, and nothing is floored"
+
+# The regime labeller, field for field the options of `market labels` (market.msvol.Params).
+[labeller]
+warmup_days = 184        # the first fit comes after these days
+refit_days = 7           # refit at every 7th UTC midnight, counted from a Monday
+baseline_days = 28       # one of 14, 28, 56: the trailing median z is measured against
+start_low = 25.0         # the first fit starts mu at these percentiles of z
+start_high = 75.0
+start_p = 0.95           # and p00 = p11 = start_p
+tol = 1e-6               # EM stops at a relative log-likelihood gain below this
+max_iter = 200           # M-steps from the deterministic start
+max_iter_warm = 50       # M-steps from a warm start
+min_sigma = 0.05         # degeneracy guard: a sigma below this keeps the previous theta
+min_share = 0.02         # degeneracy guard: a state's smoothed share below this
+min_gap = 0.25           # degeneracy guard: mu1 - mu0 below this
+enter = 0.8              # enter and exit: one of 0.7/0.3, 0.8/0.2, 0.9/0.1; H rises at
+exit = 0.2               # P >= enter and falls at P <= exit
+d_min = 36               # one of 6, 12, 36: the bars an episode needs to be an event (pilot: 12 to 36)
+clean = 72               # C: bars with H = 0 before an event's onset
+refractory = 288         # Q: bars after an event onset in which no other event begins
+
+# The null-stretch rule. "matched-calm-windows": a null stretch is a maximal run of calm bars
+# (H = 0) with no event onset within `refractory` bars either side, at least `refractory` bars
+# from the first label and from the end, so any `clean`-bar window inside one is calm as a
+# pre-event window is, with no event near it. Flickers and other episodes break a stretch only
+# where H = 1. The owner chose it after the S5 pilot, outside the declared ranges.
+[nulls]
+rule = "matched-calm-windows"
+
+# The liquidation-cascade proxy, field for field the options of `market cascade`
+# (market.cascade.Params).
+[cascade]
+a = 0.03                 # the fall in open interest over the window, as a log ratio
+b = 0.03                 # the move in price over the window, as a log ratio (pilot: 0.025 to 0.03)
+c = 0.15                 # the flow imbalance, in [-1, 1]
+v = 3.0                  # the window's volume over its trailing median
+window = 6               # W, in bars: 30 minutes
+trailing_days = 28       # the days the volume median and the onset percentile read
+onset_percentile = 99.0  # a one-bar return above this percentile marks the onset
+merge_hours = 24         # a symbol's candidates within this many hours merge into one
+both_hours = 1           # both symbols' instances within this many hours are one market event
+bounds_hours = 12        # the L2 download window either side of an onset
+
+# The smallest warning horizon a scoring of these labels may use without being marked
+# contaminated: at least the pilot's p90 detection delay under the fitted theta.
+[horizon]
+smallest = 5             # the D_min 36 rerun's p90 detection delay, in bars
+
+# What was seen before the freeze, and what the frozen version labels.
+[disclosure]
+exploratory = """
+All of the following read 2022-07-01..2023-12-31 only; no label, cascade candidate or report from 2024-01-01 on was generated or looked at.
+
+5 November 2026, the S5 pilot at the research pass's start values (main b2d4fa5, reports at 8ff0bb1): labels run 20261105T002030Z-binance-20220701-20231231 with its label-count and stability reports, and cascade run 20261105T002052Z-cascades-20221204-20231231. In 2023 the two-state model was high on 47.3 % (BTC) and 47.6 % (ETH) of bars, in 3 to 4 hour spells; D_min 12 gave 104 and 72 events and the old null rule 13 and 4 four-hour null slices; the cascade rule gave 22 market events and 26 asset instances, among them the documented 2023-08-17 cascade. The stability report's variants (D_min 6 and 36, thresholds 0.7/0.3 and 0.9/0.1, baselines 14 and 56 days, Parkinson, no deseasonalisation, a plain z rule) and its detection-delay simulation (p90 5 bars for BTC, 4 for ETH) were read.
+
+5 November 2026, an exploratory count of matched control windows on the pilot labels, with an exploratory script kept outside the repository, at D_min 12 and 36: 60 and 76, then 217 and 200, 72-bar windows for BTC and ETH.
+
+6 November 2026, two cascade reruns on 2023 at a = 0.03 and v = 3: c = 0.18 with b = 0.025 (run 20261106T183242Z-cascades-20221204-20231231-c018: 13 market events, 17 asset instances) and b = 0.03 with c = 0.15 (run 20261106T183249Z-cascades-20221204-20231231-b030: 15 market events, 19 asset instances). Both still catch 2023-08-17, in their tables and by cascade.recall run on that one documented event only.
+
+6 November 2026, the labels rerun at D_min 36 with the matched-calm-windows rule and the other start values (run 20261106T183214Z-binance-20220701-20231231-dmin36-prep, with its reports): 42 BTC and 19 ETH events in 2023, and 217 and 200 72-bar control windows in its null stretches.
+
+<floor run and GARCH parameters, from the floor lane>
+"""
+decisions = """
+Chosen inside the declared ranges with the pilot in view, as the research pass's decision 4 provides: labeller.d_min 36 (from 12; the only declared change that brought events near the expected 20 to 50 a year, leaving the high/low labels unchanged), and thresholds 0.8/0.2, baseline 28 days, the degeneracy guards and Garman-Klass kept at their start values.
+
+Chosen outside the declared ranges, after the pilot: the null-stretch rule. The pilot's rule (null stretches Q bars from every episode, C bars from every flicker) left almost no controls, because the labeller is high on about 47 % of bars. The owner replaced it with matched-calm-windows (control windows calm as pre-event windows are, with no event onset within Q bars either side) rather than a distance from events only, which would compare calm pre-event windows with possibly turbulent controls. The decision was made with the pilot's counts in view and is not a pre-registered choice.
+
+Known limitation, kept: the labeller's high state is ordinary intraday activity, not a rare stress regime (#149). Changing the model after seeing the pilot would be choosing a method from the data, so v1 labels with it as it is; the matched rule keeps that from biasing the warning comparison but does not fix the labeller. ETH's 19 events in 2023 sit just under the expected 20 to 50 a year.
+
+horizon.smallest 5 bars: the p90 detection delay in the D_min 36 rerun's stability report (BTC 5 bars; ETH 4 over all episodes and 5 over those at least D_min long), larger than the research pass's expected 3.
+
+cascade.b 0.03 (from 0.025), with a, c and v at their start values. The target was 10 to 15 pooled market events a year with 2023-08-17 caught. Both candidate reruns met it (15 events at b = 0.03, 13 at c = 0.18); each moves one parameter by a fifth of its start value, and b = 0.03 was taken as the smaller change because it removes fewer of the start values' events (7 of 22 against 9). Cascade precision is not measured: Binance's liquidation archive ends in 2024-03 and the forward recording of Bybit liquidations (#90) holds no row yet.
+"""
+confirmatory = "v1 labels 2024-01-01..2026-09-30 for BTCUSDT and ETHUSDT, from the tagged commit, with the parameters above; the first labels of those days are made after the freeze. The cascade list's validation by recall reads the documented events from 2024 on only after the freeze as well."
+links = [
+    "https://github.com/GabrielEzerzer/tipping-point/issues/29#issuecomment-6402534074",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/29#issuecomment-6646397245",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/29#issuecomment-6664595938",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/29#issuecomment-6667942464",
+    "https://github.com/GabrielEzerzer/tipping-point/pull/150",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/149",
+]
+
+[deviations]
+policy = "Any change after the freeze is a new version with a supersedes and a reason, frozen before any label it changes is used; labels and results made under v1 stay bound to v1 and are reported."
+log = []
