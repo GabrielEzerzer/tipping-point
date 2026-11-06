@@ -1,0 +1,48 @@
+{
+  "format": 2,
+  "domain": "market",
+  "run_id": "20261020T000000Z-bybit-linear-btcusdt",
+  "producer": {
+    "name": "engine",
+    "version": "0.1.0",
+    "git_sha": "0e941a6ef4d432eee2f28ac94851d2eebd8956a0",
+    "dirty": false
+  },
+  "started_ns": 1792454400000000000,
+  "key": "seq",
+  "tables": [
+    "book_samples"
+  ],
+  "params": {
+    "venue": "bybit-linear",
+    "symbols": [
+      "BTCUSDT"
+    ],
+    "scales": {
+      "BTCUSDT": {
+        "price_decimals": 1,
+        "qty_decimals": 3
+      }
+    },
+    "streams": [
+      "orderbook.200"
+    ],
+    "book_sample": {
+      "levels": 20,
+      "every_ns": 100000000
+    },
+    "clock": "exchange",
+    "source": {
+      "kind": "archive",
+      "format": "bybit-orderbook",
+      "files": [
+        {
+          "name": "2026-10-20_BTCUSDT_ob200.data.zip",
+          "url": "https://quote-saver.bycsi.com/orderbook/linear/BTCUSDT/2026-10-20_BTCUSDT_ob200.data.zip",
+          "sha256": "49678446271bd599718d1e16f3ebfc18bd9b9257a61e9d1d135575244c350b03",
+          "bytes": 1285
+        }
+      ]
+    }
+  }
+}

@@ -1,5 +1,6 @@
 """The planted 3-month series (harness/market_planted.py) and its full labeller run, shared by the
-lookahead and recovery tests: built once per session and never modified by them."""
+lookahead and recovery tests: built once per session and never modified by them. Every test here
+runs with the shared network block (tests/conftest.py)."""
 
 from dataclasses import dataclass
 from datetime import date
@@ -22,6 +23,11 @@ class Planted:
     gap: slice  # six hours of missing bars inside a calm stretch of the labelled span
     full: msvol.Labels
     params: msvol.Params
+
+
+@pytest.fixture(autouse=True)
+def offline(no_network: None) -> None:
+    """No test here reaches the network, even when the code under test breaks."""
 
 
 @pytest.fixture(scope="session")

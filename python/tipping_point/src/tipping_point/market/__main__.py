@@ -23,6 +23,21 @@
            list the label-count report counts, as it counts the committed CPI, NFP and FOMC calendar
            (reports.CALENDAR). The aggTrades cross-check is not wired yet, so the stability report
            says "not supplied" for it
+  book     fetch Bybit's order-book archive days of one --range (training 2023-01-18..09-30,
+           exploratory 2023-10-01..12-31, confirmatory 2024-01-01..2026-09-30, the last only
+           with --confirmatory), optionally narrowed by --start/--end, for --symbols. Each day is
+           checked, imported with the engine's `store import` (--store: the release binary,
+           default target/release/store) and recorded in <out>/<range>/manifest.json (--out,
+           default <data dir>/bybit-book); its zip is deleted, and so are its 100 ms samples
+           unless --keep-samples. --reduce "<cmd> <args>" runs per day on the samples' Parquet
+           (its path appended) before they go (book.py); its last line of output, when a JSON
+           object, is kept as the day's `reduced` ("python -m tipping_point.book" writes the
+           day's 1-second features under <out>/<range>/features/). A first word `python` runs
+           as this interpreter; any other program is named by a full path with forward slashes
+           (D:/x/y.exe, as the string is split by shell rules). The reducer is called once with
+           --version first and the run refuses to start unless that works. A re-run skips the
+           days imported already; a day that fails is recorded and the range goes on; exit 1
+           when one failed or was missing
 
 The floor (reports.floor) needs the feature pipelines, which no module here may import:
 harness/market_floor.py runs it. The data dir is --data-dir, else the engine's own ($TP_DATA_DIR,
@@ -34,6 +49,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import shlex
 import sys
 from collections import Counter
 from collections.abc import Sequence
@@ -45,19 +61,20 @@ import numpy as np
 import pyarrow as pa
 
 from .. import engine
-from . import archive, bars, cascade, msvol, reports
+from . import archive, bars, book, cascade, msvol, reports
 
 ARCHIVE = Path("harness") / "fixtures" / "archives" / "binance"
 CONFIRMATORY = date(2024, 1, 1)  # no label from here on until market-labels-v1 is frozen
 DATA_DIR_HELP = "default: $TP_DATA_DIR, else the engine's per-user data dir"
 BAD = ("refused", "failed", "unreadable")  # the fetch statuses that make it exit 1
+STORE = Path("target") / "release" / ("store.exe" if sys.platform == "win32" else "store")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return args.command(args)
-    except archive.ArchiveError as exc:
+    except (archive.ArchiveError, book.BookError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -103,7 +120,46 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--archive", type=Path, default=ARCHIVE)
     p.add_argument("--seed", type=int, default=29, help="the delay simulation's draws")
     p.set_defaults(command=_reports)
+
+    p = sub.add_parser("book", help="fetch and import a range's Bybit order-book days")
+    p.add_argument("--range", required=True, choices=list(book.RANGES), dest="range_name")
+    p.add_argument("--start", type=date.fromisoformat, help="first UTC day (default: the range's)")
+    p.add_argument("--end", type=date.fromisoformat, help="last UTC day (default: the range's)")
+    p.add_argument("--symbols", nargs="+", default=list(book.SYMBOLS))
+    p.add_argument("--store", type=Path, default=STORE, help="the engine's store binary")
+    p.add_argument("--out", type=Path, default=engine.data_dir() / "bybit-book")
+    p.add_argument("--confirmatory", action="store_true", help="allow the confirmatory range")
+    p.add_argument("--keep-samples", action="store_true", help="keep each day's 100 ms samples")
+    p.add_argument(
+        "--reduce",
+        type=shlex.split,
+        help="a command run on each day's samples, such as 'python -m tipping_point.book'; "
+        "full paths with forward slashes",
+    )
+    p.set_defaults(command=_book)
     return parser
+
+
+def _book(args: argparse.Namespace) -> int:
+    if not args.store.is_file():
+        print(f"error: no store binary at {args.store} (cargo build --release)", file=sys.stderr)
+        return 1
+    done = book.fetch(
+        args.range_name,
+        args.symbols,
+        args.out,
+        book.http_open,
+        book.engine_importer(args.store.resolve()),
+        start=args.start,
+        end=args.end,
+        confirmatory=args.confirmatory,
+        keep_samples=args.keep_samples,
+        reduce=args.reduce,
+        log=lambda line: print(line, flush=True),
+    )
+    print(book.report(done))
+    print(args.out / args.range_name / "manifest.json")
+    return 0 if all(e["status"] == "imported" for e in done.values()) else 1
 
 
 def _fetch(args: argparse.Namespace) -> int:

@@ -1,0 +1,23 @@
+{
+  "ended_ns": 1793994308645103100,
+  "last_key": 35,
+  "rows": {
+    "book_samples": 34
+  },
+  "clean": true,
+  "integrity": {
+    "records": 35,
+    "first_ts_ns": 1792454400495000000,
+    "last_ts_ns": 1792454403882000000,
+    "outside_day": 0,
+    "first_id": 5788995,
+    "last_id": 5789030,
+    "id_gaps": 1,
+    "snapshots": 2,
+    "errors": 0,
+    "resyncs": 1,
+    "crossed": 0,
+    "skipped_samples": 0,
+    "unsynced_samples": 8
+  }
+}
