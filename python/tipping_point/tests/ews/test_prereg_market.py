@@ -30,8 +30,7 @@ def _ready(text: str, prereg_id: str = "market-labels") -> str:
 
 def _filled(text: str) -> str:
     """The template with every placeholder set: a file that may be frozen."""
-    text = re.sub(r'rule = "<[^"]*>"', 'rule = "refractory-from-episodes"', _ready(text))
-    text = re.sub(r'smallest = "<[^"]*>"', "smallest = 5", text)
+    text = re.sub(r'smallest = "<[^"]*>"', "smallest = 5", _ready(text))
     return re.sub(r'"<[^"]*>"', '"set"', text)
 
 
@@ -64,14 +63,13 @@ def doc() -> dict[str, Any]:
 
 def test_the_template_loads_with_its_placeholders(doc: dict[str, Any]) -> None:
     """A draft: load takes it, and the freeze's strict check names each placeholder, nothing else.
-    nulls.rule is the choice the S5 pilot read left to the owner."""
+    nulls.rule is settled, so it is not among them."""
     assert prereg.problems(doc) == []
     strict = prereg.problems(doc, strict=True)
     assert all(": placeholder " in p for p in strict), strict
     assert {p.split(":")[0] for p in strict} == {
         "id",
         "question",
-        "nulls.rule",
         "horizon.smallest",
         "disclosure.exploratory",
         "disclosure.decisions",
@@ -130,7 +128,7 @@ def test_the_freeze_refuses_a_placeholder(tmp_path: Path, left: str) -> None:
     """Every placeholder set but one: the freeze names it and tags nothing."""
     filled = _filled(TEMPLATE.read_text("utf-8"))
     kept = {
-        "nulls.rule": ('rule = "refractory-from-episodes"', 'rule = "<settled by the owner>"'),
+        "nulls.rule": ('rule = "matched-calm-windows"', 'rule = "<settled by the owner>"'),
         "horizon.smallest": ("smallest = 5", 'smallest = "TBD"'),
         "question": ('question = "set"', 'question = "<one sentence>"'),
     }[left]
@@ -189,7 +187,7 @@ def _set(doc: dict[str, Any], where: str, value: Any) -> dict[str, Any]:
         ("data.symbols", ["BTCUSDT", "BTCUSDT"], "data.symbols"),
         ("bars.estimator", "parkinson", "bars.estimator: one of ['garman-klass']"),
         ("bars.missing", "a missing bar is skipped", "bars.missing"),
-        ("nulls.rule", "events-only", "nulls.rule: one of ['refractory-from-episodes']"),
+        ("nulls.rule", "refractory-from-episodes", "nulls.rule: one of ['matched-calm-windows']"),
         ("cascade.a", -0.03, "cascade.a: positive"),
         ("cascade.c", 1.0, "cascade.c: below 1"),
         ("cascade.onset_percentile", 100.0, "cascade.onset_percentile"),

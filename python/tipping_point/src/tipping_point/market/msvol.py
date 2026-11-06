@@ -24,10 +24,12 @@ never rewritten (tests/market/test_lookahead.py checks it bit for bit).
 An episode is a maximal run of H = 1. One of at least `d_min` bars is an event when H = 0 through
 the `clean` bars before its onset and no event began in the `refractory` bars before it; it is
 confirmed `d_min` bars after its onset. A closed run shorter than `d_min` is a flicker, an open one
-at the end of the data pending; the rest are plain episodes. Null stretches are the bars at least
-`refractory` bars from every episode but flickers (pending ones included) and `clean` bars from
-every flicker. History the labels do not cover counts as unclean: no event begins and no null
-stretch lies within `refractory` bars of the first label, nor within `refractory` of the end.
+at the end of the data pending; the rest are plain episodes. Null stretches (the rule
+"matched-calm-windows") are the maximal runs of calm bars (H = 0) with no event onset within
+`refractory` bars either side, so any `clean`-bar window inside one is calm as a pre-event window
+is, with no event near it. Flickers and other episodes break a stretch only where H = 1. History
+the labels do not cover counts as unclean: no event begins and no null stretch lies within
+`refractory` bars of the first label, nor within `refractory` of the end.
 """
 
 from __future__ import annotations
@@ -412,28 +414,23 @@ def episodes(h: np.ndarray, missing: np.ndarray, params: Params) -> list[dict[st
 def nulls(
     h: np.ndarray, missing: np.ndarray, found: list[dict[str, Any]], params: Params
 ) -> list[dict[str, Any]]:
-    """The null stretches, as [start, end) bar indices with their missing bars."""
+    """The null stretches, as [start, end) bar indices with their missing bars: the maximal runs of
+    bars t with H = 0, no event onset in [t - refractory, t + refractory], first label + refractory
+    <= t and t < n - refractory."""
     labelled = np.flatnonzero(h >= 0)
     if not labelled.size:
         return []
-    first, n = int(labelled[0]), len(h)
-    cover = np.zeros(n + 1, np.int64)
-
-    def exclude(a: int, b: int) -> None:
-        a, b = min(max(a, 0), n), min(max(b, 0), n)
-        if a < b:
-            cover[a] += 1
-            cover[b] -= 1
-
-    exclude(0, first + params.refractory)
-    exclude(n - params.refractory, n)
+    first, n, q = int(labelled[0]), len(h), params.refractory
+    keep = h == 0
+    keep[: first + q] = False
+    keep[max(n - q, 0) :] = False
     for e in found:
-        margin = params.clean if e["kind"] == "flicker" else params.refractory
-        exclude(e["onset"] - margin, (n if e["end"] is None else e["end"]) + margin)
+        if e["kind"] == "event":
+            keep[max(e["onset"] - q, 0) : e["onset"] + q + 1] = False
     gaps = np.concatenate([[0], np.cumsum(missing)])
     return [
         {"start": int(a), "end": int(b), "bars": int(b - a), "missing": int(gaps[b] - gaps[a])}
-        for a, b in zip(*runs(np.cumsum(cover[:n]) == 0), strict=True)
+        for a, b in zip(*runs(keep), strict=True)
     ]
 
 

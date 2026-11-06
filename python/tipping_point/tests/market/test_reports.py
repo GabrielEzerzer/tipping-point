@@ -210,18 +210,18 @@ def test_coincidence_counts_onsets_within_an_hour_either_way_by_hand(hand: dict[
 def test_null_hours_and_four_hour_slices_by_hand(hand: dict[str, Any]) -> None:
     report = reports.label_count(hand)
     stretches = [(s["start"], s["end"]) for s in hand["BTCUSDT"][1].nulls]
-    assert stretches == [(320, 396), (406, 590), (622, 2868)]
+    assert stretches == [(311, 400), (402, 590), (612, 2870)]
     (row,) = _rows(report, "nulls", symbol="BTCUSDT")
     assert row == {
         "symbol": "BTCUSDT",
         "stretches": 3,
-        "bars": 76 + 184 + 2246,
-        "hours": pytest.approx(2506 / 12),
+        "bars": 89 + 188 + 2258,
+        "hours": pytest.approx(2535 / 12),
         "missing_bars": 60,
-        "slices_4h": 1 + 3 + 46,
-        "slices_4h_gapless": 50 - 3,  # the gap at 1000-1060 touches 958-1006, 1006-1054, 1054-1102
+        "slices_4h": 1 + 3 + 47,
+        "slices_4h_gapless": 51 - 2,  # the gap at 1000-1060 touches 996-1044 and 1044-1092
     }
-    assert "209 null hours hold 50 4-hour slices (47 without a missing bar)" in report.summary
+    assert "211 null hours hold 51 4-hour slices (49 without a missing bar)" in report.summary
 
 
 def test_scheduled_releases_are_counted_within_15_minutes_by_hand(hand: dict[str, Any]) -> None:

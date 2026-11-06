@@ -125,8 +125,9 @@ MISSING = (
     "variance of 0 is a missing observation: the filter carries its prediction without an update, "
     "and nothing is floored"
 )
-# what market.msvol.nulls does: the rule the S5 pilot read sends to the owner for an amendment
-NULL_RULES = ("refractory-from-episodes",)
+# what market.msvol.nulls does: calm bars with no event onset within Q bars either side, the
+# owner's choice after the S5 pilot (5 November 2026)
+NULL_RULES = ("matched-calm-windows",)
 # the ranges the 2023 pilot chooses inside (#29 research pass, section 2, item 13)
 D_MIN = (6, 12, 36)
 THRESHOLDS = ((0.7, 0.3), (0.8, 0.2), (0.9, 0.1))  # (enter, exit)

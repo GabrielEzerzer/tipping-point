@@ -147,25 +147,61 @@ def test_episodes_are_classed_by_length_clean_window_and_refractory_period() -> 
     assert [e["kind"] for e in tail] == ["pending"]
 
 
-def test_null_stretches_keep_clear_of_episodes_flickers_and_unknown_history() -> None:
+def test_null_stretches_are_calm_bars_more_than_q_from_every_event_onset() -> None:
     params = Params(d_min=3, clean=4, refractory=10)
     missing = np.zeros(100, bool)
-    missing[[50, 51]] = True
+    missing[[45, 46]] = True
 
     def stretches(h: np.ndarray) -> list[tuple[int, int, int, int]]:
         found = msvol.episodes(h, missing, params)
-        assert found[0]["kind"] == "event" and found[1]["kind"] == "flicker"
         return [
             (s["start"], s["end"], s["bars"], s["missing"])
             for s in msvol.nulls(h, missing, found, params)
         ]
 
-    # an event at 30-34 clears [20, 45); a flicker at 60-61 clears [56, 66); the first and last
-    # 10 bars are unknown history
-    h = _path(100, [(30, 35), (60, 62)])
-    assert stretches(h) == [(10, 20, 10, 0), (45, 56, 11, 2), (66, 90, 24, 0)]
-    h = _path(100, [(30, 35), (60, 62), (98, 100)])  # a pending run counts as an episode
-    assert stretches(h) == [(10, 20, 10, 0), (45, 56, 11, 2), (66, 88, 22, 0)]
+    # bars 0-4 unlabelled, so the first 10 labelled bars and the last 10 bars are cut: 15 is in,
+    # 14 out, 89 in, 90 out. An event at 30-34 rules out [20, 40]: 19 and 41, 11 bars from its
+    # onset, are in; 20 and 40, 10 bars from it, are out. The flicker at 50-51, the flicker at 60
+    # and the episode at 63-66 (the flicker sits in its clean window) break a stretch only where
+    # they are high.
+    h = _path(100, [(30, 35), (50, 52), (60, 61), (63, 67)], unlabelled=5)
+    kinds = [e["kind"] for e in msvol.episodes(h, missing, params)]
+    assert kinds == ["event", "flicker", "flicker", "episode"]
+    assert stretches(h) == [
+        (15, 20, 5, 0),
+        (41, 50, 9, 2),
+        (52, 60, 8, 0),
+        (61, 63, 2, 0),
+        (67, 90, 23, 0),
+    ]
+    # the distance runs from the onset, not the end: a calm bar just after a long event is in once
+    # it is more than 10 bars from the onset
+    h = _path(100, [(30, 43)])
+    assert stretches(h) == [(10, 20, 10, 0), (43, 90, 47, 2)]
+    assert msvol.nulls(np.full(50, -1, np.int8), np.zeros(50, bool), [], params) == []
+
+
+def test_every_clean_window_in_a_null_stretch_is_calm_and_far_from_events(planted: Any) -> None:
+    """On the planted series: every C-bar window inside a stretch is calm, with no event onset in
+    the Q bars before it or after it; the bars just outside each stretch fail the rule."""
+    full, params = planted.full, planted.params
+    c, q, n = params.clean, params.refractory, len(full.h)
+    first = int(np.flatnonzero(full.h >= 0)[0])
+    onsets = np.array([e["onset"] for e in full.episodes if e["kind"] == "event"])
+    assert onsets.size >= 20 and len(full.nulls) >= 10
+
+    def member(t: int) -> bool:
+        near = np.any(np.abs(onsets - t) <= q)
+        return first + q <= t < n - q and full.h[t] == 0 and not near
+
+    windows = 0
+    for s in full.nulls:
+        assert not member(s["start"] - 1) and not member(s["end"])
+        for a in range(s["start"], s["end"] - c + 1):
+            windows += 1
+            assert np.all(full.h[a : a + c] == 0)
+            assert not np.any((onsets >= a - q) & (onsets <= a + c - 1 + q))
+    assert windows > 0
 
 
 def test_refits_fall_after_the_warm_up_then_on_mondays() -> None:
