@@ -1,7 +1,9 @@
 """The Bybit order-book fetcher (#30 M1): the confirmatory range is refused without --confirmatory,
 each range keeps its own manifest, no zip or sample is kept unless asked, a day imported before is
-skipped, the reducer runs on each day's samples, and a failed or missing day is recorded while the
-range goes on. Synthetic small zips served by a fake archive and a fake importer; no network.
+skipped, the reducer runs on each day's samples (`python` meaning this interpreter, checked once
+before any download, its format deciding whether a day is done), and a failed or missing day is
+recorded while the range goes on, whatever failed. Synthetic small zips served by a fake archive
+and a fake importer; no network (tests/conftest.py).
 The engine's own import runs only when TP_STORE_BIN names a built store binary."""
 
 import hashlib
@@ -27,14 +29,12 @@ END = date(2023, 3, 3)
 PARQUET = b"PAR1" * 10
 
 
-@pytest.fixture(autouse=True)
-def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test reaches the archive, even when the refusal it checks is broken."""
+# A reducer's script answers the run's --version probe first: exit 0, and a format when given.
+PROBE = "import sys, json\nif sys.argv[-1] == '--version': print(json.dumps({F})); sys.exit(0)\n"
 
-    def urlopen(request: Any, timeout: float) -> None:
-        raise AssertionError(f"a test opened {request.full_url}")
 
-    monkeypatch.setattr(book.urllib.request, "urlopen", urlopen)
+def _reducer(body: str, version: str = "{}") -> list[str]:
+    return [sys.executable, "-c", PROBE.replace("{F}", version) + body]
 
 
 def _zip(member: str) -> bytes:
@@ -80,6 +80,7 @@ class Importer:
     def __init__(self) -> None:
         self.imported: list[str] = []
         self.refuse: set[str] = set()
+        self.no_rows: set[str] = set()  # complete.json without its row counts
 
     def __call__(self, archive: Path, url: str, data_dir: Path) -> Path:
         with zipfile.ZipFile(archive) as opened:
@@ -91,6 +92,8 @@ class Importer:
         (run / "book_samples").mkdir(parents=True, exist_ok=True)
         (run / book.TABLE).write_bytes(PARQUET)
         complete = {"rows": {"book_samples": 864_000}, "integrity": {"id_gaps": 0, "errors": 0}}
+        if url in self.no_rows:
+            del complete["rows"]
         (run / "complete.json").write_text(json.dumps(complete))
         return run
 
@@ -196,10 +199,10 @@ def test_the_reducer_runs_on_each_days_samples_before_they_go(tmp_path: Path) ->
     archive, importer = Archive(), Importer()
     seen = tmp_path / "seen.txt"
     script = (
-        "import sys, pathlib; p = pathlib.Path(sys.argv[2]); assert p.read_bytes()[:4] == b'PAR1';"
+        "import pathlib; p = pathlib.Path(sys.argv[2]); assert p.read_bytes()[:4] == b'PAR1';"
         "open(sys.argv[1], 'a').write(p.parent.parent.name + chr(10))"
     )
-    reduce = [sys.executable, "-c", script, str(seen)]
+    reduce = [*_reducer(script), str(seen)]
     done = _fetch(tmp_path / "out", archive, importer, reduce=reduce)
     assert {e["status"] for e in done.values()} == {"imported"}
     assert seen.read_text().split() == [f"2023-03-0{d}_BTCUSDT_ob500" for d in (1, 2, 3)]
@@ -207,11 +210,87 @@ def test_the_reducer_runs_on_each_days_samples_before_they_go(tmp_path: Path) ->
     assert _files(tmp_path / "out") == []
     # A day imported without the reducer is fetched again to run it; a failing reducer fails it.
     _fetch(tmp_path / "plain", archive, importer, end=START)
-    failing = [sys.executable, "-c", "import sys; sys.exit('no features')"]
+    failing = _reducer("sys.exit('no features')")
     again = _fetch(tmp_path / "plain", archive, importer, end=START, reduce=failing)
     assert again["BTCUSDT/2023-03-01"]["status"] == "failed"
     assert "reduce exited 1: no features" in again["BTCUSDT/2023-03-01"]["error"]
     assert _files(tmp_path / "plain") == []
+
+
+def test_python_is_this_interpreter_and_the_reducer_is_probed_before_any_download(
+    tmp_path: Path,
+) -> None:
+    assert book._interpreter(["python", "-m", "x"]) == [sys.executable, "-m", "x"]
+    assert book._interpreter(["python3", "-m", "x"]) == [sys.executable, "-m", "x"]
+    assert book._interpreter(["D:/x/python.exe", "-m", "x"]) == ["D:/x/python.exe", "-m", "x"]
+    archive, importer = Archive(), Importer()
+    for reduce in (
+        [str(tmp_path / "no-such-reducer.exe")],  # cannot run
+        ["python", "-c", "import sys; sys.exit(3)"],  # exits non-zero on --version
+    ):
+        with pytest.raises(book.BookError, match="reducer"):
+            _fetch(tmp_path / "out", archive, importer, reduce=reduce)
+    assert archive.opened == [] and importer.imported == []
+    assert not (tmp_path / "out" / "training" / "manifest.json").exists()
+
+
+def test_a_missing_reducer_fails_the_day_and_the_range_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reducer that vanishes after the probe (or a probe that lies) fails each day, recorded."""
+    monkeypatch.setattr(book, "_probe", lambda reduce: None)
+    archive, importer = Archive(), Importer()
+    done = _fetch(tmp_path, archive, importer, reduce=[str(tmp_path / "gone.exe")])
+    assert [e["status"] for e in done.values()] == ["failed"] * 3
+    assert all("FileNotFoundError" in e["error"] for e in done.values())
+    assert len(_manifest(tmp_path)["days"]) == 3 and _files(tmp_path) == []
+
+
+def test_any_failure_after_the_download_is_recorded_and_the_range_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, importer = Archive(), Importer()
+    url = {d: book.url("BTCUSDT", date(2023, 3, d)) for d in (1, 2, 3)}
+    archive.headers[url[1]] = {"Content-Length": "many"}  # ValueError
+    importer.no_rows.add(url[2])  # KeyError
+    real_unlink, held = Path.unlink, {"times": 0}
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.startswith("2023-03-03") and self.suffix == ".zip" and held["times"] < 2:
+            held["times"] += 1  # a scanner holds the zip twice, then lets go
+            raise PermissionError(13, "in use", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(book.time, "sleep", lambda _: None)
+    done = _fetch(tmp_path, archive, importer)
+    status = {k[-2:]: (e["status"], e.get("error", "")) for k, e in done.items()}
+    assert status["01"][0] == "failed" and "invalid literal" in status["01"][1]
+    assert status["02"] == ("failed", "KeyError: 'rows'")
+    assert status["03"] == ("imported", "") and held["times"] == 2
+    held["times"] = -10  # now it never lets go: the day fails, recorded, after the retries
+    (tmp_path / "training" / "manifest.json").unlink()
+    done = _fetch(tmp_path, archive, importer, start=date(2023, 3, 3))
+    assert done["BTCUSDT/2023-03-03"]["status"] == "failed"
+    assert "PermissionError" in done["BTCUSDT/2023-03-03"]["error"]
+
+
+def test_a_day_reduced_with_another_format_is_not_done(tmp_path: Path) -> None:
+    archive, importer = Archive(), Importer()
+    body = "print(json.dumps({'path': 'f.parquet', 'format': FORMAT}))"
+    one = _reducer(f"FORMAT = 1\n{body}", '{"format": 1}')
+    _fetch(tmp_path, archive, importer, end=START, reduce=one)
+    (tmp_path / "training" / "f.parquet").write_bytes(b"")
+    entry = _manifest(tmp_path)["days"]["BTCUSDT/2023-03-01"]
+    assert entry["reduced"] == {"path": "f.parquet", "format": 1}
+    _fetch(tmp_path, archive, importer, end=START, reduce=one)
+    assert len(archive.opened) == 1  # same format: done
+    two = _reducer(f"FORMAT = 2\n{body}", '{"format": 2}')
+    # The commands differ too, which alone redoes the day, so check the format rule directly.
+    assert not book._done(entry, tmp_path / "training", False, one, {"format": 2})
+    assert book._done(entry, tmp_path / "training", False, one, {"format": 1})
+    _fetch(tmp_path, archive, importer, end=START, reduce=two)
+    assert _manifest(tmp_path)["days"]["BTCUSDT/2023-03-01"]["reduced"]["format"] == 2
 
 
 def test_a_failed_day_is_recorded_and_the_range_goes_on(tmp_path: Path) -> None:

@@ -12,13 +12,24 @@ else: no statistic over the day, nothing later than the second. The means read t
 step comes from the previous second's last sample. Neighbouring seconds (and so neighbouring
 minute frames of the JEPA) share that one boundary sample; in exchange no 100 ms step is lost and
 the day's `ret` adds up to the log change of the mid from the day's first sample to its last when
-nothing is missing. The day's first sample has no step before it.
+nothing is missing. The day's first sample has no step before it. The one reach further back is
+the outage rule below, which reads the samples' `seq` up to 2 s before; nothing reads later.
 
 Gaps. A sample counts only when the book was synced, both sides have a best level and the book is
 not crossed. `samples` is the count of those (0 to 10) and `gap` is set when it is below 10. A
 second with some samples missing is masked by `gap` and its features use only the samples present
 (steps only between two neighbouring samples that are both present, so none across an unsynced
-or missing sample or a missing second); nothing is filled in. A second with none is NaN.
+or missing sample or a missing second); nothing is filled in. A second with none is NaN. `steps`
+counts the steps behind `ret`, `rv100`, `moves` and `ofi` (10 in a whole second, 9 when the
+sample before it is missing, as in the day's first second).
+
+Outages. When the feed goes silent the engine keeps sampling the last book, synced, with the same
+`seq` (the last frame applied). A sample is stale, and counts as missing, once `seq` has not
+changed for STALE_SAMPLES grid instants up to and including it; a silent stretch therefore
+masks from 2 s after the last update on, and a second inside it is NaN and gapped like a missing
+one. On ETHUSDT 2023-06-10 (a Saturday) the longest run of one `seq` was 8 samples (0.8 s; p99.99
+0.4 s) and the rule masked nothing. Causally, the first 2 s of an outage cannot be told from a
+quiet book, so they stay.
 
 Features, per second (a "sample" is one 100 ms book; means are over the second's samples):
 
@@ -68,6 +79,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .. import __version__
+from ..ising import io
+
 STEP_NS = 100_000_000  # the engine's book_samples grid
 SECOND_NS = 1_000_000_000
 PER = SECOND_NS // STEP_NS  # samples per second
@@ -90,7 +104,8 @@ FEATURES = (
     "slope_a",
     "wide",
 )
-FORMAT = 1
+FORMAT = 2  # 2: the boundary step, the outage rule and `steps`
+STALE_SAMPLES = 20  # 2 s of one unchanged seq; 2.5x the longest run seen on a real day
 # Each sample's quantities that the features are made from (_per_sample).
 _SAMPLED = (
     "mid",
@@ -113,7 +128,7 @@ _SAMPLED = (
 # Floats gain nothing from dictionaries; the timestamps compress to almost nothing as deltas.
 _WRITE = {
     "compression": "zstd",
-    "use_dictionary": ["samples", "gap", "moves", "wide"],
+    "use_dictionary": ["samples", "steps", "gap", "moves", "wide"],
     "column_encoding": {"second_ts_ns": "DELTA_BINARY_PACKED"},
 }
 
@@ -137,6 +152,7 @@ def reduce(
     unit = 10.0 ** -(price_decimals + qty_decimals)  # quote currency per (tick x lot)
     flat = {k: np.full(DAY * PER, np.nan) for k in _SAMPLED}
     taken = np.zeros(DAY * PER, dtype=bool)
+    seq = np.full(DAY * PER, np.nan)  # every sample's, good or not; NaN where none is
     for batch in batches:
         offset = batch.column("sample_ts_ns").to_numpy() - day_start_ns
         inside = (offset >= 0) & (offset < DAY * SECOND_NS)
@@ -146,6 +162,7 @@ def reduce(
         if taken[slot].any() or np.unique(slot).size != slot.size:
             raise FeatureError("two samples share a grid instant")
         taken[slot] = True
+        seq[slot] = batch.column("seq").to_numpy()[inside]
 
         def side(prefix: str, batch: pa.RecordBatch = batch, inside: np.ndarray = inside) -> Any:
             cols = [batch.column(f"{prefix}_{i}").cast(pa.float64()) for i in range(LEVELS)]
@@ -158,6 +175,9 @@ def reduce(
             values = _per_sample(bp, bq, ap, aq, unit)
         for k in _SAMPLED:
             flat[k][slot[ok]] = values[k][ok]
+    stale = _stale(seq)
+    for v in flat.values():
+        v[stale] = np.nan
     grid = {k: v.reshape(DAY, PER) for k, v in flat.items()}  # (second, 100 ms step)
     count = np.isfinite(grid["mid"]).sum(axis=1)
 
@@ -186,10 +206,12 @@ def reduce(
     columns: dict[str, Any] = {
         "second_ts_ns": day_start_ns + np.arange(DAY, dtype=np.int64) * SECOND_NS,
         "samples": count.astype(np.uint8),
+        "steps": stepped.sum(axis=1).astype(np.uint8),
         "gap": count < PER,
     }
     columns |= {k: out[k].astype(np.float32) for k in FEATURES}
-    return pa.table(columns)
+    meta = {"tp.stale_samples": str(int(stale.sum()))}
+    return pa.table(columns).replace_schema_metadata(meta)
 
 
 def _per_sample(
@@ -246,6 +268,21 @@ def _ofi(bp: np.ndarray, bq: np.ndarray, ap: np.ndarray, aq: np.ndarray) -> np.n
     return np.where(present, e, np.nan)
 
 
+def _stale(seq: np.ndarray) -> np.ndarray:
+    """Grid instants whose sample repeats the `seq` of the STALE_SAMPLES instants before it or
+    more: how long since `seq` last changed, counted backwards only (a missing sample breaks it)."""
+    index = np.arange(seq.size)
+    changed = np.ones(seq.size, dtype=bool)
+    changed[1:] = seq[1:] != seq[:-1]  # NaN never equals, so a missing sample starts a run
+    since = index - np.maximum.accumulate(np.where(changed, index, 0))
+    return since >= STALE_SAMPLES
+
+
+def version() -> dict[str, Any]:
+    """The reducer's identity: the feature format, the package version and its commit."""
+    return {"format": FORMAT, "version": __version__, **io.code_version()}
+
+
 def _by_second(steps: np.ndarray) -> np.ndarray:
     """The day's steps between neighbouring grid instants as (second, 10): the step into instant j
     goes to j's second, and the day's first instant has none."""
@@ -288,8 +325,9 @@ def reduce_run(samples: Path, out: Path) -> dict[str, Any]:
     day = datetime.fromtimestamp(day_start // SECOND_NS, UTC).date()
     batches = pq.ParquetFile(samples).iter_batches(BATCH)
     table = reduce(batches, day_start, scales["price_decimals"], scales["qty_decimals"])
+    stale = int(table.schema.metadata[b"tp.stale_samples"])
     meta = {
-        "format": FORMAT,
+        **version(),
         "symbol": symbol,
         "day": day.isoformat(),
         "run_id": manifest["run_id"],
@@ -304,10 +342,12 @@ def reduce_run(samples: Path, out: Path) -> dict[str, Any]:
     part.replace(path)
     gap = table["gap"].to_numpy(zero_copy_only=False)
     return {
+        **version(),
         "path": path.relative_to(out).as_posix(),
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "bytes": path.stat().st_size,
         "rows": table.num_rows,
         "gap_seconds": int(gap.sum()),
         "empty_seconds": int((table["samples"].to_numpy() == 0).sum()),
+        "stale_samples": stale,
     }

@@ -9,7 +9,6 @@ import json
 import math
 import os
 import shutil
-import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -51,15 +50,16 @@ TOP = [
 ]
 
 
-def _table(rows: list[Row], day0: int = DAY0) -> pa.Table:
-    """book_samples rows in the engine's schema (engine/src/store/samples.rs)."""
+def _table(rows: list[Row], day0: int = DAY0, seqs: list[int] | None = None) -> pa.Table:
+    """book_samples rows in the engine's schema (engine/src/store/samples.rs); each row has a new
+    seq unless `seqs` says otherwise."""
     cols: dict[str, list[Any]] = {"sample_ts_ns": [], "seq": [], "synced": []}
     for prefix in ("bid_px", "bid_qty", "ask_px", "ask_qty"):
         for i in range(features.LEVELS):
             cols[f"{prefix}_{i}"] = []
     for n, (slot, synced, bids, asks) in enumerate(rows):
         cols["sample_ts_ns"].append(day0 + slot * features.STEP_NS)
-        cols["seq"].append(n)
+        cols["seq"].append(n if seqs is None else seqs[n])
         cols["synced"].append(synced)
         for name, levels in (("bid", bids), ("ask", asks)):
             for i in range(features.LEVELS):
@@ -162,7 +162,7 @@ def test_known_answers_on_a_hand_built_book() -> None:
     assert f["slope_a"][0] == approx(
         sum((a - m) / m * 1e4 for m, (*_, a, _) in zip(mids, TOP, strict=True)) / 10
     )
-    assert (f["samples"][0], f["gap"][0]) == (10, False)
+    assert (f["samples"][0], f["gap"][0], f["steps"][0]) == (10, False, 9)
 
     # Second 1, the deep book standing still, every level counted. Its one moving step is the
     # boundary step from second 0's last sample (1000 x 1 | 1002 x 7, mid 1001) to its first
@@ -174,7 +174,7 @@ def test_known_answers_on_a_hand_built_book() -> None:
     assert f["rv100"][1] == approx(math.log(1000.5 / 1001) ** 2)
     assert (f["moves"][1], f["wide"][1]) == (1, 0)
     assert f["ofi"][1] == approx(1 / 12)
-    assert (f["samples"][1], f["gap"][1]) == (10, False)
+    assert (f["samples"][1], f["gap"][1], f["steps"][1]) == (10, False, 10)
 
 
 def test_ofi_is_positive_for_buying_pressure_and_negative_for_selling() -> None:
@@ -235,6 +235,7 @@ def test_a_gap_free_days_returns_add_up_to_its_log_change() -> None:
     bid = 200_000 + np.cumsum(rng.integers(-1, 2, n))
     columns: dict[str, Any] = {
         "sample_ts_ns": DAY0 + np.arange(n, dtype=np.int64) * features.STEP_NS,
+        "seq": np.arange(n, dtype=np.int64),
         "synced": np.ones(n, dtype=bool),
     }
     for name, values in (("bid", bid), ("ask", bid + 1 + (rng.random(n) < 0.1))):
@@ -250,6 +251,33 @@ def test_a_gap_free_days_returns_add_up_to_its_log_change() -> None:
     total = f["ret"].to_numpy().astype(np.float64).sum()
     assert total == pytest.approx(math.log(mid[-1] / mid[0]), abs=1e-7)
     assert f["moves"].to_numpy().sum() == np.count_nonzero(np.diff(mid))
+    steps = f["steps"].to_numpy()
+    assert steps[0] == 9 and (steps[1:] == 10).all() and steps.sum() == n - 1
+
+
+def test_a_feed_outage_is_masked_once_seq_stands_still_for_two_seconds() -> None:
+    """The engine fills a silent feed with synced copies of the last book: from slot 20, fifty
+    samples share one seq. The first STALE_SAMPLES of them still count (only the past says it is
+    an outage); slots 40 to 69 are masked like missing samples, so seconds 4 to 6 are gaps with
+    NaN features, and second 7 has no step from the stale slot 69 into it."""
+    assert features.STALE_SAMPLES == 20
+    rows: list[Row] = [(k, True, _shift(BIDS, k % 3), _shift(ASKS, k % 3)) for k in range(100)]
+    seqs = [k if k < 20 else 20 if k < 70 else k for k in range(100)]
+    f = features.reduce(_table(rows, seqs=seqs), DAY0, 2, 3)
+    stale = int(f.schema.metadata[b"tp.stale_samples"])
+    f = f.to_pydict()
+    assert stale == 30
+    for s in (4, 5, 6):
+        assert (f["samples"][s], f["gap"][s], f["steps"][s]) == (0, True, 0), s
+        assert all(math.isnan(f[name][s]) for name in features.FEATURES), s
+    for s in (2, 3):
+        assert (f["samples"][s], f["gap"][s]) == (10, False), s
+    assert (f["samples"][7], f["gap"][7], f["steps"][7]) == (10, False, 9)
+    assert (f["samples"][1], f["steps"][1]) == (10, 10)
+    # With fresh seqs throughout, nothing is masked.
+    plain = features.reduce(_table(rows), DAY0, 2, 3)
+    assert plain.schema.metadata[b"tp.stale_samples"] == b"0"
+    assert not plain["gap"].to_numpy()[:10].any()
 
 
 def test_a_crossed_or_one_sided_sample_counts_as_missing() -> None:
@@ -343,6 +371,11 @@ def test_two_runs_write_the_same_bytes(tmp_path: Path) -> None:
         "price_decimals": 1,
         "qty_decimals": 3,
     }
+    # The reducer's identity, in the file and in its record, decides whether a day is done.
+    for found in (meta, first):
+        assert found["format"] == features.FORMAT and found["version"] == features.__version__
+        assert "git_sha" in found and found.items() >= features.version().items()
+    assert first["stale_samples"] == 0
 
 
 def test_the_command_finds_the_range_folder_or_refuses(tmp_path: Path, capsys: Any) -> None:
@@ -400,7 +433,7 @@ def _wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, importer: Any) -> di
     store = tmp_path / "store.exe"
     store.write_bytes(b"")
     out = tmp_path / "out"
-    reduce = f"{Path(sys.executable).as_posix()} -m tipping_point.book"
+    reduce = "python -m tipping_point.book"  # as documented: `python` is this interpreter
     argv = ["book", "--range", "training", "--symbols", "BTCUSDT", "--store", str(store)]
     assert market_main([*argv, "--out", str(out), "--reduce", reduce]) == 0
     kept = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())

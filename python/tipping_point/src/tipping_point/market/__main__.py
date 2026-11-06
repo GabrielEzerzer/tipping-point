@@ -32,9 +32,12 @@
            unless --keep-samples. --reduce "<cmd> <args>" runs per day on the samples' Parquet
            (its path appended) before they go (book.py); its last line of output, when a JSON
            object, is kept as the day's `reduced` ("python -m tipping_point.book" writes the
-           day's 1-second features under <out>/<range>/features/). A re-run skips the days
-           imported already; a day that fails is recorded and the range goes on; exit 1 when
-           one failed or was missing
+           day's 1-second features under <out>/<range>/features/). A first word `python` runs
+           as this interpreter; any other program is named by a full path with forward slashes
+           (D:/x/y.exe, as the string is split by shell rules). The reducer is called once with
+           --version first and the run refuses to start unless that works. A re-run skips the
+           days imported already; a day that fails is recorded and the range goes on; exit 1
+           when one failed or was missing
 
 The floor (reports.floor) needs the feature pipelines, which no module here may import:
 harness/market_floor.py runs it. The data dir is --data-dir, else the engine's own ($TP_DATA_DIR,
@@ -127,7 +130,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, default=engine.data_dir() / "bybit-book")
     p.add_argument("--confirmatory", action="store_true", help="allow the confirmatory range")
     p.add_argument("--keep-samples", action="store_true", help="keep each day's 100 ms samples")
-    p.add_argument("--reduce", type=shlex.split, help="a command run on each day's samples")
+    p.add_argument(
+        "--reduce",
+        type=shlex.split,
+        help="a command run on each day's samples, such as 'python -m tipping_point.book'; "
+        "full paths with forward slashes",
+    )
     p.set_defaults(command=_book)
     return parser
 

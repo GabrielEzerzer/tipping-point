@@ -12,12 +12,19 @@ Per day, `fetch` downloads the zip into `<range>/staging/`, checks it, has the e
 `store import` (engine/src/store/import.rs) write the day's `book_samples` Parquet (20 levels a
 side on the 100 ms grid), deletes the zip, runs the `reduce` command if one is given (its argv
 with the Parquet's path appended; a non-zero exit fails the day), records the day and deletes the
-samples. When the reducer's last line of output is a JSON object, the manifest keeps it as the day's
-`reduced` (tipping_point.book prints its feature file's path, relative to the range folder, its
-SHA-256, rows and gap seconds). With `keep_samples`, the samples are imported into
-`<range>/samples/` and kept instead.
+samples. With `keep_samples`, the samples are imported into `<range>/samples/` and kept instead.
 At most one day's zip and samples exist at a time; the manifest records each day's peak
 (`peak_bytes`: the zip and the run on disk together, after the import).
+
+The reducer. When its last line of output is a JSON object, the manifest keeps it as the day's
+`reduced` (tipping_point.book prints its feature file's path, relative to the range folder, its
+SHA-256, rows, gap seconds and its own version and feature format). A first word `python` or
+`python3` runs as this interpreter (sys.executable), so `--reduce "python -m tipping_point.book"`
+finds the package in this environment whatever `python` means on the PATH. Any other program is
+named by its path, written with forward slashes (the command is split by shell rules, which drop
+backslashes). Before the first download the run calls the reducer once with `--version` appended
+and refuses to start unless it exits 0; when that prints a JSON object with a `format`, a day
+reduced with another format is not done.
 
 Integrity (#23). Bybit publishes no .CHECKSUM, so a download must have the size its
 Content-Length gave and, when the ETag is a plain MD5 (an S3 object uploaded in one part, as every
@@ -28,9 +35,10 @@ zip's URL, bytes and SHA-256, the sample count, the samples' bytes and SHA-256, 
 whole integrity record, whether or not the samples are kept.
 
 A day already imported is skipped when it was imported with the same `reduce` command, the file
-its `reduced` record names (if any) is present and, if this run keeps samples, its Parquet is
-present. A day that fails (network, a size or MD5 mismatch, the engine or the reducer refusing
-it) is recorded with why and the range goes on; the next run tries it again, as it does a day the
+its `reduced` record names (if any) is present with the reducer's current format and, if this run
+keeps samples, its Parquet is present. A day that fails (network, a size or MD5 mismatch, the
+engine or the reducer refusing it, a file the system will not let go, a malformed record) is
+recorded with why and the range goes on; the next run tries it again, as it does a day the
 archive does not have (404, `missing`). The manifest is rewritten after every day, so a stopped
 run loses at most the day in hand.
 
@@ -39,12 +47,14 @@ The confirmatory range is refused unless `confirmatory` is set (#30 M7).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -159,6 +169,9 @@ def fetch(
     """Fetches and imports the days of range `name` for each symbol (see the module notes).
     Returns this run's manifest entries, keyed `<SYMBOL>/<day>`."""
     days = span(name, start, end, confirmatory)
+    given = list(reduce) if reduce else None  # as recorded in the manifest
+    reducer = _interpreter(given) if given else None  # as run
+    version = _probe(reducer) if reducer else None
     where = out / name
     staging = where / "staging"
     shutil.rmtree(staging, ignore_errors=True)  # whatever a stopped run left
@@ -169,18 +182,18 @@ def fetch(
         if manifest_path.exists()
         else {"format": 1, "source": BASE_URL, "range": name, "days": {}}
     )
-    reducer = list(reduce) if reduce else None
     done: dict[str, dict[str, Any]] = {}
     for symbol in symbols:
         for day in days:
             key = f"{symbol}/{day:%Y-%m-%d}"
             entry = manifest["days"].get(key)
-            if entry and _done(entry, where, keep_samples, reducer):
+            if entry and _done(entry, where, keep_samples, given, version):
                 done[key] = entry
                 log(f"{key}: imported before, skipped")
                 continue
             data_dir = where / "samples" if keep_samples else staging
             entry = _day(symbol, day, where, data_dir, open_url, importer, keep_samples, reducer)
+            entry["reduce"] = given
             done[key] = manifest["days"][key] = entry
             manifest["days"] = dict(sorted(manifest["days"].items()))
             io.write_json(manifest_path, manifest, replace=True)
@@ -189,13 +202,40 @@ def fetch(
     return done
 
 
-def _done(entry: dict[str, Any], where: Path, keep: bool, reduce: list[str] | None) -> bool:
-    """Whether a day recorded before needs nothing: imported with the same reducer, with the file
-    its reducer reported still there and, when this run keeps samples, its Parquet still there."""
+def _interpreter(reduce: list[str]) -> list[str]:
+    """The reducer's argv, a first word `python` or `python3` replaced by this interpreter."""
+    return [sys.executable, *reduce[1:]] if reduce[0] in ("python", "python3") else reduce
+
+
+def _probe(reduce: list[str]) -> dict[str, Any] | None:
+    """Runs the reducer once with `--version`; its JSON record, if it prints one. Raises BookError
+    when it cannot run or exits non-zero, before anything is downloaded."""
+    try:
+        done = subprocess.run([*reduce, "--version"], capture_output=True, text=True)
+    except OSError as error:
+        raise BookError(f"the reducer {reduce} cannot run: {error}") from error
+    if done.returncode != 0:
+        why = done.stderr.strip()[-2000:]
+        raise BookError(f"the reducer {reduce} --version exited {done.returncode}: {why}")
+    return _reported(done.stdout)
+
+
+def _done(
+    entry: dict[str, Any],
+    where: Path,
+    keep: bool,
+    reduce: list[str] | None,
+    version: dict[str, Any] | None = None,
+) -> bool:
+    """Whether a day recorded before needs nothing: imported with the same reducer at the format
+    the reducer now reports, with the file it reported still there and, when this run keeps
+    samples, its Parquet still there."""
     kept = entry.get("parquet") and (where / entry["parquet"]).is_file()
     reduced = entry.get("reduced")
     named = reduced.get("path") if isinstance(reduced, dict) else None
     output = named is None or (where / named).is_file()
+    if version and "format" in version and isinstance(reduced, dict):
+        output = output and reduced.get("format") == version["format"]
     same = entry["status"] == "imported" and entry.get("reduce") == reduce
     return same and output and (kept or not keep)
 
@@ -222,7 +262,7 @@ def _day(
         began = time.monotonic()
         try:
             got = _download(address, archive, open_url)
-        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as error:
             return {**entry, "status": "failed", "error": f"download: {error}"}
         if got is None:
             return {**entry, "status": "missing", "error": "the archive has no such file (404)"}
@@ -235,7 +275,7 @@ def _day(
             return {**entry, "status": "failed", "error": str(error)}
         entry["import_s"] = round(time.monotonic() - began, 1)
         entry["peak_bytes"] = archive.stat().st_size + _bytes(run)
-        archive.unlink()
+        _unlink(archive)
         parquet = run / TABLE
         entry |= {
             "samples": complete["rows"]["book_samples"],
@@ -254,13 +294,26 @@ def _day(
             if reported := _reported(done.stdout):
                 entry["reduced"] = reported
         return {**entry, "status": "imported"}
-    except BookError as error:
-        return {**entry, "status": "failed", "error": str(error)}
+    except (BookError, OSError, KeyError, ValueError) as error:
+        return {**entry, "status": "failed", "error": f"{type(error).__name__}: {error}"}
     finally:
-        archive.unlink(missing_ok=True)
-        archive.with_name(archive.name + ".part").unlink(missing_ok=True)
+        for leftover in (archive, archive.with_name(archive.name + ".part")):
+            with contextlib.suppress(OSError):  # the day's result stands; staging goes next run
+                _unlink(leftover)
         if run is not None and not keep:
             shutil.rmtree(run, ignore_errors=True)
+
+
+def _unlink(path: Path, tries: int = 5, wait_s: float = 0.5) -> None:
+    """Deletes `path` if it is there, trying again while something (a virus scanner) holds it."""
+    for attempt in range(tries):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(wait_s)
 
 
 def _reported(stdout: str) -> dict[str, Any] | None:
