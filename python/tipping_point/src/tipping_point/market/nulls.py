@@ -3,12 +3,14 @@ research pass section 4, "Circularity, dynamic", section 2 item 12, call 7).
 
   Garch              a GARCH(1,1)-t process: r_t = sqrt(h_t) e_t, h_t = omega + alpha r_t-1^2 +
                      beta h_t-1, e_t Student-t with nu degrees of freedom scaled to unit variance
-  simulate           its returns, started from the unconditional variance
+  simulate           its returns, started from the unconditional variance, and each return
+                     spread over sub-steps along a Gaussian bridge when asked
   minute_klines      1-minute OHLC from 10-second returns, in archive.collect's columns
   delays             how late the hysteresis state rises after a planted switch, under a theta
   eligible_onsets    the bars where the event rule could have placed an event
   shift_onsets       the event-time shift null: events moved to eligible bars at least a day away
-  circularity_floor  simulate at 10 seconds, build 1-minute OHLC, run the exact bars and labeller,
+  circularity_floor  simulate a minute GARCH bridged to 10 seconds, build 1-minute OHLC, run the
+                     exact bars and labeller,
                      score close-to-close 1-minute returns: the AUC of pre-onset segments against
                      null slices, pooled over the paths and per path (the floor's own spread),
                      and of shifted segments against the same slices
@@ -16,8 +18,20 @@ research pass section 4, "Circularity, dynamic", section 2 item 12, call 7).
 The floor takes its scorers and its AUC as inputs. A scorer is any ews.trend.Pipeline, whose
 windows and horizons #30's pre-registration fixes; scoring.auc is the AUC. No module of this package
 may import those (tests/market/test_circularity.py: the labels cannot see the features), and the
-floor needs nothing of them but the call. The GARCH parameters are an input too: their fit on the
-2023 pilot year belongs to #29 S5. harness/market_floor.py assembles them all for a labels run.
+floor needs nothing of them but the call. The GARCH parameters are an input too, per minute:
+harness/market_garch.py fits them on the 2023 pilot year's 1-minute returns, and
+harness/market_floor.py holds them frozen and assembles everything for a labels run.
+
+Why per minute and bridged, not a GARCH at 10 seconds: the archives hold 1-minute klines, so only a
+minute GARCH can be fitted, and GARCH is not closed under temporal aggregation (Drost and Nijman
+1993). Matching a 10-second GARCH to the minute fit's variance and half-life (persistence
+s^(1/6), alpha's share and nu kept) gives, at the pilot fits, minute sums with 1-2% of the fitted
+variance and a refitted half-life of 78-119 minutes instead of 3.5-7 days: six shocks a minute feed
+h six times the minute fit's vol-of-vol, and the fit has no finite fourth moment for the
+aggregation formulas to use. The bridge keeps the minute returns exactly the fitted process; its
+sub-steps only draw a path inside each minute for the high and low Garman-Klass reads. Read over
+six sub-steps, Garman-Klass gives about 0.44 of the minute variance, a constant factor that the
+labeller's log baseline removes.
 
 Lengths: a segment or slice is `span` 1-minute samples. Bar b covers minutes [5b, 5b + 5), so the
 segment at horizon h bars before onset bar b ends just before minute 5(b - h): it holds nothing of
@@ -45,7 +59,8 @@ CONFIRMATORY = date(2024, 1, 1)  # as __main__'s: no label from here on until th
 FIRST = date(2022, 7, 4)  # a Monday: simulated days stand on the warm-up's calendar
 STEPS_PER_MINUTE = 6  # 10-second returns
 MINUTES_PER_BAR = 5
-DAY_STEPS = 1440 * STEPS_PER_MINUTE
+DAY_MINUTES = 1440
+DAY_STEPS = DAY_MINUTES * STEPS_PER_MINUTE
 DELAY_BARS = 200_000  # draws per delay simulation: some 2,000 episodes at p00 = 0.985
 SHIFT_DRAWS = 100
 SHIFT_MIN_DAYS = 1
@@ -74,17 +89,24 @@ class Garch:
         return self.omega / (1.0 - self.alpha - self.beta)
 
 
-def simulate(garch: Garch, n: int, rng: np.random.Generator) -> np.ndarray:
-    """n returns from h_0 at the unconditional variance, so E[r_t^2] is that variance at every t."""
+def simulate(garch: Garch, n: int, rng: np.random.Generator, steps: int = 1) -> np.ndarray:
+    """n returns from h_0 at the unconditional variance, so E[r_t^2] is that variance at every t.
+    With steps > 1, each return is spread over `steps` sub-steps along a Gaussian bridge: sub-steps
+    of variance h_t / steps, drawn after all the returns and conditioned to sum to r_t exactly. The
+    sums are then the GARCH itself, and the sub-steps give each return a path inside it."""
     shocks = rng.standard_t(garch.nu, n) * math.sqrt((garch.nu - 2.0) / garch.nu)
     omega, alpha, beta = garch.omega, garch.alpha, garch.beta
     h = garch.variance
-    out = [0.0] * n
+    out, var = [0.0] * n, [0.0] * n
     for t, e in enumerate(shocks.tolist()):
         r = math.sqrt(h) * e
-        out[t] = r
+        out[t], var[t] = r, h
         h = omega + alpha * r * r + beta * h
-    return np.array(out)
+    r = np.array(out)
+    if steps == 1:
+        return r
+    z = rng.normal(size=(n, steps)) * np.sqrt(np.array(var) / steps)[:, None]
+    return (z - z.mean(axis=1, keepdims=True) + r[:, None] / steps).ravel()
 
 
 def minute_klines(
@@ -291,7 +313,8 @@ def circularity_floor(
     summary, path_cells = [], []
     for path in range(paths):
         rng = np.random.default_rng([seed, path])
-        klines = minute_klines(start_ms, simulate(garch, days * DAY_STEPS, rng))
+        returns = simulate(garch, days * DAY_MINUTES, rng, STEPS_PER_MINUTE)
+        klines = minute_klines(start_ms, returns)
         bar, _ = bars.bars(start_ms, days, klines, _NO_METRICS, _NO_FUNDING)
         out = msvol.label(bar["ts_ns"], bar["rv"], params)
         minutes = close_returns(klines)
