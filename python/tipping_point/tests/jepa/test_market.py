@@ -529,8 +529,8 @@ def _crash_after(calls: int, real: Callable[..., Any]) -> Callable[..., Any]:
 def test_a_crashed_market_run_resumes_bit_for_bit(
     tmp_path: Path, toy_days: days.Dataset, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catches a resume that loses optimiser or generator state, and one that trains on other
-    days than the manifest names."""
+    """Catches a resume that loses optimiser or generator state, one that trains on other days
+    than the manifest names, and one that takes the same days through another scaling record."""
     straight = train.start(SHORT, toy_days, tmp_path / "straight", "m", "cpu")
     monkeypatch.setattr(train._Trainer, "update", _crash_after(7, train._Trainer.update))
     with pytest.raises(RuntimeError, match="injected crash"):
@@ -542,6 +542,10 @@ def test_a_crashed_market_run_resumes_bit_for_bit(
     shifted = market_toy.dataset(market_toy.Source(seed=1))  # same days, other bytes
     with pytest.raises(DataError, match="differ"):
         train.resume(run_dir, shifted)
+    rescaled = copy.deepcopy(toy_days.sources)
+    rescaled["scaling"]["scale"][0] *= 2  # same days and bytes, another record
+    with pytest.raises(DataError, match="differ"):
+        train.resume(run_dir, dataclasses.replace(toy_days, sources=rescaled))
     train.resume(run_dir, toy_days)
     assert _chunks(run_dir) == _chunks(straight)
     assert np.array_equal(_losses(run_dir), _losses(straight))

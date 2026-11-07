@@ -1,13 +1,15 @@
 """The cross-day step of the market loader (#165; #30 research pass 2.2 and 4.3 test 2): the scaling
 record is fitted on the training days alone, a feature that is mostly zero still gets a finite
-scale, relative depth reads only earlier days, readouts reuse the frozen record, and the Parquet
-source reads the files the feature reducer writes."""
+scale, relative depth reads only earlier days, readouts reuse the frozen record and give each day
+the baseline it had in training, and the Parquet source reads the files the feature reducer
+writes."""
 
 import hashlib
 import json
 from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -93,6 +95,7 @@ def test_the_record_is_fitted_on_the_training_days_alone(plain: days.Dataset) ->
     even one inside the 7-day depth window before a training day, leaves it identical, and the
     record names the training span and days it was fitted on."""
     record = plain.sources["scaling"]
+    assert record["symbol"] == SYMBOL and record["feature_format"] == features.FORMAT
     assert record["features"] == list(FEATURES)
     assert record["span"] == ["2023-01-18", "2023-10-01"]
     assert record["days"] == [d.isoformat() for d in TRAIN]
@@ -165,29 +168,62 @@ def test_relative_depth_reads_only_earlier_days(plain: days.Dataset) -> None:
 
 def test_readouts_reuse_the_frozen_record(plain: days.Dataset) -> None:
     """`frames` applies a training's record and never refits: the training days read through it
-    are bitwise the training frames, a changed record changes them, and a record made under other
-    transforms or a confirmatory day is refused."""
+    are bitwise the training frames, a changed record changes them, and a record fitted on another
+    symbol, made under other transforms or for another feature format, or a confirmatory day is
+    refused."""
     record = plain.sources["scaling"]
     m, _ = days.frames(Source(), SYMBOL, TRAIN, record)
     assert torch.equal(m.frames, plain.train.frames) and torch.equal(m.valid, plain.train.valid)
     other = {**record, "centre": [c + 1.0 for c in record["centre"]]}
     assert not torch.equal(days.frames(Source(), SYMBOL, TRAIN, other)[0].frames, m.frames)
+    with pytest.raises(DataError, match="fitted on BTCUSDT, not ETHUSDT"):
+        days.frames(Source(), "ETHUSDT", TRAIN, record)
     with pytest.raises(DataError, match="transforms"):
         days.frames(Source(), SYMBOL, TRAIN, {**record, "transforms": ["none"] * len(FEATURES)})
+    with pytest.raises(DataError, match="feature format"):
+        days.frames(Source(), SYMBOL, TRAIN, {**record, "feature_format": features.FORMAT + 1})
     with pytest.raises(DataError, match="confirmatory"):
         days.frames(Source(), SYMBOL, [date(2024, 1, 1)], record)
 
 
-def _write_day(root: Path, symbol: str, day: date, meta_day: date | None = None) -> Path:
+def test_frames_give_each_day_the_baseline_load_gave_it(plain: days.Dataset) -> None:
+    """The training and validation days read through `frames` in one call are bitwise the frames
+    `load` gave them, VAL[0] (before the training days) included: a training day's baseline skips
+    the validation day in its window, as in training. Read one day at a time with the days before
+    it as `lead`, each day is bitwise the same again, no lead day emits a minute and every lead day
+    is listed with its sha256. A training day without every earlier training day its baseline drew
+    on is refused."""
+    record = plain.sources["scaling"]
+    both = sorted([*TRAIN, *VAL])
+    whole, _ = days.frames(Source(), SYMBOL, both, record)
+    at = {d: slice(k * days.MINUTES, (k + 1) * days.MINUTES) for k, d in enumerate(both)}
+    for which, data in ((TRAIN, plain.train), (VAL, plain.val)):
+        assert torch.equal(torch.cat([whole.frames[at[d]] for d in which]), data.frames)
+        assert torch.equal(torch.cat([whole.valid[at[d]] for d in which]), data.valid)
+    digest = {d: Source().read(SYMBOL, d)[1] for d in both}
+    for k, d in enumerate(both):
+        one, records = days.frames(Source(), SYMBOL, [d], record, lead=both[:k])
+        assert torch.equal(one.frames, whole.frames[at[d]]), d
+        assert torch.equal(one.valid, whole.valid[at[d]]), d
+        listed = [(r["day"], r["sha256"], r.get("lead", False)) for r in records]
+        assert listed == [(x.isoformat(), digest[x], x != d) for x in both[: k + 1]]
+    with pytest.raises(DataError, match=r"needs the training days \['2023-03-01'\]"):
+        days.frames(Source(), SYMBOL, [TRAIN[3]], record, lead=TRAIN[1:3])
+    with pytest.raises(DataError, match="after every lead day"):
+        days.frames(Source(), SYMBOL, [TRAIN[3]], record, lead=[TRAIN[4]])
+
+
+def _write_day(root: Path, symbol: str, day: date, /, **changes: Any) -> Path:
     """A feature file as `reduce_run` writes it: the reducer's own schema (an empty day reduced),
-    synthetic values, its metadata and write options."""
+    synthetic values, its metadata (with `changes` made to it) and write options."""
     start = int((day - date(1970, 1, 1)).total_seconds()) * features.SECOND_NS
     table = features.reduce([], start, 2, 3)
     values, gap = book_day(day)
     for name in FEATURES:
         table = table.set_column(table.schema.get_field_index(name), name, pa.array(values[name]))
     table = table.set_column(table.schema.get_field_index("gap"), "gap", pa.array(gap))
-    meta = {"symbol": symbol, "day": (meta_day or day).isoformat(), "features": list(FEATURES)}
+    meta = {"format": features.FORMAT, "symbol": symbol, "day": day.isoformat()}
+    meta |= {"features": list(FEATURES), **changes}
     table = table.replace_schema_metadata({"tp.book_features": json.dumps(meta)})
     path = root / "features" / symbol / f"{day.isoformat()}.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,7 +234,8 @@ def _write_day(root: Path, symbol: str, day: date, meta_day: date | None = None)
 def test_the_parquet_source_reads_the_reducers_files(tmp_path: Path) -> None:
     """Reads `<root>/features/<SYMBOL>/<day>.parquet` with the sha256 of its bytes (as
     `reduce_run` records it), feeds `load`, and refuses a missing file, a file holding another
-    day and any confirmatory day before touching the disk."""
+    day, a file of another feature format or feature list, and any confirmatory day before
+    touching the disk."""
     for day in [*TRAIN[:3], VAL[1]]:
         _write_day(tmp_path, SYMBOL, day)
     source = days.ParquetSource(tmp_path)
@@ -214,8 +251,14 @@ def test_the_parquet_source_reads_the_reducers_files(tmp_path: Path) -> None:
         source.read(SYMBOL, TRAIN[4])
     with pytest.raises(DataError, match="no feature file"):
         source.read("ETHUSDT", TRAIN[0])
-    _write_day(tmp_path, SYMBOL, TRAIN[5], meta_day=TRAIN[4])
+    _write_day(tmp_path, SYMBOL, TRAIN[5], day=TRAIN[4].isoformat())
     with pytest.raises(DataError, match="holds BTCUSDT 2023-03-05"):
+        source.read(SYMBOL, TRAIN[5])
+    _write_day(tmp_path, SYMBOL, TRAIN[5], format=features.FORMAT - 1)
+    with pytest.raises(DataError, match=f"is feature format {features.FORMAT - 1};"):
+        source.read(SYMBOL, TRAIN[5])
+    _write_day(tmp_path, SYMBOL, TRAIN[5], features=list(FEATURES[:-1]))
+    with pytest.raises(DataError, match="holds the features"):
         source.read(SYMBOL, TRAIN[5])
     with pytest.raises(DataError, match="confirmatory"):
         days.ParquetSource(tmp_path / "nowhere").read(SYMBOL, date(2024, 1, 2))

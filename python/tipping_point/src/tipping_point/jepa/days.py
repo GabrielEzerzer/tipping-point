@@ -5,17 +5,18 @@ per symbol-day (UTC), 86,400 rows in second order, a float32 column per feature 
 column, True for a second without valid book data (a feature gap or an unsynced book). A source
 hands over the table with the sha256 of the bytes it came from, which the training manifest pins.
 `ParquetSource` reads the files `book.features.reduce_run` writes and hashes their bytes as it
-records them.
+records them. It refuses a file whose metadata names another symbol, day, feature format
+(`book.features.FORMAT`) or feature list (`book.features.FEATURES`).
 
 The cross-day step (#30 research pass 2.2, #165) turns the raw features into model inputs. Per
 feature, in this order:
   1. `relative` (depth_5, depth_20): minus a trailing baseline, the median of the daily medians
      (over each day's valid seconds) of the days in [d - 7, d) that the load holds. A training day
-     draws only on earlier training days, so the fit never sees a validation day; a validation
-     day (or a day read with a frozen record) draws on every earlier day it is loaded with. A day
-     with no such earlier day (the first day of a range, or one after a break of 7 days or more)
-     has no baseline: it serves as a baseline for later days and trains on nothing (every second
-     is set to a gap). Days 2 to 7 of a range use the 1 to 6 earlier days they have.
+     draws only on earlier training days, so the fit never sees a validation day; any other day
+     draws on every earlier day it is loaded with. A day with no such earlier day (the first day
+     of a range, or one after a break of 7 days or more) has no baseline: it serves as a baseline
+     for later days and trains on nothing (every second is set to a gap). Days 2 to 7 of a range
+     use the 1 to 6 earlier days they have.
      `log` (slope_b, slope_a): the natural log; both are positive distances in bps with a long
      right tail.
   2. A robust standardisation (x - centre) / scale fitted on the valid (non-gap) seconds of the
@@ -34,8 +35,21 @@ feature, in this order:
 Every other feature (moves, micro_dev, imb_*, depth_asym, wide, and any feature without an entry,
 as in the market toy) is only standardised. Gap seconds are zeroed last, so a gap reads the
 centre. The fitted record (`Scaling`, in the manifest's data section) holds each feature's
-transform, centre and scale with the training span and days it was fitted on; `frames` reads days
-for readouts and extraction through a frozen record and never refits.
+transform, centre and scale with the symbol, feature format, training span and days it was fitted
+on.
+
+Validation days should form a block after the training days. `load` takes them anywhere, but one
+before the training days draws its depth baseline from earlier validation days alone, so the
+first of them is all gap, and one between training days sits among days the model trained on,
+which makes it an easier test than a later day.
+
+`frames` reads days for readouts and extraction through a frozen record and never refits. It
+refuses a record fitted on another symbol or feature format. Its baselines follow the rule of
+step 1 with the record's training days, so a training day comes out bitwise as it trained, and a
+validation day as it was validated when it is read with the same earlier days. A training day
+whose earlier training days are not all handed in is refused. Days passed as `lead` are read for
+the baseline alone and emit no minutes, so a series can be read one day at a time; the exploratory
+read from 2023-10-01 takes the last training days as its lead.
 
 A minute is valid when none of its 60 seconds is a gap. Invalid minutes are never trained on:
 their latents are left out of every loss term, the predictor sees a mask token in their place, and
@@ -64,6 +78,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from torch import Tensor
+
+from ..book.features import FEATURES, FORMAT
 
 SECONDS = 86_400
 MINUTE = 60  # seconds per frame
@@ -114,6 +130,12 @@ class ParquetSource:
         meta = json.loads((table.schema.metadata or {}).get(b"tp.book_features", b"{}"))
         if meta.get("symbol") != symbol or meta.get("day") != day.isoformat():
             raise DataError(f"{path} holds {meta.get('symbol')} {meta.get('day')}")
+        if meta.get("format") != FORMAT:
+            raise DataError(
+                f"{path} is feature format {meta.get('format')}; this code reads {FORMAT}"
+            )
+        if meta.get("features") != list(FEATURES):
+            raise DataError(f"{path} holds the features {meta.get('features')}, not {FEATURES}")
         return table, hashlib.sha256(raw).hexdigest()
 
 
@@ -138,19 +160,28 @@ class Span:
 class Scaling:
     """The fitted cross-day record (module notes), as the manifest's data section keeps it."""
 
+    symbol: str  # the symbol whose days it was fitted on
     features: list[str]
     transforms: list[str]
     centre: list[float]
     scale: list[float]
     span: list[str]  # the model's training span [start, end) it was fitted for
     days: list[str]  # the training days it was fitted on
+    feature_format: int  # book.features.FORMAT of the code that fitted it
     baseline_days: int = BASELINE_DAYS
 
-    def check(self) -> None:
-        """Refuses a record made under other transforms than this code applies."""
+    def check(self, symbol: str) -> None:
+        """Refuses a record fitted on another symbol, or made under other transforms or another
+        feature format than this code reads."""
+        if self.symbol != symbol:
+            raise DataError(f"a record fitted on {self.symbol}, not {symbol}")
         expected = [TRANSFORMS.get(name, "none") for name in self.features]
         if self.transforms != expected or self.baseline_days != BASELINE_DAYS:
             raise DataError(f"a record of transforms {self.transforms}; this code: {expected}")
+        if self.feature_format != FORMAT:
+            raise DataError(
+                f"a record fitted on feature format {self.feature_format}; this code reads {FORMAT}"
+            )
 
 
 def read_day(
@@ -206,9 +237,12 @@ def _read(
     return out
 
 
-def _prepare(read: Sequence[_Day], pool: Sequence[_Day], features: Sequence[str]) -> None:
+def _prepare(
+    read: Sequence[_Day], pool: Sequence[_Day], features: Sequence[str], fitted: set[date]
+) -> None:
     """Step 1 in place: `relative` features minus their baseline from the `pool` days before each
-    day (a day without one becomes all gap), `log` features logged."""
+    day, only the `fitted` (training) ones for a day that is one of them (a day without a baseline
+    becomes all gap), `log` features logged."""
     relative = _relative(features)
     if relative:
         for d in read:
@@ -216,6 +250,7 @@ def _prepare(read: Sequence[_Day], pool: Sequence[_Day], features: Sequence[str]
                 p.depth
                 for p in pool
                 if d.day - timedelta(days=BASELINE_DAYS) <= p.day < d.day
+                and (p.day in fitted or d.day not in fitted)
                 and not np.isnan(p.depth).any()
             ]
             if not window:
@@ -338,16 +373,18 @@ def load(
         span.check(symbol, day)
     train = _read(source, symbol, train_days, features)
     val = _read(source, symbol, val_days, features)
-    _prepare(train, train, features)  # the fit sees training days only, baselines included
-    _prepare(val, [*train, *val], features)
+    # the fit sees training days only, baselines included
+    _prepare([*train, *val], [*train, *val], features, set(train_days))
     centre, scale = _fit(train, features)
     scaling = Scaling(
+        symbol=symbol,
         features=list(features),
         transforms=[TRANSFORMS.get(name, "none") for name in features],
         centre=centre,
         scale=scale,
         span=[span.start.isoformat(), span.end.isoformat()],
         days=[d.isoformat() for d in train_days],
+        feature_format=FORMAT,
     )
     _apply(train, scaling)
     _apply(val, scaling)
@@ -367,19 +404,40 @@ def load(
 
 
 def frames(
-    source: DaySource, symbol: str, days: Sequence[date], scaling: dict[str, Any]
+    source: DaySource,
+    symbol: str,
+    days: Sequence[date],
+    scaling: dict[str, Any],
+    lead: Sequence[date] = (),
 ) -> tuple[Minutes, list[dict[str, Any]]]:
     """Minutes of `days` through a frozen record (a manifest's `data["scaling"]`), for readouts
-    and extraction: nothing is refitted. Relative depth draws on the earlier days of `days`, so the
-    first day of a range serves as a baseline only."""
+    and extraction, with a record of every day read: nothing is refitted. Relative depth draws on
+    the earlier days of `lead` and `days` by the rule of `load` (module notes). `lead` days come
+    before `days` and are read for that alone: they emit no minutes and their records say `lead`.
+    A training day whose earlier training days are not all handed in is refused, since its
+    baseline would differ from the one it trained on."""
     record = Scaling(**scaling)
-    record.check()
-    if not days or list(days) != sorted(set(days)):
-        raise DataError("days must be given, unique and in date order")
-    for day in days:
+    record.check(symbol)
+    if not days or [*lead, *days] != sorted({*lead, *days}):
+        raise DataError("days must be given, unique and in date order, after every lead day")
+    for day in (*lead, *days):
         if day >= CONFIRMATORY:
             raise DataError(f"{day} is in the confirmatory span (from {CONFIRMATORY}): never read")
-    read = _read(source, symbol, days, record.features)
-    _prepare(read, read, record.features)
+    fitted = {date.fromisoformat(d) for d in record.days}
+    if _relative(record.features):
+        held = {*lead, *days}
+        for day in sorted(fitted.intersection(days)):
+            window = day - timedelta(days=BASELINE_DAYS)
+            missing = sorted(t for t in fitted - held if window <= t < day)
+            if missing:
+                raise DataError(
+                    f"training day {day} needs the training days {[t.isoformat() for t in missing]}"
+                    " for its baseline: hand them in as `lead`"
+                )
+    pool = _read(source, symbol, [*lead, *days], record.features)
+    before, read = pool[: len(lead)], pool[len(lead) :]
+    _prepare(read, pool, record.features, fitted)
     _apply(read, record)
-    return _minutes(read)
+    minutes, records = _minutes(read)
+    leads = [{"day": p.day.isoformat(), "sha256": p.digest, "lead": True} for p in before]
+    return minutes, [*leads, *records]
