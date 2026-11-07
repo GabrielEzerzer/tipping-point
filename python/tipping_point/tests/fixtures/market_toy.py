@@ -37,7 +37,9 @@ VAL_DAYS = (date(2023, 3, 8), date(2023, 3, 9))
 PROBE_DAYS = (date(2023, 4, 3), date(2023, 4, 4))  # fit and test the probes; never trained on
 GAP_MINUTES = (100, 700, 1000, 1001, 1002, 1003, 1004)
 
-SPEC = minutes.MinuteSpec(dim=32, depth=2, pred_depth=1, heads=2, context=16)
+SPEC = minutes.MinuteSpec(
+    features=len(FEATURES), dim=32, depth=2, pred_depth=1, heads=2, context=16
+)
 # a budget of steps, never of wall-clock time; a flat learning rate and a faster EMA than the
 # production 0.996 -> 1.0, so the target encoder follows the context encoder within 400 steps
 # (at 0.996 the target barely moves from its random start in a run this short, and the latent
