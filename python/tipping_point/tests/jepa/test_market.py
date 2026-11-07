@@ -402,6 +402,43 @@ def test_readouts_have_no_position_effect_and_never_look_ahead() -> None:
         assert torch.equal(s[:cut].nan_to_num(-1.0), surprise[:cut].nan_to_num(-1.0))
 
 
+def test_no_prediction_is_scored_or_trained_from_mask_tokens_alone() -> None:
+    """Catches surprise and training cells taken from a context with no valid minute (#166): after
+    an outage longer than the context, the first valid minutes' surprise is NaN until a valid minute
+    enters the predictor's input window [t - C + 1, t - k - 1], and a chunk that opens with invalid
+    minutes has no hidden cell before its first valid one."""
+    spec = market_toy.SPEC
+    model = minutes.MarketJepa(spec)
+    model.initialise(torch.Generator().manual_seed(1))
+    C, H, M = spec.context, spec.horizons, 120
+    gen = torch.Generator().manual_seed(5)
+    frames = torch.randn(M, days.MINUTE, spec.features, generator=gen)
+    # The second case keeps one valid minute inside the outage, at the oldest end of minute 60's
+    # window (60 - C + 1 = 45 with C = 16), so a fix that drops that end fails.
+    for lone in (None, 60 - C + 1):
+        valid = torch.ones(M, dtype=torch.bool)
+        valid[30:60] = False  # longer than the context
+        if lone is not None:
+            valid[lone] = True
+        _, surprise = minutes.readouts(model, frames, valid, windows=32)
+        for t in range(C - 1, M):
+            for k in range(H):
+                scored = bool(valid[t]) and bool(valid[t - C + 1 : t - k].any())
+                assert bool(torch.isfinite(surprise[t, k])) == scored, (lone, t, k)
+        if lone is None:
+            assert torch.isnan(surprise[60]).all() and torch.isfinite(surprise[60 + H]).all()
+        else:
+            assert torch.isfinite(surprise[60]).all()
+
+    chunk_valid = torch.ones(1, C, dtype=torch.bool)
+    chunk_valid[0, :6] = False
+    with torch.no_grad():
+        hidden = model.chunk(frames[:C].unsqueeze(0), chunk_valid)["hidden"][0]
+    for t in range(C):
+        for k in range(H):
+            assert bool(hidden[t, k]) == (t >= 6 and t + k + 1 < C), (t, k)
+
+
 # ---------------------------------------------------------------- the market toy
 
 
