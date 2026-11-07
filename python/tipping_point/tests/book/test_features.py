@@ -141,12 +141,15 @@ def test_known_answers_on_a_hand_built_book() -> None:
         3 * math.log(1001 / 1000.5) ** 2 + 2 * math.log(1001.5 / 1001) ** 2
     )
     assert f["moves"][0] == 5
-    assert f["wide"][0] == approx(0.3)  # spreads of 2 ticks at 0.2, 0.5 and 0.9 s
+    # One level a side: the spread is the only price difference a sample shows, so it is also the
+    # sample's tick (see the shortcut). The 2-unit spreads at 0.2, 0.5 and 0.9 s read as one tick
+    # of 2, so no sample is wide and micro_dev is in spreads.
+    assert f["wide"][0] == 0
     # OFI: e = +2 +1 +2 +3 -2 -2 0 -5 +2 = +1 over a mean top-5 quantity of 62 / 10 lots.
     assert f["ofi"][0] == approx(1 / 6.2)
-    micro = [(b * qa + a * qb) / (qb + qa) - (b + a) / 2 for b, qb, a, qa in TOP]
+    micro = [((b * qa + a * qb) / (qb + qa) - (b + a) / 2) / (a - b) for b, qb, a, qa in TOP]
     assert f["micro_dev"][0] == approx(sum(micro) / 10)
-    assert micro[0] == 0.25 and micro[2] == approx(1 / 9)  # (1000*4 + 1002*5) / 9 - 1001
+    assert micro[0] == 0.25 and micro[2] == approx(1 / 18)  # ((1000*4 + 1002*5) / 9 - 1001) / 2
     imb = [(qb - qa) / (qb + qa) for _, qb, _, qa in TOP]
     for name in ("imb_1", "imb_5", "imb_20"):  # one level a side
         assert f[name][0] == approx(sum(imb) / 10)
@@ -255,14 +258,21 @@ def test_a_gap_free_days_returns_add_up_to_its_log_change() -> None:
     assert steps[0] == 9 and (steps[1:] == 10).all() and steps.sum() == n - 1
 
 
+def _outage() -> tuple[list[Row], list[int]]:
+    """Ten seconds of the deep book, a tick up or down from one sample to the next, and their
+    seqs: from slot 20, fifty samples share one."""
+    rows: list[Row] = [(k, True, _shift(BIDS, k % 3), _shift(ASKS, k % 3)) for k in range(100)]
+    seqs = [k if k < 20 else 20 if k < 70 else k for k in range(100)]
+    return rows, seqs
+
+
 def test_a_feed_outage_is_masked_once_seq_stands_still_for_two_seconds() -> None:
     """The engine fills a silent feed with synced copies of the last book: from slot 20, fifty
     samples share one seq. The first STALE_SAMPLES of them still count (only the past says it is
     an outage); slots 40 to 69 are masked like missing samples, so seconds 4 to 6 are gaps with
     NaN features, and second 7 has no step from the stale slot 69 into it."""
     assert features.STALE_SAMPLES == 20
-    rows: list[Row] = [(k, True, _shift(BIDS, k % 3), _shift(ASKS, k % 3)) for k in range(100)]
-    seqs = [k if k < 20 else 20 if k < 70 else k for k in range(100)]
+    rows, seqs = _outage()
     f = features.reduce(_table(rows, seqs=seqs), DAY0, 2, 3)
     stale = int(f.schema.metadata[b"tp.stale_samples"])
     f = f.to_pydict()
@@ -371,7 +381,7 @@ def test_two_runs_write_the_same_bytes(tmp_path: Path) -> None:
         "price_decimals": 1,
         "qty_decimals": 3,
     }
-    assert meta["ticks"] == [1]  # 0.1, one unit at 1 decimal
+    assert meta["ticks"] == {"1": 26}  # its 26 counted samples, all on 0.1: one unit at 1 decimal
     # The reducer's identity, in the file and in its record, decides whether a day is done.
     for found in (meta, first):
         assert found["format"] == features.FORMAT and found["version"] == features.__version__
@@ -481,34 +491,57 @@ def test_batches_in_any_order_give_the_same_table() -> None:
         features.reduce([*table.to_batches(), *table.to_batches()], DAY0, 2, 3)
 
 
-def test_the_tick_is_measured_from_each_samples_book() -> None:
-    """A book on a 5-unit tick (BTCUSDT before 2023-02-10: 0.5 at 1 decimal) reads like the same
-    book on a 1-unit tick: `micro_dev` in its own ticks, `wide` only past one of them (#164).
-    Seconds 0 and 1 are on the 5-unit tick, a one-tick then a two-tick spread; second 2 switches
-    to the 1-unit tick mid-day."""
+def _ticks() -> list[Row]:
+    """Seconds 0 and 1 on a 5-unit tick, a one-tick then a two-tick spread; second 2 on the
+    1-unit tick, as after a mid-day switch; second 3 one bid level under asks two units apart,
+    a one-unit spread."""
     coarse = lambda levels: [(5 * p, q) for p, q in levels]  # noqa: E731
     wider = [(p + 1, q) for p, q in ASKS]  # a two-tick spread
+    sparse = [(1001 + 2 * i, q) for i, (_, q) in enumerate(ASKS)]  # 1001, 1003, ..., 1011
     rows: list[Row] = [(k, True, coarse(BIDS), coarse(ASKS)) for k in range(10)]
     rows += [(10 + k, True, coarse(BIDS), coarse(wider)) for k in range(10)]
     rows += [(20 + k, True, BIDS, ASKS) for k in range(10)]
-    table = features.reduce(_table(rows), DAY0, 2, 3)
+    rows += [(30 + k, True, BIDS[:1], sparse) for k in range(10)]
+    return rows
+
+
+def test_the_tick_is_measured_from_each_samples_book() -> None:
+    """A book on a 5-unit tick (BTCUSDT before 2023-02-10: 0.5 at 1 decimal) reads like the same
+    book on a 1-unit tick: `micro_dev` in its own ticks, `wide` only past one of them (#164). The
+    spread is measured with the gaps, so a sparse side over a one-level side keeps its 1-unit tick
+    (see _ticks for the seconds)."""
+    table = features.reduce(_table(_ticks()), DAY0, 2, 3)
     f = {name: table[name].to_numpy() for name in table.column_names}
     assert f["micro_dev"][0] == pytest.approx(0.25) and f["wide"][0] == 0
     assert f["micro_dev"][2] == pytest.approx(0.25) and f["wide"][2] == 0
     # (5000 * 1 + 5010 * 3) / 4 - 5005 = 2.5 units, half a 5-unit tick
     assert f["micro_dev"][1] == pytest.approx(0.5) and f["wide"][1] == 1
-    assert json.loads(table.schema.metadata[b"tp.ticks"]) == [1, 5]
+    # Ask gaps of 2 and a 1-unit spread make a 1-unit tick, not 2: (1000 * 1 + 1001 * 3) / 4 -
+    # 1000.5 = 0.25 units, a quarter tick.
+    assert f["micro_dev"][3] == pytest.approx(0.25) and f["wide"][3] == 0
+    assert json.loads(table.schema.metadata[b"tp.ticks"]) == {"1": 20, "5": 20}
 
 
-# reduce() output per FORMAT, hashed column by column (see _digest), for the committed run and
-# the hand-built book. A change to the output fails here until FORMAT and this table move together
-# (#169): a re-run skips every day already reduced at the same FORMAT.
+# reduce() output per FORMAT, hashed column by column (see _digest), for the committed run, the
+# hand-built book and the rarer books (_rarer_books). A change to the output fails here until
+# FORMAT and this table move together (#169): a re-run skips every day already reduced at the same
+# FORMAT.
 DIGESTS = {
     3: (
         "5a2ba3e6016ecdf779be1d46201f96c48e22c78b79c1201f38c379b8a6c811a9",
-        "bc18821e9c3cf800f538b3e3ff68145f753407f0dda7df50f307a3358df79443",
+        "8c0218808a8b7eca248ec919890f34edb6e0aca38bd0218f50e2d810494ad7f1",
+        "d9bb41858fa41152d8f15503a25eb32a5bd24646ae0c0b86eda8d06ff785cd25",
     ),
 }
+
+
+def _rarer_books() -> pa.Table:
+    """What neither the committed run nor the hand-built book holds: the outage (seconds 0 to 9),
+    the tick rows (10 to 13) and a locked book, bid = ask, alone in second 14."""
+    rows, seqs = _outage()
+    rows += [(100 + slot, synced, bids, asks) for slot, synced, bids, asks in _ticks()]
+    rows += [(140, True, _shift(BIDS, 1), ASKS)]  # the bid a tick up meets the ask at 1001
+    return _table(rows, seqs=seqs + list(range(len(seqs), len(rows))))
 
 
 def _digest(table: pa.Table) -> str:
@@ -530,6 +563,7 @@ def test_the_output_matches_its_format() -> None:
     found = (
         _digest(features.reduce(pq.read_table(run), 1792454400 * 10**9, 1, 3)),
         _digest(features.reduce(_table(_book()), DAY0, 2, 3)),
+        _digest(features.reduce(_rarer_books(), DAY0, 2, 3)),
     )
     assert DIGESTS.get(features.FORMAT) == found, f"bump FORMAT and record {found}"
 
@@ -543,14 +577,21 @@ def _manifest(run: Path, edit: Any) -> Path:
 
 
 @pytest.mark.parametrize(
-    "case",
-    ["day start", "off the grid", "book_sample", "symbols"],
+    ("case", "message"),
+    [
+        ("day start", "start of a UTC day"),
+        ("off the grid", "100 ms grid"),
+        ("book_sample", "sampled the book as"),
+        ("symbols", "not one symbol"),
+    ],
 )
-def test_the_reducer_refuses_input_it_cannot_reduce(case: str, tmp_path: Path) -> None:
-    """Each input check raises FeatureError (#173)."""
+def test_the_reducer_refuses_input_it_cannot_reduce(
+    case: str, message: str, tmp_path: Path
+) -> None:
+    """Each input check raises FeatureError with its own message (#173)."""
     run = tmp_path / RUN.name
     shutil.copytree(RUN, run)
-    with pytest.raises(features.FeatureError):
+    with pytest.raises(features.FeatureError, match=message):
         if case == "day start":
             features.reduce(_table(_book()), DAY0 + features.SECOND_NS, 2, 3)
         elif case == "off the grid":

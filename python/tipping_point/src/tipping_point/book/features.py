@@ -54,22 +54,25 @@ Features, per second (a "sample" is one 100 ms book; means are over the second's
              within every sample and is scale-free, leaving the size of the book to `depth_*`.
   wide       fraction of samples with a spread above one tick
 
-Ticks. Each sample's tick is measured from its own book: the greatest common divisor of the
-differences between adjacent level prices on each side, in units of the run's price scale. The
-scale alone does not give it: BTCUSDT's tick on Bybit was 0.5 (5 units at 1 decimal) until
-2023-02-10, then 0.1, with the scale unchanged (#164). The distinct ticks of a day's counted
-samples go into the file's metadata (`ticks`).
+Ticks. Each sample's tick is measured from its own book: the greatest common divisor of its
+spread and of the differences between adjacent level prices on each side, in units of the run's
+price scale. The scale alone does not give it: BTCUSDT's tick on Bybit was 0.5 (5 units at 1
+decimal) until 2023-02-10, then 0.1, with the scale unchanged (#164). The file's metadata counts
+the day's counted samples by their measured tick (`ticks`, {tick: samples}).
 
 Cross-day steps, not done here (they are fitted later, on the training span only, #30 4.1):
 `depth_5` and `depth_20` become relative to their trailing 7-day median, and every feature gets
 the robust standardisation (median and IQR) with its log or signed-log transform. Every other
 feature is defined within the day and is final here.
 
-shortcut: the measured tick is a multiple of the true one; it is too large only when every gap
-between the 20 levels of both sides is (all levels two ticks apart, say), and a sample with fewer
-than two levels on both sides shows no gap at all and takes one price unit. Both are rare in a deep
-book; if `ticks` in a file's metadata shows more than the exchange's tick for the day, take the
-day's smallest measured tick instead of each sample's.
+shortcut: the tick is measured per sample, which keeps the intraday switch on 2023-02-10 (between
+06:00 and 08:00 UTC) right. Each measure is a multiple of the true tick. It is too large only when
+the spread and every gap between adjacent levels share a larger factor, as in a thin book whose
+levels and spread all stand two ticks apart, or one level a side over a two-tick spread; both are
+rare in a deep book. If the `ticks` counts in a file's metadata show samples above the exchange's
+tick for the day, the upgrade is the smallest tick over the trailing N samples, which stays causal.
+The day's smallest tick would not do: it reads later samples, and on 2023-02-10 it would give the
+morning the afternoon's tick.
 """
 
 from __future__ import annotations
@@ -217,8 +220,9 @@ def reduce(
         "gap": count < PER,
     }
     columns |= {k: out[k].astype(np.float32) for k in FEATURES}
-    ticks = np.unique(flat["tick"][np.isfinite(flat["mid"])]).astype(int).tolist()
-    meta = {"tp.stale_samples": str(int(stale.sum())), "tp.ticks": json.dumps(ticks)}
+    ticks, held = np.unique(flat["tick"][np.isfinite(flat["mid"])], return_counts=True)
+    by_tick = {int(t): int(n) for t, n in zip(ticks, held, strict=True)}  # JSON keys: strings
+    meta = {"tp.stale_samples": str(int(stale.sum())), "tp.ticks": json.dumps(by_tick)}
     return pa.table(columns).replace_schema_metadata(meta)
 
 
@@ -255,10 +259,13 @@ def _per_sample(
 
 
 def _tick(bp: np.ndarray, ap: np.ndarray) -> np.ndarray:
-    """Each sample's tick in price units: the gcd of the gaps between adjacent levels on both
-    sides (missing levels give no gap); 1 where there is no gap (see the shortcut above)."""
+    """Each sample's tick in price units: the gcd of its spread and of the gaps between adjacent
+    levels on both sides (missing levels give no gap; see the shortcut above). 1 where the book
+    shows no price difference at all, which only a sample that does not count can do: a counted
+    one always has a spread."""
     gaps = np.abs(np.concatenate([np.diff(bp, axis=1), np.diff(ap, axis=1)], axis=1))
     tick = np.gcd.reduce(np.nan_to_num(gaps).astype(np.int64), axis=1)
+    tick = np.gcd(tick, np.nan_to_num(ap[:, 0] - bp[:, 0]).astype(np.int64))
     return np.where(tick > 0, tick, 1).astype(np.float64)
 
 
