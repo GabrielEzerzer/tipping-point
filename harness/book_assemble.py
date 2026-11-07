@@ -10,8 +10,9 @@ Every check runs before anything is written, and any problem refuses the whole m
   - a day of a range, for a symbol of market.book.SYMBOLS, that no source has imported (missing),
     or that two sources hold (duplicate, even with equal bytes: the kernels must split the days);
   - an entry not `imported`, reduced by another feature format than book.features.FORMAT, by a
-    dirty tree or at another commit than --commit, or whose feature file is absent or does not
-    hash to the entry's sha256.
+    dirty tree or at another commit than --commit (7 to 40 hex digits), whose path is not
+    features/<SYMBOL>/<day>.parquet, or whose feature file is absent or does not hash to the
+    entry's sha256.
 It is idempotent: a feature file already in <out> with the entry's sha256 is kept, one with other
 bytes is a problem, and a manifest equal to the one it would write is not rewritten. --dry-run
 prints the plan and the problems and writes nothing.
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import sys
 from collections.abc import Sequence
@@ -59,6 +61,8 @@ class Plan:
 def plan(sources: Sequence[Path], out: Path, commit: str) -> Plan:
     """What merging `sources` into `out` would do, and every reason it must not (module notes)."""
     result = Plan()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", commit):
+        result.problems.append(f"--commit {commit!r} is not 7 to 40 hex digits")
     owner: dict[tuple[str, str], Path] = {}  # (range, key) -> the source holding it
     entries: dict[str, dict[str, Any]] = {}
     for src in map(Path, sources):
@@ -100,6 +104,8 @@ def plan(sources: Sequence[Path], out: Path, commit: str) -> Plan:
                 why.append(f"reduced at {reduced.get('git_sha')}, not {commit}")
             if reduced.get("dirty") is not False:
                 why.append("reduced from a dirty tree")
+            if reduced.get("path") != f"features/{key}.parquet":
+                why.append(f"path {reduced.get('path')!r}, not features/{key}.parquet")
             if why:
                 result.problems.append(f"{name} {key}: {'; '.join(why)}")
                 continue

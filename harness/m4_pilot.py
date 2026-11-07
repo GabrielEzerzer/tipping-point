@@ -124,6 +124,7 @@ def run(
     cfg = config(asset, size, steps)
     root = Path(out) / f"{asset}-{size}"
     found = _runs(root)
+    manifest: dict[str, Any] = {}
     if len(found) > 1:
         raise RuntimeError(f"{root}: {len(found)} trainings; keep one")
     if found:
@@ -138,6 +139,10 @@ def run(
     if not found or not (found[0] / "complete.json").exists() or not (root / VALIDATION).exists():
         source = days.ParquetSource(data_dir)
         data = days.load(source, cfg.span, cfg.symbol, FEATURES, train_days, val_days)
+        # the check minutes.Domain.check_resume makes, here also for a finished run whose
+        # validation is still to write: smoke follows the days it trained on, not this --limit
+        if found and manifest["data"] != json.loads(json.dumps(data.sources)):
+            raise RuntimeError(f"{found[0]} was trained on other days (another --limit?)")
     checkpoint = train._Trainer.checkpoint
     train._Trainer.checkpoint = _keep_short(checkpoint)
     try:
@@ -189,8 +194,10 @@ def probe_errors(latent: np.ndarray, val: days.Minutes) -> list[float]:
     from minute t's latent to minute t + 1's feature means, fitted on the first half."""
     target = val.frames.mean(1).numpy()[1:]
     x = latent[:-1]
-    pair = (val.valid[:-1] & val.valid[1:] & (val.run[:-1] == val.run[1:])).numpy()
-    day = np.arange(len(x)) // days.MINUTES
+    day = np.arange(len(val)) // days.MINUTES
+    same = (val.run[:-1] == val.run[1:]).numpy() & (day[:-1] == day[1:])
+    pair = (val.valid[:-1] & val.valid[1:]).numpy() & same
+    day = day[:-1]
     total = len(val) // days.MINUTES
     first = total // 2
     fit = pair & (day < first)

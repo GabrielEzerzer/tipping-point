@@ -1,16 +1,25 @@
 """The M4 pilot's rules as code (harness/m4_pilot.py) and the merge of the book's range folders
 (harness/book_assemble.py), on planted numbers and fake range folders: no training, no real data."""
 
+import copy
+import dataclasses
 import hashlib
 import json
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import book_assemble
 import m4_pilot
+import market_toy
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import torch
+from tipping_point.ising import io
+from tipping_point.jepa import days, train
 
 
 def test_the_split_is_a_validation_block_after_the_training_days() -> None:
@@ -130,6 +139,10 @@ def test_assembly_refuses_missing_duplicate_and_foreign_days(
         for p in book_assemble.plan([*training, training[0]], out, "fcd5b6f").problems
     )
     assert book_assemble.plan(training, out, "abc1234").problems  # another commit
+    for prefix in ("", "fcd5b6", "FCD5B6F"):  # every sha starts with ""; 7 hex digits at least
+        assert any("hex digits" in p for p in book_assemble.plan(training, out, prefix).problems)
+    escape = _range(tmp_path / "f3", "training", ("BTCUSDT",), [date(2023, 1, 18)], path="../x")
+    assert any("not features/" in p for p in book_assemble.plan([escape], out, "fcd5b6f").problems)
     dirty = _range(tmp_path / "f2", "training", ("BTCUSDT",), [date(2023, 1, 18)], format=2)
     assert any(
         "feature format 2" in p for p in book_assemble.plan([dirty], out, "fcd5b6f").problems
@@ -143,10 +156,9 @@ def test_assembly_refuses_missing_duplicate_and_foreign_days(
 
 
 def test_the_probe_scores_a_latent_that_knows_the_next_minute_near_0_and_noise_near_1() -> None:
-    """Planted: 4 days of minutes whose feature means follow an AR(1); a latent holding minute t's
-    means predicts minute t + 1's well, pure noise does not; days 3 and 4 are scored."""
-    from tipping_point.jepa import days
-
+    """Planted: 4 days of minutes whose feature means follow an AR(1); a latent holding minute
+    t + 1's means scores near 0, one holding minute t's (a probe aimed at minute t or t - 1) about
+    0.1, pure noise near 1; days 3 and 4 are scored."""
     rng = np.random.default_rng(0)
     n = 4 * days.MINUTES
     means = np.zeros((n, 3), np.float32)
@@ -156,6 +168,72 @@ def test_the_probe_scores_a_latent_that_knows_the_next_minute_near_0_and_noise_n
     valid = torch.ones(n, dtype=torch.bool)
     valid[100:110] = False
     minutes = days.Minutes(frames, valid, torch.zeros(n, dtype=torch.int64))
-    good = m4_pilot.probe_errors(means.astype(float), minutes)
+    ahead = m4_pilot.probe_errors(np.roll(means, -1, 0).astype(float), minutes)
+    now = m4_pilot.probe_errors(means.astype(float), minutes)
     noise = m4_pilot.probe_errors(rng.standard_normal((n, 3)), minutes)
-    assert len(good) == 2 and max(good) < 0.15 and min(noise) > 0.9
+    assert len(ahead) == 2 and max(ahead) < 0.02
+    assert min(now) > 0.05 and min(noise) > 0.9
+
+
+# ---------------------------------------------------------------- run, on the market toy
+
+
+@pytest.fixture
+def toy_pilot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> days.Dataset:
+    """m4_pilot.run on a 12-step market toy run, the step-SHORT copy at step 4; the data folder is
+    never read, days.load hands back the toy's days."""
+    toy = market_toy.dataset()
+    short = market_toy.config(steps=12, checkpoint_every=4, monitor_every=4, pca_frames=128)
+    monkeypatch.setattr(m4_pilot, "config", lambda *a, **k: short)
+    monkeypatch.setattr(m4_pilot, "SHORT", 4)
+    monkeypatch.setattr(m4_pilot, "HALF", Path("ckpt") / "step_0000004.pt")
+    monkeypatch.setattr(days, "ParquetSource", lambda folder: None)
+    monkeypatch.setattr(days, "load", lambda *a: toy)
+    return toy
+
+
+def _crash_after(calls: int, real: Callable[..., Any]) -> Callable[..., Any]:
+    count = 0
+
+    def crashing(*args: Any, **kwargs: Any) -> Any:
+        nonlocal count
+        count += 1
+        if count > calls:
+            raise RuntimeError("injected crash")
+        return real(*args, **kwargs)
+
+    return crashing
+
+
+def test_the_step_short_copy_survives_a_crash_and_resume(
+    toy_pilot: days.Dataset, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with monkeypatch.context() as m:
+        m.setattr(train._Trainer, "update", _crash_after(6, train._Trainer.update))
+        with pytest.raises(RuntimeError, match="injected crash"):
+            m4_pilot.run("btc", "M", tmp_path / "data", tmp_path / "out")
+    (run_dir,) = m4_pilot._runs(tmp_path / "out" / "btc-M")
+    assert (run_dir / m4_pilot.HALF).is_file() and not (run_dir / "complete.json").exists()
+    assert m4_pilot.run("btc", "M", tmp_path / "data", tmp_path / "out") == run_dir
+    assert train.verify(run_dir) == []
+    assert m4_pilot.HALF.as_posix() in io.read_json(run_dir / "complete.json")["files"]
+    steps = pa.concat_tables(pq.read_table(p) for p in io.chunks(run_dir, "train"))["step"]
+    assert steps.to_pylist() == list(range(1, 13))
+    record = io.read_json(tmp_path / "out" / "btc-M" / m4_pilot.VALIDATION)
+    assert record["half"] is not None and record["steps"] == 12
+
+
+def test_a_finished_run_refuses_validation_on_other_days(
+    toy_pilot: days.Dataset, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run trained with --limit whose validation.json is missing, re-run without it, must not
+    probe the smoke model and record it as a full run."""
+    out = tmp_path / "out"
+    m4_pilot.run("btc", "M", tmp_path / "data", out)
+    (out / "btc-M" / m4_pilot.VALIDATION).unlink()
+    sources = copy.deepcopy(toy_pilot.sources)
+    sources["val"] = sources["val"][:1]
+    monkeypatch.setattr(days, "load", lambda *a: dataclasses.replace(toy_pilot, sources=sources))
+    with pytest.raises(RuntimeError, match="other days"):
+        m4_pilot.run("btc", "M", tmp_path / "data", out)
+    assert not (out / "btc-M" / m4_pilot.VALIDATION).exists()
