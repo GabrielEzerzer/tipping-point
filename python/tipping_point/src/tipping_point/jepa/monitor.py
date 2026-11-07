@@ -76,11 +76,12 @@ class Detector:
     history: list[int] = field(default_factory=list)  # steps whose evaluation fired
 
     def check(self, step: int, stats: dict[int, dict[str, Any]]) -> list[str]:
-        """One evaluation, statistics per L; returns the floors it broke."""
+        """One evaluation, statistics per L (None for a domain with one group, the market's);
+        returns the floors it broke."""
         floors = asdict(self.floors)
         fired = [
-            f"L{L} {name} {s[name]:.4g} < {floors[name]:g}"
-            for L, s in sorted(stats.items())
+            f"{'' if L is None else f'L{L} '}{name} {s[name]:.4g} < {floors[name]:g}"
+            for L, s in sorted(stats.items(), key=lambda item: (item[0] is not None, item[0]))
             for name in self.floors.broken(s)
         ]
         if fired:
