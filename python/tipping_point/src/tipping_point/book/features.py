@@ -12,8 +12,9 @@ else: no statistic over the day, nothing later than the second. The means read t
 step comes from the previous second's last sample. Neighbouring seconds (and so neighbouring
 minute frames of the JEPA) share that one boundary sample; in exchange no 100 ms step is lost and
 the day's `ret` adds up to the log change of the mid from the day's first sample to its last when
-nothing is missing. The day's first sample has no step before it. The one reach further back is
-the outage rule below, which reads the samples' `seq` up to 2 s before; nothing reads later.
+nothing is missing. The day's first sample has no step before it. Two rules reach further back,
+and nothing reads later: the outage rule below reads the samples' `seq` up to 2 s before, and a
+sample whose book shows no gaps between levels takes its tick from an earlier sample (Ticks).
 
 Gaps. A sample counts only when the book was synced, both sides have a best level and the book is
 not crossed. `samples` is the count of those (0 to 10) and `gap` is set when it is below 10. A
@@ -57,8 +58,13 @@ Features, per second (a "sample" is one 100 ms book; means are over the second's
 Ticks. Each sample's tick is measured from its own book: the greatest common divisor of its
 spread and of the differences between adjacent level prices on each side, in units of the run's
 price scale. The scale alone does not give it: BTCUSDT's tick on Bybit was 0.5 (5 units at 1
-decimal) until 2023-02-10, then 0.1, with the scale unchanged (#164). The file's metadata counts
-the day's counted samples by their measured tick (`ticks`, {tick: samples}).
+decimal) until 2023-02-10, then 0.1, with the scale unchanged (#164). A book with no gaps between
+levels (one level a side, or the rest null) shows only its spread, which in a thin book is often
+more than one tick. Such a sample takes the tick of the most recent earlier counted sample of the
+day that had level gaps, reduced to its gcd with the sample's own spread (a tick always divides
+the spread). Only when there is no such sample is its spread alone its tick.
+The file's metadata counts the day's counted samples by their tick (`ticks`, {tick: samples}),
+and those whose tick was carried (`tick_carried`) or is their spread alone (`tick_spread_only`).
 
 Cross-day steps, not done here (they are fitted later, on the training span only, #30 4.1):
 `depth_5` and `depth_20` become relative to their trailing 7-day median, and every feature gets
@@ -68,11 +74,15 @@ feature is defined within the day and is final here.
 shortcut: the tick is measured per sample, which keeps the intraday switch on 2023-02-10 (between
 06:00 and 08:00 UTC) right. Each measure is a multiple of the true tick. It is too large only when
 the spread and every gap between adjacent levels share a larger factor, as in a thin book whose
-levels and spread all stand two ticks apart, or one level a side over a two-tick spread; both are
-rare in a deep book. If the `ticks` counts in a file's metadata show samples above the exchange's
-tick for the day, the upgrade is the smallest tick over the trailing N samples, which stays causal.
-The day's smallest tick would not do: it reads later samples, and on 2023-02-10 it would give the
-morning the afternoon's tick.
+levels and spread all stand two ticks apart; a sample with no level gaps that carries such a tick
+keeps the error unless its own spread is not a multiple of it. Before the day's first sample with
+level gaps, a sample without them has only its spread, which may be several ticks. A carried tick
+also lags a change of tick until the next sample with level gaps, unless the sample's spread is
+not a multiple of the old tick. All of these are rare in a deep book. If the `ticks` counts in a
+file's metadata show samples above the exchange's tick for the day (`tick_carried` and
+`tick_spread_only` say how many had no level gaps of their own), the upgrade is the smallest tick
+over the trailing N samples, which stays causal. The day's smallest tick would not do: it reads
+later samples, and on 2023-02-10 it would give the morning the afternoon's tick.
 """
 
 from __future__ import annotations
@@ -122,7 +132,9 @@ _SAMPLED = (
     "bq0",
     "ap0",
     "aq0",
-    "micro_dev",
+    "micro",
+    "spread",
+    "gaps",
     "top5",
     "imb_1",
     "imb_5",
@@ -132,8 +144,6 @@ _SAMPLED = (
     "depth_asym",
     "slope_b",
     "slope_a",
-    "wide",
-    "tick",
 )
 # Floats gain nothing from dictionaries; the timestamps compress to almost nothing as deltas.
 _WRITE = {
@@ -188,6 +198,11 @@ def reduce(
     stale = _stale(seq)
     for v in flat.values():
         v[stale] = np.nan
+    # The tick reads earlier samples (Ticks), so it waits until the whole day is in place.
+    spread = flat.pop("spread")
+    flat["tick"], carried, spread_only = _tick(flat.pop("gaps"), spread)
+    flat["micro_dev"] = flat.pop("micro") / flat["tick"]
+    flat["wide"] = np.where(np.isfinite(spread), spread > flat["tick"], np.nan)
     grid = {k: v.reshape(DAY, PER) for k, v in flat.items()}  # (second, 100 ms step)
     count = np.isfinite(grid["mid"]).sum(axis=1)
 
@@ -222,17 +237,22 @@ def reduce(
     columns |= {k: out[k].astype(np.float32) for k in FEATURES}
     ticks, held = np.unique(flat["tick"][np.isfinite(flat["mid"])], return_counts=True)
     by_tick = {int(t): int(n) for t, n in zip(ticks, held, strict=True)}  # JSON keys: strings
-    meta = {"tp.stale_samples": str(int(stale.sum())), "tp.ticks": json.dumps(by_tick)}
+    meta = {
+        "tp.stale_samples": str(int(stale.sum())),
+        "tp.ticks": json.dumps(by_tick),
+        "tp.tick_carried": str(int(carried.sum())),
+        "tp.tick_spread_only": str(int(spread_only.sum())),
+    }
     return pa.table(columns).replace_schema_metadata(meta)
 
 
 def _per_sample(
     bp: np.ndarray, bq: np.ndarray, ap: np.ndarray, aq: np.ndarray, notional_unit: float
 ) -> dict[str, np.ndarray]:
-    """Each sample's book quantities; levels past the book's depth (null) count as empty."""
+    """Each sample's book quantities; levels past the book's depth (null) count as empty. Prices
+    stay in price units: the tick may come from an earlier sample in another batch (reduce)."""
     bq0, aq0, bp0, ap0 = bq[:, 0], aq[:, 0], bp[:, 0], ap[:, 0]
     mid = (bp0 + ap0) / 2
-    tick = _tick(bp, ap)
     bqz, aqz = np.nan_to_num(bq), np.nan_to_num(aq)
     bn = np.nan_to_num(bp * bq) * notional_unit  # notional per level, quote currency
     an = np.nan_to_num(ap * aq) * notional_unit
@@ -242,15 +262,15 @@ def _per_sample(
         "bq0": bq0,
         "ap0": ap0,
         "aq0": aq0,
-        "micro_dev": ((bp0 * aq0 + ap0 * bq0) / (bq0 + aq0) - mid) / tick,
+        "micro": (bp0 * aq0 + ap0 * bq0) / (bq0 + aq0) - mid,  # micro_dev before the tick
+        "spread": ap0 - bp0,
+        "gaps": _level_gcd(bp, ap),
         "top5": bqz[:, :5].sum(axis=1) + aqz[:, :5].sum(axis=1),
         "depth_5": np.log(bn[:, :5].sum(axis=1) + an[:, :5].sum(axis=1)),
         "depth_20": np.log(bn.sum(axis=1) + an.sum(axis=1)),
         "depth_asym": np.log(bn.sum(axis=1) / an.sum(axis=1)),
         "slope_b": (mid - _half_depth_price(bp, bn)) / mid * 1e4,
         "slope_a": (_half_depth_price(ap, an) - mid) / mid * 1e4,
-        "wide": (ap0 - bp0 > tick).astype(np.float64),
-        "tick": tick,
     }
     for k in (1, 5, 20):
         b, a = bqz[:, :k].sum(axis=1), aqz[:, :k].sum(axis=1)
@@ -258,15 +278,30 @@ def _per_sample(
     return out
 
 
-def _tick(bp: np.ndarray, ap: np.ndarray) -> np.ndarray:
-    """Each sample's tick in price units: the gcd of its spread and of the gaps between adjacent
-    levels on both sides (missing levels give no gap; see the shortcut above). 1 where the book
-    shows no price difference at all, which only a sample that does not count can do: a counted
-    one always has a spread."""
+def _level_gcd(bp: np.ndarray, ap: np.ndarray) -> np.ndarray:
+    """Each sample's gcd of the gaps between adjacent levels on both sides, in price units; 0 where
+    it shows none (missing levels give no gap)."""
     gaps = np.abs(np.concatenate([np.diff(bp, axis=1), np.diff(ap, axis=1)], axis=1))
-    tick = np.gcd.reduce(np.nan_to_num(gaps).astype(np.int64), axis=1)
-    tick = np.gcd(tick, np.nan_to_num(ap[:, 0] - bp[:, 0]).astype(np.int64))
-    return np.where(tick > 0, tick, 1).astype(np.float64)
+    return np.gcd.reduce(np.nan_to_num(gaps).astype(np.int64), axis=1).astype(np.float64)
+
+
+def _tick(gaps: np.ndarray, spread: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The day's ticks in price units, in grid order, from each sample's level gcd (_level_gcd)
+    and spread; NaN where no sample counts. A sample with level gaps measures gcd(gaps, spread).
+    One without takes the gcd of its spread and the tick of the most recent earlier sample that
+    had them, or its spread alone when none had (Ticks; see the shortcut above). Also returns the
+    masks of the samples that carried a tick and of those left with their spread."""
+    counted = np.isfinite(spread)
+    g = np.where(counted, gaps, 0).astype(np.int64)
+    s = np.where(counted, spread, 0).astype(np.int64)
+    own = np.gcd(g, s)  # the spread alone where there are no gaps: gcd(0, s) = s
+    measured = counted & (g > 0)
+    index = np.arange(s.size)
+    last = np.maximum.accumulate(np.where(measured, index, -1))  # -1 until the first one
+    carried = counted & ~measured & (last >= 0)
+    tick = np.where(carried, np.gcd(own[last], s), own).astype(np.float64)
+    tick[~counted] = np.nan
+    return tick, carried, counted & ~measured & ~carried
 
 
 def _half_depth_price(price: np.ndarray, notional: np.ndarray) -> np.ndarray:
@@ -358,6 +393,8 @@ def reduce_run(samples: Path, out: Path) -> dict[str, Any]:
         "run_id": manifest["run_id"],
         "scales": scales,
         "ticks": json.loads(table.schema.metadata[b"tp.ticks"]),
+        "tick_carried": int(table.schema.metadata[b"tp.tick_carried"]),
+        "tick_spread_only": int(table.schema.metadata[b"tp.tick_spread_only"]),
         "features": list(FEATURES),
     }
     table = table.replace_schema_metadata({"tp.book_features": json.dumps(meta, sort_keys=True)})
