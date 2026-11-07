@@ -66,10 +66,10 @@ the spread). Only when there is no such sample is its spread alone its tick.
 The file's metadata counts the day's counted samples by their tick (`ticks`, {tick: samples}),
 and those whose tick was carried (`tick_carried`) or is their spread alone (`tick_spread_only`).
 
-Cross-day steps, not done here (they are fitted later, on the training span only, #30 4.1):
-`depth_5` and `depth_20` become relative to their trailing 7-day median, and every feature gets
-the robust standardisation (median and IQR) with its log or signed-log transform. Every other
-feature is defined within the day and is final here.
+Cross-day steps, not done here: the market loader (jepa/days.py, #165) makes `depth_5` and
+`depth_20` relative to a trailing 7-day median, logs or signed-logs the heavy-tailed features and
+standardises every feature with a robust scale fitted on the training days only. Everything here
+is defined within the day.
 
 shortcut: the tick is measured per sample, which keeps the intraday switch on 2023-02-10 (between
 06:00 and 08:00 UTC) right. Each measure is a multiple of the true tick. It is too large only when
