@@ -413,14 +413,22 @@ def test_no_prediction_is_scored_or_trained_from_mask_tokens_alone() -> None:
     C, H, M = spec.context, spec.horizons, 120
     gen = torch.Generator().manual_seed(5)
     frames = torch.randn(M, days.MINUTE, spec.features, generator=gen)
-    valid = torch.ones(M, dtype=torch.bool)
-    valid[30:60] = False  # longer than the context
-    _, surprise = minutes.readouts(model, frames, valid, windows=32)
-    for t in range(C - 1, M):
-        for k in range(H):
-            scored = bool(valid[t]) and bool(valid[t - C + 1 : t - k].any())
-            assert bool(torch.isfinite(surprise[t, k])) == scored, (t, k)
-    assert torch.isnan(surprise[60]).all() and torch.isfinite(surprise[60 + H]).all()
+    # The second case keeps one valid minute inside the outage, at the oldest end of minute 60's
+    # window (60 - C + 1 = 45 with C = 16), so a fix that drops that end fails.
+    for lone in (None, 60 - C + 1):
+        valid = torch.ones(M, dtype=torch.bool)
+        valid[30:60] = False  # longer than the context
+        if lone is not None:
+            valid[lone] = True
+        _, surprise = minutes.readouts(model, frames, valid, windows=32)
+        for t in range(C - 1, M):
+            for k in range(H):
+                scored = bool(valid[t]) and bool(valid[t - C + 1 : t - k].any())
+                assert bool(torch.isfinite(surprise[t, k])) == scored, (lone, t, k)
+        if lone is None:
+            assert torch.isnan(surprise[60]).all() and torch.isfinite(surprise[60 + H]).all()
+        else:
+            assert torch.isfinite(surprise[60]).all()
 
     chunk_valid = torch.ones(1, C, dtype=torch.bool)
     chunk_valid[0, :6] = False
