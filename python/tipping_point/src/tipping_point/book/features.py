@@ -36,8 +36,8 @@ Features, per second (a "sample" is one 100 ms book; means are over the second's
   ret        sum of the 100 ms log mid returns into the second's samples
   rv100      sum of their squares
   moves      count of those steps where the mid moved
-  micro_dev  mean of (Stoikov micro-price - mid) in ticks; micro = (bid ask_qty + ask bid_qty) /
-             (bid_qty + ask_qty) at the best level
+  micro_dev  mean of (Stoikov micro-price - mid) in the sample's ticks (see Ticks); micro =
+             (bid ask_qty + ask bid_qty) / (bid_qty + ask_qty) at the best level
   imb_k      mean of (bid qty - ask qty) / (bid qty + ask qty) over the top k = 1, 5, 20 levels
   ofi        Cont-Kukanov-Stoikov order-flow imbalance at the best level, summed over the steps,
              divided by the mean top-5 quantity of both sides; positive is buying pressure (the bid
@@ -54,16 +54,22 @@ Features, per second (a "sample" is one 100 ms book; means are over the second's
              within every sample and is scale-free, leaving the size of the book to `depth_*`.
   wide       fraction of samples with a spread above one tick
 
+Ticks. Each sample's tick is measured from its own book: the greatest common divisor of the
+differences between adjacent level prices on each side, in units of the run's price scale. The
+scale alone does not give it: BTCUSDT's tick on Bybit was 0.5 (5 units at 1 decimal) until
+2023-02-10, then 0.1, with the scale unchanged (#164). The distinct ticks of a day's counted
+samples go into the file's metadata (`ticks`).
+
 Cross-day steps, not done here (they are fitted later, on the training span only, #30 4.1):
 `depth_5` and `depth_20` become relative to their trailing 7-day median, and every feature gets
 the robust standardisation (median and IQR) with its log or signed-log transform. Every other
 feature is defined within the day and is final here.
 
-shortcut: a tick is one unit of the run's price scale (10^-price_decimals), which the engine sets
-from the finest price in the file; that matched the tick on the days checked (ETHUSDT 2023-06-10:
-2 decimals, a 0.01 tick; the synthetic BTCUSDT day: 1 decimal, a 0.1 tick). A day whose scale
-differs would shift `micro_dev` and `wide`; the scales are kept in each file's metadata so the
-cross-day step can check them and refuse such a day.
+shortcut: the measured tick is a multiple of the true one; it is too large only when every gap
+between the 20 levels of both sides is (all levels two ticks apart, say), and a sample with fewer
+than two levels on both sides shows no gap at all and takes one price unit. Both are rare in a deep
+book; if `ticks` in a file's metadata shows more than the exchange's tick for the day, take the
+day's smallest measured tick instead of each sample's.
 """
 
 from __future__ import annotations
@@ -104,7 +110,7 @@ FEATURES = (
     "slope_a",
     "wide",
 )
-FORMAT = 2  # 2: the boundary step, the outage rule and `steps`
+FORMAT = 3  # 2: the boundary step, the outage rule and `steps`; 3: the tick measured per sample
 STALE_SAMPLES = 20  # 2 s of one unchanged seq; 2.5x the longest run seen on a real day
 # Each sample's quantities that the features are made from (_per_sample).
 _SAMPLED = (
@@ -124,6 +130,7 @@ _SAMPLED = (
     "slope_b",
     "slope_a",
     "wide",
+    "tick",
 )
 # Floats gain nothing from dictionaries; the timestamps compress to almost nothing as deltas.
 _WRITE = {
@@ -210,7 +217,8 @@ def reduce(
         "gap": count < PER,
     }
     columns |= {k: out[k].astype(np.float32) for k in FEATURES}
-    meta = {"tp.stale_samples": str(int(stale.sum()))}
+    ticks = np.unique(flat["tick"][np.isfinite(flat["mid"])]).astype(int).tolist()
+    meta = {"tp.stale_samples": str(int(stale.sum())), "tp.ticks": json.dumps(ticks)}
     return pa.table(columns).replace_schema_metadata(meta)
 
 
@@ -220,6 +228,7 @@ def _per_sample(
     """Each sample's book quantities; levels past the book's depth (null) count as empty."""
     bq0, aq0, bp0, ap0 = bq[:, 0], aq[:, 0], bp[:, 0], ap[:, 0]
     mid = (bp0 + ap0) / 2
+    tick = _tick(bp, ap)
     bqz, aqz = np.nan_to_num(bq), np.nan_to_num(aq)
     bn = np.nan_to_num(bp * bq) * notional_unit  # notional per level, quote currency
     an = np.nan_to_num(ap * aq) * notional_unit
@@ -229,19 +238,28 @@ def _per_sample(
         "bq0": bq0,
         "ap0": ap0,
         "aq0": aq0,
-        "micro_dev": (bp0 * aq0 + ap0 * bq0) / (bq0 + aq0) - mid,  # a tick is one price unit
+        "micro_dev": ((bp0 * aq0 + ap0 * bq0) / (bq0 + aq0) - mid) / tick,
         "top5": bqz[:, :5].sum(axis=1) + aqz[:, :5].sum(axis=1),
         "depth_5": np.log(bn[:, :5].sum(axis=1) + an[:, :5].sum(axis=1)),
         "depth_20": np.log(bn.sum(axis=1) + an.sum(axis=1)),
         "depth_asym": np.log(bn.sum(axis=1) / an.sum(axis=1)),
         "slope_b": (mid - _half_depth_price(bp, bn)) / mid * 1e4,
         "slope_a": (_half_depth_price(ap, an) - mid) / mid * 1e4,
-        "wide": (ap0 - bp0 > 1).astype(np.float64),
+        "wide": (ap0 - bp0 > tick).astype(np.float64),
+        "tick": tick,
     }
     for k in (1, 5, 20):
         b, a = bqz[:, :k].sum(axis=1), aqz[:, :k].sum(axis=1)
         out[f"imb_{k}"] = (b - a) / (b + a)
     return out
+
+
+def _tick(bp: np.ndarray, ap: np.ndarray) -> np.ndarray:
+    """Each sample's tick in price units: the gcd of the gaps between adjacent levels on both
+    sides (missing levels give no gap); 1 where there is no gap (see the shortcut above)."""
+    gaps = np.abs(np.concatenate([np.diff(bp, axis=1), np.diff(ap, axis=1)], axis=1))
+    tick = np.gcd.reduce(np.nan_to_num(gaps).astype(np.int64), axis=1)
+    return np.where(tick > 0, tick, 1).astype(np.float64)
 
 
 def _half_depth_price(price: np.ndarray, notional: np.ndarray) -> np.ndarray:
@@ -332,6 +350,7 @@ def reduce_run(samples: Path, out: Path) -> dict[str, Any]:
         "day": day.isoformat(),
         "run_id": manifest["run_id"],
         "scales": scales,
+        "ticks": json.loads(table.schema.metadata[b"tp.ticks"]),
         "features": list(FEATURES),
     }
     table = table.replace_schema_metadata({"tp.book_features": json.dumps(meta, sort_keys=True)})

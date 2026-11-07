@@ -371,6 +371,7 @@ def test_two_runs_write_the_same_bytes(tmp_path: Path) -> None:
         "price_decimals": 1,
         "qty_decimals": 3,
     }
+    assert meta["ticks"] == [1]  # 0.1, one unit at 1 decimal
     # The reducer's identity, in the file and in its record, decides whether a day is done.
     for found in (meta, first):
         assert found["format"] == features.FORMAT and found["version"] == features.__version__
@@ -478,3 +479,89 @@ def test_batches_in_any_order_give_the_same_table() -> None:
     assert _columns(split, slice(None)) == _columns(whole, slice(None))  # bitwise, NaN too
     with pytest.raises(features.FeatureError, match="share a grid instant"):
         features.reduce([*table.to_batches(), *table.to_batches()], DAY0, 2, 3)
+
+
+def test_the_tick_is_measured_from_each_samples_book() -> None:
+    """A book on a 5-unit tick (BTCUSDT before 2023-02-10: 0.5 at 1 decimal) reads like the same
+    book on a 1-unit tick: `micro_dev` in its own ticks, `wide` only past one of them (#164).
+    Seconds 0 and 1 are on the 5-unit tick, a one-tick then a two-tick spread; second 2 switches
+    to the 1-unit tick mid-day."""
+    coarse = lambda levels: [(5 * p, q) for p, q in levels]  # noqa: E731
+    wider = [(p + 1, q) for p, q in ASKS]  # a two-tick spread
+    rows: list[Row] = [(k, True, coarse(BIDS), coarse(ASKS)) for k in range(10)]
+    rows += [(10 + k, True, coarse(BIDS), coarse(wider)) for k in range(10)]
+    rows += [(20 + k, True, BIDS, ASKS) for k in range(10)]
+    table = features.reduce(_table(rows), DAY0, 2, 3)
+    f = {name: table[name].to_numpy() for name in table.column_names}
+    assert f["micro_dev"][0] == pytest.approx(0.25) and f["wide"][0] == 0
+    assert f["micro_dev"][2] == pytest.approx(0.25) and f["wide"][2] == 0
+    # (5000 * 1 + 5010 * 3) / 4 - 5005 = 2.5 units, half a 5-unit tick
+    assert f["micro_dev"][1] == pytest.approx(0.5) and f["wide"][1] == 1
+    assert json.loads(table.schema.metadata[b"tp.ticks"]) == [1, 5]
+
+
+# reduce() output per FORMAT, hashed column by column (see _digest), for the committed run and
+# the hand-built book. A change to the output fails here until FORMAT and this table move together
+# (#169): a re-run skips every day already reduced at the same FORMAT.
+DIGESTS = {
+    3: (
+        "5a2ba3e6016ecdf779be1d46201f96c48e22c78b79c1201f38c379b8a6c811a9",
+        "bc18821e9c3cf800f538b3e3ff68145f753407f0dda7df50f307a3358df79443",
+    ),
+}
+
+
+def _digest(table: pa.Table) -> str:
+    """The table's columns hashed in order. Floats are rounded to 12 significant bits first, so
+    a last-bit difference in a platform's log or sum cannot fail the test; any real change to a
+    feature moves far more than that."""
+    h = hashlib.sha256()
+    for name in table.column_names:
+        x = table[name].to_numpy()
+        if x.dtype.kind == "f":
+            m, e = np.frexp(x.astype(np.float64))
+            x = np.ldexp(np.round(m * 4096), e)  # NaN stays NaN
+        h.update(name.encode() + np.ascontiguousarray(x).tobytes())
+    return h.hexdigest()
+
+
+def test_the_output_matches_its_format() -> None:
+    run = RUN / "book_samples" / book.TABLE.name
+    found = (
+        _digest(features.reduce(pq.read_table(run), 1792454400 * 10**9, 1, 3)),
+        _digest(features.reduce(_table(_book()), DAY0, 2, 3)),
+    )
+    assert DIGESTS.get(features.FORMAT) == found, f"bump FORMAT and record {found}"
+
+
+def _manifest(run: Path, edit: Any) -> Path:
+    path = run / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    edit(manifest["params"])
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return run / "book_samples" / book.TABLE.name
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["day start", "off the grid", "book_sample", "symbols"],
+)
+def test_the_reducer_refuses_input_it_cannot_reduce(case: str, tmp_path: Path) -> None:
+    """Each input check raises FeatureError (#173)."""
+    run = tmp_path / RUN.name
+    shutil.copytree(RUN, run)
+    with pytest.raises(features.FeatureError):
+        if case == "day start":
+            features.reduce(_table(_book()), DAY0 + features.SECOND_NS, 2, 3)
+        elif case == "off the grid":
+            table = _table(_book())
+            ts = table["sample_ts_ns"].to_numpy().copy()
+            ts[5] += 1
+            table = table.set_column(0, "sample_ts_ns", pa.array(ts))
+            features.reduce(table, DAY0, 2, 3)
+        elif case == "book_sample":
+            samples = _manifest(run, lambda p: p["book_sample"].update(every_ns=200_000_000))
+            features.reduce_run(samples, tmp_path / "out")
+        else:
+            samples = _manifest(run, lambda p: p["symbols"].append("ETHUSDT"))
+            features.reduce_run(samples, tmp_path / "out")
