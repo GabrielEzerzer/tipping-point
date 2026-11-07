@@ -3,9 +3,10 @@ in, one latent per minute out, and a causal predictor over past minutes' latents
 
 This is the Ising design moved to time. The Ising encoder sees one frame and the predictor carries
 the dynamics across frames; here the encoder sees one minute (60 seconds x F features) on its own,
-so neighbouring latents share no input (their AC1 is not inflated by construction), and a causal
-transformer over a chunk of `context` minutes predicts the target encoder's latent of minutes
-t + 1 ... t + horizons from z_1 ... z_t.
+so neighbouring latents share only the one boundary 100 ms sample that the first second's step
+features read from the previous second (book/features.py), and their AC1 is inflated only
+negligibly by construction. A causal transformer over a chunk of `context` minutes predicts the
+target encoder's latent of minutes t + 1 ... t + horizons from z_1 ... z_t.
 
   encoder    Conv1d patch embedding (`patch` seconds a token), LayerNorm, `depth` 1-D ConvNeXt
              blocks (zero padding: a minute is not periodic), the mean and the log standard
@@ -15,12 +16,15 @@ t + 1 ... t + horizons from z_1 ... z_t.
              pre-norm causal attention blocks, LayerNorm, one linear head per delta = 1..horizons
   loss       objective.prediction_loss and objective.vicreg unchanged: a chunk's predictions pass
              as (B, dim, context, horizons) with the valid targets as the hidden cells, its frame
-             latents as (B, dim, context, 1) with the valid minutes as the kept cells; every
-             chunk drawn holds two valid minutes, so neither term divides by zero
+             latents as (B, dim, context, 1) with the valid minutes as the kept cells. A target
+             counts only when a valid minute precedes it in the chunk, so no loss is spent on a
+             prediction made from mask tokens alone; every chunk drawn holds two valid minutes,
+             so the later one is such a target and neither term divides by zero
 
 Readouts: at minute t the predictor sees exactly the previous context - 1 minutes and z_t is
-predicted from them, so surprise has no position effect. The latent is the target encoder's z_t,
-as Ising's embedding is the target features averaged over cells.
+predicted from them, so surprise has no position effect. Surprise is NaN when that input window
+holds no valid minute, so the first minutes after a long outage are not scored. The latent is
+the target encoder's z_t, as Ising's embedding is the target features averaged over cells.
 
 Sizes (decision 4): S (dim 64, two predictor blocks, 0.24M parameters) and M (dim 96, three
 blocks, 0.65M); the CPU pilot (M4) picks one.
@@ -207,8 +211,8 @@ class MarketJepa(nn.Module):
     def chunk(self, frames: Tensor, valid: Tensor) -> dict[str, Tensor]:
         """The loss inputs of chunks (B, C, MINUTE, F) with valid minutes (B, C), in the shapes
         objective.py takes: pred and target (B, dim, C, horizons), hidden (B, C, horizons) (the
-        target minute exists in the chunk and is valid), features (B, dim, C, 1) (the context
-        latents), keep (B, C, 1) (the valid minutes)."""
+        target minute exists in the chunk and is valid, and some minute <= t is valid), features
+        (B, dim, C, 1) (the context latents), keep (B, C, 1) (the valid minutes)."""
         B, C = valid.shape
         flat = frames.flatten(0, 1)
         targets = self.targets(flat).view(B, C, -1)
@@ -219,6 +223,7 @@ class MarketJepa(nn.Module):
         future = torch.stack([padded[:, k : k + C] for k in range(1, H + 1)], 2)
         seen = F.pad(valid, (0, H))
         hidden = torch.stack([seen[:, k : k + C] for k in range(1, H + 1)], 2)
+        hidden &= (valid.cumsum(1) > 0).unsqueeze(-1)  # a prediction from mask tokens alone
         return {
             "pred": pred.permute(0, 3, 1, 2),
             "target": future.permute(0, 3, 1, 2),
@@ -242,7 +247,8 @@ def readouts(
     """For a contiguous series of minutes (M, MINUTE, F) with valid (M,): the latent z_t (M, dim)
     and the surprise (M, horizons), [t, k] the error of the delta = k + 1 prediction of z_t from
     the minutes before it in the window [t - context + 1, t]. The latent is NaN where minute t is
-    invalid, the surprise too and where fewer than context - 1 minutes precede it. Computed in
+    invalid, the surprise too, where fewer than context - 1 minutes precede it, and where the
+    predictor's input window [t - context + 1, t - k - 1] holds no valid minute. Computed in
     float32 with autocast off on the model's device, returned on the CPU."""
     device = next(model.parameters()).device
     C, H = model.spec.context, model.spec.horizons
@@ -266,7 +272,9 @@ def readouts(
                 guess = pred[:, C - 2 - k, k].unsqueeze(-1).unsqueeze(-1)
                 truth = target_t[end].unsqueeze(-1).unsqueeze(-1)
                 cells = torch.ones(len(end), 1, 1, dtype=torch.bool, device=device)
-                surprise[end, k] = objective.errors(guess, truth, cells)
+                error = objective.errors(guess, truth, cells)
+                context = ok[index[:, : C - 1 - k]].any(1)
+                surprise[end, k] = torch.where(context, error, float("nan"))
         surprise[~ok] = float("nan")
         latent_t[~ok] = float("nan")
     return latent_t.cpu(), surprise.cpu()
