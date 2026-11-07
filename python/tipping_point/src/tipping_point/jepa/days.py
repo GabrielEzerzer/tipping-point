@@ -49,7 +49,7 @@ step 1 with the record's training days, so a training day comes out bitwise as i
 validation day as it was validated when it is read with the same earlier days. A training day
 whose earlier training days are not all handed in is refused. Days passed as `lead` are read for
 the baseline alone and emit no minutes, so a series can be read one day at a time; the exploratory
-read from 2023-10-01 takes the last training days as its lead.
+read from 2023-10-01 takes the 7 days before it as its lead, whichever split they served.
 
 A minute is valid when none of its 60 seconds is a gap. Invalid minutes are never trained on:
 their latents are left out of every loss term, the predictor sees a mask token in their place, and
@@ -416,7 +416,10 @@ def frames(
     before `days` and are read for that alone: they emit no minutes and their records say `lead`.
     A training day whose earlier training days are not all handed in is refused, since its
     baseline would differ from the one it trained on."""
-    record = Scaling(**scaling)
+    try:
+        record = Scaling(**scaling)
+    except TypeError as e:
+        raise DataError(f"not a scaling record: {e}") from e
     record.check(symbol)
     if not days or [*lead, *days] != sorted({*lead, *days}):
         raise DataError("days must be given, unique and in date order, after every lead day")
