@@ -10,27 +10,33 @@ SPLIT. The training span [2023-01-18, 2023-10-01) (call 5), split as jepa/days.p
 validation days a block after the training days: training 2023-01-18 .. 2023-08-31 (226 days),
 validation 2023-09-01 .. 2023-09-30 (30 days). PROPOSAL: the primaries use the same split.
 
-VALIDATION ERROR. Per validation day, the mean over its scored minutes of final.pt's delta = 1
-surprise (minutes.readouts, column 0: the normalised error, where predicting zero scores 1), on the
-training's own validation minutes; the same for its step-0 twin. A run is usable when its mean
-validation error is below its twin's.
+VALIDATION ERROR (PROPOSAL: a probe, not the JEPA loss). The JEPA's own error is measured against
+each model's own target encoder, which moves during training and differs between sizes: on a
+1,000-step smoke run (BTC, 10 days) the monitor's val_error fell to 0.44 at step 250 and rose to
+0.59 (S) and 0.63 (M) by step 1,000 while effective rank grew, and the richer M latent scored worse
+than S. A lower JEPA error can mean a poorer latent, so it can rank neither sizes nor steps. The
+validation error is instead a fixed task in input space: a ridge probe (jepa.probes.ridge, alpha
+1e-3) from the target encoder's latent of minute t (minutes.readouts) to the mean of each scaled
+feature over minute t + 1, over minute pairs both valid, fitted on validation days 1-15 and scored
+per day on days 16-30 as the mean over features of the squared error over the fit set's variance
+(1 = the fit mean). It is measured for final.pt, for the copy saved at step 10,000, and for the
+step-0 twin; the JEPA surprise of final.pt is kept beside it, descriptive. A run is usable when
+final.pt's mean probe error is below its twin's.
 
 SIZE (call 4: M unless S reaches the same validation error). S is chosen when, on both assets, both
-runs are usable and S matches M: the upper end of the 95% bootstrap interval of the mean over
-validation days of (S - M), paired by day (2,000 draws, seed 0), is at most TOLERANCE = 2% of M's
+runs are usable and S matches M: the upper end of the 95% bootstrap interval of the mean over the
+scored days of (S - M), paired by day (2,000 draws, seed 0), is at most TOLERANCE = 2% of M's
 mean (PROPOSAL: the 2%). Otherwise M. If an M run is not usable, no size is chosen: the owner
-decides. Each model is scored against its own target encoder, so the two errors are both
-normalised but not one quantity; a narrower latent may be easier to predict, which leans to S, and
-the twin margin and the floors below are the guard.
+decides.
 
-STEPS (research pass 5.2, in the manner of Ising's call 9). v(s) is the mean of the monitor's
-val_error over the evaluations in (s - 1,000, s] of a run of the chosen size. The primaries train
-10,000 steps if, on both assets, v(10,000) - v(20,000) <= 2% of v(20,000), and 20,000 otherwise:
-never below 10,000 (about 21 passes over the training minutes), never above 20,000 (the pilot sees
-no further). The laptop's seconds per step are recorded but do not set the count: checkpoints make
-a CPU run of any length resumable, and the T4 rate the primaries would run at is unmeasured. In a
-20,000-step run the learning rate at step 10,000 is still high, so v(10,000) overstates what a
-10,000-step run reaches: the rule leans to 20,000, which costs time, never validity.
+STEPS (research pass 5.2, in the manner of Ising's call 9). On a run of the chosen size, e(s) is
+the mean probe error of its model at step s. The primaries train 10,000 steps if, on both assets,
+e(10,000) - e(20,000) <= 2% of e(20,000), and 20,000 otherwise: never below 10,000 (about 21
+passes over the training minutes), never above 20,000 (the pilot sees no further). The laptop's
+seconds per step are recorded but do not set the count: checkpoints make a CPU run of any length
+resumable, and the T4 rate the primaries would run at is unmeasured. In a 20,000-step run the
+learning rate at step 10,000 is still high, so e(10,000) overstates what a 10,000-step run
+reaches: the rule leans to 20,000, which costs time, never validity.
 
 FLOORS. For each floored statistic (spatial_std, here the spread of a latent over the minutes of a
 chunk; pooled_std, the spread of chunk means over chunks; effective_rank), h is its minimum over
@@ -67,7 +73,7 @@ import pyarrow.parquet as pq
 import torch
 from tipping_point.book.features import FEATURES
 from tipping_point.ising import io
-from tipping_point.jepa import days, minutes, monitor, train
+from tipping_point.jepa import days, minutes, monitor, probes, train
 
 ASSETS = {"btc": "BTCUSDT", "eth": "ETHUSDT"}
 SIZES = ("S", "M")
@@ -78,7 +84,7 @@ CHECKPOINT_EVERY = 500
 TOLERANCE = 0.02
 DRAWS = 2_000
 SHORT, LONG = 10_000, 20_000
-WINDOW = 1_000  # steps of monitor evaluations v(s) averages, and the warm-up the floors skip
+WINDOW = 1_000  # the warm-up the floors skip
 FLOOR_DIVISOR = 5
 
 
@@ -132,12 +138,17 @@ def run(
     if not found or not (found[0] / "complete.json").exists() or not (root / VALIDATION).exists():
         source = days.ParquetSource(data_dir)
         data = days.load(source, cfg.span, cfg.symbol, FEATURES, train_days, val_days)
-    if not found:
-        run_dir = train.start(cfg, data, root, f"{cfg.symbol}-{size}-m{SEED}", "cpu")
-    elif not (found[0] / "complete.json").exists():
-        run_dir = train.resume(found[0], data, "cpu")
-    else:
-        run_dir = found[0]
+    checkpoint = train._Trainer.checkpoint
+    train._Trainer.checkpoint = _keep_short(checkpoint)
+    try:
+        if not found:
+            run_dir = train.start(cfg, data, root, f"{cfg.symbol}-{size}-m{SEED}", "cpu")
+        elif not (found[0] / "complete.json").exists():
+            run_dir = train.resume(found[0], data, "cpu")
+        else:
+            run_dir = found[0]
+    finally:
+        train._Trainer.checkpoint = checkpoint
     if not (root / VALIDATION).exists():
         assert data is not None
         record = validation(run_dir, data)
@@ -147,19 +158,54 @@ def run(
 
 
 VALIDATION = "validation.json"
+HALF = Path("ckpt") / f"step_{SHORT:07d}.pt"  # the model at step 10,000, for STEPS
 
 
-def day_errors(ckpt: Path, val: days.Minutes) -> list[float]:
-    """Per validation day, the mean delta = 1 surprise over its scored minutes (NaN if none)."""
+def _keep_short(checkpoint: Any) -> Any:
+    """The trainer's checkpoint, which first saves the model once at step SHORT (to HALF)."""
+
+    def wrapped(self: Any) -> None:
+        if self.step == SHORT and not (self.run_dir / HALF).exists():
+            train.save_model(
+                self.run_dir / HALF, self.run_id, self.step, self.config, self.model, self.pca()
+            )
+        checkpoint(self)
+
+    return wrapped
+
+
+def _readouts(ckpt: Path, val: days.Minutes) -> tuple[np.ndarray, np.ndarray]:
+    """(latent (M, dim), delta = 1 surprise (M,)) over the validation minutes, run by run."""
     model = train.load_market(ckpt).model
-    out = []
-    for r in torch.unique(val.run).tolist():
-        pick = val.run == r
-        _, surprise = minutes.readouts(model, val.frames[pick], val.valid[pick])
-        per_day = surprise[:, 0].numpy().reshape(-1, days.MINUTES)
-        for row in per_day:
-            out.append(float(np.nanmean(row)) if np.isfinite(row).any() else math.nan)
-    return out
+    parts = [
+        minutes.readouts(model, val.frames[val.run == r], val.valid[val.run == r])
+        for r in torch.unique(val.run).tolist()
+    ]
+    return torch.cat([z for z, _ in parts]).numpy(), torch.cat([s for _, s in parts])[:, 0].numpy()
+
+
+def probe_errors(latent: np.ndarray, val: days.Minutes) -> list[float]:
+    """VALIDATION ERROR per scored day (the second half of the validation days): the ridge probe
+    from minute t's latent to minute t + 1's feature means, fitted on the first half."""
+    target = val.frames.mean(1).numpy()[1:]
+    x = latent[:-1]
+    pair = (val.valid[:-1] & val.valid[1:] & (val.run[:-1] == val.run[1:])).numpy()
+    day = np.arange(len(x)) // days.MINUTES
+    total = len(val) // days.MINUTES
+    first = total // 2
+    fit = pair & (day < first)
+    var = target[fit].var(0)
+    keep = var > 1e-12
+    model = probes.ridge(x[fit], target[fit][:, keep])
+    err = ((model.predict(x) - target[:, keep]) ** 2 / var[keep]).mean(1)
+    scored = [pair & (day == d) for d in range(first, total)]
+    return [float(err[m].mean()) if m.any() else math.nan for m in scored]
+
+
+def surprise_days(surprise: np.ndarray) -> list[float]:
+    """Per validation day, the mean delta = 1 surprise over its scored minutes (descriptive)."""
+    rows = surprise.reshape(-1, days.MINUTES)
+    return [float(np.nanmean(r)) if np.isfinite(r).any() else math.nan for r in rows]
 
 
 def validation(run_dir: Path, data: days.Dataset) -> dict[str, Any]:
@@ -168,11 +214,16 @@ def validation(run_dir: Path, data: days.Dataset) -> dict[str, Any]:
     lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
     mine = [x for x in lines if x["run_id"] == run_dir.name]
     hours = sum(x["hours"] for x in mine)
+    final_z, final_s = _readouts(run_dir / train.FINAL, data.val)
+    half = run_dir / HALF
+    val_days = [d["day"] for d in data.sources["val"]]
     return {
         "run_id": run_dir.name,
-        "days": [d["day"] for d in data.sources["val"]],
-        "final": day_errors(run_dir / train.FINAL, data.val),
-        "twin": day_errors(run_dir / train.TWIN, data.val),
+        "days": val_days[len(val_days) // 2 :],  # the scored days
+        "final": probe_errors(final_z, data.val),
+        "half": probe_errors(_readouts(half, data.val)[0], data.val) if half.exists() else None,
+        "twin": probe_errors(_readouts(run_dir / train.TWIN, data.val)[0], data.val),
+        "surprise": surprise_days(final_s),  # every validation day, descriptive
         "steps": done["last_key"],
         "collapse": done["collapse"],
         # wall clock between checkpoints, a laptop sleep included
@@ -213,16 +264,14 @@ def choose_size(records: Mapping[str, Mapping[str, Mapping[str, Any]]]) -> dict[
     return {"size": choice, **detail}
 
 
-def v(steps: np.ndarray, error: np.ndarray, at: int) -> float:
-    pick = (steps > at - WINDOW) & (steps <= at)
-    return float(error[pick].mean())
-
-
-def choose_steps(curves: Mapping[str, tuple[np.ndarray, np.ndarray]]) -> dict[str, Any]:
-    """curves[asset] -> (monitor steps, val_error) of the chosen size; the STEPS rule."""
-    detail = {a: (v(s, e, SHORT), v(s, e, LONG)) for a, (s, e) in sorted(curves.items())}
+def choose_steps(records: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """records[asset] -> validation.json of the chosen size; the STEPS rule."""
+    detail = {
+        a: (float(np.nanmean(r["half"])), float(np.nanmean(r["final"])))
+        for a, r in sorted(records.items())
+    }
     flat = all(short - long <= TOLERANCE * long for short, long in detail.values())
-    return {"steps": SHORT if flat else LONG, "v10k_v20k": detail}
+    return {"steps": SHORT if flat else LONG, "e10k_e20k": detail}
 
 
 def floor_value(h: float) -> float:
@@ -242,7 +291,7 @@ def floors(tables: Sequence[Mapping[str, np.ndarray]]) -> dict[str, float]:
 
 def _monitor(run_dir: Path) -> dict[str, np.ndarray]:
     table = pa.concat_tables(pq.read_table(p) for p in io.chunks(run_dir, "monitor"))
-    return {c: table[c].to_numpy() for c in ("step", "val_error", *monitor.FLOORED)}
+    return {c: table[c].to_numpy() for c in ("step", *monitor.FLOORED)}
 
 
 def decide(out: Path) -> dict[str, Any]:
@@ -251,8 +300,8 @@ def decide(out: Path) -> dict[str, Any]:
         for size in SIZES:
             path = Path(out) / f"{asset}-{size}" / VALIDATION
             record = io.read_json(path)
-            if record.get("smoke"):
-                raise ValueError(f"{path} is a smoke run")
+            if record.get("smoke") or record.get("half") is None:
+                raise ValueError(f"{path} is a smoke run, or holds no step-{SHORT} model")
             records.setdefault(asset, {})[size] = record
     result = choose_size(records)
     size = result["size"]
@@ -260,7 +309,7 @@ def decide(out: Path) -> dict[str, Any]:
         return result
     dirs = {a: _runs(Path(out) / f"{a}-{size}")[0] for a in ASSETS}
     tables = {a: _monitor(d) for a, d in dirs.items()}
-    result.update(choose_steps({a: (t["step"], t["val_error"]) for a, t in tables.items()}))
+    result.update(choose_steps({a: records[a][size] for a in ASSETS}))
     kept = [tables[a] for a in ASSETS if usable(records[a][size])]
     result["floors"] = floors(kept)
     result["seconds_per_step"] = {

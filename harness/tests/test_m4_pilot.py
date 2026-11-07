@@ -10,6 +10,7 @@ import book_assemble
 import m4_pilot
 import numpy as np
 import pytest
+import torch
 
 
 def test_the_split_is_a_validation_block_after_the_training_days() -> None:
@@ -50,12 +51,11 @@ def test_nan_days_are_left_out_of_the_paired_difference() -> None:
     assert ok and upper == 0.0
 
 
-def test_steps_are_10k_when_the_curve_is_flat_after_10k_on_both_assets() -> None:
-    steps = np.arange(0, 20_001, 250)
-    flat = np.where(steps <= 10_000, 0.81, 0.80)  # 1.25 % better at 20k
-    falling = np.where(steps <= 10_000, 0.85, 0.80)  # 6 %
-    assert m4_pilot.choose_steps({"btc": (steps, flat), "eth": (steps, flat)})["steps"] == 10_000
-    assert m4_pilot.choose_steps({"btc": (steps, flat), "eth": (steps, falling)})["steps"] == 20_000
+def test_steps_are_10k_when_the_10k_model_is_within_2_percent_on_both_assets() -> None:
+    flat = {"half": [0.81, 0.81], "final": [0.80, 0.80]}  # 1.25 % worse at 10k
+    falling = {"half": [0.85, 0.85], "final": [0.80, 0.80]}  # 6 %
+    assert m4_pilot.choose_steps({"btc": flat, "eth": flat})["steps"] == 10_000
+    assert m4_pilot.choose_steps({"btc": flat, "eth": falling})["steps"] == 20_000
 
 
 def test_floors_are_a_fifth_of_the_healthy_minimum_after_warm_up_rounded_down() -> None:
@@ -140,3 +140,22 @@ def test_assembly_refuses_missing_duplicate_and_foreign_days(
     with pytest.raises(ValueError, match="refused"):
         book_assemble.apply(bad, out)
     assert not out.exists()
+
+
+def test_the_probe_scores_a_latent_that_knows_the_next_minute_near_0_and_noise_near_1() -> None:
+    """Planted: 4 days of minutes whose feature means follow an AR(1); a latent holding minute t's
+    means predicts minute t + 1's well, pure noise does not; days 3 and 4 are scored."""
+    from tipping_point.jepa import days
+
+    rng = np.random.default_rng(0)
+    n = 4 * days.MINUTES
+    means = np.zeros((n, 3), np.float32)
+    for t in range(1, n):
+        means[t] = 0.95 * means[t - 1] + 0.3 * rng.standard_normal(3)
+    frames = torch.from_numpy(np.repeat(means[:, None, :], 60, 1))
+    valid = torch.ones(n, dtype=torch.bool)
+    valid[100:110] = False
+    minutes = days.Minutes(frames, valid, torch.zeros(n, dtype=torch.int64))
+    good = m4_pilot.probe_errors(means.astype(float), minutes)
+    noise = m4_pilot.probe_errors(rng.standard_normal((n, 3)), minutes)
+    assert len(good) == 2 and max(good) < 0.15 and min(noise) > 0.9
