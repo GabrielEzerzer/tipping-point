@@ -12,8 +12,9 @@ else: no statistic over the day, nothing later than the second. The means read t
 step comes from the previous second's last sample. Neighbouring seconds (and so neighbouring
 minute frames of the JEPA) share that one boundary sample; in exchange no 100 ms step is lost and
 the day's `ret` adds up to the log change of the mid from the day's first sample to its last when
-nothing is missing. The day's first sample has no step before it. The one reach further back is
-the outage rule below, which reads the samples' `seq` up to 2 s before; nothing reads later.
+nothing is missing. The day's first sample has no step before it. Two rules reach further back,
+and nothing reads later: the outage rule below reads the samples' `seq` up to 2 s before, and a
+sample whose book shows no gaps between levels takes its tick from an earlier sample (Ticks).
 
 Gaps. A sample counts only when the book was synced, both sides have a best level and the book is
 not crossed. `samples` is the count of those (0 to 10) and `gap` is set when it is below 10. A
@@ -36,8 +37,8 @@ Features, per second (a "sample" is one 100 ms book; means are over the second's
   ret        sum of the 100 ms log mid returns into the second's samples
   rv100      sum of their squares
   moves      count of those steps where the mid moved
-  micro_dev  mean of (Stoikov micro-price - mid) in ticks; micro = (bid ask_qty + ask bid_qty) /
-             (bid_qty + ask_qty) at the best level
+  micro_dev  mean of (Stoikov micro-price - mid) in the sample's ticks (see Ticks); micro =
+             (bid ask_qty + ask bid_qty) / (bid_qty + ask_qty) at the best level
   imb_k      mean of (bid qty - ask qty) / (bid qty + ask qty) over the top k = 1, 5, 20 levels
   ofi        Cont-Kukanov-Stoikov order-flow imbalance at the best level, summed over the steps,
              divided by the mean top-5 quantity of both sides; positive is buying pressure (the bid
@@ -54,16 +55,34 @@ Features, per second (a "sample" is one 100 ms book; means are over the second's
              within every sample and is scale-free, leaving the size of the book to `depth_*`.
   wide       fraction of samples with a spread above one tick
 
+Ticks. Each sample's tick is measured from its own book: the greatest common divisor of its
+spread and of the differences between adjacent level prices on each side, in units of the run's
+price scale. The scale alone does not give it: BTCUSDT's tick on Bybit was 0.5 (5 units at 1
+decimal) until 2023-02-10, then 0.1, with the scale unchanged (#164). A book with no gaps between
+levels (one level a side, or the rest null) shows only its spread, which in a thin book is often
+more than one tick. Such a sample takes the tick of the most recent earlier counted sample of the
+day that had level gaps, reduced to its gcd with the sample's own spread (a tick always divides
+the spread). Only when there is no such sample is its spread alone its tick.
+The file's metadata counts the day's counted samples by their tick (`ticks`, {tick: samples}),
+and those whose tick was carried (`tick_carried`) or is their spread alone (`tick_spread_only`).
+
 Cross-day steps, not done here: the market loader (jepa/days.py, #165) makes `depth_5` and
 `depth_20` relative to a trailing 7-day median, logs or signed-logs the heavy-tailed features and
 standardises every feature with a robust scale fitted on the training days only. Everything here
 is defined within the day.
 
-shortcut: a tick is one unit of the run's price scale (10^-price_decimals), which the engine sets
-from the finest price in the file; that matched the tick on the days checked (ETHUSDT 2023-06-10:
-2 decimals, a 0.01 tick; the synthetic BTCUSDT day: 1 decimal, a 0.1 tick). A day whose scale
-differs would shift `micro_dev` and `wide`; the scales are kept in each file's metadata so the
-cross-day step can check them and refuse such a day.
+shortcut: the tick is measured per sample, which keeps the intraday switch on 2023-02-10 (between
+06:00 and 08:00 UTC) right. Each measure is a multiple of the true tick. It is too large only when
+the spread and every gap between adjacent levels share a larger factor, as in a thin book whose
+levels and spread all stand two ticks apart; a sample with no level gaps that carries such a tick
+keeps the error unless its own spread is not a multiple of it. Before the day's first sample with
+level gaps, a sample without them has only its spread, which may be several ticks. A carried tick
+also lags a change of tick until the next sample with level gaps, unless the sample's spread is
+not a multiple of the old tick. All of these are rare in a deep book. If the `ticks` counts in a
+file's metadata show samples above the exchange's tick for the day (`tick_carried` and
+`tick_spread_only` say how many had no level gaps of their own), the upgrade is the smallest tick
+over the trailing N samples, which stays causal. The day's smallest tick would not do: it reads
+later samples, and on 2023-02-10 it would give the morning the afternoon's tick.
 """
 
 from __future__ import annotations
@@ -104,7 +123,7 @@ FEATURES = (
     "slope_a",
     "wide",
 )
-FORMAT = 2  # 2: the boundary step, the outage rule and `steps`
+FORMAT = 3  # 2: the boundary step, the outage rule and `steps`; 3: the tick measured per sample
 STALE_SAMPLES = 20  # 2 s of one unchanged seq; 2.5x the longest run seen on a real day
 # Each sample's quantities that the features are made from (_per_sample).
 _SAMPLED = (
@@ -113,7 +132,9 @@ _SAMPLED = (
     "bq0",
     "ap0",
     "aq0",
-    "micro_dev",
+    "micro",
+    "spread",
+    "gaps",
     "top5",
     "imb_1",
     "imb_5",
@@ -123,7 +144,6 @@ _SAMPLED = (
     "depth_asym",
     "slope_b",
     "slope_a",
-    "wide",
 )
 # Floats gain nothing from dictionaries; the timestamps compress to almost nothing as deltas.
 _WRITE = {
@@ -178,6 +198,11 @@ def reduce(
     stale = _stale(seq)
     for v in flat.values():
         v[stale] = np.nan
+    # The tick reads earlier samples (Ticks), so it waits until the whole day is in place.
+    spread = flat.pop("spread")
+    flat["tick"], carried, spread_only = _tick(flat.pop("gaps"), spread)
+    flat["micro_dev"] = flat.pop("micro") / flat["tick"]
+    flat["wide"] = np.where(np.isfinite(spread), spread > flat["tick"], np.nan)
     grid = {k: v.reshape(DAY, PER) for k, v in flat.items()}  # (second, 100 ms step)
     count = np.isfinite(grid["mid"]).sum(axis=1)
 
@@ -210,14 +235,22 @@ def reduce(
         "gap": count < PER,
     }
     columns |= {k: out[k].astype(np.float32) for k in FEATURES}
-    meta = {"tp.stale_samples": str(int(stale.sum()))}
+    ticks, held = np.unique(flat["tick"][np.isfinite(flat["mid"])], return_counts=True)
+    by_tick = {int(t): int(n) for t, n in zip(ticks, held, strict=True)}  # JSON keys: strings
+    meta = {
+        "tp.stale_samples": str(int(stale.sum())),
+        "tp.ticks": json.dumps(by_tick),
+        "tp.tick_carried": str(int(carried.sum())),
+        "tp.tick_spread_only": str(int(spread_only.sum())),
+    }
     return pa.table(columns).replace_schema_metadata(meta)
 
 
 def _per_sample(
     bp: np.ndarray, bq: np.ndarray, ap: np.ndarray, aq: np.ndarray, notional_unit: float
 ) -> dict[str, np.ndarray]:
-    """Each sample's book quantities; levels past the book's depth (null) count as empty."""
+    """Each sample's book quantities; levels past the book's depth (null) count as empty. Prices
+    stay in price units: the tick may come from an earlier sample in another batch (reduce)."""
     bq0, aq0, bp0, ap0 = bq[:, 0], aq[:, 0], bp[:, 0], ap[:, 0]
     mid = (bp0 + ap0) / 2
     bqz, aqz = np.nan_to_num(bq), np.nan_to_num(aq)
@@ -229,19 +262,46 @@ def _per_sample(
         "bq0": bq0,
         "ap0": ap0,
         "aq0": aq0,
-        "micro_dev": (bp0 * aq0 + ap0 * bq0) / (bq0 + aq0) - mid,  # a tick is one price unit
+        "micro": (bp0 * aq0 + ap0 * bq0) / (bq0 + aq0) - mid,  # micro_dev before the tick
+        "spread": ap0 - bp0,
+        "gaps": _level_gcd(bp, ap),
         "top5": bqz[:, :5].sum(axis=1) + aqz[:, :5].sum(axis=1),
         "depth_5": np.log(bn[:, :5].sum(axis=1) + an[:, :5].sum(axis=1)),
         "depth_20": np.log(bn.sum(axis=1) + an.sum(axis=1)),
         "depth_asym": np.log(bn.sum(axis=1) / an.sum(axis=1)),
         "slope_b": (mid - _half_depth_price(bp, bn)) / mid * 1e4,
         "slope_a": (_half_depth_price(ap, an) - mid) / mid * 1e4,
-        "wide": (ap0 - bp0 > 1).astype(np.float64),
     }
     for k in (1, 5, 20):
         b, a = bqz[:, :k].sum(axis=1), aqz[:, :k].sum(axis=1)
         out[f"imb_{k}"] = (b - a) / (b + a)
     return out
+
+
+def _level_gcd(bp: np.ndarray, ap: np.ndarray) -> np.ndarray:
+    """Each sample's gcd of the gaps between adjacent levels on both sides, in price units; 0 where
+    it shows none (missing levels give no gap)."""
+    gaps = np.abs(np.concatenate([np.diff(bp, axis=1), np.diff(ap, axis=1)], axis=1))
+    return np.gcd.reduce(np.nan_to_num(gaps).astype(np.int64), axis=1).astype(np.float64)
+
+
+def _tick(gaps: np.ndarray, spread: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The day's ticks in price units, in grid order, from each sample's level gcd (_level_gcd)
+    and spread; NaN where no sample counts. A sample with level gaps measures gcd(gaps, spread).
+    One without takes the gcd of its spread and the tick of the most recent earlier sample that
+    had them, or its spread alone when none had (Ticks; see the shortcut above). Also returns the
+    masks of the samples that carried a tick and of those left with their spread."""
+    counted = np.isfinite(spread)
+    g = np.where(counted, gaps, 0).astype(np.int64)
+    s = np.where(counted, spread, 0).astype(np.int64)
+    own = np.gcd(g, s)  # the spread alone where there are no gaps: gcd(0, s) = s
+    measured = counted & (g > 0)
+    index = np.arange(s.size)
+    last = np.maximum.accumulate(np.where(measured, index, -1))  # -1 until the first one
+    carried = counted & ~measured & (last >= 0)
+    tick = np.where(carried, np.gcd(own[last], s), own).astype(np.float64)
+    tick[~counted] = np.nan
+    return tick, carried, counted & ~measured & ~carried
 
 
 def _half_depth_price(price: np.ndarray, notional: np.ndarray) -> np.ndarray:
@@ -332,6 +392,9 @@ def reduce_run(samples: Path, out: Path) -> dict[str, Any]:
         "day": day.isoformat(),
         "run_id": manifest["run_id"],
         "scales": scales,
+        "ticks": json.loads(table.schema.metadata[b"tp.ticks"]),
+        "tick_carried": int(table.schema.metadata[b"tp.tick_carried"]),
+        "tick_spread_only": int(table.schema.metadata[b"tp.tick_spread_only"]),
         "features": list(FEATURES),
     }
     table = table.replace_schema_metadata({"tp.book_features": json.dumps(meta, sort_keys=True)})
