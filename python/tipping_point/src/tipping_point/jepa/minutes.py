@@ -37,6 +37,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..book.features import FEATURES
 from . import monitor, objective
 from .days import CONFIRMATORY, MINUTE, DataError, Dataset, Minutes, Span
 from .monitor import Floors
@@ -45,7 +46,7 @@ from .readout import Pca, basis
 
 @dataclass(frozen=True)
 class MinuteSpec:
-    features: int = 16
+    features: int = len(FEATURES)  # the book's 1-second features, 14
     dim: int = 96
     depth: int = 3
     kernel: int = 5

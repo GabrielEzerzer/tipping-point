@@ -19,6 +19,7 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 import torch.nn.functional as F
+from tipping_point.book import features
 from tipping_point.ising import io
 from tipping_point.jepa import days, minutes, monitor, objective, probes, train
 from tipping_point.jepa.days import DataError
@@ -46,9 +47,10 @@ def _table(run_dir: Path, name: str) -> dict[str, np.ndarray]:
     return {c: table[c].to_numpy() for c in table.column_names if c != "dim_std"}
 
 
-def _probe_day(day: date) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
-    frames, valid, _ = days.read_day(market_toy.Source(), market_toy.SYMBOL, day, FEATURES)
-    return torch.from_numpy(frames), torch.from_numpy(valid), market_toy.slow(day)
+def _probe_day(day: date, scaling: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
+    """A day read for readouts through a training's frozen scaling record."""
+    m, _ = days.frames(market_toy.Source(), market_toy.SYMBOL, [day], scaling)
+    return m.frames, m.valid, market_toy.slow(day)
 
 
 # ---------------------------------------------------------------- the loader (leakage tests 1, 2)
@@ -134,7 +136,7 @@ def test_the_manifest_lists_every_input_day_with_its_sha256(market_run: Path) ->
         train.load_model(market_run / train.FINAL)  # the lattice loader never reads a market model
 
 
-def test_the_input_contract_is_checked() -> None:
+def test_the_input_contract_is_checked(toy_days: days.Dataset) -> None:
     """Catches a day of the wrong length, a missing or mistyped column, a value that is not finite
     outside a gap, and a gap value reaching the model."""
     good, _ = market_toy.Source().read(market_toy.SYMBOL, date(2023, 3, 1))
@@ -149,10 +151,14 @@ def test_the_input_contract_is_checked() -> None:
     def read(table: pa.Table) -> tuple[np.ndarray, np.ndarray, str]:
         return days.read_day(Fixed(table), market_toy.SYMBOL, date(2023, 3, 1), FEATURES)
 
-    frames, valid, _ = read(good)
-    assert frames.shape == (days.MINUTES, days.MINUTE, len(FEATURES)) and frames.dtype == np.float32
-    assert set(np.flatnonzero(~valid)) == set(market_toy.GAP_MINUTES)
-    assert np.isfinite(frames).all() and (frames[1000] == 0).all()  # NaN behind gaps zeroed
+    values, gap, _ = read(good)
+    assert values.shape == (days.SECONDS, len(FEATURES)) and values.dtype == np.float32
+    assert set(np.flatnonzero(gap.reshape(days.MINUTES, days.MINUTE).any(1))) == set(
+        market_toy.GAP_MINUTES
+    )
+    frames, valid = toy_days.train.frames[: days.MINUTES], toy_days.train.valid[: days.MINUTES]
+    assert set(torch.nonzero(~valid).flatten().tolist()) == set(market_toy.GAP_MINUTES)
+    assert torch.isfinite(frames).all() and (frames[1000] == 0).all()  # NaN behind gaps zeroed
     assert (frames[100, 17] == 0).all() and (frames[100, 16] != 0).any()
     bad_value = good["f03"].to_numpy(zero_copy_only=False).copy()
     bad_value[5] = np.nan  # second 5 is not a gap
@@ -252,16 +258,18 @@ def test_days_with_nothing_to_learn_from_are_refused(tmp_path: Path) -> None:
     """Catches a training that starts on days it cannot learn from and divides its losses by zero
     at its first update: training days in which no chunk holds two valid minutes (the feed down
     all day, or up for lone minutes further apart than a chunk) are refused before any file is
-    written, as validation days without a wholly valid chunk for the monitor already were."""
+    written, as validation days without a wholly valid chunk for the monitor already were. Training
+    days without a single valid second are refused by the loader, which has nothing to fit the
+    scaling on."""
     lone = range(0, days.MINUTES, 2 * market_toy.SPEC.context)
     cases = (
-        ({day: () for day in market_toy.TRAIN_DAYS}, "two valid minutes"),
+        ({day: () for day in market_toy.TRAIN_DAYS}, "no valid training second"),
         ({day: lone for day in market_toy.TRAIN_DAYS}, "two valid minutes"),
         ({day: () for day in market_toy.VAL_DAYS}, "wholly valid"),
     )
     for up, refusal in cases:
-        data = market_toy.dataset(Outage(up))
         with pytest.raises(DataError, match=refusal):
+            data = market_toy.dataset(Outage(up))
             train.start(market_toy.CONFIG, data, tmp_path, "refused", "cpu")
     assert not (tmp_path / "jepa").exists()
 
@@ -270,8 +278,10 @@ def test_days_with_nothing_to_learn_from_are_refused(tmp_path: Path) -> None:
 
 
 def test_presets_have_the_research_pass_sizes() -> None:
-    """Decision 4: S about 0.24M parameters, M about 0.6M. Counted: S 0.245M (encoder 0.113M,
-    predictor 0.131M), M 0.651M (encoder 0.250M, predictor 0.401M), the pooling layer included."""
+    """Decision 4: S about 0.24M parameters, M about 0.6M, at the book's 14 input features.
+    Counted: S 0.244M (encoder 0.113M, predictor 0.131M), M 0.650M (encoder 0.249M, predictor
+    0.401M), the pooling layer included."""
+    assert all(spec.features == len(features.FEATURES) == 14 for spec in minutes.PRESETS.values())
     counts = {}
     for name, spec in minutes.PRESETS.items():
         model = minutes.MarketJepa(spec)
@@ -368,14 +378,14 @@ def test_the_predictor_is_causal_and_ignores_invalid_minutes() -> None:
         assert torch.equal(model.chunk(hidden, valid)["pred"], base)
 
 
-def test_readouts_have_no_position_effect_and_never_look_ahead() -> None:
+def test_readouts_have_no_position_effect_and_never_look_ahead(toy_days: days.Dataset) -> None:
     """Catches surprise that depends on where a minute sits in its batch, and any readout that a
     later minute changes (leakage test 3 for the latent): reading a truncated or a perturbed series
     gives bitwise the same values up to the cut. An invalid minute reads NaN in both readouts."""
     spec = market_toy.SPEC
     model = minutes.MarketJepa(spec)
     model.initialise(torch.Generator().manual_seed(1))
-    frames, valid, _ = _probe_day(date(2023, 3, 1))
+    frames, valid, _ = _probe_day(date(2023, 3, 1), toy_days.sources["scaling"])
     frames, valid = frames[:300], valid[:300]
     latent, surprise = minutes.readouts(model, frames, valid, windows=64)
     C = spec.context
@@ -421,7 +431,8 @@ def test_the_latent_tracks_the_slow_variable_and_the_twins_does_not(market_run: 
     unseen day and tested on another, and by its first principal component alone; the untrained
     twin's latent reads it far worse. s shows only in second moments, so this fails for an encoder
     that pools its tokens by their mean alone (trained accuracy 0.51-0.52 on seeds 30-32)."""
-    (fa, va, sa), (fb, vb, sb) = (_probe_day(d) for d in market_toy.PROBE_DAYS)
+    scaling = io.read_json(market_run / "manifest.json")["data"]["scaling"]
+    (fa, va, sa), (fb, vb, sb) = (_probe_day(d, scaling) for d in market_toy.PROBE_DAYS)
     va_np, vb_np = va.numpy(), vb.numpy()
     scores = {}
     for name, path in (("trained", train.FINAL), ("untrained", train.TWIN)):

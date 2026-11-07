@@ -54,10 +54,10 @@ Features, per second (a "sample" is one 100 ms book; means are over the second's
              within every sample and is scale-free, leaving the size of the book to `depth_*`.
   wide       fraction of samples with a spread above one tick
 
-Cross-day steps, not done here (they are fitted later, on the training span only, #30 4.1):
-`depth_5` and `depth_20` become relative to their trailing 7-day median, and every feature gets
-the robust standardisation (median and IQR) with its log or signed-log transform. Every other
-feature is defined within the day and is final here.
+Cross-day steps, not done here: the market loader (jepa/days.py, #165) makes `depth_5` and
+`depth_20` relative to a trailing 7-day median, logs or signed-logs the heavy-tailed features and
+standardises every feature with a robust scale fitted on the training days only. Everything here
+is defined within the day.
 
 shortcut: a tick is one unit of the run's price scale (10^-price_decimals), which the engine sets
 from the finest price in the file; that matched the tick on the days checked (ETHUSDT 2023-06-10:
