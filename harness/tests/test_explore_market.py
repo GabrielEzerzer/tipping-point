@@ -4,9 +4,14 @@ invalid minute is left out and counted; a day from 2024 is refused; reading in b
 one read of the whole series gives.
 """
 
+import hashlib
+import json
 from datetime import date
+from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import torch
 from explore import market_latents, market_pass
@@ -55,7 +60,8 @@ def test_a_planted_rise_reads_greater_and_a_flat_series_near_half() -> None:
     for r in level:
         assert r["trained"]["median_s_events"] > 0.5, r["h"]
         assert r["trained"]["auc"] > 0.9 and r["trained"]["auc_ci"][0] > 0.5
-        assert r["margin"]["auc"] == 0.0  # the same table twice
+        assert r["margin"]["auc"] == 0.0  # the same table twice, on the same draws
+        assert r["margin"]["auc_ci"] == [0.0, 0.0]
     noise = [r for r in rows if r["indicator"] == "variance"]
     for r in noise:
         assert abs(r["trained"]["auc"] - 0.5) < 0.2
@@ -146,3 +152,86 @@ def test_reading_in_blocks_gives_what_one_read_gives() -> None:
     z, s = market_latents.carried(model, parts)
     torch.testing.assert_close(z, whole[0], equal_nan=True, rtol=0, atol=1e-6)
     torch.testing.assert_close(s, whole[1], equal_nan=True, rtol=0, atol=1e-6)
+
+
+def _row(cell: str, auc: float, ci: list[float], twin: float, column: str = "pc_2") -> dict:
+    return {
+        "cell": cell,
+        "kind": "same",
+        "column": column,
+        "indicator": "variance",
+        "h": 5,
+        "trained": {"auc": auc, "auc_ci": ci},
+        "twin": {"auc": twin},
+    }
+
+
+@pytest.mark.parametrize("low", [True, False])
+def test_a_column_is_proposed_only_past_its_ci_and_its_twin_in_both_cells(low: bool) -> None:
+    """Each case fails if the CI condition is dropped or > becomes <; on both sides of 0.5."""
+
+    def at(x: float) -> float:
+        return 1.0 - x if low else x
+
+    def ci(a: float, b: float) -> list[float]:
+        return sorted([at(a), at(b)])
+
+    passing = _row("BTC->BTC", at(0.8), ci(0.6, 0.95), at(0.55))
+    assert market_pass._passes(passing)
+    straddles = _row("BTC->BTC", at(0.8), ci(0.45, 0.95), at(0.5))
+    assert not market_pass._passes(straddles)
+    twin_further = _row("BTC->BTC", at(0.8), ci(0.6, 0.95), at(0.9))
+    assert not market_pass._passes(twin_further)
+    one_cell = market_pass.judged([passing, _row("ETH->ETH", 0.5, [0.3, 0.7], 0.5)])
+    assert "pc_2" not in one_cell["proposed"]
+    alone = market_pass.judged([passing])  # one same-asset cell read: never "both"
+    assert "pc_2" not in alone["proposed"]
+    both = market_pass.judged([passing, {**passing, "cell": "ETH->ETH"}])
+    assert both["proposed"] == ["pc_2"]
+
+
+def test_a_cell_with_no_kept_event_does_not_turn_agreement_into_disagree() -> None:
+    def row(cell: str, h: int, s: float) -> dict:
+        trained = {"median_s_events": s}
+        return {
+            "cell": cell,
+            "kind": "same",
+            "column": "surprise",
+            "indicator": "level",
+            "h": h,
+            "trained": trained,
+        }
+
+    rows = [row("BTC->BTC", 5, 0.3), row("ETH->ETH", 5, 0.2), row("ETH->ETH", 24, np.nan)]
+    found = market_pass.directions(rows, pairs=(("surprise", "level"),))["surprise level"]
+    assert found["same_asset"] == "greater" and found["no_sign"] == ["ETH->ETH h24"]
+
+
+def _labels(root: Path, **params: object) -> Path:
+    run = root / "run"
+    run.mkdir(parents=True)
+    manifest = {"domain": "labels", "run_id": "run", "params": {"end": "2023-12-31", **params}}
+    (run / "manifest.json").write_text(json.dumps(manifest), "utf-8")
+    (run / "complete.json").write_text(json.dumps({"files": {}}), "utf-8")
+    return run
+
+
+def test_a_labels_run_into_2024_or_under_a_prereg_is_refused(tmp_path: Path) -> None:
+    assert market_pass.labels_run(_labels(tmp_path / "a"))["run_id"] == "run"
+    with pytest.raises(SystemExit, match="2024-01-01"):
+        market_pass.events_and_nulls(_labels(tmp_path / "b", end="2026-09-30"), "BTCUSDT")
+    with pytest.raises(SystemExit, match="pre-registration"):
+        market_pass.events_and_nulls(_labels(tmp_path / "c", prereg={"id": "x"}), "BTCUSDT")
+
+
+def test_a_series_whose_bytes_differ_from_its_manifest_is_refused(tmp_path: Path) -> None:
+    folder = tmp_path / "r-step0"
+    folder.mkdir()
+    path = folder / "BTCUSDT-exploratory.parquet"
+    pq.write_table(pa.table({"ts_ns": np.arange(3), "valid": np.ones(3, bool)}), path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_suffix(".json").write_text(json.dumps({"parquet_sha256": digest}), "utf-8")
+    assert len(market_pass.load_series(tmp_path, "r-step0", "BTCUSDT", "exploratory")["ts_ns"]) == 3
+    pq.write_table(pa.table({"ts_ns": np.arange(4), "valid": np.ones(4, bool)}), path)
+    with pytest.raises(SystemExit, match="not the bytes"):
+        market_pass.load_series(tmp_path, "r-step0", "BTCUSDT", "exploratory")

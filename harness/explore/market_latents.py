@@ -172,7 +172,8 @@ def read(
     parts: list[tuple[torch.Tensor, torch.Tensor]] = []
     for lead, block in blocks(wanted):
         got, rec = days.frames(source, symbol, block, scaling, lead=lead)
-        records += [r for r in rec if not r.get("lead")]
+        seen = {r["day"] for r in records}  # a later block's lead days were read as days
+        records += [r for r in rec if not (r.get("lead") and r["day"] in seen)]
         feature_valid.append(got.valid)
         parts.append((got.frames, got.valid))
     out: dict[Path, dict[str, np.ndarray]] = {}
@@ -261,6 +262,10 @@ def main(argv: list[str] | None = None) -> None:
     clock = common.Clock()
     record, provenance = scaling_of(args.scaling_run, args.symbol)
     loaded = [train.load_market(c) for c in args.checkpoints]
+    for ckpt in loaded:  # a same-asset read takes the model's own record, no other
+        own = json.loads((_run_dir(ckpt.path) / "manifest.json").read_text("utf-8"))
+        if ckpt.config.symbol == args.symbol and own["data"]["scaling"] != record:
+            raise SystemExit(f"{ckpt.path}: --scaling-run is not this model's own record")
     clock(f"{args.symbol} {args.span}: {len(wanted)} days, {len(loaded)} checkpoint(s)")
     columns, feature_valid, records = read(Folders(args.data), args.symbol, wanted, record, loaded)
     for ckpt in loaded:

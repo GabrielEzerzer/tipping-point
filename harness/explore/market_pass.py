@@ -45,6 +45,7 @@ Writes <out>/market-pass.json (every row), market-proposal.json and market-repor
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -215,10 +216,32 @@ def _labels(run: Path, table: str) -> list[dict[str, Any]]:
     return pa.concat_tables(pq.read_table(p) for p in parts).to_pylist()
 
 
+def labels_run(run: Path) -> dict[str, Any]:
+    """The labels run's record, if this pass may read it: a complete labels run that ends before
+    2024-01-01 and was made without a pre-registration (a --prereg run is the confirmatory one)."""
+    run = Path(run)
+    if not (run / "complete.json").is_file() or not (run / "manifest.json").is_file():
+        raise SystemExit(f"{run}: not a complete labels run")
+    manifest = json.loads((run / "manifest.json").read_text("utf-8"))
+    params = manifest.get("params", {})
+    if manifest.get("domain") != "labels" or "end" not in params:
+        raise SystemExit(f"{run}: not a labels run")
+    if params["end"] >= market_latents.days.CONFIRMATORY.isoformat():
+        raise SystemExit(f"{run} runs to {params['end']}: this pass never reads from 2024-01-01")
+    if "prereg" in params or "prereg" in manifest:
+        raise SystemExit(f"{run} was made under a pre-registration: this pass never reads it")
+    complete = json.loads((run / "complete.json").read_text("utf-8"))
+    return {
+        "run_id": manifest["run_id"],
+        "params": params,
+        "producer": manifest.get("producer"),
+        "files": complete["files"],
+    }
+
+
 def events_and_nulls(run: Path, symbol: str) -> tuple[np.ndarray, list[dict[str, Any]]]:
     """Event onsets (ns) and null stretches of `symbol`; nothing from 2024 is read."""
-    if not (Path(run) / "complete.json").is_file():
-        raise SystemExit(f"{run}: not a complete labels run")
+    labels_run(run)
     end = np.datetime64(market_latents.days.CONFIRMATORY.isoformat(), "ns").astype(np.int64)
     episodes = [
         e["ts_ns"]
@@ -243,6 +266,15 @@ def find_tables(latents: Path) -> dict[str, dict[str, Any]]:
         if key in run:
             raise SystemExit(f"{latents}: two {key} tables of {m['run']}")
         run[key] = folder.name
+        run[f"{key}_files"] = {
+            j.stem: {
+                "checkpoint_sha256": record["checkpoint_sha256"],
+                "parquet_sha256": record["parquet_sha256"],
+                "scaling_sha256": record["scaling"]["sha256"],
+            }
+            for j in sorted(folder.glob("*.json"))
+            for record in [json.loads(j.read_text("utf-8"))]
+        }
     for name, run in runs.items():
         if not {"trained", "twin"} <= set(run):
             raise SystemExit(f"{latents}: {name} needs a trained table and its step-0 twin")
@@ -250,10 +282,15 @@ def find_tables(latents: Path) -> dict[str, dict[str, Any]]:
 
 
 def load_series(latents: Path, table: str, symbol: str, span: str) -> dict[str, np.ndarray] | None:
+    """A table's series, refused when its bytes are not the ones its manifest names."""
     path = Path(latents) / table / f"{symbol}-{span}.parquet"
     if not path.is_file():
         return None
-    t = pq.read_table(path)
+    raw = path.read_bytes()
+    manifest = json.loads(path.with_suffix(".json").read_text("utf-8"))
+    if hashlib.sha256(raw).hexdigest() != manifest["parquet_sha256"]:
+        raise SystemExit(f"{path}: not the bytes its manifest names")
+    t = pq.read_table(pa.BufferReader(raw))
     return {name: t[name].to_numpy() for name in t.column_names}
 
 
@@ -351,6 +388,9 @@ def _one(signs: Sequence[str]) -> str:
     return found.pop() if len(found) == 1 else ("none" if not found else "disagree")
 
 
+KINDS = ("same", "cross")
+
+
 def directions(rows: Sequence[Mapping[str, Any]], pairs: Sequence = PAIRS) -> dict[str, Any]:
     """Per pair: the trained median event s's sign per cell and h, and whether they agree."""
     out: dict[str, Any] = {}
@@ -359,12 +399,14 @@ def directions(rows: Sequence[Mapping[str, Any]], pairs: Sequence = PAIRS) -> di
         by_cell: dict[str, dict[int, str]] = {}
         for r in mine:
             by_cell.setdefault(r["cell"], {})[r["h"]] = _sign(r["trained"]["median_s_events"])
-        same = [by_cell[r["cell"]][r["h"]] for r in mine if r["kind"] == "same"]
-        cross = [by_cell[r["cell"]][r["h"]] for r in mine if r["kind"] == "cross"]
+        signs = {k: [by_cell[r["cell"]][r["h"]] for r in mine if r["kind"] == k] for k in KINDS}
         out[f"{column} {indicator}"] = {
-            "same_asset": _one(same),
-            "cross_asset": _one(cross),
+            "same_asset": _one([x for x in signs["same"] if x != "none"]),
+            "cross_asset": _one([x for x in signs["cross"] if x != "none"]),
             "by_cell": by_cell,
+            "no_sign": sorted(
+                f"{r['cell']} h{r['h']}" for r in mine if by_cell[r["cell"]][r["h"]] == "none"
+            ),
         }
     return out
 
@@ -374,6 +416,11 @@ def _passes(row: Mapping[str, Any]) -> bool:
     if not (np.isfinite(lo) and np.isfinite(hi)) or lo <= 0.5 <= hi:
         return False
     return abs(row["trained"]["auc"] - 0.5) > abs(row["twin"]["auc"] - 0.5)
+
+
+def _mean(x: Sequence[float]) -> float:
+    a = np.asarray(x, float)
+    return float(np.nanmean(a)) if np.isfinite(a).any() else math.nan
 
 
 def judged(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -391,11 +438,11 @@ def judged(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         }
         dev = [abs(r["trained"]["auc"] - 0.5) for r in mine]
         twin = [abs(r["twin"]["auc"] - 0.5) for r in mine]
-        trained_dev, twin_dev = float(np.nanmean(dev)), float(np.nanmean(twin))
+        trained_dev, twin_dev = _mean(dev), _mean(twin)
         ranking.append(
             {
                 "column": column,
-                "proposed": bool(cells) and all(passing[c] for c in cells),
+                "proposed": len(cells) == 2 and all(passing[c] for c in cells),
                 "passing": passing,
                 "trained_mean_dev": trained_dev,
                 "twin_mean_dev": twin_dev,
@@ -476,6 +523,9 @@ def render(result: Mapping[str, Any], draws: int) -> str:
     disagree = [p for p, d in result["directions"].items() if d["same_asset"] == "disagree"]
     if disagree:
         lines += ["", f"The signs disagree for {', '.join(disagree)}: the owner decides."]
+    for pair, d in result["directions"].items():
+        if d["no_sign"]:
+            lines.append(f"- {pair}: no sign (no kept event) at {', '.join(d['no_sign'])}")
     lines += ["", "## The four pairs, trained beside twin", ""]
     lines += [
         f"CI: percentile, {draws} bootstrap draws resampling events and controls; the margin is "
@@ -561,7 +611,7 @@ def main(argv: list[str] | None = None) -> None:
         "pre_registered": False,
         "code_commit": common._git("rev-parse", "HEAD"),
         "code_dirty": bool(common._git("status", "--porcelain", "--untracked-files=no")),
-        "labels_run": Path(args.labels).name,
+        "labels_run": labels_run(args.labels),
         "draws": args.draws,
         "seed": args.seed,
         "horizons": list(HORIZONS),
