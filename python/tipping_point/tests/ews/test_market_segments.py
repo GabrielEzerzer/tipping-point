@@ -202,6 +202,35 @@ def test_a_subsample_is_seeded_and_in_time_order(
     assert (count["kept"], count["scored"]) == (2, 1)
 
 
+def test_days_before_score_from_are_history_only(
+    tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg]
+) -> None:
+    """An onset before score_from is not cut, a later onset whose segment reaches back before it
+    still is, and a control segment starting before it is not cut."""
+    labels, _ = frozen
+    run = _run(tmp_path, labels)
+    series = {"BTCUSDT": _minutes()}
+    onset_day = date(2023, 3, 1) + timedelta(days=ONSET // msvol.DAY_BARS)  # EARLY is on day 0
+    got = ms.build(run, labels, series, HORIZONS, SPAN, score_from=onset_day)
+    whole = ms.build(run, labels, series, HORIZONS, SPAN)
+    for h in HORIZONS:
+        assert np.array_equal(got.events["BTCUSDT", h].x, whole.events["BTCUSDT", h].x)
+        assert got.events["BTCUSDT", h].first_ms[0] < archive.day_ms(onset_day)  # reaches back
+    events = {c["horizon_bars"]: c for c in got.counts if c["kind"] == "event"}
+    assert all((c["cut"], c["kept"], c["excluded_outside"]) == (1, 1, 0) for c in events.values())
+    assert np.array_equal(got.controls["BTCUSDT"].x, whole.controls["BTCUSDT"].x)
+    # a day later the onset goes, and of the stretch's three controls the two starting on
+    # onset_day; the third starts after midnight and stays
+    after = onset_day + timedelta(1)
+    later = ms.build(run, labels, series, HORIZONS, SPAN, score_from=after)
+    assert all(len(later.events["BTCUSDT", h].x) == 0 for h in HORIZONS)
+    (control,) = [c for c in later.counts if c["kind"] == "control"]
+    assert control["cut"] == 1 and len(later.controls["BTCUSDT"].x) == 1
+    assert np.array_equal(later.controls["BTCUSDT"].x, whole.controls["BTCUSDT"].x[-1:])
+    assert later.controls["BTCUSDT"].first_ms[0] >= archive.day_ms(after)
+    assert len(later.onsets["BTCUSDT"]) == 2  # every onset is still known, for eth-only
+
+
 def test_the_labels_must_be_the_frozen_files(
     tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg]
 ) -> None:

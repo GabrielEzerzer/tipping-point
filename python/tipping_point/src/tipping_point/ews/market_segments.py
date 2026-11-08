@@ -21,7 +21,9 @@ in such bars is reported (call 11). Controls are the non-overlapping spans cut i
 the start of each null stretch (market.nulls.null_rows), one set for every horizon, then
 optionally a seeded subsample of them. A segment that holds a minute with no return is excluded
 (the same segments for every indicator), and so is one that reaches outside the series given;
-both are counted.
+both are counted. With `score_from`, an onset before that day, and a control segment starting before
+it, is not cut at all: the series may start earlier, as history for the first days' segments,
+without its own days being scored.
 
 The confirmatory span (from 2024-01-01) opens only through a frozen market-ews file, as the market
 command's --prereg opens it for labels: build refuses a series, onset or control segment reaching
@@ -234,6 +236,7 @@ def build(
     *,
     subsample: int = 0,
     seed: int = 0,
+    score_from: date | None = None,
     scoring: prereg.Prereg | None = None,
 ) -> Segments:
     """The event segments of each symbol's regime-shift onsets at each horizon (in bars) and its
@@ -241,8 +244,9 @@ def build(
     from `series` (one Minutes per symbol: returns, raw or deseasonalised). With subsample n > 0,
     at most n of each symbol's kept controls are kept: when there are more, n are drawn without
     replacement, symbols in sorted order from one generator seeded with `seed`, and kept in time
-    order. Days from 2024-01-01 need `scoring`, whose horizons, span, subsample and seed these
-    must be (the module docstring says why)."""
+    order. With `score_from`, onsets before that UTC day and control segments starting before it
+    are not cut (the series before it is history only). Days from 2024-01-01 need `scoring`, whose
+    horizons, span, subsample and seed these must be (the module docstring says why)."""
     manifest = check_labels(run, labels, scoring)
     if scoring is not None:
         doc = scoring.doc
@@ -282,6 +286,7 @@ def build(
         )
         for symbol in manifest["params"]["symbols"]
     }
+    first_day_ms = archive.day_ms(score_from) if score_from else None
     rng = np.random.default_rng(seed)
     events: dict[tuple[str, int], Block] = {}
     controls: dict[str, Block] = {}
@@ -304,6 +309,8 @@ def build(
             bar_ns, bar_ns[0] + msvol.BAR_NS * np.arange(len(bar_ns))
         ):
             raise SegmentError(f"{run}: {symbol}'s labels are not on one 5-minute grid")
+        if first_day_ms is not None:
+            onsets = onsets[onsets // 1_000_000 >= first_day_ms]
         onset_ms = onsets // 1_000_000
         if scoring is None and np.any(onset_ms >= CONFIRMATORY_MS):
             raise SegmentError(_closed(f"{symbol}'s onsets reach"))
@@ -320,10 +327,14 @@ def build(
                 first_ms.append(t // 1_000_000 + k * span * MINUTE_MS)
                 anchor.append(t)
         first = np.array(first_ms, np.int64)
+        anchors = np.array(anchor, np.int64)
+        if first_day_ms is not None:
+            later = first >= first_day_ms
+            first, anchors = first[later], anchors[later]
         if scoring is None and np.any(first + span * MINUTE_MS > CONFIRMATORY_MS):
             raise SegmentError(_closed(f"{symbol}'s control segments reach"))
         rows, kept, share, outside, invalid = _cut(minutes, first, span, high, high_t0)
-        block = Block(rows, first[kept], np.array(anchor, np.int64)[kept], share)
+        block = Block(rows, first[kept], anchors[kept], share)
         if subsample and subsample < len(rows):
             pick = np.sort(rng.choice(len(rows), subsample, replace=False))
             block = Block(rows[pick], block.first_ms[pick], block.anchor_ns[pick], share[pick])

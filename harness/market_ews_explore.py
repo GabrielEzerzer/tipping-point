@@ -9,11 +9,12 @@ span, call 9) by each of the two methods market-ews offers, "scale" and "mean", 
 the event and control segments of the labels run --run, which must be a run of the frozen
 market-labels file at its parameters (market_segments.check_labels), and scored by
 Pipeline("variance", 60, 240) and Pipeline("ac", 60, 240) at horizons 5, 6, 12 and 24 bars.
-Per symbol, pooled, and for the ETH events with no BTC event onset within an hour (eth-only,
-against the ETH controls): the AUC of events against controls, with a percentile bootstrap CI
-(events and controls resampled with replacement within each symbol, a generator per cell seeded
-from --seed and the cell's name). The run must end before 2024-01-01 and no kline from then on
-is read; the builder refuses otherwise. Writes report.json and report.md to --out.
+Onsets and control segments from 2023-01-01 only; the day before is read as history for
+January's segments. Per symbol, pooled, and for the ETH events with no BTC event onset within an
+hour (eth-only, against the ETH controls): the AUC of events against controls, with a percentile
+bootstrap CI (events and controls resampled with replacement within each symbol, a generator per
+cell seeded from --seed and the cell's name). The run must end before 2024-01-01 and no kline
+from then on is read; the builder refuses otherwise. Writes report.json and report.md to --out.
 
   .venv/Scripts/python.exe harness/market_ews_explore.py --run <labels run folder> \\
       [--archive <archive folder>] [--out harness/out/market-ews-explore]
@@ -38,6 +39,7 @@ from tipping_point.market import archive
 from tipping_point.market.__main__ import ARCHIVE
 
 READ = (date(2022, 12, 31), date(2023, 12, 31))  # a day early: a 24-bar segment starts 419 min out
+SCORED = date(2023, 1, 1)  # READ's first day is history only: no onset or control from it
 FIT = (date(2023, 1, 18), date(2023, 9, 30))
 HORIZONS = (5, 6, 12, 24)
 SCORERS = {"variance": Pipeline("variance", 60, 240), "ac": Pipeline("ac", 60, 240)}
@@ -84,7 +86,7 @@ def explore(run: Path, labels: Path, root: Path, draws: int, seed: int) -> dict[
     span = max(s.span for s in SCORERS.values())
     rows, counts, shares = [], None, {}
     for variant, by_symbol in found.items():
-        segs = ms.build(run, pre, by_symbol, HORIZONS, span)
+        segs = ms.build(run, pre, by_symbol, HORIZONS, span, score_from=SCORED)
         counts = counts or segs.counts
         assert segs.counts == counts  # the same segments for every variant
         alone = {  # eth-only: which kept ETH events have no BTC onset within the window
