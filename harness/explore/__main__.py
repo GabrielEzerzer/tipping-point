@@ -20,6 +20,8 @@ Scripts, in the order a pass runs them (latent_pass runs them all for one traini
   report          one size's outputs as markdown
   latent_report   a training's trained and twin side by side, as markdown (--latents)
   latent_pass     every step above for one training, in order, trained and twin
+  market_latents  the market JEPA's per-minute series of one symbol and span (#30 M6)
+  market_pass     the market JEPA's 2023-Q4 segments, AUCs, directions and judged columns
 """
 
 from __future__ import annotations
@@ -44,6 +46,8 @@ SCRIPTS = (
     "report",
     "latent_report",
     "latent_pass",
+    "market_latents",
+    "market_pass",
 )
 
 
