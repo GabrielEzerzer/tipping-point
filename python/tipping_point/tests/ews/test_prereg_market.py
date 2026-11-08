@@ -207,7 +207,11 @@ def _set(doc: dict[str, Any], where: str, value: Any) -> dict[str, Any]:
         ("supersedes", "market-labels-v1", "reason: an amendment must say why"),
         # a key nothing reads, and a domain with no schema
         ("labeller.lag", 1, "labeller.lag: nothing reads this key in a market-labels file"),
-        ("data.domain", "market", "data.domain: 'market' is not one of ['ising', 'market-labels']"),
+        (
+            "data.domain",
+            "market",
+            "data.domain: 'market' is not one of ['ising', 'market-labels', 'market-ews']",
+        ),
     ],
 )
 def test_each_problem_is_named(doc: dict[str, Any], where: str, value: Any, named: str) -> None:

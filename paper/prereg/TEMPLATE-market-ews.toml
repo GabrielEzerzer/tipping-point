@@ -1,0 +1,134 @@
+# Pre-registration template for the classic market warning test (#30 M5): copy to
+# market-ews-v<k>.toml, replace every "<...>" and "TBD", commit, then
+# `python -m tipping_point.ews prereg freeze <id>` tags the commit prereg/<id>-v<k>. The freeze
+# refuses a file that still holds a placeholder. To change anything after the freeze, write
+# <id>-v<k+1>.toml with `supersedes` and `reason`. Units: bars are 5-minute bars on the UTC grid,
+# minutes are 1-minute klines, days are UTC days.
+#
+# Set here, at the #30 research pass's recommended values (sections 6.2-6.4, 7.2, owner's calls 9
+# to 11): the frozen labels file, the series and missing-minute rule, variance and AC1 through a
+# 60-minute window and a 240-value trend, horizons 5, 6, 12 and 24 bars, the segment rule of call
+# 11 (fixed length, segments may start before the clean window, the share of H = 1 minutes
+# reported), the slot-profile deseasonalisation of call 9 fitted on the JEPA's training span, the
+# event-time shift at 100 draws a day or more away, phase surrogates as secondary, pooled,
+# per-asset and ETH-only reporting.
+#
+# Open, for the owner before the freeze (placeholders): the detrending (none or a Gaussian
+# bandwidth; the floor scored with none), the GARCH floor's fit (#154), its noise band (#153) and
+# its empty-cell rule (#138), and the alarm rate. A floor option is accepted only once its code
+# is built: today "pilot", "bootstrap" and "mark".
+#
+# Not in this file yet: the same-input tier (Bybit book features as classic series, research
+# pass 6.4 item 2), which comes with its own keys before the freeze.
+
+id = "<lowercase-slug>"
+version = 1
+supersedes = ""          # "<id>-v<k>" this version amends, or ""
+reason = ""              # why it amends that version (required when supersedes is set)
+question = "<what this test asks, in one sentence>"
+
+# One per scored indicator. The prediction states the decision rule.
+[[hypotheses]]
+name = "variance-rises"
+indicator = "variance"
+statement = "The rolling variance of 1-minute returns rises over the four hours before a regime-shift onset, more than over matched calm windows."
+prediction = "<the decision rule, e.g. pooled and per asset at every horizon: the AUC's 95 % CI above 0.5, above the GARCH floor's AUC at that horizon, and above the event-time shift's 97.5th percentile>"
+direction = "greater"
+
+[[hypotheses]]
+name = "ac1-rises"
+indicator = "ac"
+statement = "The lag-1 autocorrelation of 1-minute returns rises over the four hours before a regime-shift onset, more than over matched calm windows."
+prediction = "<the decision rule, as for variance-rises>"
+direction = "greater"
+
+[data]
+domain = "market-ews"
+symbols = ["BTCUSDT", "ETHUSDT"]   # Binance USD-M perpetuals
+series = "Binance USD-M 1-minute klines, the archives market-labels-v1 reads: close-to-close log returns, the return of minute m being ln(close_m / close_(m-1)), known when minute m closes"
+missing = "a minute with no kline, or whose previous minute has none, has no return; a segment holding such a minute is excluded for every indicator and counted"
+
+[data.labels]            # the frozen labels file the segments are cut from
+tag = "prereg/market-labels-v1"
+sha256 = "d5988eab9e1bab7442e8d56dd7d80388d1696a6cb0ef6d6b4d4bb50f26507458"
+
+[data.events]
+primary = "regime-shifts"   # the labels' events
+stress = "cascades"         # the pooled cascade list, a stress test
+
+# Each indicator through ews.trend.Pipeline(name, window, length): a rolling window of `window`
+# minutes, then Kendall's tau over the last `length` values; a score reads window + length - 1
+# minutes. A Gaussian detrend adds `bandwidth = <minutes>` here.
+[indicators]
+names = ["variance", "ac"]
+window = 60
+length = 240
+lag = 1
+detrend = "<none|gaussian, chosen before the freeze; the floor and the pilot scored none>"
+
+[seasonality]
+rule = "each 1-minute return is divided by the root mean square of the returns of its slot, one of 2 x 288 (weekday or weekend, by 5-minute time of day, the labeller's slots), over the minutes of the fit span; the raw series is scored beside it, descriptively"
+fit = { start = 2023-01-18, end = 2023-09-30 }   # the JEPA's training span (#30 call 5)
+strata = ["onset-hour"]  # AUCs per UTC hour of the onset, descriptively
+
+[segments]
+horizons = [5, 6, 12, 24]   # bars; the smallest is the labels' horizon.smallest
+rule = "an event segment at horizon h bars ends with the minute that closes at the onset minus 5h minutes and holds the window + length - 1 minutes up to it; the length is the same at every horizon, a segment may start before the labels' clean window, and the share of its minutes in bars with H = 1 is reported"
+controls = "control segments are the non-overlapping runs of window + length - 1 minutes cut in time order from the start of each null stretch of the labels run, one set for every horizon; with subsample n > 0, n of each symbol's are drawn without replacement under the seed, after the exclusions"
+subsample = 0            # 0: every control segment
+seed = 30
+
+[scoring]
+ci_level = 0.95
+bootstrap = 2000         # AUC CI: positives and negatives resampled with replacement, per symbol
+seed = 30
+
+# The GARCH(1,1)-t circularity floor (harness/market_floor.py), per minute.
+[scoring.floor]
+fit = "<pilot|deseasonalised, which fit the floor simulates; deseasonalised waits on #154>"
+noise = "<bootstrap|matched, the noise band against the floor; matched waits on #153>"
+empty = "<mark|refuse, what a floor cell with an empty side does; refuse waits on #138>"
+paths = 30
+days = 546               # simulated days from 2022-07-04, ending before 2024-01-01
+seed = 29
+
+[scoring.floor.garch.BTCUSDT]   # the pilot fit market-labels-v1 discloses
+omega = 8.651445052105347e-11
+alpha = 0.07110265726317705
+beta = 0.9288274749829264
+nu = 5.085328354482213
+
+[scoring.floor.garch.ETHUSDT]
+omega = 6.419879719145039e-10
+alpha = 0.0801166904491908
+beta = 0.9197468505253973
+nu = 4.97264822567892
+
+[scoring.shift]          # the event-time shift null (market.nulls.shift_onsets)
+draws = 100
+min_offset_bars = 288    # a day
+
+[scoring.surrogates]
+secondary = "phase"
+n = 999
+
+[reporting]
+groups = ["pooled", "per-asset", "eth-only"]   # eth-only: ETH onsets with no BTC onset within an hour
+
+[alarms]
+rule = "per indicator, horizon and symbol, the alarm threshold is the lowest whose false alarms on the 2023 control segments stay within far_per_day; lead times and false alarms per day under it are reported, descriptively"
+far_per_day = "<false alarms per day, set before the freeze>"
+
+[trials]
+budget = 32              # 2 indicators x 4 horizons x (pooled + 2 assets + eth-only)
+counted = "One trial per AUC evaluation of an (indicator, horizon, reporting group) cell; every scoring run appends its cells to ews/trials.jsonl in the data dir. The raw-series and onset-hour AUCs are descriptive, read by no hypothesis, and not counted."
+
+[disclosure]
+exploratory = "<what was seen before the freeze, and when>"
+decisions = "<which choices were made with it in view>"
+confirmatory = "<what v1 scores, from which commit, on which days>"
+links = []
+
+[deviations]
+policy = "<how changes after the freeze are handled>"
+log = []
