@@ -399,9 +399,11 @@ def test_no_script_can_log_a_trial_or_write_a_result() -> None:
                 assert not (node.module or "").endswith("prereg"), path.name
 
 
-@pytest.mark.parametrize(
-    "name", [s for s in SCRIPTS if s not in ("join_pilot", "latent_pass", "latent_report")]
-)
+# the market scripts read a market model's minutes, which have no lattice size or Ising table
+NOT_ISING = ("join_pilot", "latent_pass", "latent_report", "market_latents", "market_pass")
+
+
+@pytest.mark.parametrize("name", [s for s in SCRIPTS if s not in NOT_ISING])
 def test_every_script_takes_the_size_and_the_table(
     name: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
