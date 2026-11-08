@@ -31,7 +31,7 @@ from tipping_point.market import msvol, nulls, reports
 # shortcut: the floor tests' 1-hour windows over a 4-hour segment and horizons up to 2 hours, read
 # them from #30's pre-registration once it is frozen
 SCORERS = {"variance": Pipeline("variance", 60, 240), "ac": Pipeline("ac", 60, 240)}
-HORIZONS = (0, 3, 6, 12, 24)
+HORIZONS = (0, 3, 5, 6, 12, 24)  # 5: market-labels-v1's horizon.smallest, market-ews's first
 PATHS = 30  # about 30 paths bring the floor's standard error near 0.017 (#111)
 # Per minute, from harness/market_garch.py on 2023-01-01..2023-12-31 (the report garch of labels
 # run 20261106T182828Z-binance-20220701-20231231-dmin36), recorded in market-labels-v1's

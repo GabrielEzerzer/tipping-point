@@ -38,9 +38,17 @@ and [cascade] tables field for field those of market.msvol.Params and market.cas
 span and its pilot/confirmatory boundary, and the null-stretch rule and smallest horizon, which a
 draft may leave as placeholders (_market_problems). The research pass's "source files' manifest
 hash" is left out: the fetch manifest grows with every fetch, and a labels run records each
-file's sha256 itself. Any other domain is refused. load, freeze,
-frozen and stamp take a file of either domain; cells, charge and the result functions are the Ising
-scorer's.
+file's sha256 itself. "market-ews" takes _MARKET_EWS_SCHEMA (#30 M5), the classic warning test
+on the frozen labels: the labels file's tag and sha256, the series, indicators and segment rule
+that ews.market_segments carries out (held word for word, as bars.missing is), the
+deseasonalisation method, horizons from the labels' smallest, the AUC bootstrap, the GARCH floor,
+the event-time shift and the phase surrogates, the hypotheses, reporting groups, alarm rule and
+trial budget (_market_ews_problems). A draft may leave the detrending, the deseasonalisation
+method, the floor's three open choices and the alarm rate as placeholders; a floor option is
+accepted only once its code is built, and the pilot floor only at the horizons and pipelines it
+scores. Any
+other domain is refused. load, freeze, frozen and stamp take a file of any domain; cells, charge
+and the result functions are the Ising scorer's.
 """
 
 from __future__ import annotations
@@ -123,7 +131,8 @@ _SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 # a market-labels file (#29): tuples, so that membership never hashes whatever a file holds there
 MARKET_LABELS = "market-labels"
-DOMAINS = ("ising", MARKET_LABELS)
+MARKET_EWS = "market-ews"
+DOMAINS = ("ising", MARKET_LABELS, MARKET_EWS)
 MARKET_SYMBOLS = ("BTCUSDT", "ETHUSDT")  # market.archive.SYMBOLS
 RV_ESTIMATORS = ("garman-klass",)  # what market.bars computes; Parkinson is a reported variant
 # what market.bars and market.msvol do with a bar they cannot use, word for word
@@ -144,6 +153,65 @@ BASELINE_DAYS = (14, 28, 56)
 CLEAN = (72,)
 REFRACTORY = (288,)
 CONFIRMATORY = date(2024, 1, 1)  # market.__main__.CONFIRMATORY: the first day the pilot never saw
+# a market-ews file (#30 M5): the classic warning test on the frozen labels. The texts are the
+# rules ews.market_segments carries out, word for word
+EWS_INDICATORS = ("variance", "ac")  # ews.trend.INDICATORS' classic pair: variance and AC1
+DETRENDS = ("none", "gaussian")  # ews.trend.Pipeline: bandwidth None, or a Gaussian bandwidth
+HORIZON_FLOOR = 5  # market-labels-v1's horizon.smallest: the p90 detection delay, in bars
+DAY_BARS = 288
+EVENT_SETS = {"primary": "regime-shifts", "stress": "cascades"}
+SERIES = (
+    "Binance USD-M 1-minute klines, the archives market-labels-v1 reads: close-to-close log "
+    "returns, the return of minute m being ln(close_m / close_(m-1)), known when minute m closes"
+)
+MISSING_MINUTE = (
+    "a minute with no kline, or whose previous minute has none, has no return; a segment holding "
+    "such a minute is excluded for every indicator and counted"
+)
+SEGMENT = (
+    "an event segment at horizon h bars ends with the minute that closes at the onset minus 5h "
+    "minutes and holds the window + length - 1 minutes up to it; the length is the same at every "
+    "horizon, a segment may start before the labels' clean window, and the share of its minutes "
+    "in bars with H = 1 is reported"
+)
+CONTROLS = (
+    "control segments are the non-overlapping runs of window + length - 1 minutes cut in time "
+    "order from the start of each null stretch of the labels run, one set for every horizon; with "
+    "subsample n > 0, at most n of each symbol's are kept, drawn without replacement under the "
+    "seed after the exclusions when there are more"
+)
+# seasonality.method, per slot of the labeller's 2 x 288 (weekday or weekend, by 5-minute time of
+# day) over the fit span (ews.market_segments.slot_profile): "scale" divides each 1-minute return
+# by its slot's root mean square, "mean" subtracts its slot's mean return
+DESEASON_METHODS = ("scale", "mean")
+STRATA = ("onset-hour",)  # AUCs also reported per UTC hour of the onset, descriptively
+# eth-only: the ETH events with no BTC event onset within reporting.eth_only_bars bars either side
+# (ews.market_segments.eth_only), against the ETH controls; market.reports' coincidence window
+REPORT_GROUPS = ("pooled", "per-asset", "eth-only")
+ETH_ONLY_BARS = 12  # market.reports.COINCIDENCE_NS, an hour, in bars
+# the floor harness/market_floor.py scores: its horizons and pipelines, which a file whose floor
+# is the pilot fit must keep to (test_prereg_market_ews holds them to market_floor's)
+FLOOR_HORIZONS = (0, 3, 5, 6, 12, 24)
+FLOOR_PIPELINE = {"window": 60, "length": 240, "detrend": "none"}
+ALARMS = (
+    "per indicator, horizon and symbol, the alarm threshold is the lowest whose false alarms on "
+    "the 2023 control segments stay within far_per_day; lead times and false alarms per day under "
+    "it are reported, descriptively"
+)
+# the floor options built so far: #154 adds a deseasonalised refit, #153 count-matched noise and
+# #138 may add a refusal; each joins its tuple when its code lands
+FLOOR_FITS = ("pilot",)  # the GARCH(1,1)-t fits on raw 2023 returns: PILOT_GARCH
+FLOOR_NOISE = ("bootstrap",)  # the real AUC's own bootstrap CI is the noise band
+FLOOR_EMPTY = ("mark",)  # an empty side gives no AUC (nulls._auc), and the cell is inconclusive
+FLOOR_FIRST = date(2022, 7, 4)  # market.nulls.FIRST: simulated days stand from here
+# harness/market_floor.PILOT_GARCH, per minute (omega, alpha, beta, nu): the fit market-labels-v1
+# discloses; test_prereg_market_ews holds the two equal
+PILOT_GARCH = {
+    "BTCUSDT": (8.651445052105347e-11, 0.07110265726317705, 0.9288274749829264, 5.085328354482213),
+    "ETHUSDT": (6.419879719145039e-10, 0.0801166904491908, 0.9197468505253973, 4.97264822567892),
+}
+GARCH_FIELDS = ("omega", "alpha", "beta", "nu")
+_LABELS_TAG = re.compile(r"prereg/market-labels-v[1-9][0-9]*")
 
 
 class PreregError(ValueError):
@@ -370,6 +438,53 @@ _MARKET_SCHEMA: dict[str, Any] = {
     "horizon": {"smallest": (int, str)},  # a string only as a placeholder: _market_problems
     "disclosure": _SCHEMA["disclosure"],
     "deviations": _SCHEMA["deviations"],
+}
+# a file whose data.domain is "market-ews" (#30 M5): every key it holds; indicators.bandwidth is
+# the one it may leave out (_MARKET_EWS_KEYS), and must, unless detrend is "gaussian"
+_MARKET_EWS_SCHEMA: dict[str, Any] = {
+    "id": str,
+    "version": int,
+    "supersedes": str,
+    "reason": str,
+    "question": str,
+    "hypotheses": [
+        {"name": str, "indicator": str, "statement": str, "prediction": str, "direction": str}
+    ],
+    "data": {
+        "domain": str,
+        "symbols": [str],
+        "series": str,
+        "missing": str,
+        "labels": {"tag": str, "sha256": str},
+        "events": {"primary": str, "stress": str},
+    },
+    "indicators": {"names": [str], "window": int, "length": int, "lag": int, "detrend": str},
+    "seasonality": {"method": str, "fit": {"start": date, "end": date}, "strata": [str]},
+    "segments": {"horizons": [int], "rule": str, "controls": str, "subsample": int, "seed": int},
+    "scoring": {
+        "ci_level": _NUMBER,
+        "bootstrap": int,
+        "seed": int,
+        "floor": {
+            "fit": str,
+            "noise": str,
+            "empty": str,
+            "paths": int,
+            "days": int,
+            "seed": int,
+            "garch": {},  # per symbol: GARCH_FIELDS, checked in _market_ews_problems
+        },
+        "shift": {"draws": int, "min_offset_bars": int},
+        "surrogates": {"secondary": str, "n": int},
+    },
+    "reporting": {"groups": [str], "eth_only_bars": int},
+    "alarms": {"rule": str, "far_per_day": (*_NUMBER, str)},  # a string only as a placeholder
+    "trials": {"budget": int, "counted": str},
+    "disclosure": _SCHEMA["disclosure"],
+    "deviations": _SCHEMA["deviations"],
+}
+_MARKET_EWS_KEYS: dict[str, Any] = _MARKET_EWS_SCHEMA | {
+    "indicators": _MARKET_EWS_SCHEMA["indicators"] | {"bandwidth": _NUMBER}
 }
 
 
@@ -858,6 +973,204 @@ def _market_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     return found
 
 
+def _numbers(value: Any, where: str = "") -> list[tuple[str, float]]:
+    if isinstance(value, dict):
+        return [n for k, v in value.items() for n in _numbers(v, f"{where}.{k}".lstrip("."))]
+    if isinstance(value, list):
+        return [n for i, v in enumerate(value) for n in _numbers(v, f"{where}[{i}]")]
+    return [(where, value)] if isinstance(value, float) else []
+
+
+def market_ews_cells(doc: dict[str, Any]) -> int:
+    """AUC evaluations one scoring of a market-ews file makes, one trial each: per indicator and
+    horizon, one per reporting group, per-asset counting once per symbol."""
+    groups = doc["reporting"]["groups"]
+    per = sum(len(doc["data"]["symbols"]) if g == "per-asset" else 1 for g in groups)
+    return len(doc["indicators"]["names"]) * len(doc["segments"]["horizons"]) * per
+
+
+def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
+    """Everything wrong with a market-ews document (#30 M5). A draft may leave a placeholder in
+    any text, in indicators.detrend, seasonality.method, scoring.floor's fit, noise and empty, and
+    alarms.far_per_day; strict refuses every placeholder. Each rule the segment builder carries
+    out is held word for word, and each choice to the options built; the pilot floor holds the
+    horizons and pipelines to those harness/market_floor.py scores."""
+    found: list[str] = []
+    _check(doc, _MARKET_EWS_SCHEMA, "", found)
+    if found:
+        return found
+    found += [
+        f"{key}: nothing reads this key in a market-ews file; take it out"
+        for key in _unread(doc, _MARKET_EWS_KEYS)
+    ]
+    found += [  # TOML allows nan and inf, and nan passes every check
+        f"{where}: a finite number, not {value!r}"
+        for where, value in _numbers(doc)
+        if not math.isfinite(value)
+    ]
+    if found:
+        return found
+    if not _SLUG.fullmatch(doc["id"]) and not _PLACEHOLDER.search(doc["id"]):
+        found.append(f"id: {doc['id']!r} is not a lowercase slug")
+    if doc["version"] < 1:
+        found.append("version: must be >= 1")
+    if doc["supersedes"] and not doc["reason"].strip():
+        found.append("reason: an amendment must say why it supersedes " + doc["supersedes"])
+    data, ind, seg = doc["data"], doc["indicators"], doc["segments"]
+    symbols = data["symbols"]
+    if not symbols or len(set(symbols)) != len(symbols) or not set(symbols) <= set(MARKET_SYMBOLS):
+        found.append(
+            f"data.symbols: distinct symbols, a non-empty subset of {list(MARKET_SYMBOLS)}"
+        )
+    for key, rule in (("series", SERIES), ("missing", MISSING_MINUTE)):
+        if data[key] != rule:
+            found.append(f"data.{key}: {rule!r}, the rule the segment builder carries out")
+    if not _LABELS_TAG.fullmatch(data["labels"]["tag"]):
+        found.append("data.labels.tag: prereg/market-labels-v<k>, the frozen labels' tag")
+    if not _SHA256.fullmatch(data["labels"]["sha256"]):
+        found.append("data.labels.sha256: the frozen labels file's sha256 (64 hex digits)")
+    if data["events"] != EVENT_SETS:
+        found.append(f"data.events: {EVENT_SETS}, regime shifts primary, cascades a stress test")
+    names = ind["names"]
+    if not names or len(set(names)) != len(names) or not set(names) <= set(EWS_INDICATORS):
+        found.append(f"indicators.names: distinct, a non-empty subset of {list(EWS_INDICATORS)}")
+    for key in ("window", "length"):
+        if ind[key] < 2:
+            found.append(f"indicators.{key}: at least 2")
+    if ind["lag"] != 1:
+        found.append("indicators.lag: 1, AC1's lag in minutes")
+    detrend, bandwidth = ind["detrend"], ind.get("bandwidth")
+    if detrend not in DETRENDS and not _placeholder(detrend):
+        found.append(f"indicators.detrend: one of {list(DETRENDS)}")
+    if detrend == "gaussian" and not (
+        isinstance(bandwidth, _NUMBER) and not isinstance(bandwidth, bool) and bandwidth > 0
+    ):
+        found.append("indicators.bandwidth: a positive number of minutes, with detrend 'gaussian'")
+    if detrend != "gaussian" and bandwidth is not None:
+        found.append("indicators.bandwidth: only with detrend 'gaussian'; nothing else reads it")
+    hyp = doc["hypotheses"]
+    if sorted(h["indicator"] for h in hyp) != sorted(names):
+        found.append("hypotheses: one per scored indicator, naming it in `indicator`")
+    if len({h["name"] for h in hyp}) != len(hyp):
+        found.append("hypotheses: distinct names")
+    for i, h in enumerate(hyp):
+        if h["direction"] != "greater":  # no scorer orients a score by direction yet
+            found.append(
+                f"hypotheses[{i}].direction: 'greater', a rising indicator; no scorer reads "
+                "another direction yet"
+            )
+    season = doc["seasonality"]
+    method = season["method"]
+    if method not in DESEASON_METHODS and not _placeholder(method):
+        found.append(f"seasonality.method: one of {list(DESEASON_METHODS)}")
+    fit = season["fit"]
+    if any(isinstance(day, datetime) for day in fit.values()):
+        found.append("seasonality.fit: UTC days, with no time of day")
+    elif not fit["start"] <= fit["end"] < CONFIRMATORY:
+        found.append(
+            f"seasonality.fit: start on or before end, and end before {CONFIRMATORY.isoformat()}: "
+            "the slot profile is fitted on pilot days only"
+        )
+    if not set(season["strata"]) <= set(STRATA):
+        found.append(f"seasonality.strata: a subset of {list(STRATA)}")
+    horizons = seg["horizons"]
+    if not horizons or len(set(horizons)) != len(horizons) or min(horizons) < HORIZON_FLOOR:
+        found.append(
+            f"segments.horizons: distinct numbers of bars, each at least {HORIZON_FLOOR}, the "
+            "labels' p90 detection delay"
+        )
+    for key, rule in (("rule", SEGMENT), ("controls", CONTROLS)):
+        if seg[key] != rule:
+            found.append(f"segments.{key}: {rule!r}, the rule the segment builder carries out")
+    for key in ("subsample", "seed"):
+        if seg[key] < 0:
+            found.append(f"segments.{key}: at least 0")
+    sc = doc["scoring"]
+    if not 0 < sc["ci_level"] < 1:
+        found.append("scoring.ci_level: in (0, 1)")
+    if sc["bootstrap"] < 1:
+        found.append("scoring.bootstrap: at least 1 draw")
+    if sc["seed"] < 0:
+        found.append("scoring.seed: at least 0")
+    floor = sc["floor"]
+    for key, built in (("fit", FLOOR_FITS), ("noise", FLOOR_NOISE), ("empty", FLOOR_EMPTY)):
+        if floor[key] not in built and not _placeholder(floor[key]):
+            found.append(f"scoring.floor.{key}: one of {list(built)}, the options built")
+    if floor["paths"] < 1 or floor["seed"] < 0:
+        found.append("scoring.floor: at least 1 path, and a seed of at least 0")
+    last = (CONFIRMATORY - FLOOR_FIRST).days
+    if not 1 <= floor["days"] <= last:
+        found.append(
+            f"scoring.floor.days: 1 to {last}, so that the simulated days from "
+            f"{FLOOR_FIRST.isoformat()} end before {CONFIRMATORY.isoformat()}"
+        )
+    garch = floor["garch"]
+    if sorted(garch) != sorted(symbols):
+        found.append("scoring.floor.garch: one table per symbol of data.symbols")
+    for symbol, params in garch.items():
+        where = f"scoring.floor.garch.{symbol}"
+        numbers = isinstance(params, dict) and sorted(params) == sorted(GARCH_FIELDS)
+        if not numbers or not all(
+            isinstance(v, _NUMBER) and not isinstance(v, bool) for v in params.values()
+        ):
+            found.append(f"{where}: the numbers {list(GARCH_FIELDS)}, per minute")
+            continue
+        omega, alpha, beta, nu = (params[k] for k in GARCH_FIELDS)
+        if not (omega > 0 and alpha >= 0 and beta >= 0 and alpha + beta < 1 and nu > 2):
+            found.append(f"{where}: omega > 0, alpha and beta >= 0, alpha + beta < 1, nu > 2")
+        elif floor["fit"] == "pilot" and (omega, alpha, beta, nu) != PILOT_GARCH.get(symbol):
+            found.append(f"{where}: the pilot fit, {PILOT_GARCH.get(symbol)}, with fit 'pilot'")
+    if floor["fit"] == "pilot":
+        if not set(horizons) <= set(FLOOR_HORIZONS):
+            found.append(
+                f"segments.horizons: with the pilot floor, among {list(FLOOR_HORIZONS)}, the "
+                "horizons harness/market_floor.py scores"
+            )
+        for key, value in FLOOR_PIPELINE.items():
+            if ind[key] != value and not (key == "detrend" and _placeholder(ind[key])):
+                found.append(
+                    f"indicators.{key}: {value!r} with the pilot floor, whose pipelines are "
+                    "Pipeline(name, 60, 240) with no detrend"
+                )
+    shift = sc["shift"]
+    if shift["draws"] < 1:
+        found.append("scoring.shift.draws: at least 1")
+    if shift["min_offset_bars"] < DAY_BARS:
+        found.append(f"scoring.shift.min_offset_bars: at least {DAY_BARS}, a day")
+    if sc["surrogates"]["secondary"] != "phase":
+        found.append("scoring.surrogates.secondary: 'phase', the secondary null (#29 call 7)")
+    if sc["surrogates"]["n"] < 1:
+        found.append("scoring.surrogates.n: at least 1")
+    if doc["reporting"]["eth_only_bars"] != ETH_ONLY_BARS:
+        found.append(
+            f"reporting.eth_only_bars: {ETH_ONLY_BARS}, an hour, the window the eth-only filter "
+            "and the labels' coincidence report read"
+        )
+    groups = doc["reporting"]["groups"]
+    known = set(groups) <= set(REPORT_GROUPS) and len(set(groups)) == len(groups)
+    if not known or not {"pooled", "per-asset"} <= set(groups):
+        found.append("reporting.groups: pooled and per-asset, and may add eth-only")
+    if "eth-only" in groups and set(symbols) != set(MARKET_SYMBOLS):
+        found.append("reporting.groups: eth-only reads ETH onsets against BTC's: both symbols")
+    alarms = doc["alarms"]
+    if alarms["rule"] != ALARMS:
+        found.append(f"alarms.rule: {ALARMS!r}, the rule the alarm table carries out")
+    far = alarms["far_per_day"]
+    if not _placeholder(far) and (isinstance(far, str) or not far > 0):
+        found.append("alarms.far_per_day: a positive number of false alarms per day")
+    if doc["trials"]["budget"] < 1:
+        found.append("trials.budget: at least 1")
+    if strict:
+        found += [
+            f"{where}: placeholder {text!r}"
+            for where, text in _strings(doc)
+            if _PLACEHOLDER.search(text)
+        ]
+        if not found and doc["trials"]["budget"] < market_ews_cells(doc):
+            found.append(f"trials.budget: one scoring run evaluates {market_ews_cells(doc)} cells")
+    return found
+
+
 def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     """Everything wrong with a pre-registration document, checked against the schema of its
     data.domain; strict also refuses placeholders. A file with no domain, or with one that is not
@@ -868,6 +1181,8 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         return _ising_problems(doc, strict)
     if domain == MARKET_LABELS:
         return _market_problems(doc, strict)
+    if domain == MARKET_EWS:
+        return _market_ews_problems(doc, strict)
     return [f"data.domain: {domain!r} is not one of {list(DOMAINS)}"]
 
 
