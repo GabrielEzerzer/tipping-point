@@ -35,6 +35,7 @@ def filled(text: str) -> str:
     text = text.replace('id = "<lowercase-slug>"', 'id = "market-ews"', 1)
     for key, value in {
         "detrend": "none",
+        "method": "scale",
         "fit": "pilot",
         "noise": "bootstrap",
         "empty": "mark",
@@ -232,12 +233,34 @@ def test_the_confirmatory_span_needs_a_frozen_market_ews_file(
     with pytest.raises(ms.SegmentError, match="confirmatory span"):
         ms.build(bare, labels, {"BTCUSDT": _minutes(late)}, (5,), SPAN)
     with pytest.raises(ms.SegmentError, match="without market-labels-v1's stamp"):
-        ms.build(bare, labels, {"BTCUSDT": _minutes(late)}, (5,), SPAN, scoring=scoring)
+        ms.build(
+            bare, labels, {"BTCUSDT": _minutes(late)}, HORIZONS, SPAN, seed=30, scoring=scoring
+        )
     stamped = _run(tmp_path / "c", labels, first=late, stamp=True)
     with pytest.raises(ms.SegmentError, match="confirmatory span"):
         ms.build(stamped, labels, {"BTCUSDT": _minutes(late)}, (5,), SPAN)
-    got = ms.build(stamped, labels, {"BTCUSDT": _minutes(late)}, (5,), SPAN, scoring=scoring)
+    got = ms.build(
+        stamped, labels, {"BTCUSDT": _minutes(late)}, HORIZONS, SPAN, seed=30, scoring=scoring
+    )
     assert len(got.events["BTCUSDT", 5].x) == 1
+    # with the frozen file, its horizons and span are the ones cut, and no others
+    with pytest.raises(ms.SegmentError, match="fixes horizons"):
+        ms.build(stamped, labels, {"BTCUSDT": _minutes(late)}, (5,), SPAN, seed=30, scoring=scoring)
+    with pytest.raises(ms.SegmentError, match="fixes span"):
+        ms.build(
+            stamped, labels, {"BTCUSDT": _minutes(late)}, HORIZONS, 239, seed=30, scoring=scoring
+        )
+    with pytest.raises(ms.SegmentError, match="fixes subsample: "):
+        ms.build(
+            stamped,
+            labels,
+            {"BTCUSDT": _minutes(late)},
+            HORIZONS,
+            SPAN,
+            subsample=3,
+            seed=30,
+            scoring=scoring,
+        )
     # an onset in 2024 in a run that claims to end before it, read with a series that does not
     claims = _run(tmp_path / "d", labels, first=date(2023, 12, 31))
     manifest = claims / "manifest.json"
@@ -262,13 +285,37 @@ def test_returns_and_the_slot_profile() -> None:
     n = 14 * 1440
     values = rng.standard_normal(n) * np.tile(np.repeat([1.0, 4.0], 720), 14)  # a loud afternoon
     series = ms.Minutes(start, values)
-    scale = ms.slot_scale(series, (date(2023, 3, 1), date(2023, 3, 7)))
+    scale = ms.slot_profile(series, (date(2023, 3, 1), date(2023, 3, 7)), "scale")
     assert scale.shape == (576,)
-    flat = ms.deseasonalise(series, scale).values
+    flat = ms.deseasonalise(series, scale, "scale").values
     weekday = (np.arange(n) // 1440 + 3) % 7 < 5  # 2023-03-01 was a Wednesday
     morning = np.tile(np.arange(1440) < 720, 14)
     for part in (morning, ~morning):
         assert np.std(flat[part & weekday]) == pytest.approx(1.0, abs=0.08)
     # the fit reads only its days: a profile from day 8 on is another number
-    later = ms.slot_scale(series, (date(2023, 3, 8), date(2023, 3, 14)))
+    later = ms.slot_profile(series, (date(2023, 3, 8), date(2023, 3, 14)), "scale")
     assert not np.allclose(scale, later)
+    # "mean" subtracts each slot's mean return over the fit days
+    drift = ms.Minutes(start, values + np.tile(np.repeat([0.5, -2.0], 720), 14))
+    mean = ms.slot_profile(drift, (date(2023, 3, 1), date(2023, 3, 7)), "mean")
+    centred = ms.deseasonalise(drift, mean, "mean").values
+    for part in (morning, ~morning):
+        assert np.mean(centred[part & weekday]) == pytest.approx(0.0, abs=0.08)
+    assert np.allclose(centred - drift.values, -mean[ms._slots(drift)], equal_nan=True)
+    with pytest.raises(ValueError, match="method"):
+        ms.slot_profile(series, (date(2023, 3, 1), date(2023, 3, 7)), "median")
+
+
+def test_the_slot_profile_is_fitted_before_the_confirmatory_span() -> None:
+    late = ms.Minutes(archive.day_ms(date(2023, 12, 1)), np.ones(40 * 1440))
+    with pytest.raises(ms.SegmentError, match="confirmatory"):
+        ms.slot_profile(late, (date(2023, 12, 1), date(2024, 1, 5)), "scale")
+
+
+def test_eth_only_keeps_the_eth_onsets_with_no_btc_onset_within_the_window() -> None:
+    bar = msvol.BAR_NS
+    eth = np.array([0, 100, 200, 300]) * bar
+    btc = np.array([112, 188, 400]) * bar  # 12 bars after 100 and before 200: both inclusive
+    assert ms.eth_only(eth, btc, 12).tolist() == [True, False, False, True]
+    assert ms.eth_only(eth, btc, 11).tolist() == [True, True, True, True]
+    assert ms.eth_only(eth, np.array([], np.int64), 12).all()

@@ -16,7 +16,7 @@ from typing import Any
 import market_floor
 import pytest
 from tipping_point.ews import prereg, trend
-from tipping_point.market import msvol, nulls
+from tipping_point.market import msvol, nulls, reports
 
 REPO = Path(__file__).resolve().parents[4]
 TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE-market-ews.toml"
@@ -27,6 +27,7 @@ DELETE = object()
 # each open choice of the template, set to an option that is built
 CHOICES = {
     "detrend": "none",
+    "method": "scale",
     "fit": "pilot",
     "noise": "bootstrap",
     "empty": "mark",
@@ -81,6 +82,7 @@ def test_the_template_loads_with_its_placeholders(doc: dict[str, Any]) -> None:
         "hypotheses[0].prediction",
         "hypotheses[1].prediction",
         "indicators.detrend",
+        "seasonality.method",
         "scoring.floor.fit",
         "scoring.floor.noise",
         "scoring.floor.empty",
@@ -121,6 +123,18 @@ def test_the_template_holds_what_the_code_runs(doc: dict[str, Any]) -> None:
     smallest = prereg.load(LABELS_V1).doc["horizon"]["smallest"]
     assert prereg.HORIZON_FLOOR == smallest == min(doc["segments"]["horizons"])
     assert doc["trials"]["budget"] == prereg.market_ews_cells(doc) == 32
+    # the pilot floor scores the template's horizons with the template's pipelines
+    assert prereg.FLOOR_HORIZONS == market_floor.HORIZONS
+    assert set(doc["segments"]["horizons"]) <= set(market_floor.HORIZONS)
+    floor = prereg.FLOOR_PIPELINE
+    for name, scorer in market_floor.SCORERS.items():
+        assert scorer == trend.Pipeline(name, floor["window"], floor["length"])
+        assert scorer.bandwidth is None and floor["detrend"] == "none"
+    assert {k: ind[k] for k in ("window", "length")} == {k: floor[k] for k in ("window", "length")}
+    # eth-only's window is the coincidence window the labels reports use
+    assert prereg.ETH_ONLY_BARS * msvol.BAR_NS == reports.COINCIDENCE_NS
+    assert doc["reporting"]["eth_only_bars"] == prereg.ETH_ONLY_BARS
+    assert set(prereg.DESEASON_METHODS) == {"scale", "mean"}
 
 
 def test_a_filled_template_goes_through_freeze_frozen_and_stamp(tmp_path: Path) -> None:
@@ -193,7 +207,7 @@ def _set(doc: dict[str, Any], where: str, value: Any) -> dict[str, Any]:
         ("data.missing", "gaps are filled", "data.missing"),
         ("segments.rule", "shorter at long horizons", "segments.rule"),
         ("segments.controls", "hour-matched", "segments.controls"),
-        ("seasonality.rule", "subtract slot means", "seasonality.rule"),
+        ("seasonality.method", "median", "seasonality.method: one of ['scale', 'mean']"),
         ("alarms.rule", "any", "alarms.rule"),
         # indicators
         ("indicators.names", ["variance", "skewness"], "indicators.names"),
@@ -232,6 +246,11 @@ def _set(doc: dict[str, Any], where: str, value: Any) -> dict[str, Any]:
         # reporting, alarms, trials
         ("reporting.groups", ["pooled"], "reporting.groups: pooled and per-asset"),
         ("reporting.groups", ["pooled", "per-asset", "btc-only"], "reporting.groups"),
+        ("reporting.eth_only_bars", 6, "reporting.eth_only_bars: 12"),
+        # the pilot floor binds horizons and pipelines
+        ("segments.horizons", [5, 7], "segments.horizons: with the pilot floor, among"),
+        ("indicators.length", 120, "indicators.length: 240 with the pilot floor"),
+        ("indicators.window", 30, "indicators.window: 60 with the pilot floor"),
         ("alarms.far_per_day", 0, "alarms.far_per_day: a positive number"),
         ("alarms.far_per_day", "often", "alarms.far_per_day: a positive number"),
         ("trials.budget", 0, "trials.budget: at least 1"),
@@ -244,6 +263,26 @@ def test_each_problem_is_named(doc: dict[str, Any], where: str, value: Any, name
     doc["scoring"]["floor"]["fit"] = "pilot"
     found = prereg.problems(_set(doc, where, value))
     assert any(named in p for p in found), found
+
+
+def test_the_pilot_floor_refuses_a_detrend(doc: dict[str, Any]) -> None:
+    """The floor's pipelines detrend nothing; a placeholder fit leaves the detrend open."""
+    doc["indicators"]["detrend"], doc["indicators"]["bandwidth"] = "gaussian", 120
+    assert prereg.problems(doc) == []
+    doc["scoring"]["floor"]["fit"] = "pilot"
+    found = prereg.problems(doc)
+    assert len(found) == 1 and found[0].startswith("indicators.detrend: 'none' with the pilot"), (
+        found
+    )
+
+
+def test_hypotheses_are_distinct_and_rising(doc: dict[str, Any]) -> None:
+    """No scorer reads a falling indicator yet, and two hypotheses may not share a name."""
+    doc["hypotheses"][0]["direction"] = "less"
+    assert any("hypotheses[0].direction: 'greater'" in p for p in prereg.problems(doc))
+    doc["hypotheses"][0]["direction"] = "greater"
+    doc["hypotheses"][1]["name"] = doc["hypotheses"][0]["name"]
+    assert any("hypotheses" in p and "distinct" in p for p in prereg.problems(doc))
 
 
 def test_the_pilot_fit_is_held_to_its_numbers(doc: dict[str, Any]) -> None:

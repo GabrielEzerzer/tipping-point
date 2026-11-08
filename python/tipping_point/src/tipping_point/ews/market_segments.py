@@ -3,12 +3,14 @@
 
   close_returns  a symbol's 1-minute close-to-close log returns on the minute grid, NaN for a minute
                  with no kline or whose previous minute has none (prereg.MISSING_MINUTE)
-  slot_scale     the root mean square of the returns of each of the labeller's 2 x 288 slots
-                 (weekday or weekend, by 5-minute time of day) over a fit span of UTC days
-  deseasonalise  each return divided by its slot's scale (prereg.DESEASON)
+  slot_profile   per slot of the labeller's 2 x 288 (weekday or weekend, by 5-minute time of day),
+                 over a fit span of pilot days: the returns' root mean square ("scale") or mean
+                 ("mean"), the two prereg.DESEASON_METHODS
+  deseasonalise  each return divided by its slot's scale, or less its slot's mean
   check_labels   the labels run's manifest, once the labels file is frozen at its tag and the run
                  was labelled with its parameters (and its stamp, when it has one)
   build          the event segments per (symbol, horizon) and the control segments per symbol
+  eth_only       which ETH onsets have no BTC event onset within a window (reporting's eth-only)
 
 Lengths: a segment is `span` minutes, Pipeline.span = window + length - 1. An onset is the start of
 a 5-minute bar; at horizon h bars its segment ends with the minute that closes at onset - 5h
@@ -26,7 +28,8 @@ command's --prereg opens it for labels: build refuses a series, onset or control
 it unless `scoring` is a market-ews file frozen at its tag that names this labels file, and a run
 labelling those days must carry the frozen labels' stamp in its manifest. An environment switch,
 as cascade.recall takes, would open those days to any caller; the frozen file ties them to the
-pre-registered test.
+pre-registered test. With it, build also takes nothing the file fixes from its caller: the
+horizons, the span (window + length - 1), the subsample and the seed must be the file's.
 
 This module reads labels and is fed the series; the labels package (market/) imports none of it.
 """
@@ -84,6 +87,7 @@ class Segments:
     span: int
     events: dict[tuple[str, int], Block]  # by (symbol, horizon in bars)
     controls: dict[str, Block]  # by symbol, one set for every horizon
+    onsets: dict[str, np.ndarray]  # every event onset (ns) of each symbol the run labels
     counts: list[dict[str, Any]]  # per (symbol, kind, horizon): _count
 
 
@@ -108,23 +112,48 @@ def _slots(series: Minutes) -> np.ndarray:
     return msvol._slots(ms * 1_000_000)  # the labeller's own slots
 
 
-def slot_scale(series: Minutes, fit: tuple[date, date]) -> np.ndarray:
-    """(2 x 288,) the root mean square of the returns of each slot over the UTC days fit[0] to
-    fit[1], both included; NaN for a slot with no return there."""
+def _method(method: str) -> None:
+    if method not in prereg.DESEASON_METHODS:
+        raise ValueError(f"method must be one of {list(prereg.DESEASON_METHODS)}: {method!r}")
+
+
+def slot_profile(series: Minutes, fit: tuple[date, date], method: str) -> np.ndarray:
+    """(2 x 288,) per slot, over the UTC days fit[0] to fit[1], both included: the returns' root
+    mean square ("scale") or mean ("mean"); NaN for a slot with no return there. The fit reads
+    pilot days only: one ending on or after 2024-01-01 is refused."""
+    _method(method)
+    if fit[1] >= prereg.CONFIRMATORY:
+        raise SegmentError(_closed("a slot profile fitted on"))
     ms = series.start_ms + MINUTE_MS * np.arange(len(series.values), dtype=np.int64)
     inside = (ms >= archive.day_ms(fit[0])) & (ms < archive.day_ms(fit[1] + timedelta(days=1)))
     use = inside & np.isfinite(series.values)
     slot = _slots(series)[use]
-    total = np.bincount(slot, weights=series.values[use] ** 2, minlength=2 * msvol.DAY_BARS)
+    power = 2 if method == "scale" else 1
+    total = np.bincount(slot, weights=series.values[use] ** power, minlength=2 * msvol.DAY_BARS)
     count = np.bincount(slot, minlength=2 * msvol.DAY_BARS)
     with np.errstate(divide="ignore", invalid="ignore"):
-        return np.sqrt(total / count)
+        mean = total / count
+    return np.sqrt(mean) if method == "scale" else mean
 
 
-def deseasonalise(series: Minutes, scale: np.ndarray) -> Minutes:
-    """Each return divided by its slot's scale (a slot with no scale leaves NaN)."""
+def deseasonalise(series: Minutes, profile: np.ndarray, method: str) -> Minutes:
+    """Each return divided by its slot's scale ("scale") or less its slot's mean ("mean"), the
+    profile slot_profile fitted with the same method; a slot with no profile leaves NaN."""
+    _method(method)
+    by_minute = profile[_slots(series)]
     with np.errstate(divide="ignore", invalid="ignore"):
-        return Minutes(series.start_ms, series.values / scale[_slots(series)])
+        values = series.values / by_minute if method == "scale" else series.values - by_minute
+    return Minutes(series.start_ms, values)
+
+
+def eth_only(eth_ns: np.ndarray, btc_ns: np.ndarray, bars: int) -> np.ndarray:
+    """Per ETH onset, True when no BTC onset lies within `bars` bars of it either side
+    (reporting.eth_only_bars)."""
+    eth_ns, btc_ns = np.asarray(eth_ns, np.int64), np.sort(np.asarray(btc_ns, np.int64))
+    window = bars * msvol.BAR_NS
+    low = np.searchsorted(btc_ns, eth_ns - window, side="left")
+    high = np.searchsorted(btc_ns, eth_ns + window, side="right")
+    return high == low
 
 
 def _read(run: Path, table: str) -> Any:
@@ -210,10 +239,26 @@ def build(
     """The event segments of each symbol's regime-shift onsets at each horizon (in bars) and its
     control segments, from the labels run `run` of the frozen file `labels` (check_labels), cut
     from `series` (one Minutes per symbol: returns, raw or deseasonalised). With subsample n > 0,
-    n of each symbol's kept controls are drawn without replacement, symbols in sorted order from
-    one generator seeded with `seed`, and kept in time order. Days from 2024-01-01 need `scoring`
-    (the module docstring says why)."""
+    at most n of each symbol's kept controls are kept: when there are more, n are drawn without
+    replacement, symbols in sorted order from one generator seeded with `seed`, and kept in time
+    order. Days from 2024-01-01 need `scoring`, whose horizons, span, subsample and seed these
+    must be (the module docstring says why)."""
     manifest = check_labels(run, labels, scoring)
+    if scoring is not None:
+        doc = scoring.doc
+        fixed = {
+            "horizons": list(doc["segments"]["horizons"]),
+            "span": doc["indicators"]["window"] + doc["indicators"]["length"] - 1,
+            "subsample": doc["segments"]["subsample"],
+            "seed": doc["segments"]["seed"],
+        }
+        given = {"horizons": list(horizons), "span": span, "subsample": subsample, "seed": seed}
+        differ = [k for k in fixed if given[k] != fixed[k]]
+        if differ:
+            raise SegmentError(
+                f"{scoring.name} fixes {', '.join(differ)}: "
+                + ", ".join(f"{k} {fixed[k]!r}, not {given[k]!r}" for k in differ)
+            )
     unknown = set(series) - set(manifest["params"]["symbols"])
     if unknown:
         raise SegmentError(f"{run} has no labels for {sorted(unknown)}")
@@ -224,13 +269,8 @@ def build(
     episodes = _read(run, "episodes").to_pydict()
     stretches = _read(run, "nulls").to_pydict()
     table = _read(run, "labels").select(["ts_ns", "symbol", "h"]).to_pydict()
-    rng = np.random.default_rng(seed)
-    events: dict[tuple[str, int], Block] = {}
-    controls: dict[str, Block] = {}
-    counts: list[dict[str, Any]] = []
-    for symbol in sorted(series):
-        minutes = series[symbol]
-        onsets = np.array(
+    all_onsets = {
+        symbol: np.array(
             [
                 t
                 for t, s, k in zip(
@@ -240,6 +280,15 @@ def build(
             ],
             np.int64,
         )
+        for symbol in manifest["params"]["symbols"]
+    }
+    rng = np.random.default_rng(seed)
+    events: dict[tuple[str, int], Block] = {}
+    controls: dict[str, Block] = {}
+    counts: list[dict[str, Any]] = []
+    for symbol in sorted(series):
+        minutes = series[symbol]
+        onsets = all_onsets[symbol]
         null = [
             (t, b)
             for t, s, b in zip(
@@ -282,7 +331,7 @@ def build(
         counts.append(
             _count(symbol, "control", None, len(first), len(rows), len(block.x), invalid, outside)
         )
-    return Segments(span, events, controls, counts)
+    return Segments(span, events, controls, all_onsets, counts)
 
 
 def _count(

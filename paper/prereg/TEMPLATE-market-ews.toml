@@ -9,14 +9,19 @@
 # to 11): the frozen labels file, the series and missing-minute rule, variance and AC1 through a
 # 60-minute window and a 240-value trend, horizons 5, 6, 12 and 24 bars, the segment rule of call
 # 11 (fixed length, segments may start before the clean window, the share of H = 1 minutes
-# reported), the slot-profile deseasonalisation of call 9 fitted on the JEPA's training span, the
-# event-time shift at 100 draws a day or more away, phase surrogates as secondary, pooled,
-# per-asset and ETH-only reporting.
+# reported), the slot profile of call 9 fitted on the JEPA's training span, the event-time shift
+# at 100 draws a day or more away, phase surrogates as secondary, pooled, per-asset and ETH-only
+# reporting.
 #
 # Open, for the owner before the freeze (placeholders): the detrending (none or a Gaussian
-# bandwidth; the floor scored with none), the GARCH floor's fit (#154), its noise band (#153) and
-# its empty-cell rule (#138), and the alarm rate. A floor option is accepted only once its code
-# is built: today "pilot", "bootstrap" and "mark".
+# bandwidth; the floor scored with none), the deseasonalisation method, the GARCH floor's fit
+# (#154), its noise band (#153) and its empty-cell rule (#138), and the alarm rate. Call 9 says
+# "subtract per-slot means" ("mean"); the 1-minute returns' slot means are near zero, so their
+# seasonality is in the scale, which "scale" (divide by the slot's root mean square) removes. A
+# floor option is accepted only once its code is built: today "pilot", "bootstrap" and "mark".
+# With the pilot floor the horizons must be among those harness/market_floor.py scores and the
+# pipelines its own (window 60, length 240, no detrend); its horizon 5 was added in M5, so the
+# floor reports are rerun before the freeze.
 #
 # Not in this file yet: the same-input tier (Bybit book features as classic series, research
 # pass 6.4 item 2), which comes with its own keys before the freeze.
@@ -66,15 +71,18 @@ length = 240
 lag = 1
 detrend = "<none|gaussian, chosen before the freeze; the floor and the pilot scored none>"
 
+# Per slot of the labeller's 2 x 288 (weekday or weekend, by 5-minute time of day) over the fit
+# span: "scale" divides each return by its slot's root mean square, "mean" subtracts its slot's
+# mean return. The raw series is scored beside it, descriptively.
 [seasonality]
-rule = "each 1-minute return is divided by the root mean square of the returns of its slot, one of 2 x 288 (weekday or weekend, by 5-minute time of day, the labeller's slots), over the minutes of the fit span; the raw series is scored beside it, descriptively"
+method = "<scale|mean, chosen before the freeze; call 9 says mean, the pilot report shows both>"
 fit = { start = 2023-01-18, end = 2023-09-30 }   # the JEPA's training span (#30 call 5)
 strata = ["onset-hour"]  # AUCs per UTC hour of the onset, descriptively
 
 [segments]
 horizons = [5, 6, 12, 24]   # bars; the smallest is the labels' horizon.smallest
 rule = "an event segment at horizon h bars ends with the minute that closes at the onset minus 5h minutes and holds the window + length - 1 minutes up to it; the length is the same at every horizon, a segment may start before the labels' clean window, and the share of its minutes in bars with H = 1 is reported"
-controls = "control segments are the non-overlapping runs of window + length - 1 minutes cut in time order from the start of each null stretch of the labels run, one set for every horizon; with subsample n > 0, n of each symbol's are drawn without replacement under the seed, after the exclusions"
+controls = "control segments are the non-overlapping runs of window + length - 1 minutes cut in time order from the start of each null stretch of the labels run, one set for every horizon; with subsample n > 0, at most n of each symbol's are kept, drawn without replacement under the seed after the exclusions when there are more"
 subsample = 0            # 0: every control segment
 seed = 30
 
@@ -112,8 +120,11 @@ min_offset_bars = 288    # a day
 secondary = "phase"
 n = 999
 
+# eth-only: the ETH events with no BTC event onset within eth_only_bars bars either side, against
+# the ETH controls
 [reporting]
-groups = ["pooled", "per-asset", "eth-only"]   # eth-only: ETH onsets with no BTC onset within an hour
+groups = ["pooled", "per-asset", "eth-only"]
+eth_only_bars = 12       # an hour, the labels' coincidence window
 
 [alarms]
 rule = "per indicator, horizon and symbol, the alarm threshold is the lowest whose false alarms on the 2023 control segments stay within far_per_day; lead times and false alarms per day under it are reported, descriptively"
@@ -121,7 +132,7 @@ far_per_day = "<false alarms per day, set before the freeze>"
 
 [trials]
 budget = 32              # 2 indicators x 4 horizons x (pooled + 2 assets + eth-only)
-counted = "One trial per AUC evaluation of an (indicator, horizon, reporting group) cell; every scoring run appends its cells to ews/trials.jsonl in the data dir. The raw-series and onset-hour AUCs are descriptive, read by no hypothesis, and not counted."
+counted = "One trial per AUC evaluation of an (indicator, horizon, reporting group) cell; every scoring run appends its cells to ews/trials.jsonl in the data dir. The raw-series, onset-hour and cascade stress-test AUCs are descriptive, read by no hypothesis, and not counted."
 
 [disclosure]
 exploratory = "<what was seen before the freeze, and when>"
