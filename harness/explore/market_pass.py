@@ -297,6 +297,18 @@ def load_series(latents: Path, table: str, symbol: str, span: str) -> dict[str, 
 # ---------------------------------------------------------------- the pass
 
 
+def missing_memorisation(latents: Path, runs: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """The series the memorisation report needs that market_latents has not written: each model's
+    trained and twin tables on its own symbol, over the training span and the quarter."""
+    return [
+        f"{run[who]}/{run['symbol']}-{span}.parquet"
+        for run in runs.values()
+        for who in ("trained", "twin")
+        for span in ("training", "exploratory")
+        if not (Path(latents) / run[who] / f"{run['symbol']}-{span}.parquet").is_file()
+    ]
+
+
 def memorisation(latents: Path, runs: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Mean surprise by month on each model's own symbol, training span and quarter, trained
     beside twin, with the part of the split each month served."""
@@ -311,8 +323,7 @@ def memorisation(latents: Path, runs: Mapping[str, Mapping[str, Any]]) -> list[d
         for who in ("trained", "twin"):
             for span in ("training", "exploratory"):
                 s = load_series(latents, run[who], symbol, span)
-                if s is None:
-                    continue
+                assert s is not None  # run_pass refuses first (missing_memorisation)
                 month = s["ts_ns"].astype("datetime64[ns]").astype("datetime64[M]").astype(str)
                 ok = s["valid"]
                 for m in np.unique(month):
@@ -334,6 +345,12 @@ def memorisation(latents: Path, runs: Mapping[str, Mapping[str, Any]]) -> list[d
 
 def run_pass(latents: Path, labels: Path, draws: int = DRAWS, seed: int = SEED) -> dict[str, Any]:
     runs = find_tables(latents)
+    missing = missing_memorisation(latents, runs)
+    if missing:
+        raise SystemExit(
+            f"{latents}: the memorisation report needs {', '.join(missing)}: run market_latents "
+            "--span training (and --span exploratory) on each model's own symbol first"
+        )
     symbols = sorted({r["symbol"] for r in runs.values()})
     result: dict[str, Any] = {"runs": runs, "cells": [], "counts": {}, "rows": []}
     for symbol in symbols:

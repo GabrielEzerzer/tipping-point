@@ -235,3 +235,23 @@ def test_a_series_whose_bytes_differ_from_its_manifest_is_refused(tmp_path: Path
     pq.write_table(pa.table({"ts_ns": np.arange(4), "valid": np.ones(4, bool)}), path)
     with pytest.raises(SystemExit, match="not the bytes"):
         market_pass.load_series(tmp_path, "r-step0", "BTCUSDT", "exploratory")
+
+
+def test_a_pass_without_the_training_series_is_refused_and_names_them(tmp_path: Path) -> None:
+    """A Q4-only extraction would leave the memorisation report without its training months."""
+    for step in (10000, 0):
+        folder = tmp_path / f"r-step{step}"
+        folder.mkdir()
+        (folder / "BTCUSDT-exploratory.parquet").write_bytes(b"")
+        manifest = {
+            "model_symbol": "BTCUSDT",
+            "checkpoint_sha256": "c",
+            "parquet_sha256": "p",
+            "scaling": {"sha256": "s"},
+        }
+        (folder / "BTCUSDT-exploratory.json").write_text(json.dumps(manifest), "utf-8")
+    with pytest.raises(SystemExit) as refused:
+        market_pass.run_pass(tmp_path, tmp_path / "no-labels")
+    for step in (10000, 0):
+        assert f"r-step{step}/BTCUSDT-training.parquet" in str(refused.value)
+    assert "exploratory.parquet" not in str(refused.value)
