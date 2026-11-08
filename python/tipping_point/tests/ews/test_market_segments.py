@@ -272,6 +272,18 @@ def test_the_confirmatory_span_needs_a_frozen_market_ews_file(
         stamped, labels, {"BTCUSDT": _minutes(late)}, HORIZONS, SPAN, seed=30, scoring=scoring
     )
     assert len(got.events["BTCUSDT", 5].x) == 1
+    # with the frozen file, the caller picks no part of the span to score
+    with pytest.raises(ms.SegmentError, match="fixes the scored span"):
+        ms.build(
+            stamped,
+            labels,
+            {"BTCUSDT": _minutes(late)},
+            HORIZONS,
+            SPAN,
+            seed=30,
+            score_from=date(2024, 1, 3),
+            scoring=scoring,
+        )
     # with the frozen file, its horizons and span are the ones cut, and no others
     with pytest.raises(ms.SegmentError, match="fixes horizons"):
         ms.build(stamped, labels, {"BTCUSDT": _minutes(late)}, (5,), SPAN, seed=30, scoring=scoring)

@@ -249,6 +249,10 @@ def build(
     horizons, span, subsample and seed these must be (the module docstring says why)."""
     manifest = check_labels(run, labels, scoring)
     if scoring is not None:
+        if score_from is not None:
+            raise SegmentError(
+                f"{scoring.name} fixes the scored span: score_from is for exploratory runs"
+            )
         doc = scoring.doc
         fixed = {
             "horizons": list(doc["segments"]["horizons"]),
