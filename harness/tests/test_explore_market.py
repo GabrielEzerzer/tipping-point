@@ -231,7 +231,8 @@ def test_a_series_whose_bytes_differ_from_its_manifest_is_refused(tmp_path: Path
     pq.write_table(pa.table({"ts_ns": np.arange(3), "valid": np.ones(3, bool)}), path)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     path.with_suffix(".json").write_text(json.dumps({"parquet_sha256": digest}), "utf-8")
-    assert len(market_pass.load_series(tmp_path, "r-step0", "BTCUSDT", "exploratory")["ts_ns"]) == 3
+    series = market_pass.load_series(tmp_path, "r-step0", "BTCUSDT", "exploratory")
+    assert series is not None and len(series["ts_ns"]) == 3
     pq.write_table(pa.table({"ts_ns": np.arange(4), "valid": np.ones(4, bool)}), path)
     with pytest.raises(SystemExit, match="not the bytes"):
         market_pass.load_series(tmp_path, "r-step0", "BTCUSDT", "exploratory")
