@@ -99,7 +99,7 @@ def split(limit: int | None = None) -> tuple[list[date], list[date]]:
     return (train_days[-limit:], val_days[:limit]) if limit else (train_days, val_days)
 
 
-def config(asset: str, size: str, steps: int = STEPS) -> minutes.Config:
+def config(asset: str, size: str, steps: int = STEPS, seed: int = SEED) -> minutes.Config:
     return minutes.preset(
         size,
         symbol=ASSETS[asset],
@@ -107,7 +107,7 @@ def config(asset: str, size: str, steps: int = STEPS) -> minutes.Config:
         train_end=END.isoformat(),
         steps=steps,
         warmup=max(1, steps // 20),
-        seed=SEED,
+        seed=seed,
         checkpoint_every=CHECKPOINT_EVERY,
         stop_on_collapse=False,
     )
@@ -117,12 +117,16 @@ def _runs(root: Path) -> list[Path]:
     return sorted(p.parent for p in (root / "jepa").glob("*/manifest.json"))
 
 
-def run(
-    asset: str, size: str, data_dir: Path, out: Path, steps: int = STEPS, limit: int | None = None
-) -> Path:
-    """Start, resume or finish the pilot training of (asset, size); returns its folder."""
-    cfg = config(asset, size, steps)
-    root = Path(out) / f"{asset}-{size}"
+def fit(
+    cfg: minutes.Config,
+    root: Path,
+    tag: str,
+    data_dir: Path,
+    limit: int | None = None,
+    reload_done: bool = False,
+) -> tuple[Path, days.Dataset | None]:
+    """Start, resume or find finished the one training of `cfg` under `root` (on the SPLIT days);
+    returns its folder and its days, loaded when it trains or when `reload_done` asks."""
     found = _runs(root)
     manifest: dict[str, Any] = {}
     if len(found) > 1:
@@ -136,22 +140,39 @@ def run(
             raise RuntimeError(f"{found[0]} was started with another config")
     train_days, val_days = split(limit)
     data = None
-    if not found or not (found[0] / "complete.json").exists() or not (root / VALIDATION).exists():
+    if not found or not (found[0] / "complete.json").exists() or reload_done:
         source = days.ParquetSource(data_dir)
         data = days.load(source, cfg.span, cfg.symbol, FEATURES, train_days, val_days)
         # the check minutes.Domain.check_resume makes, here also for a finished run whose
-        # validation is still to write: smoke follows the days it trained on, not this --limit
+        # days are reloaded (pilot validation): smoke follows the days it trained on, not --limit
         if found and manifest["data"] != json.loads(json.dumps(data.sources)):
             raise RuntimeError(f"{found[0]} was trained on other days (another --limit?)")
+    if not found:
+        run_dir = train.start(cfg, data, root, tag, "cpu")
+    elif not (found[0] / "complete.json").exists():
+        run_dir = train.resume(found[0], data, "cpu")
+    else:
+        run_dir = found[0]
+    return run_dir, data
+
+
+def run(
+    asset: str, size: str, data_dir: Path, out: Path, steps: int = STEPS, limit: int | None = None
+) -> Path:
+    """Start, resume or finish the pilot training of (asset, size); returns its folder."""
+    cfg = config(asset, size, steps)
+    root = Path(out) / f"{asset}-{size}"
     checkpoint = train._Trainer.checkpoint
     train._Trainer.checkpoint = _keep_short(checkpoint)
     try:
-        if not found:
-            run_dir = train.start(cfg, data, root, f"{cfg.symbol}-{size}-m{SEED}", "cpu")
-        elif not (found[0] / "complete.json").exists():
-            run_dir = train.resume(found[0], data, "cpu")
-        else:
-            run_dir = found[0]
+        run_dir, data = fit(
+            cfg,
+            root,
+            f"{cfg.symbol}-{size}-m{SEED}",
+            data_dir,
+            limit,
+            reload_done=not (root / VALIDATION).exists(),
+        )
     finally:
         train._Trainer.checkpoint = checkpoint
     if not (root / VALIDATION).exists():
