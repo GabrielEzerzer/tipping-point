@@ -28,9 +28,10 @@ of its twin, of its PCA basis and of the scaling record. It refuses a run that i
 configuration, sits outside <out>/<asset>-s<seed>/, is incomplete (fewer than 10,000 steps), fails
 train.verify, whose data manifest or scaling record is of another feature format than this code's,
 whose data manifest names a day on or after 2024-01-01, or one of whose days does not have, in its
-data manifest, the sha256 it read (both are over the bytes of features/<SYMBOL>/<day>.parquet); and
-an asset and seed trained twice. It lists every refusal and then writes nothing. Extraction is not
-here: it reads the confirmatory span, after `market-latent-v1` is frozen.
+data manifest, the sha256 it read (both are over the bytes of features/<SYMBOL>/<day>.parquet); an
+asset and seed trained twice; and any planned asset and seed (PLAN) without its one pinnable run, so
+no seed can be dropped after its run is seen. It lists every refusal and then writes nothing.
+Extraction is not here: it reads the confirmatory span, after `market-latent-v1` is frozen.
 """
 
 from __future__ import annotations
@@ -57,6 +58,8 @@ SIZE = "S"
 STEPS = 10_000
 DATA_MANIFEST = "data-manifest.json"
 PINS = "pins.json"
+# every asset x seed pins needs, each exactly once: no seed may be dropped after seeing its run
+PLAN = tuple((a, s) for a in m4_pilot.ASSETS for s in (*PRIMARIES, *SPARES))
 
 
 def role(seed: int) -> str:
@@ -167,8 +170,9 @@ def pin(run_dir: Path) -> dict[str, Any]:
 
 
 def pins(out: Path) -> Path:
-    """Write <out>/pins.json over every training under `out`; refuses, listing every training
-    that cannot be pinned and every asset and seed trained twice, if there is any."""
+    """Write <out>/pins.json over every training under `out`, one per planned asset and seed
+    (PLAN); refuses, listing every training that cannot be pinned, every asset and seed trained
+    twice and every planned one without a pinnable training, if there is any."""
     runs = sorted(p.parent for p in Path(out).glob("*/jepa/*/manifest.json"))
     if not runs:
         raise FileNotFoundError(f"no trainings under {out}")
@@ -181,6 +185,9 @@ def pins(out: Path) -> Path:
     count = Counter((p["asset"], p["seed"]) for p in pinned)
     problems += [
         f"{a} seed {s}: {n} trainings in {a}-s{s}; keep one" for (a, s), n in count.items() if n > 1
+    ]
+    problems += [
+        f"{a} seed {s}: no pinnable training in {a}-s{s}" for a, s in PLAN if not count[a, s]
     ]
     if problems:
         raise ValueError("refused:\n  " + "\n  ".join(problems))

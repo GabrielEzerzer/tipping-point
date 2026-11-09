@@ -36,7 +36,8 @@ def _manifest(
     folder: Path, days_: list[str], digests: dict[str, str] | None = None, **over: Any
 ) -> Path:
     """A fake training range folder: only its manifest.json, as book_assemble writes it, naming
-    BTCUSDT on `days_`, each with its file's sha256 from `digests` (none when it is not there)."""
+    BTCUSDT and ETHUSDT on `days_`, each with its file's sha256 from `digests` (none when it is
+    not there)."""
     folder.mkdir(parents=True, exist_ok=True)
     digests = digests or {}
     manifest = {
@@ -44,7 +45,8 @@ def _manifest(
         "range": "training",
         "assembled": {"commit": "abc1234", "feature_format": FORMAT, "from": []},
         "days": {
-            f"BTCUSDT/{d}": {"status": "imported", "reduced": {"sha256": digests.get(d)}}
+            f"{symbol}/{d}": {"status": "imported", "reduced": {"sha256": digests.get(d)}}
+            for symbol in m4_pilot.ASSETS.values()
             for d in days_
         },
         **over,
@@ -55,21 +57,42 @@ def _manifest(
 
 @pytest.fixture
 def toy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """m8_primaries.run on market toy trainings of STEPS = 12 (BTCUSDT, the run's seed and steps,
-    which the tests pass): the data folder holds only a manifest naming the toy's days with the
-    sha256 its source hands over, and days.load hands back those days. Returns the data folder."""
+    """m8_primaries.run on market toy trainings of STEPS = 12 (the asset's symbol, the run's seed
+    and steps, which the tests pass): the data folder holds only a manifest naming the toy's days
+    with the sha256 its source hands over, and days.load hands back those days. Returns the data
+    folder."""
     data = market_toy.dataset()
     short = dict(checkpoint_every=4, monitor_every=4, pca_frames=128)
     monkeypatch.setattr(
         m4_pilot,
         "config",
-        lambda asset, size, steps, seed: market_toy.config(**short, steps=steps, seed=seed),
+        lambda asset, size, steps, seed: market_toy.config(
+            **short, symbol=m4_pilot.ASSETS[asset], steps=steps, seed=seed
+        ),
     )
     monkeypatch.setattr(m8_primaries, "STEPS", 12)
     monkeypatch.setattr(days, "ParquetSource", lambda folder: None)
     monkeypatch.setattr(days, "load", lambda *a: data)
     read = {d["day"]: d["sha256"] for d in (*data.sources["train"], *data.sources["val"])}
     return _manifest(tmp_path / "data", [*read, "2023-09-30"], read)
+
+
+def _fill(out: Path, done: Path) -> None:
+    """Every planned asset and seed with no folder under `out` gets a copy of the finished run
+    `done`, its manifest's symbol and seed changed and complete.json resealed: the full plan
+    without training 14 toys."""
+    for asset, seed in m8_primaries.PLAN:
+        root = out / f"{asset}-s{seed}"
+        if root.exists():
+            continue
+        shutil.copytree(done.parents[1], root)
+        run_dir = root / "jepa" / done.name
+        manifest = io.read_json(run_dir / "manifest.json")
+        manifest["params"]["config"].update(symbol=m4_pilot.ASSETS[asset], seed=seed)
+        io.write_json(run_dir / "manifest.json", manifest, replace=True)
+        record = io.read_json(run_dir / "complete.json")
+        record["files"]["manifest.json"] = train.sha256((run_dir / "manifest.json").read_bytes())
+        io.write_json(run_dir / "complete.json", record, replace=True)
 
 
 def _crash_after(calls: int, real: Callable[..., Any]) -> Callable[..., Any]:
@@ -98,15 +121,25 @@ def test_pins_refuse_an_incomplete_run_and_pin_it_once_resumed(
     with pytest.raises(ValueError, match="incomplete") as refused:
         m8_primaries.pins(out)
     why = str(refused.value)
-    assert "BTCUSDT-S-s106" in why and "8 of 12 steps" in why and "s101" not in why
+    assert (
+        "BTCUSDT-S-s106" in why
+        and "no complete.json" in why
+        and "8 of 12 steps" in why
+        and "btc-s101" not in why
+    )
     assert not (out / m8_primaries.PINS).exists()
 
     shutil.rmtree(smoke.parents[1])
     spare = m8_primaries.run("btc", 106, toy, out, 12)  # resumes the killed run
+    _fill(out, done)
     path = m8_primaries.pins(out)
     record = io.read_json(path)
     assert (record["size"], record["steps"]) == ("S", 12)
-    first, second = record["checkpoints"]
+    pinned = record["checkpoints"]
+    assert [(p["asset"], p["seed"]) for p in pinned] == list(m8_primaries.PLAN)
+    assert [p["symbol"] for p in pinned] == ["BTCUSDT"] * 7 + ["ETHUSDT"] * 7
+    assert [p["role"] for p in pinned] == (["primary"] * 5 + ["spare"] * 2) * 2
+    first, second = pinned[0], pinned[5]
     assert (first["seed"], first["role"], second["seed"], second["role"]) == (
         101,
         "primary",
@@ -121,6 +154,18 @@ def test_pins_refuse_an_incomplete_run_and_pin_it_once_resumed(
     assert first["trained_sha256"] != first["twin_sha256"]
     assert first["pca_sha256"] != second["pca_sha256"]  # each run's own basis
     assert first["scaling_sha256"] == second["scaling_sha256"]  # the same training days
+
+
+def test_pins_refuse_a_plan_missing_one_run(toy: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _fill(out, m8_primaries.run("btc", 101, toy, out, 12))
+    shutil.rmtree(out / "eth-s104")  # a run removed after it was seen
+    with pytest.raises(ValueError, match="refused") as refused:
+        m8_primaries.pins(out)
+    assert str(refused.value).splitlines()[1:] == [
+        "  eth seed 104: no pinnable training in eth-s104"
+    ]
+    assert not (out / m8_primaries.PINS).exists()
 
 
 def test_pins_refuse_a_run_whose_data_manifest_reaches_2024(toy: Path, tmp_path: Path) -> None:
