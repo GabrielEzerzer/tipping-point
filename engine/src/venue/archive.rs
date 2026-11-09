@@ -204,6 +204,7 @@ pub struct Scan {
     integrity: Integrity,
     prev_id: Option<u64>,
     prev_last_trade: Option<u64>,
+    first_whole: Option<bool>,
 }
 
 impl Scan {
@@ -221,6 +222,7 @@ impl Scan {
             integrity,
             prev_id: None,
             prev_last_trade: None,
+            first_whole: None,
         }
     }
 
@@ -239,6 +241,12 @@ impl Scan {
     #[must_use]
     pub fn integrity(&self) -> &Integrity {
         &self.integrity
+    }
+
+    /// Whether the first record was a whole book (Bybit's snapshot), once there is one.
+    #[must_use]
+    pub fn opens_whole(&self) -> Option<bool> {
+        self.first_whole
     }
 
     /// Takes a price as written.
@@ -262,6 +270,7 @@ impl Scan {
     /// Takes one record: its exchange time, the venue's continuity id, and whether it is a
     /// whole book (where the id may jump: Bybit's snapshots).
     pub(super) fn record(&mut self, day: Day, time_ms: u64, id: u64, whole: bool) {
+        self.first_whole.get_or_insert(whole);
         let integrity = &mut self.integrity;
         integrity.records += 1;
         let ns = ms_to_ns(time_ms);
@@ -385,6 +394,7 @@ mod tests {
         let day = Day::parse("2026-10-20").expect("a day");
         let t = 1_792_454_400_000;
         let mut scan = Scan::new(ArchiveFormat::BybitOrderbook);
+        assert_eq!(scan.opens_whole(), None);
         scan.record(day, t, 10, true);
         scan.record(day, t + 100, 11, false);
         scan.record(day, t + 200, 13, false);
@@ -401,6 +411,7 @@ mod tests {
             ),
             (6, 1, Some(2), 1)
         );
+        assert_eq!(scan.opens_whole(), Some(true));
         let mut trades = Scan::new(ArchiveFormat::BinanceAggTrades);
         trades.trade_ids(1, 3);
         trades.trade_ids(4, 4);

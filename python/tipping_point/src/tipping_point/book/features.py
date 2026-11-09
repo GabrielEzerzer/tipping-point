@@ -27,8 +27,9 @@ or missing sample or a missing second); nothing is filled in. A second with none
 counts the steps behind `ret`, `rv100`, `moves` and `ofi` (10 in a whole second, 9 when the
 sample before it is missing, as in the day's first second). Seeded, the day's first second has
 its 10 samples like any other. A day the engine could not seed (no closing book for the day
-before, or one whose update ids do not run on to the day's; the range manifest's `seed` says
-which) has no samples before its file's first record, so its first second or two are gaps.
+before, or one whose update ids do not run on to the day's or whose book went over 2 s without a
+record; the range manifest's `seed` says which) has no samples before its file's first record, so
+its first second or two are gaps.
 
 Outages. When the feed goes silent the engine keeps sampling the last book, synced, with the same
 `seq` (the last frame applied). A sample is stale, and counts as missing, once `seq` has not
@@ -132,6 +133,8 @@ FEATURES = (
 # 2: the boundary step, the outage rule and `steps`; 3: the tick measured per sample;
 # 4: second 0 seeded from the previous day's closing book
 FORMAT = 4
+# The engine refuses a seed whose book goes longer than this without a record (import.rs,
+# SEED_GAP_NS), since the rule counts from the day's first sample only: change both together.
 STALE_SAMPLES = 20  # 2 s of one unchanged seq; 2.5x the longest run seen on a real day
 # Each sample's quantities that the features are made from (_per_sample).
 _SAMPLED = (

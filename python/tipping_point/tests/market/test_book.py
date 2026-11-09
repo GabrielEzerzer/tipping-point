@@ -5,8 +5,9 @@ before any download, its format deciding whether a day is done), a failed or mis
 recorded while the range goes on, whatever failed, what a day put in staging goes when it ends (a
 file that will not go is listed with its day, and again when the day is retried), and a staging
 folder that is a link is refused (a link inside it goes as a link), and each day is seeded with the
-day before's closing book, the day before a span fetched for it alone (#170). Synthetic small zips
-served by a fake archive and a fake importer; no network (tests/conftest.py).
+day before's closing book (#170): a day before without one is fetched for it alone, once a run, and
+a day imported without one is imported again once the day before has one, kept samples too.
+Synthetic small zips served by a fake archive and a fake importer; no network (tests/conftest.py).
 The engine's own import runs only when TP_STORE_BIN names a built store binary."""
 
 import hashlib
@@ -79,12 +80,13 @@ class Archive:
 
 class Importer:
     """Stands in for `store import`: writes a run's complete.json, Parquet and closing book, or
-    refuses."""
+    refuses, and returns a run that has its complete.json and Parquet as it is, as the engine
+    returns a run it finished before whatever seed it is given."""
 
     def __init__(self) -> None:
         self.imported: list[str] = []
         self.seeds: list[Path | None] = []  # the closing book each import was seeded with
-        self.unchained: set[str] = set()  # refuses its seed, as when its update ids do not run on
+        self.unchained: set[str] = set()  # refuses its seed, as when the day does not run on
         self.refuse: set[str] = set()
         self.no_rows: set[str] = set()  # complete.json without its row counts
         self.half: set[str] = set()  # writes the samples, then fails without naming its run
@@ -97,9 +99,11 @@ class Importer:
         self.seeds.append(seed)
         assert seed is None or seed.is_file()
         self.found.append(_files(data_dir))
+        run = data_dir / "market" / archive.name.removesuffix(".data.zip")
+        if (run / "complete.json").is_file() and (run / book.TABLE).is_file():
+            return run
         if url in self.refuse:
             raise book.BookError("store import exited 1: line 3: u ran back")
-        run = data_dir / "market" / archive.name.removesuffix(".data.zip")
         (run / "book_samples").mkdir(parents=True, exist_ok=True)
         (run / book.TABLE).write_bytes(PARQUET)
         if url in self.half:  # as when writing complete.json fails
@@ -109,7 +113,9 @@ class Importer:
             "integrity": {"id_gaps": 0, "errors": 0},
         }
         if seed:
-            why = {"why": "it does not chain: its last u is 7, the day's first record's u is 9"}
+            why = {
+                "why": "it does not chain: its last u is 7, and the day opens with a delta of u 9"
+            }
             complete["seed"] = {"used": False, **why} if url in self.unchained else {"used": True}
         if url in self.no_rows:
             del complete["rows"]
@@ -450,8 +456,9 @@ def test_a_day_reduced_with_another_format_is_not_done(tmp_path: Path) -> None:
     assert len(archive.opened) == 2  # same format: done (the first was the day before's book)
     two = _reducer(f"FORMAT = 2\n{body}", '{"format": 2}')
     # The commands differ too, which alone redoes the day, so check the format rule directly.
-    assert not book._done(entry, tmp_path / "training", False, one, {"format": 2})
-    assert book._done(entry, tmp_path / "training", False, one, {"format": 1})
+    before = book._state(tmp_path / "training", "BTCUSDT", date(2023, 2, 28))
+    assert not book._done(entry, tmp_path / "training", False, one, {"format": 2}, before)
+    assert book._done(entry, tmp_path / "training", False, one, {"format": 1}, before)
     _fetch(tmp_path, archive, importer, end=START, reduce=two)
     assert _manifest(tmp_path)["days"]["BTCUSDT/2023-03-01"]["reduced"]["format"] == 2
 
@@ -478,7 +485,8 @@ def test_a_failed_day_is_recorded_and_the_range_goes_on(tmp_path: Path) -> None:
     assert importer.imported == [before[0], before[1], url["ETHUSDT", 2], url["ETHUSDT", 3]]
     assert _files(tmp_path) == []  # no zip, no partial download and no samples are kept
     assert "failed: 4" in book.report(done)
-    # Every day not imported is tried again; the imported one is not.
+    # Every day not imported is tried again, and so is the one imported after a failed day, now
+    # that the day before has a closing book to seed it.
     archive.headers.clear()
     archive.broken.clear()
     archive.absent.clear()
@@ -486,8 +494,8 @@ def test_a_failed_day_is_recorded_and_the_range_goes_on(tmp_path: Path) -> None:
     archive.opened.clear()
     again = _fetch(tmp_path, archive, importer, symbols=symbols)
     assert {e["status"] for e in again.values()} == {"imported"}
-    assert url["ETHUSDT", 3] not in archive.opened
-    assert len(archive.opened) == 5
+    assert archive.opened == list(url.values())
+    assert again["ETHUSDT/2023-03-03"]["seed"]["used"]
 
 
 def test_each_day_is_seeded_with_the_day_befores_closing_book(tmp_path: Path) -> None:
@@ -540,13 +548,84 @@ def test_a_day_not_seeded_is_imported_unseeded_and_says_why(tmp_path: Path) -> N
     assert last["state"] == "state/BTCUSDT/2023-03-02.jsonl" and not last["used"]
     assert last["why"].startswith("it does not chain")
     assert importer.seeds[0] is None and importer.seeds[2] is not None
-    # A day before that is in the manifest (here failed) is not fetched again for its book.
+    # A day before tried in this run (here failed) is not fetched again for its book.
     archive.opened.clear()
     archive.broken.add(book.url("BTCUSDT", date(2023, 3, 5)))
     _fetch(tmp_path, archive, importer, start=date(2023, 3, 5), end=date(2023, 3, 6))
     assert archive.opened == [book.url("BTCUSDT", date(2023, 3, d)) for d in (4, 5, 6)]
     six = _manifest(tmp_path)["days"]["BTCUSDT/2023-03-06"]["seed"]
     assert six == {"state": None, "why": "no closing book for 2023-03-05", "used": False}
+
+
+def test_a_day_before_in_the_manifest_without_its_closing_book_is_fetched_for_it(
+    tmp_path: Path,
+) -> None:
+    """As in a range fetched before #170, which has no closing books: the day before a span is
+    fetched and imported for its book all the same, its manifest entry left as it is."""
+    archive, importer = Archive(), Importer()
+    _fetch(tmp_path, archive, importer, end=START)
+    shutil.rmtree(tmp_path / "training" / "state")
+    entry = _manifest(tmp_path)["days"]["BTCUSDT/2023-03-01"]
+    archive.opened.clear()
+    two = date(2023, 3, 2)
+    done = _fetch(tmp_path, archive, importer, start=two, end=two)
+    assert archive.opened == [book.url("BTCUSDT", START), book.url("BTCUSDT", two)]
+    assert done["BTCUSDT/2023-03-02"]["seed"] == {
+        "state": "state/BTCUSDT/2023-03-01.jsonl",
+        "used": True,
+    }
+    assert _manifest(tmp_path)["days"]["BTCUSDT/2023-03-01"] == entry
+
+
+def test_a_day_imported_unseeded_is_imported_again_once_the_day_before_has_a_closing_book(
+    tmp_path: Path,
+) -> None:
+    """A day the archive did not have yet leaves the next day unseeded. Once it is published, the
+    next run imports it, then the next day again, seeded, kept samples and all: the engine returns
+    the run it finished before as it is, so that run goes first. A day whose seed the engine
+    refused, or one with a closing book still missing for the day before, stays done."""
+    archive, importer = Archive(), Importer()
+    two = date(2023, 3, 2)
+    archive.absent.add(book.url("BTCUSDT", START))
+    first = _fetch(tmp_path, archive, importer, end=two, keep_samples=True)
+    assert first["BTCUSDT/2023-03-02"]["seed"]["state"] is None
+    archive.absent.clear()
+    importer.seeds.clear()
+    done = _fetch(tmp_path, archive, importer, end=two, keep_samples=True)
+    where, state = tmp_path / "training", "state/BTCUSDT/2023-03-01.jsonl"
+    assert done["BTCUSDT/2023-03-02"]["seed"] == {"state": state, "used": True}
+    # 2023-03-01 seeded by the book of 2023-02-28 fetched before, then 2023-03-02 twice.
+    assert importer.seeds == [where / "state/BTCUSDT/2023-02-28.jsonl", *[where / state] * 2]
+    run = (where / done["BTCUSDT/2023-03-02"]["parquet"]).parents[1]
+    assert json.loads((run / "complete.json").read_text())["seed"] == {"used": True}
+    refused = done["BTCUSDT/2023-03-02"] | {"seed": {"state": state, "used": False, "why": "u"}}
+    assert book._done(refused, where, True, None, None, where / state)
+    unseeded = first["BTCUSDT/2023-03-02"]
+    assert book._done(unseeded, where, True, None, None, where / "state/none.jsonl")
+    assert not book._done(unseeded, where, True, None, None, where / state)
+    before_170 = {k: v for k, v in unseeded.items() if k != "seed"}
+    assert not book._done(before_170, where, True, None, None, where / state)
+
+
+def test_samples_kept_from_an_import_before_170_are_imported_again(tmp_path: Path) -> None:
+    """A run kept from an import made before #170 has no closing book, and the engine returns it
+    as it is: it goes and the day is imported again for its book, or every later day of the span
+    would go unseeded."""
+    archive, importer = Archive(), Importer()
+    archive.absent.add(book.url("BTCUSDT", date(2023, 2, 28)))  # as before the archive's first day
+    kept = _fetch(tmp_path, archive, importer, end=START, keep_samples=True)
+    where = tmp_path / "training"
+    run = (where / kept["BTCUSDT/2023-03-01"]["parquet"]).parents[1]
+    (run / book.CLOSE).unlink()
+    shutil.rmtree(where / "state")
+    (where / "manifest.json").unlink()
+    done = _fetch(tmp_path, archive, importer, end=date(2023, 3, 2), keep_samples=True)
+    assert (run / book.CLOSE).is_file()
+    assert done["BTCUSDT/2023-03-01"]["state"] == "state/BTCUSDT/2023-03-01.jsonl"
+    assert done["BTCUSDT/2023-03-02"]["seed"] == {
+        "state": "state/BTCUSDT/2023-03-01.jsonl",
+        "used": True,
+    }
 
 
 def test_a_failed_run_of_the_command_exits_1(

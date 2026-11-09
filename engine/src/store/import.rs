@@ -24,9 +24,19 @@
 //! next day's import as its seed, those lines go through the pipeline before the archive's, so
 //! the instants from midnight to the day's own first record are sampled as one import of both
 //! files would sample them. A seed is used only when it is this symbol's book, opens with a whole
-//! book stamped before the day, and the day's first record's `u` is its last `u` (that same
-//! message again) or the next one; otherwise the day is imported unseeded, and `complete.json`
-//! says why (`seed`), so no instant is sampled from a book that missed an update.
+//! book stamped before the day, and runs on to the day's first record:
+//! - that record's `u` is the seed's last `u` (that same message again, or a snapshot of the same
+//!   book), or the next one when the record is a delta, which the sync rule then applies to the
+//!   seed's book. A snapshot takes no `u` of its own (its `u` is the last delta's, as above), so a
+//!   snapshot of the next `u` took in an update made at a time neither file gives, and the seed's
+//!   book may be stale at any instant before it;
+//! - its book never goes over 2 s without a record, from the closing book through the day's first
+//!   record ([`SEED_GAP_NS`]). The reducer masks a book that went 2 s without a record as stale
+//!   (`STALE_SAMPLES`, book/features.py) but counts from midnight only, so a silence that began
+//!   before midnight would leave instants counted that one import of both files masks.
+//!
+//! Otherwise the day is imported unseeded, and `complete.json` says why (`seed`), so no instant
+//! is sampled from a book that missed an update, or counted from one gone stale.
 //!
 //! Safe to re-run: an import of a run that is complete changes nothing, a crashed one is finished
 //! (its temp files deleted, the tables it had written kept), and an archive other than the one a
@@ -60,6 +70,10 @@ use crate::venue::archive::{ArchiveFormat, ArchiveFrame, ArchiveName, Scan};
 /// The day's closing book an order-book import leaves in its run, the next day's seed (module
 /// notes): one message per line.
 pub const CLOSE: &str = "close.jsonl";
+
+/// The longest a seed's book may go without a record (module notes): the reducer's stale window,
+/// `STALE_SAMPLES` instants of 100 ms in book/features.py, which moves with it.
+const SEED_GAP_NS: i64 = 2_000_000_000;
 
 /// How an import goes.
 #[derive(Debug, Clone)]
@@ -262,7 +276,7 @@ fn seeded(
     scan: &Scan,
 ) -> (Vec<String>, Option<Seed>, Scales) {
     let found = scan.scales();
-    match path.map(|path| read_seed(path, name, scan.integrity())) {
+    match path.map(|path| read_seed(path, name, scan)) {
         None => (Vec::new(), None, found),
         Some(Ok((lines, needs))) => {
             let scales = Scales {
@@ -286,12 +300,8 @@ fn seeded(
 }
 
 /// The seed's lines and the scales its prices and quantities need, or why it cannot seed the
-/// day whose archive the pre-scan found `day` in (module notes).
-fn read_seed(
-    path: &Path,
-    name: &ArchiveName,
-    day: &Integrity,
-) -> Result<(Vec<String>, Scales), String> {
+/// day whose archive the pre-scan read into `day` (module notes).
+fn read_seed(path: &Path, name: &ArchiveName, day: &Scan) -> Result<(Vec<String>, Scales), String> {
     if name.format != ArchiveFormat::BybitOrderbook {
         return Err("only an order book is seeded".to_owned());
     }
@@ -302,25 +312,44 @@ fn read_seed(
         .map(str::to_owned)
         .collect();
     let mut scan = Scan::new(name.format);
+    let mut times = Vec::with_capacity(lines.len() + 1); // each record's, then the day's first
     for (index, line) in lines.iter().enumerate() {
         name.scan(&mut scan, line, false)
             .map_err(|why| format!("line {}: {why}", index + 1))?;
         if index == 0 && scan.integrity().snapshots != Some(1) {
             return Err("it does not open with a whole book".to_owned());
         }
+        times.extend(scan.integrity().last_ts_ns);
     }
-    let seed = scan.integrity();
+    let (seed, first) = (scan.integrity(), day.integrity());
     if seed.first_ts_ns.is_none_or(|ts| ts >= name.day.start_ns()) {
         return Err("it holds no book from before the day".to_owned());
     }
-    // The day's first record repeats the seed's last (the file's overlap) or follows it. A
-    // repeated delta would drop the book in the sync rule, never apply twice.
+    // The day's first record repeats the seed's last u (the file's overlap, or a snapshot of the
+    // same book) or is the delta of the next u. A snapshot of the next u holds an update made at
+    // a time neither file gives. A repeated delta would drop the book in the sync rule, never
+    // apply twice.
     let next = seed.last_id.and_then(|u| u.checked_add(1));
-    if day.first_id.is_none() || (day.first_id != seed.last_id && day.first_id != next) {
+    let follows = first.first_id == next && day.opens_whole() == Some(false);
+    if first.first_id.is_none() || (first.first_id != seed.last_id && !follows) {
+        let record = if day.opens_whole() == Some(true) {
+            "a whole book"
+        } else {
+            "a delta"
+        };
         return Err(format!(
-            "it does not chain: its last u is {}, the day's first record's u is {}",
+            "it does not chain: its last u is {}, and the day opens with {record} of u {}",
             seed.last_id.unwrap_or_default(),
-            day.first_id.unwrap_or_default()
+            first.first_id.unwrap_or_default()
+        ));
+    }
+    times.extend(first.first_ts_ns);
+    let mut gaps = times.windows(2).map(|pair| pair[1].saturating_sub(pair[0]));
+    if let Some(gap) = gaps.find(|&gap| gap > SEED_GAP_NS) {
+        return Err(format!(
+            "its book goes {} ms without a record, over the {} ms after which a book is stale",
+            gap / 1_000_000,
+            SEED_GAP_NS / 1_000_000
         ));
     }
     Ok((lines, scan.scales()))
@@ -781,17 +810,45 @@ mod tests {
         Ok(dir)
     }
 
-    /// A Bybit book message of BTCUSDT at `ms`, one level a side (empty for none).
-    fn message(kind: &str, ms: i64, u: u64, bid: &str, ask: &str) -> String {
-        let side = |level: &str| match level.split_once('/') {
-            Some((px, qty)) => format!(r#"[["{px}","{qty}"]]"#),
-            None => "[]".to_owned(),
+    /// A Bybit book message of BTCUSDT at `ms`, its levels a side as `px/qty`, best first and
+    /// comma-separated (empty for none).
+    fn message(kind: &str, ms: i64, u: u64, bids: &str, asks: &str) -> String {
+        let side = |levels: &str| {
+            let levels: Vec<String> = levels
+                .split(',')
+                .filter_map(|level| level.split_once('/'))
+                .map(|(px, qty)| format!(r#"["{px}","{qty}"]"#))
+                .collect();
+            format!("[{}]", levels.join(","))
         };
         format!(
             r#"{{"topic":"orderbook.200.BTCUSDT","type":"{kind}","ts":{ms},"data":{{"s":"BTCUSDT","b":{},"a":{},"u":{u},"seq":1}}}}"#,
-            side(bid),
-            side(ask)
+            side(bids),
+            side(asks)
         )
+    }
+
+    /// A closing book's lines.
+    fn lines_of(close: &Path) -> Result<Vec<String>, ImportError> {
+        let text = fs::read_to_string(close).map_err(StoreError::io(close))?;
+        Ok(text.lines().map(str::to_owned).collect())
+    }
+
+    /// A closing book's first line, its whole book.
+    fn book_of(close: &Path) -> Result<serde_json::Value, ImportError> {
+        let first = lines_of(close)?.into_iter().next().unwrap_or_default();
+        serde_json::from_str(&first).map_err(|e| ImportError::bad(close, e.to_string()))
+    }
+
+    /// Why `read_seed` refuses `lines` as the seed of 2026-10-20 whose archive opens with the
+    /// message `first`; empty when it takes them.
+    fn refusal(dir: &Path, lines: &[String], first: &str) -> Result<String, ImportError> {
+        let close = write_close(dir, lines)?;
+        let name = archive_name(Path::new("2026-10-20_BTCUSDT_ob200.data.zip"))?;
+        let mut day = Scan::new(name.format);
+        name.scan(&mut day, first, true)
+            .map_err(|why| ImportError::bad(&close, why))?;
+        Ok(read_seed(&close, &name, &day).err().unwrap_or_default())
     }
 
     /// Writes Bybit's archive of `day` holding `lines`, and returns its path.
@@ -853,8 +910,16 @@ mod tests {
             message("delta", midnight + 50, 12, "", "100.4/3"),
         ];
         let day = [
-            message("snapshot", midnight + 1_450, 13, "101.0/1", "101.5/1"),
-            message("delta", midnight + 1_550, 14, "101.1/1", ""),
+            // The book as of the seed's last u, as Bybit's next file opens, then its changes.
+            message(
+                "snapshot",
+                midnight + 1_450,
+                12,
+                "100.1/2,100.0/1",
+                "100.4/3,100.5/1",
+            ),
+            message("delta", midnight + 1_480, 13, "", "100.3/1"),
+            message("delta", midnight + 1_550, 14, "100.2/1", ""),
         ];
         let config = |seed: Option<PathBuf>| ImportConfig {
             data_dir: dir.join("data"),
@@ -869,14 +934,8 @@ mod tests {
         )?;
         assert_eq!(before.seed, None);
         let close = before.run_dir.join(CLOSE);
-        let lines: Vec<String> = fs::read_to_string(&close)
-            .map_err(StoreError::io(&close))?
-            .lines()
-            .map(str::to_owned)
-            .collect();
         // The book after the last record before midnight, stamped with it, then the tail as is.
-        let book: serde_json::Value =
-            serde_json::from_str(&lines[0]).map_err(|e| ImportError::bad(&close, e.to_string()))?;
+        let book = book_of(&close)?;
         assert_eq!(book["type"], "snapshot");
         assert_eq!(book["ts"], midnight - 200);
         assert_eq!(book["data"]["u"], 11);
@@ -885,19 +944,34 @@ mod tests {
             serde_json::json!([["100.1", "2"], ["100.0", "1"]])
         );
         assert_eq!(book["data"]["a"], serde_json::json!([["100.5", "1"]]));
-        assert_eq!(lines[1..], day_before[2..]);
+        assert_eq!(lines_of(&close)?[1..], day_before[2..]);
 
         let ns = |ms: i64| ms * 1_000_000;
         let archive = archive_of(&dir, "2026-10-20", &day)?;
         let seeded = import(&archive, &config(Some(close.clone())), &mut |_| {})?;
         assert_eq!(seeded.seed.as_ref().map(|s| s.used), Some(true));
         let rows = samples(&seeded.run_dir)?;
-        // Midnight's sample is the closing book; the tail's record moves the ask at 0.05 s.
+        // Midnight's sample is the closing book; the tail's record moves the ask at 0.05 s, and
+        // the day's own records take over from 1.45 s.
         assert_eq!(rows[0], (ns(midnight), Some(1005)));
         assert_eq!(rows[1], (ns(midnight + 100), Some(1004)));
         assert_eq!(rows[14], (ns(midnight + 1_400), Some(1004)));
-        assert_eq!(rows[15], (ns(midnight + 1_500), Some(1015)));
+        assert_eq!(rows[15], (ns(midnight + 1_500), Some(1003)));
         assert_eq!(rows.len(), 16);
+        // No record of the day is stamped past its end: it closes with the book after its last.
+        let closed = seeded.run_dir.join(CLOSE);
+        let book = book_of(&closed)?;
+        assert_eq!(lines_of(&closed)?.len(), 1);
+        assert_eq!(book["ts"], midnight + 1_550);
+        assert_eq!(book["data"]["u"], 14);
+        assert_eq!(
+            book["data"]["b"],
+            serde_json::json!([["100.2", "1"], ["100.1", "2"], ["100.0", "1"]])
+        );
+        assert_eq!(
+            book["data"]["a"],
+            serde_json::json!([["100.3", "1"], ["100.4", "3"], ["100.5", "1"]])
+        );
 
         // Unseeded, the day's samples start after its first record, as before.
         fs::remove_dir_all(&seeded.run_dir).map_err(StoreError::io(&seeded.run_dir))?;
@@ -911,31 +985,19 @@ mod tests {
     fn a_seed_that_does_not_chain_to_the_day_is_not_used() -> Result<(), ImportError> {
         let dir = scratch("unchained")?;
         let midnight = 1_792_454_400_000;
-        let close = dir.join(CLOSE);
-        let seed = |lines: &[String]| write_close(&dir, lines);
-        let day = [message(
-            "snapshot",
-            midnight + 1_450,
-            13,
-            "101.0/1",
-            "101.5/1",
-        )];
+        let snapshot = message("snapshot", midnight + 1_450, 13, "101.0/1", "101.5/1");
         let config = ImportConfig {
             data_dir: dir.join("data"),
             url: None,
             tables: None,
-            seed: Some(close.clone()),
+            seed: Some(dir.join(CLOSE)),
         };
-        // A u lost between the closing book and the day's first record: the import goes on
-        // unseeded, saying why, and samples nothing from the stale book.
-        seed(&[message(
-            "snapshot",
-            midnight - 200,
-            11,
-            "100.0/1",
-            "100.5/1",
-        )])?;
-        let archive = archive_of(&dir, "2026-10-20", &day)?;
+        // The day opens with a snapshot of the u after the seed's last: update 13 came at a time
+        // neither file gives, so the seed's book may be stale at any instant before the snapshot.
+        // The import goes on unseeded, saying why, and samples nothing from that book.
+        let chained = message("snapshot", midnight - 200, 12, "100.0/1", "100.5/1");
+        write_close(&dir, std::slice::from_ref(&chained))?;
+        let archive = archive_of(&dir, "2026-10-20", std::slice::from_ref(&snapshot))?;
         let imported = import(&archive, &config, &mut |_| {})?;
         let why = imported.seed.and_then(|seed| seed.why).unwrap_or_default();
         assert!(why.contains("does not chain"), "{why}");
@@ -944,28 +1006,86 @@ mod tests {
         assert_eq!(complete.seed.map(|s| s.used), Some(false));
         assert_eq!(samples(&imported.run_dir)?, vec![]);
 
-        let name = archive_name(&archive)?;
-        let first = Integrity {
-            first_id: Some(13),
-            ..Integrity::default()
-        };
-        let refused = |lines: &[String]| -> Result<String, ImportError> {
-            seed(lines)?;
-            Ok(read_seed(&close, &name, &first).err().unwrap_or_default())
-        };
-        let chained = message("snapshot", midnight - 200, 12, "100.0/1", "100.5/1");
-        assert_eq!(refused(std::slice::from_ref(&chained))?, "");
-        // A seed ending with the very message the day opens with, as Bybit's files overlap.
-        let overlap = message("snapshot", midnight + 1_450, 13, "101.0/1", "101.5/1");
-        assert_eq!(refused(&[chained.clone(), overlap])?, "");
+        let refused = |lines: &[String], first: &str| refusal(&dir, lines, first);
+        let one = std::slice::from_ref(&chained);
+        // The next u runs on only as a delta, which the sync rule applies to the seed's book.
+        let delta = message("delta", midnight + 1_450, 13, "", "101.5/1");
+        assert_eq!(refused(one, &delta)?, "");
+        assert!(refused(one, &snapshot)?.contains("whole book of u 13"));
+        // The same u runs on either way: a snapshot of the same book, or that very message again,
+        // as Bybit's files overlap.
+        let same = message("snapshot", midnight - 200, 13, "100.0/1", "100.5/1");
+        assert_eq!(refused(&[same], &snapshot)?, "");
+        assert_eq!(
+            refused(&[chained.clone(), snapshot.clone()], &snapshot)?,
+            ""
+        );
         let behind = message("snapshot", midnight - 200, 11, "100.0/1", "100.5/1");
-        assert!(refused(&[behind])?.contains("does not chain"));
-        let delta = message("delta", midnight - 200, 12, "100.0/1", "");
-        assert!(refused(&[delta])?.contains("whole book"));
+        assert!(refused(std::slice::from_ref(&behind), &delta)?.contains("does not chain"));
+        assert!(refused(&[behind], &snapshot)?.contains("does not chain"));
+        let opens_delta = message("delta", midnight - 200, 12, "100.0/1", "");
+        assert!(refused(&[opens_delta], &delta)?.contains("whole book"));
         let late = message("snapshot", midnight, 12, "100.0/1", "100.5/1");
-        assert!(refused(&[late])?.contains("before the day"));
+        assert!(refused(&[late], &delta)?.contains("before the day"));
         let eth = chained.replace(r#""s":"BTCUSDT""#, r#""s":"ETHUSDT""#);
-        assert!(refused(&[eth])?.contains("ETHUSDT"));
+        assert!(refused(&[eth], &delta)?.contains("ETHUSDT"));
+        fs::remove_dir_all(&dir).map_err(StoreError::io(&dir))?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_day_opening_with_the_next_delta_applies_it_to_the_seeds_book() -> Result<(), ImportError> {
+        let dir = scratch("next-delta")?;
+        let midnight = 1_792_454_400_000;
+        let seed = [message(
+            "snapshot",
+            midnight - 200,
+            12,
+            "100.0/1",
+            "100.5/1",
+        )];
+        let day = [
+            message("delta", midnight + 1_450, 13, "", "100.4/2"),
+            message("delta", midnight + 1_550, 14, "100.1/1", ""),
+        ];
+        let config = ImportConfig {
+            data_dir: dir.join("data"),
+            url: None,
+            tables: None,
+            seed: Some(write_close(&dir, &seed)?),
+        };
+        let imported = import(&archive_of(&dir, "2026-10-20", &day)?, &config, &mut |_| {})?;
+        assert_eq!(imported.seed.map(|s| s.used), Some(true));
+        let ns = |ms: i64| ms * 1_000_000;
+        let rows = samples(&imported.run_dir)?;
+        assert_eq!(rows.len(), 16);
+        assert_eq!(rows[14], (ns(midnight + 1_400), Some(1005)));
+        assert_eq!(rows[15], (ns(midnight + 1_500), Some(1004))); // update 13 on the seed's book
+        let integrity = &imported.integrity;
+        assert_eq!((integrity.resyncs, integrity.unsynced_samples), (0, 0));
+        fs::remove_dir_all(&dir).map_err(StoreError::io(&dir))?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_seed_whose_book_goes_over_2_s_without_a_record_is_not_used() -> Result<(), ImportError> {
+        let dir = scratch("quiet")?;
+        let midnight = 1_792_454_400_000;
+        let first = |ms: i64| message("snapshot", ms, 13, "101.0/1", "101.5/1");
+        // The reducer counts a book's silence from midnight only (STALE_SAMPLES in
+        // book/features.py): seeded with a book last changed at 23:59:55, the day's instants up to
+        // its first record would count, where one import of both files masks them as stale.
+        let quiet = message("snapshot", midnight - 5_000, 13, "100.0/1", "100.5/1");
+        let why = refusal(&dir, &[quiet], &first(midnight + 1_450))?;
+        assert!(why.contains("goes 6450 ms without a record"), "{why}");
+        // After midnight too, up to the day's first record; 2 s exactly is not over.
+        let seed = [
+            message("snapshot", midnight - 100, 12, "100.0/1", "100.5/1"),
+            message("delta", midnight + 50, 13, "", "100.4/1"),
+        ];
+        let why = refusal(&dir, &seed, &first(midnight + 2_051))?;
+        assert!(why.contains("goes 2001 ms without a record"), "{why}");
+        assert_eq!(refusal(&dir, &seed, &first(midnight + 2_050))?, "");
         fs::remove_dir_all(&dir).map_err(StoreError::io(&dir))?;
         Ok(())
     }

@@ -40,7 +40,7 @@
            default target/release/store) and recorded in <out>/<range>/manifest.json (--out,
            default <data dir>/bybit-book); its zip is deleted, and so are its 100 ms samples
            unless --keep-samples. Each day is seeded with the day before's closing book, kept
-           under <out>/<range>/state/ (the day before a span is fetched for it alone; book.py).
+           under <out>/<range>/state/ (a day before without one is fetched for it alone; book.py).
            --reduce "<cmd> <args>" runs per day on the samples' Parquet
            (its path appended) before they go (book.py); its last line of output, when a JSON
            object, is kept as the day's `reduced` ("python -m tipping_point.book" writes the

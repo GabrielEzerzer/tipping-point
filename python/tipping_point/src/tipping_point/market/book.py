@@ -29,14 +29,17 @@ midnight, so the engine seeds each day's import with the closing book the day be
 end), and the day's samples from 00:00:00.000 on come from the book carried over until the day's
 own records take over. Each imported day's closing book is kept as
 `<range>/state/<SYMBOL>/<day>.jsonl` (tens of kB; the entry's `state`) and seeds the next day.
-When a day's predecessor has no closing book and no entry in the manifest (the first day of a
-span, or of the range), the predecessor is fetched and imported first for its closing book only:
-its samples are not reduced and it is not recorded as a day of the range, so a run of one symbol's
-days in order needs nothing more. The day's `seed` says which closing book seeded it (`state`) and
-whether the engine used it (`used`); when not, `why` says why (no closing book for the day before,
-or one whose last update id is neither the day's first record's nor the one before it, which the
-engine refuses rather than sample a stale book), and the day is imported unseeded, its first
-second or two then a gap as before.
+When a day's predecessor has no closing book (the first day of a span or of the range, or a range
+fetched before #170) and this run has not tried it yet, the predecessor is fetched and imported
+first for its closing book only: its samples are not reduced and its manifest entry, if it has
+one, is left as it is, so a run of one symbol's days in order needs nothing more. The day's `seed`
+says which closing book seeded it (`state`) and whether the engine used it (`used`); when not,
+`why` says why (no closing book for the day before, or one the engine refuses rather than sample a
+stale book: one whose last update id does not run on to the day's first record, or whose book goes
+over 2 s without a record; engine/src/store/import.rs), and the day is imported unseeded, its
+first second or two then a gap as before. Samples kept from an import made before #170 (no closing
+book in the run) or not given the closing book this one is are imported again, since the engine
+returns a run it finished before as it is.
 
 The reducer. When its last line of output is a JSON object, the manifest keeps it as the day's
 `reduced` (tipping_point.book prints its feature file's path, relative to the range folder, its
@@ -57,12 +60,13 @@ zip's URL, bytes and SHA-256, the sample count, the samples' bytes and SHA-256, 
 whole integrity record, whether or not the samples are kept.
 
 A day already imported is skipped when it was imported with the same `reduce` command, the file
-its `reduced` record names (if any) is present with the reducer's current format and, if this run
-keeps samples, its Parquet is present. A day that fails (network, a size or MD5 mismatch, the
-engine or the reducer refusing it, a file the system will not let go, a malformed record) is
-recorded with why and the range goes on; the next run tries it again, as it does a day the
-archive does not have (404, `missing`). The manifest is rewritten after every day, so a stopped
-run loses at most the day in hand.
+its `reduced` record names (if any) is present with the reducer's current format, if this run
+keeps samples, its Parquet is present and, if no closing book was given for it, the day before
+still has none (a day before that failed or was missing may have one since). A day that fails
+(network, a size or MD5 mismatch, the engine or the reducer refusing it, a file the system will
+not let go, a malformed record) is recorded with why and the range goes on; the next run tries it
+again, as it does a day the archive does not have (404, `missing`). The manifest is rewritten
+after every day, so a stopped run loses at most the day in hand.
 
 The confirmatory range is refused unless `confirmatory` is set (#30 M7).
 """
@@ -208,21 +212,24 @@ def fetch(
         else {"format": 1, "source": BASE_URL, "range": name, "days": {}}
     )
     done: dict[str, dict[str, Any]] = {}
+    tried: set[str] = set()  # the days this run fetched, as days of the range or for their book
     for symbol in symbols:
         for day in days:
             key = f"{symbol}/{day:%Y-%m-%d}"
             entry = manifest["days"].get(key)
-            if entry and _done(entry, where, keep_samples, given, version):
+            state = _state(where, symbol, day - timedelta(days=1))  # the day before's
+            if entry and _done(entry, where, keep_samples, given, version, state):
                 done[key] = entry
                 log(f"{key}: imported before, skipped")
                 continue
             earlier = set(entry.get("leftover", [])) if entry else set()  # this day's own
             data_dir = where / "samples" if keep_samples else staging
             before = _files_in(staging, where)  # what earlier days left, listed with those days
-            seed = _seed(symbol, day, where, manifest, open_url, importer)
+            seed = _seed(symbol, day, where, tried, open_url, importer)
             entry = _day(
                 symbol, day, where, data_dir, open_url, importer, keep_samples, reducer, seed
             )
+            tried.add(key)
             _clear(staging)  # all the day put there, imported or failed, named by a run or not
             left = _files_in(staging, where)
             if leftover := sorted((left - before) | (left & earlier)):
@@ -245,18 +252,21 @@ def _seed(
     symbol: str,
     day: date,
     where: Path,
-    manifest: dict[str, Any],
+    tried: set[str],
     open_url: Open,
     importer: Importer,
 ) -> dict[str, Any]:
     """The closing book of the day before `day` to seed it with: `state`, its path relative to the
-    range folder, or None and `why`. A day before with neither a closing book nor a manifest entry
-    is fetched and imported first, for its closing book only (module notes), and what it put in
-    staging goes before `day` is fetched (a file that will not go is listed with `day`)."""
+    range folder, or None and `why`. A day before without one that this run has not tried yet
+    (`tried`, keyed `<SYMBOL>/<day>`) is fetched and imported first, for its closing book only
+    (module notes), and what it put in staging goes before `day` is fetched (a file that will not
+    go is listed with `day`)."""
     before = day - timedelta(days=1)
     state = _state(where, symbol, before)
+    key = f"{symbol}/{before:%Y-%m-%d}"
     why = ""
-    if not state.is_file() and f"{symbol}/{before:%Y-%m-%d}" not in manifest["days"]:
+    if not state.is_file() and key not in tried:
+        tried.add(key)
         got = _day(symbol, before, where, where / "staging", open_url, importer, False, None, None)
         _clear(where / "staging")
         why = "" if got["status"] == "imported" else f" ({got['status']}: {got.get('error', '')})"
@@ -288,11 +298,13 @@ def _done(
     where: Path,
     keep: bool,
     reduce: list[str] | None,
-    version: dict[str, Any] | None = None,
+    version: dict[str, Any] | None,
+    before: Path,
 ) -> bool:
     """Whether a day recorded before needs nothing: imported with the same reducer at the format
-    the reducer now reports, with the file it reported still there and, when this run keeps
-    samples, its Parquet still there."""
+    the reducer now reports, with the file it reported still there, when this run keeps samples
+    its Parquet still there and, when no closing book was given for it, still none at `before`
+    (the day before's, _state): one the engine refused stays refused."""
     kept = entry.get("parquet") and (where / entry["parquet"]).is_file()
     reduced = entry.get("reduced")
     named = reduced.get("path") if isinstance(reduced, dict) else None
@@ -300,7 +312,8 @@ def _done(
     if version and "format" in version and isinstance(reduced, dict):
         output = output and reduced.get("format") == version["format"]
     same = entry["status"] == "imported" and entry.get("reduce") == reduce
-    return same and output and (kept or not keep)
+    unseeded = not (entry.get("seed") or {}).get("state")  # an entry from before #170 too
+    return same and output and (kept or not keep) and not (unseeded and before.is_file())
 
 
 def _day(
@@ -314,8 +327,9 @@ def _day(
     reduce: list[str] | None,
     seed: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Fetches and imports one day seeded as `seed` says (_seed), or, when None, as the day before
-    a span, for its closing book only; returns its manifest entry."""
+    """Fetches and imports one day seeded as `seed` says (_seed), or, when None, as a day before
+    for its closing book only; returns its manifest entry. A kept run with no closing book, or not
+    given the one given now, is imported again (module notes)."""
     address = url(symbol, day)
     archive = where / "staging" / file_name(symbol, day)
     entry: dict[str, Any] = {
@@ -339,6 +353,15 @@ def _day(
             given = where / seed["state"] if seed and seed["state"] else None
             run = importer(archive, address, data_dir, given)
             complete = io.read_json(run / "complete.json")
+            if keep and (not (run / CLOSE).is_file() or (given and "seed" not in complete)):
+                # Kept from an import made before #170 or not given this closing book: the engine
+                # returns a run it finished before as it is, so the run goes and the day is
+                # imported again. shortcut: a run made just now whose book ends unsynced has no
+                # closing book either and is imported twice; read the engine's "imported already"
+                # line if such days turn up.
+                shutil.rmtree(run)
+                run = importer(archive, address, data_dir, given)
+                complete = io.read_json(run / "complete.json")
         except (BookError, OSError, ValueError) as error:
             return {**entry, "status": "failed", "error": str(error)}
         entry["import_s"] = round(time.monotonic() - began, 1)
