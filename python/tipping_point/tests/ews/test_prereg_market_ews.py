@@ -254,6 +254,30 @@ def _set(doc: dict[str, Any], where: str, value: Any) -> dict[str, Any]:
         ("alarms.far_per_day", 0, "alarms.far_per_day: a positive number"),
         ("alarms.far_per_day", "often", "alarms.far_per_day: a positive number"),
         ("trials.budget", 0, "trials.budget: at least 1"),
+        # the same-input tier: every key, the reducer's features, sum or mean, the price
+        # series' pipeline, its rules word for word, descriptive
+        ("same_input", DELETE, "same_input: missing"),
+        ("same_input.counted", DELETE, "same_input.counted: missing"),
+        ("same_input.aggregation", DELETE, "same_input.aggregation: missing"),
+        ("same_input.counted", "false", "same_input.counted: expected bool"),
+        ("same_input.counted", True, "same_input.counted: false"),
+        # the features and aggregation are exactly the ones the harness runs
+        ("same_input.features", ["ret", "imb_5", "ofi"], "same_input.features: ['ret'"),
+        ("same_input.features", ["ret", "imb_5", "ofi", "wide"], "same_input.features: ['ret'"),
+        ("same_input.features", ["ret", "ret"], "same_input.features: ['ret'"),
+        ("same_input.features", [], "same_input.features: ['ret'"),
+        ("same_input.aggregation.ofi", "mean", "same_input.aggregation: {'ret'"),
+        ("same_input.aggregation.ret", "median", "same_input.aggregation: {'ret'"),
+        ("same_input.aggregation.wide", "mean", "same_input.aggregation: {'ret'"),
+        ("same_input.indicators", ["variance"], "same_input.indicators: the price series'"),
+        ("same_input.window", 30, "same_input.window: 60"),
+        ("same_input.length", 120, "same_input.length: 240"),
+        ("same_input.detrend", "gaussian", "same_input.detrend: 'none'"),
+        ("same_input.missing", "gaps are filled", "same_input.missing"),
+        ("same_input.series", "Binance klines", "same_input.series"),
+        ("same_input.seasonality", "raw", "same_input.seasonality"),
+        ("same_input.descriptive", " ", "same_input.descriptive: a sentence"),
+        ("same_input.bandwidth", 120, "same_input.bandwidth: nothing reads this key"),
         ("version", 0, "version: must be >= 1"),
         ("supersedes", "market-ews-v1", "reason: an amendment must say why"),
     ],
@@ -268,6 +292,7 @@ def test_each_problem_is_named(doc: dict[str, Any], where: str, value: Any, name
 def test_the_pilot_floor_refuses_a_detrend(doc: dict[str, Any]) -> None:
     """The floor's pipelines detrend nothing; a placeholder fit leaves the detrend open."""
     doc["indicators"]["detrend"], doc["indicators"]["bandwidth"] = "gaussian", 120
+    doc["same_input"]["detrend"] = "gaussian"  # the tier's pipeline is the price series'
     assert prereg.problems(doc) == []
     doc["scoring"]["floor"]["fit"] = "pilot"
     found = prereg.problems(doc)
