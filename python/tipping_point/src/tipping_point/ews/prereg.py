@@ -43,12 +43,12 @@ on the frozen labels: the labels file's tag and sha256, the series, indicators a
 that ews.market_segments carries out (held word for word, as bars.missing is), the
 deseasonalisation method, horizons from the labels' smallest, the AUC bootstrap, the GARCH floor,
 the event-time shift and the phase surrogates, the hypotheses, reporting groups, alarm rule and
-trial budget (_market_ews_problems). A draft may leave the detrending, the deseasonalisation
-method, the floor's three open choices and the alarm rate as placeholders; a floor option is
-accepted only once its code is built, and the pilot floor only at the horizons and pipelines it
-scores. Any
-other domain is refused. load, freeze, frozen and stamp take a file of any domain; cells, charge
-and the result functions are the Ising scorer's.
+trial budget (_market_ews_problems), and the same-input tier that ews.same_input carries out, a
+descriptive comparator that counts no trial (_same_input_problems). A draft may leave the
+detrending, the deseasonalisation method, the floor's three open choices and the alarm rate as
+placeholders; a floor option is accepted only once its code is built, and the pilot floor only at
+the horizons and pipelines it scores. Any other domain is refused. load, freeze, frozen and stamp
+take a file of any domain; cells, charge and the result functions are the Ising scorer's.
 """
 
 from __future__ import annotations
@@ -189,6 +189,43 @@ STRATA = ("onset-hour",)  # AUCs also reported per UTC hour of the onset, descri
 # (ews.market_segments.eth_only), against the ETH controls; market.reports' coincidence window
 REPORT_GROUPS = ("pooled", "per-asset", "eth-only")
 ETH_ONLY_BARS = 12  # market.reports.COINCIDENCE_NS, an hour, in bars
+# [same_input] (#30 research pass 6.4 item 2): the Bybit book features scored as classic series,
+# descriptively, by ews.same_input. BOOK_FEATURES is book.features.FEATURES, held here so that
+# this module does not import the reducer (test_same_input holds the two equal); the aggregation
+# is what the template freezes and the exploratory harness runs (test_same_input binds them).
+BOOK_FEATURES = (
+    "ret",
+    "rv100",
+    "moves",
+    "micro_dev",
+    "imb_1",
+    "imb_5",
+    "imb_20",
+    "ofi",
+    "depth_5",
+    "depth_20",
+    "depth_asym",
+    "slope_b",
+    "slope_a",
+    "wide",
+)
+AGGREGATIONS = ("sum", "mean")  # over a minute's 60 seconds (ews.same_input.aggregate)
+SAME_INPUT_AGGREGATION = {"ret": "sum", "imb_5": "mean", "ofi": "sum", "depth_5": "mean"}
+SAME_INPUT_SERIES = (
+    "Bybit USDT perpetual order books, the 1-second features of tipping_point.book.features in "
+    "the bybit-book range folders, each aggregated over the 60 seconds of a UTC minute as "
+    "`aggregation` says (sum adds them, mean averages them); the minute's value is known when it "
+    "closes"
+)
+SAME_INPUT_MISSING = (
+    "a minute with any gapped or missing second has no value, as jepa.days rules (a symbol-day "
+    "with no feature file has none); a segment holding such a minute is excluded for every "
+    "feature and indicator of the tier and counted"
+)
+SAME_INPUT_SEASONALITY = (
+    "each feature is deseasonalised as the returns are: [seasonality]'s method, with a slot "
+    "profile fitted per feature and symbol over [seasonality]'s fit span"
+)
 # the floor harness/market_floor.py scores: its horizons and pipelines, which a file whose floor
 # is the pilot fit must keep to (test_prereg_market_ews holds them to market_floor's)
 FLOOR_HORIZONS = (0, 3, 5, 6, 12, 24)
@@ -480,6 +517,19 @@ _MARKET_EWS_SCHEMA: dict[str, Any] = {
     "reporting": {"groups": [str], "eth_only_bars": int},
     "alarms": {"rule": str, "far_per_day": (*_NUMBER, str)},  # a string only as a placeholder
     "trials": {"budget": int, "counted": str},
+    "same_input": {
+        "series": str,
+        "features": [str],
+        "aggregation": {},  # per feature: one of AGGREGATIONS, checked in _same_input_problems
+        "missing": str,
+        "indicators": [str],
+        "window": int,
+        "length": int,
+        "detrend": str,
+        "seasonality": str,
+        "counted": bool,
+        "descriptive": str,
+    },
     "disclosure": _SCHEMA["disclosure"],
     "deviations": _SCHEMA["deviations"],
 }
@@ -1160,6 +1210,7 @@ def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]
         found.append("alarms.far_per_day: a positive number of false alarms per day")
     if doc["trials"]["budget"] < 1:
         found.append("trials.budget: at least 1")
+    found += _same_input_problems(doc)
     if strict:
         found += [
             f"{where}: placeholder {text!r}"
@@ -1168,6 +1219,51 @@ def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]
         ]
         if not found and doc["trials"]["budget"] < market_ews_cells(doc):
             found.append(f"trials.budget: one scoring run evaluates {market_ews_cells(doc)} cells")
+    return found
+
+
+def _same_input_problems(doc: dict[str, Any]) -> list[str]:
+    """[same_input]: book features from the reducer's, each aggregated by sum or mean, its rules
+    held word for word, and the price series' indicators, pipeline and detrend. The tier is
+    descriptive in a market-ews file: no hypothesis reads it and it counts no trial."""
+    found: list[str] = []
+    tier, ind = doc["same_input"], doc["indicators"]
+    for key, rule in (
+        ("series", SAME_INPUT_SERIES),
+        ("missing", SAME_INPUT_MISSING),
+        ("seasonality", SAME_INPUT_SEASONALITY),
+    ):
+        if tier[key] != rule:
+            found.append(f"same_input.{key}: {rule!r}, the rule ews.same_input carries out")
+    features = tier["features"]
+    known = set(features) <= set(BOOK_FEATURES)
+    if not features or len(set(features)) != len(features) or not known:
+        found.append(
+            f"same_input.features: distinct, a non-empty subset of {list(BOOK_FEATURES)}, the "
+            "reducer's features"
+        )
+    aggregation = tier["aggregation"]
+    if sorted(aggregation) != sorted(features):
+        found.append("same_input.aggregation: one entry per feature of same_input.features")
+    for feature, how in aggregation.items():
+        if how not in AGGREGATIONS:
+            found.append(f"same_input.aggregation.{feature}: one of {list(AGGREGATIONS)}")
+    names = tier["indicators"]
+    if len(set(names)) != len(names) or set(names) != set(ind["names"]):
+        found.append("same_input.indicators: the price series' indicators.names, each once")
+    for key in ("window", "length"):
+        if tier[key] != ind[key]:
+            found.append(f"same_input.{key}: {ind[key]!r}, the price series' indicators.{key}")
+    detrend = tier["detrend"]
+    if _placeholder(ind["detrend"]):
+        if detrend not in DETRENDS:
+            found.append(f"same_input.detrend: one of {list(DETRENDS)}")
+    elif detrend != ind["detrend"]:
+        found.append(f"same_input.detrend: {ind['detrend']!r}, the price series' detrend")
+    if tier["counted"] is not False:
+        found.append("same_input.counted: false; the tier is descriptive and counts no trial")
+    if not tier["descriptive"].strip():
+        found.append("same_input.descriptive: a sentence saying the tier is descriptive")
     return found
 
 
