@@ -5,7 +5,8 @@ the book holding information Binance's price series lacks. In market-ews-v1 it i
   aggregate  one symbol-day's 1-second feature table (book.features.reduce_run) to 1-minute values
              per feature: "sum" adds the minute's 60 seconds, "mean" averages them. A minute with
              any gapped second (`gap`, which a missing second also sets) has no value, the rule
-             jepa.days applies to a minute frame (prereg.SAME_INPUT_MISSING)
+             jepa.days applies to a minute frame (prereg.SAME_INPUT_MISSING); a value that is not
+             finite outside gap seconds is refused, as jepa.days refuses it
   read       a symbol's minutes over a span of days from a bybit-book data folder, one
              market_segments.Minutes per feature on the minute grid; a day with no feature file
              has no value in any minute
@@ -65,8 +66,10 @@ def aggregate(table: pa.Table, aggregation: Mapping[str, str]) -> dict[str, np.n
                 f"{feature}: aggregation must be one of {prereg.AGGREGATIONS}: {how!r}"
             )
         x = table[feature].to_numpy(zero_copy_only=False).astype(np.float64).reshape(MINUTES, 60)
+        if not np.isfinite(x[valid]).all():  # jepa.days refuses such a day
+            raise SegmentError(f"{feature} is not finite outside gap seconds")
         value = x.sum(axis=1) if how == "sum" else x.mean(axis=1)
-        out[feature] = np.where(valid, value, np.nan)  # a valid minute's seconds are all finite
+        out[feature] = np.where(valid, value, np.nan)
     return out
 
 

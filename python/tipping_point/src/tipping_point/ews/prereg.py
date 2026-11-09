@@ -190,25 +190,8 @@ STRATA = ("onset-hour",)  # AUCs also reported per UTC hour of the onset, descri
 REPORT_GROUPS = ("pooled", "per-asset", "eth-only")
 ETH_ONLY_BARS = 12  # market.reports.COINCIDENCE_NS, an hour, in bars
 # [same_input] (#30 research pass 6.4 item 2): the Bybit book features scored as classic series,
-# descriptively, by ews.same_input. BOOK_FEATURES is book.features.FEATURES, held here so that
-# this module does not import the reducer (test_same_input holds the two equal); the aggregation
-# is what the template freezes and the exploratory harness runs (test_same_input binds them).
-BOOK_FEATURES = (
-    "ret",
-    "rv100",
-    "moves",
-    "micro_dev",
-    "imb_1",
-    "imb_5",
-    "imb_20",
-    "ofi",
-    "depth_5",
-    "depth_20",
-    "depth_asym",
-    "slope_b",
-    "slope_a",
-    "wide",
-)
+# descriptively, by ews.same_input. The aggregation is what the template freezes and the
+# exploratory harness runs, held exactly by the validator (test_same_input binds them).
 AGGREGATIONS = ("sum", "mean")  # over a minute's 60 seconds (ews.same_input.aggregate)
 SAME_INPUT_AGGREGATION = {"ret": "sum", "imb_5": "mean", "ofi": "sum", "depth_5": "mean"}
 SAME_INPUT_SERIES = (
@@ -219,8 +202,9 @@ SAME_INPUT_SERIES = (
 )
 SAME_INPUT_MISSING = (
     "a minute with any gapped or missing second has no value, as jepa.days rules (a symbol-day "
-    "with no feature file has none); a segment holding such a minute is excluded for every "
-    "feature and indicator of the tier and counted"
+    "with no feature file has none), and nor has a minute with no return; a segment holding such "
+    "a minute is excluded for every feature and indicator of the tier and counted, and the "
+    "returns are also reported on the tier's segments"
 )
 SAME_INPUT_SEASONALITY = (
     "each feature is deseasonalised as the returns are: [seasonality]'s method, with a slot "
@@ -520,7 +504,7 @@ _MARKET_EWS_SCHEMA: dict[str, Any] = {
     "same_input": {
         "series": str,
         "features": [str],
-        "aggregation": {},  # per feature: one of AGGREGATIONS, checked in _same_input_problems
+        "aggregation": {},  # SAME_INPUT_AGGREGATION exactly, checked in _same_input_problems
         "missing": str,
         "indicators": [str],
         "window": int,
@@ -1223,7 +1207,7 @@ def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]
 
 
 def _same_input_problems(doc: dict[str, Any]) -> list[str]:
-    """[same_input]: book features from the reducer's, each aggregated by sum or mean, its rules
+    """[same_input]: the book features and aggregation the code runs, exactly, its rules
     held word for word, and the price series' indicators, pipeline and detrend. The tier is
     descriptive in a market-ews file: no hypothesis reads it and it counts no trial."""
     found: list[str] = []
@@ -1235,19 +1219,16 @@ def _same_input_problems(doc: dict[str, Any]) -> list[str]:
     ):
         if tier[key] != rule:
             found.append(f"same_input.{key}: {rule!r}, the rule ews.same_input carries out")
-    features = tier["features"]
-    known = set(features) <= set(BOOK_FEATURES)
-    if not features or len(set(features)) != len(features) or not known:
+    if tier["features"] != list(SAME_INPUT_AGGREGATION):
         found.append(
-            f"same_input.features: distinct, a non-empty subset of {list(BOOK_FEATURES)}, the "
-            "reducer's features"
+            f"same_input.features: {list(SAME_INPUT_AGGREGATION)}, the features ews.same_input "
+            "reads"
         )
-    aggregation = tier["aggregation"]
-    if sorted(aggregation) != sorted(features):
-        found.append("same_input.aggregation: one entry per feature of same_input.features")
-    for feature, how in aggregation.items():
-        if how not in AGGREGATIONS:
-            found.append(f"same_input.aggregation.{feature}: one of {list(AGGREGATIONS)}")
+    if tier["aggregation"] != SAME_INPUT_AGGREGATION:
+        found.append(
+            f"same_input.aggregation: {SAME_INPUT_AGGREGATION}, the aggregation ews.same_input "
+            "carries out"
+        )
     names = tier["indicators"]
     if len(set(names)) != len(names) or set(names) != set(ind["names"]):
         found.append("same_input.indicators: the price series' indicators.names, each once")

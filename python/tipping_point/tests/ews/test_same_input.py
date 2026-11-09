@@ -71,6 +71,16 @@ def test_a_day_aggregates_to_known_minutes() -> None:
         same_input.aggregate(_day(), {"ret": "median"})
 
 
+def test_a_value_not_finite_outside_gap_seconds_is_refused() -> None:
+    """As jepa.days refuses such a day, rather than silently emptying the minute."""
+    table = _day()
+    ofi = table["ofi"].to_numpy().copy()
+    ofi[10 * 60 + 3] = np.inf  # minute 10 holds no gapped second
+    table = table.set_column(table.schema.get_field_index("ofi"), "ofi", pa.array(ofi))
+    with pytest.raises(ms.SegmentError, match="ofi is not finite outside gap seconds"):
+        same_input.aggregate(table, AGG)
+
+
 def test_a_gapped_minute_and_a_missing_day_have_no_value(tmp_path: Path) -> None:
     """Over three days with the middle one's file absent: that day has no value in any minute and
     is listed, and the gapped minutes of the others have none either; the segment builder then
@@ -129,12 +139,12 @@ def test_another_feature_format_or_day_is_refused(tmp_path: Path) -> None:
 
 def test_the_template_freezes_what_the_code_runs() -> None:
     """The frozen text must match the code: the template's features and aggregation are the ones
-    the harness reads (prereg.SAME_INPUT_AGGREGATION), its known features the reducer's, and its
+    the harness reads (prereg.SAME_INPUT_AGGREGATION), which are the reducer's features, and its
     rules the texts the validator holds."""
     tier = tomllib.loads(TEMPLATE.read_text("utf-8"))["same_input"]
     assert tier["features"] == list(AGG)
     assert tier["aggregation"] == AGG
-    assert prereg.BOOK_FEATURES == features.FEATURES
+    assert set(AGG) <= set(features.FEATURES)
     assert set(AGG.values()) <= set(prereg.AGGREGATIONS)
     assert tier["missing"] == prereg.SAME_INPUT_MISSING
     assert tier["series"] == prereg.SAME_INPUT_SERIES

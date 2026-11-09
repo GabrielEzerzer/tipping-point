@@ -143,7 +143,7 @@ counted = "One trial per AUC evaluation of an (indicator, horizon, reporting gro
 series = "Bybit USDT perpetual order books, the 1-second features of tipping_point.book.features in the bybit-book range folders, each aggregated over the 60 seconds of a UTC minute as `aggregation` says (sum adds them, mean averages them); the minute's value is known when it closes"
 features = ["ret", "imb_5", "ofi", "depth_5"]
 aggregation = { ret = "sum", imb_5 = "mean", ofi = "sum", depth_5 = "mean" }
-missing = "a minute with any gapped or missing second has no value, as jepa.days rules (a symbol-day with no feature file has none); a segment holding such a minute is excluded for every feature and indicator of the tier and counted"
+missing = "a minute with any gapped or missing second has no value, as jepa.days rules (a symbol-day with no feature file has none), and nor has a minute with no return; a segment holding such a minute is excluded for every feature and indicator of the tier and counted, and the returns are also reported on the tier's segments"
 indicators = ["variance", "ac"]
 window = 60
 length = 240
