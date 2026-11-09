@@ -288,6 +288,20 @@ pub struct Complete {
     /// An archive run's checks of its archive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrity: Option<Integrity>,
+    /// An archive run seeded with the day before's closing book: whether it was used (#170).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<Seed>,
+}
+
+/// What an archive import did with the closing book of the day before that it was given
+/// (`close.jsonl`, see [`crate::store::import`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seed {
+    /// Its records went through the pipeline before the archive's.
+    pub used: bool,
+    /// Why not, when not: the day's sampling then starts as an unseeded import's does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 /// A new market run's folder, `<data dir>/market/<run_id>`, with the run id stamped now.
@@ -344,6 +358,7 @@ pub fn complete(run_dir: &Path, log: &Summary) -> io::Result<()> {
         rows: BTreeMap::from([("frames".to_owned(), log.frames)]),
         clean: true,
         integrity: None,
+        seed: None,
     };
     write_json_once(&run_dir.join(COMPLETE), &complete)
 }
@@ -550,6 +565,7 @@ mod tests {
             rows: BTreeMap::from([("frames".to_owned(), 10)]),
             clean: true,
             integrity: None,
+            seed: None,
         };
         write_json_once(&path, &complete)?;
         assert_eq!(read_json::<Complete>(&path)?, complete);

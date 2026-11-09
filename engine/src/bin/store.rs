@@ -4,7 +4,7 @@
 //! store recover <run dir>              close a crashed run's newest segment, cutting a torn tail
 //! store rotate <run dir>               write Parquet for every closed segment (safe to re-run)
 //! store replay <run dir> [--parquet]   replay the log (or its Parquet) and show what it rebuilt
-//! store import <archive> [--data-dir DIR] [--url URL] [--tables T,...]
+//! store import <archive> [--data-dir DIR] [--url URL] [--tables T,...] [--seed FILE]
 //!                                      a downloaded archive day into its run (safe to re-run)
 //! ```
 //!
@@ -12,7 +12,8 @@
 //! aggregated trades (`<SYMBOL>-aggTrades-<date>.zip`) into `<data dir>/market/<run_id>/`, the
 //! data dir being `--data-dir`, `TP_DATA_DIR` or the per-user default. By default it writes book
 //! samples for an order book and trades for trades; `--tables` names others (`frames`,
-//! `depth_updates`, `snapshots`).
+//! `depth_updates`, `snapshots`). An order-book import writes the day's closing book to the run's
+//! `close.jsonl`; `--seed` gives it the day before's, to sample the book from midnight (#170).
 //!
 //! `cargo run --release -p engine --bin store -- rotate <run dir>`
 
@@ -28,7 +29,7 @@ use engine::store::run;
 use engine::store::segment::recover_run;
 
 const USAGE: &str = "usage: store recover <run dir> | store rotate <run dir> | store replay <run dir> [--parquet] \
-                     | store import <archive> [--data-dir DIR] [--url URL] [--tables T,...]";
+                     | store import <archive> [--data-dir DIR] [--url URL] [--tables T,...] [--seed FILE]";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -43,6 +44,7 @@ enum Command {
         data_dir: Option<PathBuf>,
         url: Option<String>,
         tables: Option<Vec<String>>,
+        seed: Option<PathBuf>,
     },
 }
 
@@ -67,7 +69,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_import(archive: &str, options: &[&str]) -> Result<Command, String> {
-    let (mut data_dir, mut url, mut tables) = (None, None, None);
+    let (mut data_dir, mut url, mut tables, mut seed) = (None, None, None, None);
     let mut it = options.iter();
     while let Some(&flag) = it.next() {
         let value = it.next().ok_or_else(|| format!("{flag} wants a value"))?;
@@ -77,6 +79,7 @@ fn parse_import(archive: &str, options: &[&str]) -> Result<Command, String> {
             "--tables" if tables.is_none() => {
                 tables = Some(value.split(',').map(str::to_owned).collect());
             }
+            "--seed" if seed.is_none() => seed = Some(PathBuf::from(value)),
             _ => return Err(USAGE.to_owned()),
         }
     }
@@ -85,6 +88,7 @@ fn parse_import(archive: &str, options: &[&str]) -> Result<Command, String> {
         data_dir,
         url,
         tables,
+        seed,
     })
 }
 
@@ -151,11 +155,13 @@ fn run(command: &Command) -> Result<(), Box<dyn std::error::Error>> {
             data_dir,
             url,
             tables,
+            seed,
         } => {
             let config = ImportConfig {
                 data_dir: data_dir.clone().unwrap_or_else(run::data_dir),
                 url: url.clone(),
                 tables: tables.clone(),
+                seed: seed.clone(),
             };
             let imported = import(archive, &config, &mut |_| {})?;
             if imported.done_before {
@@ -190,6 +196,14 @@ fn run(command: &Command) -> Result<(), Box<dyn std::error::Error>> {
                 check.crossed,
                 check.unsynced_samples
             );
+            match &imported.seed {
+                Some(run::Seed { used: true, .. }) => println!("seeded from the day before"),
+                Some(run::Seed { why, .. }) => println!(
+                    "not seeded: {}",
+                    why.as_deref().unwrap_or("no reason given")
+                ),
+                None => {}
+            }
         }
     }
     Ok(())
@@ -262,13 +276,16 @@ mod tests {
                 "--tables",
                 "frames,book_samples",
                 "--data-dir",
-                "d"
+                "d",
+                "--seed",
+                "close.jsonl"
             ]),
             Ok(Command::Import {
                 archive: PathBuf::from("a.zip"),
                 data_dir: Some(PathBuf::from("d")),
                 url: None,
                 tables: Some(vec!["frames".to_owned(), "book_samples".to_owned()]),
+                seed: Some(PathBuf::from("close.jsonl")),
             })
         );
     }
@@ -285,6 +302,7 @@ mod tests {
             &["import", "a.zip", "--url"],
             &["import", "a.zip", "--speed", "1"],
             &["import", "a.zip", "--url", "x", "--url", "y"],
+            &["import", "a.zip", "--seed", "x", "--seed", "y"],
         ] {
             assert!(parse(raw).is_err(), "{raw:?}");
         }

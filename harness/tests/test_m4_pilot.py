@@ -97,7 +97,7 @@ def _range(root: Path, name: str, symbols: tuple[str, ...], days: list[date], **
             (folder / rel).parent.mkdir(parents=True, exist_ok=True)
             (folder / rel).write_bytes(body)
             reduced = {
-                "format": 3,
+                "format": book_assemble.FORMAT,
                 "git_sha": "fcd5b6f" + "0" * 33,
                 "dirty": False,
                 "path": rel,

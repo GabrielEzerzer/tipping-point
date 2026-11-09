@@ -15,6 +15,9 @@ the day's `ret` adds up to the log change of the mid from the day's first sample
 nothing is missing. The day's first sample has no step before it. Two rules reach further back,
 and nothing reads later: the outage rule below reads the samples' `seq` up to 2 s before, and a
 sample whose book shows no gaps between levels takes its tick from an earlier sample (Ticks).
+The day's first samples, before the day's own archive file has its first record (a second or so
+into the day), are the book the day before closed with: the engine seeds each day's import with
+it (#170; engine/src/store/import.rs), so they too read only records stamped before them.
 
 Gaps. A sample counts only when the book was synced, both sides have a best level and the book is
 not crossed. `samples` is the count of those (0 to 10) and `gap` is set when it is below 10. A
@@ -22,7 +25,10 @@ second with some samples missing is masked by `gap` and its features use only th
 (steps only between two neighbouring samples that are both present, so none across an unsynced
 or missing sample or a missing second); nothing is filled in. A second with none is NaN. `steps`
 counts the steps behind `ret`, `rv100`, `moves` and `ofi` (10 in a whole second, 9 when the
-sample before it is missing, as in the day's first second).
+sample before it is missing, as in the day's first second). Seeded, the day's first second has
+its 10 samples like any other. A day the engine could not seed (no closing book for the day
+before, or one whose update ids do not run on to the day's; the range manifest's `seed` says
+which) has no samples before its file's first record, so its first second or two are gaps.
 
 Outages. When the feed goes silent the engine keeps sampling the last book, synced, with the same
 `seq` (the last frame applied). A sample is stale, and counts as missing, once `seq` has not
@@ -123,7 +129,9 @@ FEATURES = (
     "slope_a",
     "wide",
 )
-FORMAT = 3  # 2: the boundary step, the outage rule and `steps`; 3: the tick measured per sample
+# 2: the boundary step, the outage rule and `steps`; 3: the tick measured per sample;
+# 4: second 0 seeded from the previous day's closing book
+FORMAT = 4
 STALE_SAMPLES = 20  # 2 s of one unchanged seq; 2.5x the longest run seen on a real day
 # Each sample's quantities that the features are made from (_per_sample).
 _SAMPLED = (

@@ -13,10 +13,23 @@
 //! first finds the scales the file needs and checks its integrity, the second makes the frames.
 //! The zip's CRC is checked each time a pass reaches the end of the file.
 //!
+//! Seeding (#170). Bybit's archive is one file per UTC day, and a day's file opens with a
+//! snapshot a second or so into the day (2023-06-15 BTCUSDT: at 00:00:01.451), so on its own an
+//! import has no book for the day's first instants. Every order-book import therefore leaves the
+//! day's closing book in its run, [`CLOSE`]: a snapshot message of the whole book as it stood
+//! after the last record stamped before the day's end, then, verbatim, every record from the
+//! first one stamped at or after the end (a file holds a few past its end, the next file's
+//! records run on from them). Given to the next day's import as its seed, those lines go
+//! through the pipeline before the archive's, so the instants from midnight to the day's own
+//! first record are sampled as one import of both files would sample them. A seed is used only
+//! when it is this symbol's book, opens with a whole book stamped before the day, and its last
+//! `u` is the one right before the day's first record's; otherwise the day is imported unseeded,
+//! and `complete.json` says why (`seed`).
+//!
 //! Safe to re-run: an import of a run that is complete changes nothing, a crashed one is finished
 //! (its temp files deleted, the tables it had written kept), and an archive other than the one a
 //! run was made from, or another set of tables, is refused. One import or rotate of a run at a
-//! time.
+//! time. A run complete already is done whatever seed it is given again.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -31,13 +44,20 @@ use thiserror::Error;
 use super::frame::{Frame, Kind, Meta};
 use super::rotate::{Ingest, LOCK_FILE, TABLES, Tables, clean_temp_files};
 use super::run::{
-    self, ArchiveFile, BookSample, COMPLETE, Clock, Complete, DataSource, FORMAT, Integrity, KEY,
-    MANIFEST, MARKET, Manifest, MarketParams, Producer,
+    self, ArchiveFile, BookSample, COMPLETE, Clock, Complete, DAY_NS, DataSource, FORMAT,
+    Integrity, KEY, MANIFEST, MARKET, Manifest, MarketParams, Producer, Seed,
 };
 use super::{StoreError, now_ns};
+use crate::market::decimal::format_units;
+use crate::market::feed::Feed;
 use crate::market::live::LiveEvent;
+use crate::market::sync::Level;
 use crate::market::{Scales, Symbol};
-use crate::venue::archive::{ArchiveName, Scan};
+use crate::venue::archive::{ArchiveFormat, ArchiveFrame, ArchiveName, Scan};
+
+/// The day's closing book an order-book import leaves in its run, the next day's seed (module
+/// notes): one message per line.
+pub const CLOSE: &str = "close.jsonl";
 
 /// How an import goes.
 #[derive(Debug, Clone)]
@@ -49,6 +69,8 @@ pub struct ImportConfig {
     /// The tables to write; the archive format's own when `None` (book samples for an order
     /// book, trades for trades).
     pub tables: Option<Vec<String>>,
+    /// The day before's [`CLOSE`], to sample the day's book from midnight (module notes).
+    pub seed: Option<PathBuf>,
 }
 
 /// What an import did.
@@ -62,6 +84,8 @@ pub struct Imported {
     /// Rows in each of the run's tables.
     pub rows: BTreeMap<String, u64>,
     pub integrity: Integrity,
+    /// What became of the seed, when one was given.
+    pub seed: Option<Seed>,
 }
 
 /// Why an archive could not be imported.
@@ -157,7 +181,8 @@ pub fn import(
     }
     // The whole archive is read before anything is written: a broken one leaves no run behind.
     let scan = prescan(archive, &name)?;
-    let scales = BTreeMap::from([(name.symbol.clone(), scan.scales())]);
+    let (seed_lines, seed, found) = seeded(config.seed.as_deref(), &name, &scan);
+    let scales = BTreeMap::from([(name.symbol.clone(), found)]);
 
     fs::create_dir_all(&run_dir).map_err(StoreError::io(&run_dir))?;
     let lock_path = run_dir.join(LOCK_FILE);
@@ -193,8 +218,15 @@ pub fn import(
     };
     clean_temp_files(&run_dir)?;
 
-    let (written, last_seq, piped) =
-        ingest(archive, &name, &run_dir, &manifest, &tables, on_event)?;
+    let (written, last_seq, piped) = ingest(
+        archive,
+        &name,
+        &run_dir,
+        &manifest,
+        &tables,
+        &seed_lines,
+        on_event,
+    )?;
     let integrity = merge(scan.integrity(), &piped);
     let rows = table_rows(&run_dir, &tables)?;
     let complete_path = run_dir.join(COMPLETE);
@@ -205,6 +237,7 @@ pub fn import(
             rows: rows.clone(),
             clean: true,
             integrity: Some(integrity.clone()),
+            seed: seed.clone(),
         };
         run::write_json_once(&complete_path, &complete).map_err(StoreError::io(&complete_path))?;
     }
@@ -214,7 +247,116 @@ pub fn import(
         done_before: false,
         rows,
         integrity,
+        seed,
     })
+}
+
+/// The seed's lines to feed before the archive's, what became of it, and the scales the archive
+/// and the seed need (the seed's book must convert exactly too, though a day's own records
+/// nearly always need as many decimals already).
+fn seeded(
+    path: Option<&Path>,
+    name: &ArchiveName,
+    scan: &Scan,
+) -> (Vec<String>, Option<Seed>, Scales) {
+    let found = scan.scales();
+    match path.map(|path| read_seed(path, name, scan.integrity())) {
+        None => (Vec::new(), None, found),
+        Some(Ok((lines, needs))) => {
+            let scales = Scales {
+                price_decimals: found.price_decimals.max(needs.price_decimals),
+                qty_decimals: found.qty_decimals.max(needs.qty_decimals),
+            };
+            let used = Seed {
+                used: true,
+                why: None,
+            };
+            (lines, Some(used), scales)
+        }
+        Some(Err(why)) => {
+            let unused = Seed {
+                used: false,
+                why: Some(why),
+            };
+            (Vec::new(), Some(unused), found)
+        }
+    }
+}
+
+/// The seed's lines and the scales its prices and quantities need, or why it cannot seed the
+/// day whose archive the pre-scan found `day` in (module notes).
+fn read_seed(
+    path: &Path,
+    name: &ArchiveName,
+    day: &Integrity,
+) -> Result<(Vec<String>, Scales), String> {
+    if name.format != ArchiveFormat::BybitOrderbook {
+        return Err("only an order book is seeded".to_owned());
+    }
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut scan = Scan::new(name.format);
+    for (index, line) in lines.iter().enumerate() {
+        name.scan(&mut scan, line, false)
+            .map_err(|why| format!("line {}: {why}", index + 1))?;
+        if index == 0 && scan.integrity().snapshots != Some(1) {
+            return Err("it does not open with a whole book".to_owned());
+        }
+    }
+    let seed = scan.integrity();
+    if seed.first_ts_ns.is_none_or(|ts| ts >= name.day.start_ns()) {
+        return Err("it holds no book from before the day".to_owned());
+    }
+    let next = seed.last_id.and_then(|u| u.checked_add(1));
+    if next != day.first_id {
+        return Err(format!(
+            "it does not chain: its last u is {}, the day's first record's u is {}",
+            seed.last_id.unwrap_or_default(),
+            day.first_id.unwrap_or_default()
+        ));
+    }
+    Ok((lines, scan.scales()))
+}
+
+/// Writes the closing book's lines to the run's [`CLOSE`], replacing one a crashed import left.
+fn write_close(run_dir: &Path, lines: &[String]) -> Result<PathBuf, ImportError> {
+    let path = run_dir.join(CLOSE);
+    let temp = run_dir.join(format!("{CLOSE}.tmp"));
+    let mut text = lines.join("\n");
+    text.push('\n');
+    fs::write(&temp, text).map_err(StoreError::io(&temp))?;
+    fs::rename(&temp, &path).map_err(StoreError::io(&path))?;
+    Ok(path)
+}
+
+/// The symbol's whole book in `feed` as a Bybit snapshot message stamped `time_ns`, the first
+/// line of a [`CLOSE`]; none while the book is not synced.
+fn closing_book(feed: &Feed, name: &ArchiveName, time_ns: i64) -> Option<String> {
+    let sync = feed.sync(&name.symbol)?;
+    let (book, u) = (sync.book()?, sync.last_id()?);
+    let scales = feed.scales(&name.symbol)?;
+    let side = |levels: &mut dyn Iterator<Item = Level>| -> Vec<[String; 2]> {
+        levels
+            .map(|level| {
+                [
+                    format_units(level.price, scales.price_decimals),
+                    format_units(level.qty, scales.qty_decimals),
+                ]
+            })
+            .collect()
+    };
+    let stream = name.streams().into_iter().next().unwrap_or_default();
+    let message = serde_json::json!({
+        "topic": format!("{stream}.{}", name.symbol),
+        "type": "snapshot",
+        "ts": time_ns.div_euclid(1_000_000),
+        "data": {"s": name.symbol, "b": side(&mut book.bids()), "a": side(&mut book.asks()), "u": u},
+    });
+    Some(message.to_string())
 }
 
 /// The manifest of a new archive run: one venue and symbol at the scales the file needs, on the
@@ -311,6 +453,7 @@ fn done_before(
         done_before: true,
         rows: complete.rows,
         integrity: complete.integrity.unwrap_or_default(),
+        seed: complete.seed,
     }))
 }
 
@@ -343,14 +486,17 @@ fn same_run(
     Ok(())
 }
 
-/// The second pass: the run's Meta at seq 0, then a frame per record, through rotate's ingest
-/// into the tables. Returns the files written, the last seq, and what the pipeline made of it.
+/// The second pass: the run's Meta at seq 0, then a frame per line of the seed and per record,
+/// through rotate's ingest into the tables, and an order book's closing book into [`CLOSE`]
+/// (module notes; none while the book is not synced). Returns the files written, the last seq,
+/// and what the pipeline made of it.
 fn ingest(
     archive: &Path,
     name: &ArchiveName,
     run_dir: &Path,
     manifest: &Manifest,
     tables: &[String],
+    seed: &[String],
     on_event: &mut impl FnMut(LiveEvent<'_>),
 ) -> Result<(Vec<PathBuf>, u64, Integrity), ImportError> {
     let params = &manifest.params;
@@ -359,6 +505,11 @@ fn ingest(
     let mut skipped = 0;
     let mut out = Tables::open(run_dir, 0, ingest.levels(), &enabled, &mut skipped)?;
     let mut seq = 0;
+    let closes = name.format == ArchiveFormat::BybitOrderbook;
+    let day_end = name.day.start_ns().saturating_add(DAY_NS);
+    // The closing book once a record reaches the day's end, then the records from that one on.
+    let mut close: Option<(Option<String>, Vec<String>)> = None;
+    let mut last_ns = None;
     let fed = (|| -> Result<(), ImportError> {
         let meta = Meta::for_run(manifest);
         let meta = Frame {
@@ -370,20 +521,48 @@ fn ingest(
                 .map_err(|error| ImportError::bad(archive, error.to_string()))?,
         };
         ingest.frame(&meta, &mut out, &mut *on_event)?;
+        let mut push = |ingest: &mut Ingest, out: &mut Tables, record: ArchiveFrame, at: i64| {
+            seq += 1;
+            let frame = Frame {
+                seq,
+                kind: record.kind,
+                source_ts_ns: record.time_ns,
+                capture_ts_ns: at,
+                payload: record.payload,
+            };
+            ingest.frame(&frame, out, &mut *on_event)
+        };
+        // The seed's book stands until the record after it, so it is taken in just before
+        // midnight: the grid starts at the day's first instant, not at instants of the day before.
+        let day_start = name.day.start_ns();
+        for (index, line) in seed.iter().enumerate() {
+            let number = index + 1;
+            let record = name
+                .frame(line)
+                .map_err(|why| ImportError::bad(archive, format!("seed line {number}: {why}")))?;
+            if let Some(record) = record {
+                let at = record.time_ns.max(day_start - 1);
+                push(&mut ingest, &mut out, record, at)?;
+            }
+        }
         each_line(archive, name, &mut |number, line| {
-            let frame = name
+            let record = name
                 .frame(line)
                 .map_err(|why| ImportError::bad(archive, format!("line {number}: {why}")))?;
-            if let Some(frame) = frame {
-                seq += 1;
-                let frame = Frame {
-                    seq,
-                    kind: frame.kind,
-                    source_ts_ns: frame.time_ns,
-                    capture_ts_ns: frame.time_ns,
-                    payload: frame.payload,
-                };
-                ingest.frame(&frame, &mut out, &mut *on_event)?;
+            if let Some(record) = record {
+                if closes && close.is_none() && record.time_ns >= day_end {
+                    let book = ingest
+                        .feed()
+                        .zip(last_ns)
+                        .and_then(|(feed, ts)| closing_book(feed, name, ts));
+                    close = Some((book, Vec::new()));
+                }
+                if let Some((_, tail)) = close.as_mut() {
+                    tail.push(line.to_owned());
+                }
+                last_ns = Some(record.time_ns);
+                let at = record.time_ns;
+                push(&mut ingest, &mut out, record, at)?;
             }
             Ok(())
         })
@@ -392,8 +571,20 @@ fn ingest(
         out.abandon();
         return Err(error);
     }
+    let close = match close {
+        Some((book, tail)) => book.map(|book| [vec![book], tail].concat()),
+        None if closes => ingest
+            .feed()
+            .zip(last_ns)
+            .and_then(|(feed, ts)| closing_book(feed, name, ts))
+            .map(|book| vec![book]),
+        None => None,
+    };
     let mut written = Vec::new();
     out.finish(&mut written)?;
+    if let Some(close) = close {
+        written.push(write_close(run_dir, &close)?);
+    }
     let unsynced_samples = ingest.unsynced;
     let (replayed, skipped_samples) = ingest.finish()?;
     let stats = replayed.pipeline.feed().stats();
@@ -575,6 +766,198 @@ mod tests {
             tables(&name, Some(&["agg_trades".to_owned()])),
             Err(ImportError::UnknownTable(_))
         ));
+        Ok(())
+    }
+
+    /// A scratch folder of its own for each test.
+    fn scratch(test: &str) -> Result<PathBuf, ImportError> {
+        let dir = std::env::temp_dir().join(format!("tp-import-{test}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).map_err(StoreError::io(&dir))?;
+        Ok(dir)
+    }
+
+    /// A Bybit book message of BTCUSDT at `ms`, one level a side (empty for none).
+    fn message(kind: &str, ms: i64, u: u64, bid: &str, ask: &str) -> String {
+        let side = |level: &str| match level.split_once('/') {
+            Some((px, qty)) => format!(r#"[["{px}","{qty}"]]"#),
+            None => "[]".to_owned(),
+        };
+        format!(
+            r#"{{"topic":"orderbook.200.BTCUSDT","type":"{kind}","ts":{ms},"data":{{"s":"BTCUSDT","b":{},"a":{},"u":{u},"seq":1}}}}"#,
+            side(bid),
+            side(ask)
+        )
+    }
+
+    /// Writes Bybit's archive of `day` holding `lines`, and returns its path.
+    fn archive_of(dir: &Path, day: &str, lines: &[String]) -> Result<PathBuf, ImportError> {
+        use std::io::Write as _;
+        let name = format!("{day}_BTCUSDT_ob200.data.zip");
+        let path = dir.join(&name);
+        let file = File::create(&path).map_err(StoreError::io(&path))?;
+        let mut zip = zip::ZipWriter::new(file);
+        let bad = |error: &dyn std::fmt::Display| ImportError::bad(&path, error.to_string());
+        zip.start_file(
+            name.trim_end_matches(".zip"),
+            zip::write::SimpleFileOptions::default(),
+        )
+        .map_err(|e| bad(&e))?;
+        for line in lines {
+            zip.write_all(format!("{line}\r\n").as_bytes())
+                .map_err(|e| bad(&e))?;
+        }
+        zip.finish().map_err(|e| bad(&e))?;
+        Ok(path)
+    }
+
+    /// The `sample_ts_ns` and `ask_px_0` of a run's book samples.
+    fn samples(run_dir: &Path) -> Result<Vec<(i64, Option<i64>)>, ImportError> {
+        use arrow::array::{Array, Int64Array};
+        let path = table_file(run_dir, "book_samples");
+        let file = File::open(&path).map_err(StoreError::io(&path))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .and_then(ParquetRecordBatchReaderBuilder::build)
+            .map_err(StoreError::from)?;
+        let mut rows = Vec::new();
+        for batch in reader {
+            let batch = batch.map_err(|e| ImportError::bad(&path, e.to_string()))?;
+            let column = |name: &str| {
+                batch
+                    .column_by_name(name)
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                    .cloned()
+                    .ok_or_else(|| ImportError::bad(&path, format!("no {name}")))
+            };
+            let (ts, ask) = (column("sample_ts_ns")?, column("ask_px_0")?);
+            rows.extend(
+                (0..ts.len()).map(|i| (ts.value(i), ask.is_valid(i).then(|| ask.value(i)))),
+            );
+        }
+        Ok(rows)
+    }
+
+    #[test]
+    fn a_day_seeded_with_the_day_befores_closing_book_is_sampled_from_midnight()
+    -> Result<(), ImportError> {
+        let dir = scratch("seeded")?;
+        let midnight = 1_792_454_400_000; // 2026-10-20, in ms
+        let day_before = [
+            message("snapshot", midnight - 86_399_500, 10, "100.0/1", "100.5/1"),
+            message("delta", midnight - 200, 11, "100.1/2", ""),
+            // Stamped past its day's end, as Bybit's files have a few: the closing book's tail.
+            message("delta", midnight + 50, 12, "", "100.4/3"),
+        ];
+        let day = [
+            message("snapshot", midnight + 1_450, 13, "101.0/1", "101.5/1"),
+            message("delta", midnight + 1_550, 14, "101.1/1", ""),
+        ];
+        let config = |seed: Option<PathBuf>| ImportConfig {
+            data_dir: dir.join("data"),
+            url: None,
+            tables: None,
+            seed,
+        };
+        let before = import(
+            &archive_of(&dir, "2026-10-19", &day_before)?,
+            &config(None),
+            &mut |_| {},
+        )?;
+        assert_eq!(before.seed, None);
+        let close = before.run_dir.join(CLOSE);
+        let lines: Vec<String> = fs::read_to_string(&close)
+            .map_err(StoreError::io(&close))?
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        // The book after the last record before midnight, stamped with it, then the tail as is.
+        let book: serde_json::Value =
+            serde_json::from_str(&lines[0]).map_err(|e| ImportError::bad(&close, e.to_string()))?;
+        assert_eq!(book["type"], "snapshot");
+        assert_eq!(book["ts"], midnight - 200);
+        assert_eq!(book["data"]["u"], 11);
+        assert_eq!(
+            book["data"]["b"],
+            serde_json::json!([["100.1", "2"], ["100.0", "1"]])
+        );
+        assert_eq!(book["data"]["a"], serde_json::json!([["100.5", "1"]]));
+        assert_eq!(lines[1..], day_before[2..]);
+
+        let ns = |ms: i64| ms * 1_000_000;
+        let archive = archive_of(&dir, "2026-10-20", &day)?;
+        let seeded = import(&archive, &config(Some(close.clone())), &mut |_| {})?;
+        assert_eq!(seeded.seed.as_ref().map(|s| s.used), Some(true));
+        let rows = samples(&seeded.run_dir)?;
+        // Midnight's sample is the closing book; the tail's record moves the ask at 0.05 s.
+        assert_eq!(rows[0], (ns(midnight), Some(1005)));
+        assert_eq!(rows[1], (ns(midnight + 100), Some(1004)));
+        assert_eq!(rows[14], (ns(midnight + 1_400), Some(1004)));
+        assert_eq!(rows[15], (ns(midnight + 1_500), Some(1015)));
+        assert_eq!(rows.len(), 16);
+
+        // Unseeded, the day's samples start after its first record, as before.
+        fs::remove_dir_all(&seeded.run_dir).map_err(StoreError::io(&seeded.run_dir))?;
+        let unseeded = import(&archive, &config(None), &mut |_| {})?;
+        assert_eq!(samples(&unseeded.run_dir)?, rows[15..]);
+        fs::remove_dir_all(&dir).map_err(StoreError::io(&dir))?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_seed_that_does_not_chain_to_the_day_is_not_used() -> Result<(), ImportError> {
+        let dir = scratch("unchained")?;
+        let midnight = 1_792_454_400_000;
+        let close = dir.join(CLOSE);
+        let seed = |lines: &[String]| write_close(&dir, lines);
+        let day = [message(
+            "snapshot",
+            midnight + 1_450,
+            13,
+            "101.0/1",
+            "101.5/1",
+        )];
+        let config = ImportConfig {
+            data_dir: dir.join("data"),
+            url: None,
+            tables: None,
+            seed: Some(close.clone()),
+        };
+        // A u lost between the closing book and the day's first record: the import goes on
+        // unseeded, saying why, and samples nothing from the stale book.
+        seed(&[message(
+            "snapshot",
+            midnight - 200,
+            11,
+            "100.0/1",
+            "100.5/1",
+        )])?;
+        let archive = archive_of(&dir, "2026-10-20", &day)?;
+        let imported = import(&archive, &config, &mut |_| {})?;
+        let why = imported.seed.and_then(|seed| seed.why).unwrap_or_default();
+        assert!(why.contains("does not chain"), "{why}");
+        let complete: Complete = run::read_json(&imported.run_dir.join(COMPLETE))
+            .map_err(StoreError::io(&imported.run_dir))?;
+        assert_eq!(complete.seed.map(|s| s.used), Some(false));
+        assert_eq!(samples(&imported.run_dir)?, vec![]);
+
+        let name = archive_name(&archive)?;
+        let first = Integrity {
+            first_id: Some(13),
+            ..Integrity::default()
+        };
+        let refused = |lines: &[String]| -> Result<String, ImportError> {
+            seed(lines)?;
+            Ok(read_seed(&close, &name, &first).err().unwrap_or_default())
+        };
+        let chained = message("snapshot", midnight - 200, 12, "100.0/1", "100.5/1");
+        assert_eq!(refused(std::slice::from_ref(&chained))?, "");
+        let delta = message("delta", midnight - 200, 12, "100.0/1", "");
+        assert!(refused(&[delta])?.contains("whole book"));
+        let late = message("snapshot", midnight, 12, "100.0/1", "100.5/1");
+        assert!(refused(&[late])?.contains("before the day"));
+        let eth = chained.replace(r#""s":"BTCUSDT""#, r#""s":"ETHUSDT""#);
+        assert!(refused(&[eth])?.contains("ETHUSDT"));
+        fs::remove_dir_all(&dir).map_err(StoreError::io(&dir))?;
         Ok(())
     }
 
