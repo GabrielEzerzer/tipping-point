@@ -137,6 +137,9 @@ def pin(run_dir: Path) -> dict[str, Any]:
     expected = json.loads(json.dumps(m4_pilot.config(asset, SIZE, STEPS, seed).to_json()))
     if cfg != expected:
         raise ValueError(f"not a primary's config (size {SIZE}, {STEPS} steps)")
+    # shortcut: verify checks the seal, not that the weights belong to this slot's seed, so a
+    # copy relabelled to another asset and seed and resealed would pass; refuse shared
+    # trained_sha256 across pins when runs are ever moved between folders by hand
     problems = train.verify(run_dir)
     if problems:
         raise ValueError("; ".join(problems))
