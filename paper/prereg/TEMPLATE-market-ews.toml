@@ -23,8 +23,8 @@
 # pipelines its own (window 60, length 240, no detrend); its horizon 5 was added in M5, so the
 # floor reports are rerun before the freeze.
 #
-# Not in this file yet: the same-input tier (Bybit book features as classic series, research
-# pass 6.4 item 2), which comes with its own keys before the freeze.
+# The same-input tier (research pass 6.4 item 2, owner's call 8) is set as the owner decided it: the
+# Bybit book features' 1-minute aggregates scored like the returns, descriptively.
 
 id = "<lowercase-slug>"
 version = 1
@@ -133,6 +133,24 @@ far_per_day = "<false alarms per day, set before the freeze>"
 [trials]
 budget = 32              # 2 indicators x 4 horizons x (pooled + 2 assets + eth-only)
 counted = "One trial per AUC evaluation of an (indicator, horizon, reporting group) cell; every scoring run appends its cells to ews/trials.jsonl in the data dir. The raw-series, onset-hour and cascade stress-test AUCs are descriptive, read by no hypothesis, and not counted."
+
+# The same-input tier (ews.same_input): variance and AC1 of 1-minute aggregates of the Bybit book
+# features themselves, through the price series' pipelines, on the same event and control segments
+# cut by the same rule, so that a latent win (market-latent) cannot be put down to the book holding
+# information Binance's price series lacks. Mid return is `ret` (the sum of the second's 100 ms log
+# mid returns), so its minute sum is the minute's log mid return.
+[same_input]
+series = "Bybit USDT perpetual order books, the 1-second features of tipping_point.book.features in the bybit-book range folders, each aggregated over the 60 seconds of a UTC minute as `aggregation` says (sum adds them, mean averages them); the minute's value is known when it closes"
+features = ["ret", "imb_5", "ofi", "depth_5"]
+aggregation = { ret = "sum", imb_5 = "mean", ofi = "sum", depth_5 = "mean" }
+missing = "a minute with any gapped or missing second has no value, as jepa.days rules (a symbol-day with no feature file has none), and nor has a minute with no return; a segment holding such a minute is excluded for every feature and indicator of the tier and counted, and the returns are also reported on the tier's segments"
+indicators = ["variance", "ac"]
+window = 60
+length = 240
+detrend = "none"
+seasonality = "each feature is deseasonalised as the returns are: [seasonality]'s method, with a slot profile fitted per feature and symbol over [seasonality]'s fit span"
+counted = false
+descriptive = "A comparator with no hypothesis: its AUCs are reported beside the price series' per feature, indicator, horizon and reporting group, read by no decision rule, and count no trial."
 
 [disclosure]
 exploratory = "<what was seen before the freeze, and when>"

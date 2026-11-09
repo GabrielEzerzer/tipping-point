@@ -143,9 +143,10 @@ def test_assembly_refuses_missing_duplicate_and_foreign_days(
         assert any("hex digits" in p for p in book_assemble.plan(training, out, prefix).problems)
     escape = _range(tmp_path / "f3", "training", ("BTCUSDT",), [date(2023, 1, 18)], path="../x")
     assert any("not features/" in p for p in book_assemble.plan([escape], out, "fcd5b6f").problems)
-    dirty = _range(tmp_path / "f2", "training", ("BTCUSDT",), [date(2023, 1, 18)], format=2)
+    old = book_assemble.FORMAT - 1
+    dirty = _range(tmp_path / "f2", "training", ("BTCUSDT",), [date(2023, 1, 18)], format=old)
     assert any(
-        "feature format 2" in p for p in book_assemble.plan([dirty], out, "fcd5b6f").problems
+        f"feature format {old}" in p for p in book_assemble.plan([dirty], out, "fcd5b6f").problems
     )
     (training[1] / "features" / "ETHUSDT" / "2023-01-19.parquet").write_bytes(b"changed")
     bad = book_assemble.plan(training, out, "fcd5b6f")
