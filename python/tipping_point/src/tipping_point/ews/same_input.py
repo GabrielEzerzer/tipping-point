@@ -66,7 +66,7 @@ def aggregate(table: pa.Table, aggregation: Mapping[str, str]) -> dict[str, np.n
                 f"{feature}: aggregation must be one of {prereg.AGGREGATIONS}: {how!r}"
             )
         x = table[feature].to_numpy(zero_copy_only=False).astype(np.float64).reshape(MINUTES, 60)
-        if not np.isfinite(x[valid]).all():  # jepa.days refuses such a day
+        if not np.isfinite(x[~gap]).all():  # every non-gap second, as jepa.days refuses such a day
             raise SegmentError(f"{feature} is not finite outside gap seconds")
         value = x.sum(axis=1) if how == "sum" else x.mean(axis=1)
         out[feature] = np.where(valid, value, np.nan)

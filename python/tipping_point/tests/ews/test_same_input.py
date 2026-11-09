@@ -81,6 +81,19 @@ def test_a_value_not_finite_outside_gap_seconds_is_refused() -> None:
         same_input.aggregate(table, AGG)
 
 
+def test_a_value_not_finite_beside_a_gap_second_is_refused_too() -> None:
+    """The check covers every non-gap second, not only minutes with no gap (the reviewer's case)."""
+    table = _day()
+    gap = table["gap"].to_numpy().copy()
+    gap[10 * 60] = True  # minute 10 has a gapped second 0 ...
+    ofi = table["ofi"].to_numpy().copy()
+    ofi[10 * 60 + 3] = np.inf  # ... and a corrupt value in its second 3
+    table = table.set_column(table.schema.get_field_index("gap"), "gap", pa.array(gap))
+    table = table.set_column(table.schema.get_field_index("ofi"), "ofi", pa.array(ofi))
+    with pytest.raises(ms.SegmentError, match="ofi is not finite outside gap seconds"):
+        same_input.aggregate(table, AGG)
+
+
 def test_a_gapped_minute_and_a_missing_day_have_no_value(tmp_path: Path) -> None:
     """Over three days with the middle one's file absent: that day has no value in any minute and
     is listed, and the gapped minutes of the others have none either; the segment builder then
