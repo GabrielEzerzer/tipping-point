@@ -62,7 +62,9 @@ whole integrity record, whether or not the samples are kept.
 A day already imported is skipped when it was imported with the same `reduce` command, the file
 its `reduced` record names (if any) is present with the reducer's current format, if this run
 keeps samples, its Parquet is present and, if no closing book was given for it, the day before
-still has none (a day before that failed or was missing may have one since). A day that fails
+still has none (a day before that failed or was missing may have one since), fetching the day
+before for its book did not fail (a 404 is not a failure) and, if this run keeps samples, the day
+was imported since #170 (its entry has a `seed`). A day that fails
 (network, a size or MD5 mismatch, the engine or the reducer refusing it, a file the system will
 not let go, a malformed record) is recorded with why and the range goes on; the next run tries it
 again, as it does a day the archive does not have (404, `missing`). The manifest is rewritten
@@ -304,7 +306,9 @@ def _done(
     """Whether a day recorded before needs nothing: imported with the same reducer at the format
     the reducer now reports, with the file it reported still there, when this run keeps samples
     its Parquet still there and, when no closing book was given for it, still none at `before`
-    (the day before's, _state): one the engine refused stays refused."""
+    (the day before's, _state), the day before not failed when fetched for it and, when this run
+    keeps samples, a seed recorded (an entry from before #170 has none): one the engine refused
+    stays refused, as does a day before the archive does not have (404)."""
     kept = entry.get("parquet") and (where / entry["parquet"]).is_file()
     reduced = entry.get("reduced")
     named = reduced.get("path") if isinstance(reduced, dict) else None
@@ -312,8 +316,14 @@ def _done(
     if version and "format" in version and isinstance(reduced, dict):
         output = output and reduced.get("format") == version["format"]
     same = entry["status"] == "imported" and entry.get("reduce") == reduce
-    unseeded = not (entry.get("seed") or {}).get("state")  # an entry from before #170 too
-    return same and output and (kept or not keep) and not (unseeded and before.is_file())
+    seed = entry.get("seed") or {}
+    unseeded = not seed.get("state")  # an entry from before #170 too
+    # A closing book may be had now: the day before has one, its fetch failed (not a 404), or the
+    # entry is from before #170 and its kept samples were imported unseeded. The re-import records
+    # a seed, so a day before #170 is redone once.
+    redo = before.is_file() or "(failed: " in seed.get("why", "")
+    redo = redo or (keep and "seed" not in entry)
+    return same and output and (kept or not keep) and not (unseeded and redo)
 
 
 def _day(
