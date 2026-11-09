@@ -18,13 +18,15 @@
 //! import has no book for the day's first instants. Every order-book import therefore leaves the
 //! day's closing book in its run, [`CLOSE`]: a snapshot message of the whole book as it stood
 //! after the last record stamped before the day's end, then, verbatim, every record from the
-//! first one stamped at or after the end (a file holds a few past its end, the next file's
-//! records run on from them). Given to the next day's import as its seed, those lines go
-//! through the pipeline before the archive's, so the instants from midnight to the day's own
-//! first record are sampled as one import of both files would sample them. A seed is used only
-//! when it is this symbol's book, opens with a whole book stamped before the day, and its last
-//! `u` is the one right before the day's first record's; otherwise the day is imported unseeded,
-//! and `complete.json` says why (`seed`).
+//! first one stamped at or after the end. A file holds a second or so past its end, and ends
+//! with the very snapshot the next file opens with (2023-06-14 BTCUSDT: deltas to u 49365365 at
+//! 00:00:01.447, then the snapshot of u 49365365 at 01.451 that opens 2023-06-15). Given to the
+//! next day's import as its seed, those lines go through the pipeline before the archive's, so
+//! the instants from midnight to the day's own first record are sampled as one import of both
+//! files would sample them. A seed is used only when it is this symbol's book, opens with a whole
+//! book stamped before the day, and the day's first record's `u` is its last `u` (that same
+//! message again) or the next one; otherwise the day is imported unseeded, and `complete.json`
+//! says why (`seed`), so no instant is sampled from a book that missed an update.
 //!
 //! Safe to re-run: an import of a run that is complete changes nothing, a crashed one is finished
 //! (its temp files deleted, the tables it had written kept), and an archive other than the one a
@@ -311,8 +313,10 @@ fn read_seed(
     if seed.first_ts_ns.is_none_or(|ts| ts >= name.day.start_ns()) {
         return Err("it holds no book from before the day".to_owned());
     }
+    // The day's first record repeats the seed's last (the file's overlap) or follows it. A
+    // repeated delta would drop the book in the sync rule, never apply twice.
     let next = seed.last_id.and_then(|u| u.checked_add(1));
-    if next != day.first_id {
+    if day.first_id.is_none() || (day.first_id != seed.last_id && day.first_id != next) {
         return Err(format!(
             "it does not chain: its last u is {}, the day's first record's u is {}",
             seed.last_id.unwrap_or_default(),
@@ -951,6 +955,11 @@ mod tests {
         };
         let chained = message("snapshot", midnight - 200, 12, "100.0/1", "100.5/1");
         assert_eq!(refused(std::slice::from_ref(&chained))?, "");
+        // A seed ending with the very message the day opens with, as Bybit's files overlap.
+        let overlap = message("snapshot", midnight + 1_450, 13, "101.0/1", "101.5/1");
+        assert_eq!(refused(&[chained.clone(), overlap])?, "");
+        let behind = message("snapshot", midnight - 200, 11, "100.0/1", "100.5/1");
+        assert!(refused(&[behind])?.contains("does not chain"));
         let delta = message("delta", midnight - 200, 12, "100.0/1", "");
         assert!(refused(&[delta])?.contains("whole book"));
         let late = message("snapshot", midnight, 12, "100.0/1", "100.5/1");

@@ -34,9 +34,9 @@ span, or of the range), the predecessor is fetched and imported first for its cl
 its samples are not reduced and it is not recorded as a day of the range, so a run of one symbol's
 days in order needs nothing more. The day's `seed` says which closing book seeded it (`state`) and
 whether the engine used it (`used`); when not, `why` says why (no closing book for the day before,
-or one whose last update id does not run on to the day's first record, which the engine refuses
-rather than sample a stale book), and the day is imported unseeded, its first second or two then
-a gap as before.
+or one whose last update id is neither the day's first record's nor the one before it, which the
+engine refuses rather than sample a stale book), and the day is imported unseeded, its first
+second or two then a gap as before.
 
 The reducer. When its last line of output is a JSON object, the manifest keeps it as the day's
 `reduced` (tipping_point.book prints its feature file's path, relative to the range folder, its
