@@ -45,8 +45,9 @@ use super::run::{self, BookSample, MANIFEST, Manifest};
 use super::samples::{Sample, SampleRows, Sampler};
 use super::segment::{self, Ending, LOG_DIR, SegmentReader};
 use super::{StoreError, ms_to_ns};
+use crate::market::feed::Feed;
 use crate::market::live::LiveEvent;
-use crate::market::pipeline::{Replayed, SnapshotPayload};
+use crate::market::pipeline::{Pipeline, Replayed, SnapshotPayload};
 use crate::market::sync::{DepthUpdate, Level, Snapshot};
 use crate::market::{Scales, Symbol};
 use crate::venue::{Depth, MessageError, Parsed, RawDepth, RawTrade, Venue};
@@ -176,6 +177,11 @@ impl Ingest {
     /// Levels a book sample keeps per side.
     pub(super) fn levels(&self) -> usize {
         self.sampler.levels()
+    }
+
+    /// The feed as the frames so far left it, once the Meta has built it.
+    pub(super) fn feed(&self) -> Option<&Feed> {
+        self.replay.pipeline().map(Pipeline::feed)
     }
 
     /// Takes the next frame.

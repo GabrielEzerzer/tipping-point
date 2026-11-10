@@ -447,7 +447,7 @@ class Response:
         pass
 
 
-def _copy_importer(archive: Path, url: str, data_dir: Path) -> Path:
+def _copy_importer(archive: Path, url: str, data_dir: Path, seed: Path | None) -> Path:
     """Stands in for `store import`: the committed run (samples, manifest, complete.json) that
     `store import` made of the same zip."""
     run = data_dir / "market" / RUN.name
@@ -468,6 +468,7 @@ def _wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, importer: Any) -> di
     argv = ["book", "--range", "training", "--symbols", "BTCUSDT", "--store", str(store)]
     assert market_main([*argv, "--out", str(out), "--reduce", reduce]) == 0
     kept = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    kept = [k for k in kept if not k.startswith("training/state/")]  # closing books (book.py)
     assert kept == ["training/features/BTCUSDT/2026-10-20.parquet", "training/manifest.json"]
     entry = json.loads((out / "training/manifest.json").read_text())["days"]["BTCUSDT/2026-10-20"]
     feature_file = out / "training" / entry["reduced"]["path"]
@@ -479,7 +480,9 @@ def _wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, importer: Any) -> di
     assert len(archive.opened) == opened
     feature_file.unlink()
     assert market_main([*argv, "--out", str(out), "--reduce", reduce]) == 0
-    assert len(archive.opened) == opened + 1 and feature_file.is_file()
+    # The day, and the day before for its closing book again: the archive serves 2026-10-20's
+    # zip at every URL, which no import takes as 2026-10-19's, so it never gave one.
+    assert len(archive.opened) == opened + 2 and feature_file.is_file()
     return entry
 
 
@@ -553,6 +556,12 @@ def test_the_tick_is_measured_from_each_samples_book() -> None:
 # FORMAT.
 DIGESTS = {
     3: (
+        "5a2ba3e6016ecdf779be1d46201f96c48e22c78b79c1201f38c379b8a6c811a9",
+        "7a33a6b2a4f4dda344b35c13d50e1c0b14911b0a3f499381ce2be85bb995c57e",
+        "0cb13c4858456a3163588588ceee97b6191cf24913f197289a3b1704fb50db67",
+    ),
+    # The same reduction: 4 changed what the engine samples (second 0 seeded, #170), not this.
+    4: (
         "5a2ba3e6016ecdf779be1d46201f96c48e22c78b79c1201f38c379b8a6c811a9",
         "7a33a6b2a4f4dda344b35c13d50e1c0b14911b0a3f499381ce2be85bb995c57e",
         "0cb13c4858456a3163588588ceee97b6191cf24913f197289a3b1704fb50db67",

@@ -54,6 +54,7 @@ fn config(data_dir: &Path, tables: Option<&[&str]>) -> ImportConfig {
         data_dir: data_dir.to_owned(),
         url: None,
         tables: tables.map(|tables| tables.iter().map(|&t| t.to_owned()).collect()),
+        seed: None,
     }
 }
 
