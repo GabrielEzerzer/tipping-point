@@ -34,6 +34,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 include = ["python", "harness", "notebooks"]
 exclude = ["**/.venv", "harness/out", "harness/tests/fixtures"]
 pythonVersion = "3.13"
+pythonPlatform = "Windows"
 typeCheckingMode = "standard"
 extraPaths = ["harness", "python/tipping_point/tests/fixtures"]
 

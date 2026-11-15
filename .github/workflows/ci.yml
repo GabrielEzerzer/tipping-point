@@ -42,6 +42,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
       - name: Python environment
         run: uv sync --extra cpu --locked
       - name: Ruff
@@ -58,8 +60,18 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      RUSTFLAGS: '-C link-arg=-Wl,-rpath,$ORIGIN:$ORIGIN/deps'
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Python environment for the engine-harness client checks
+        run: uv sync --extra cpu --locked
       - name: Rustfmt
         run: cargo fmt --all --check
       - name: Clippy

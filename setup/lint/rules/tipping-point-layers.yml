@@ -87,7 +87,7 @@ rule:
 id: tp-core-no-io
 language: Python
 severity: error
-message: "This module is pure computation (arrays and tensors in, arrays and tensors out) and imports no file, process or network code: not pathlib, io, pyarrow, subprocess, shutil, tempfile, zipfile, tarfile, socket, http, urllib or requests, and not tipping_point's engine, _git, ising.io, market.archive or market.book. Read or write in the caller, an I/O module such as ising/io.py, and pass the data in."
+message: "This module is pure computation (arrays and tensors in, arrays and tensors out), so it imports none of pathlib, io, pyarrow, subprocess, shutil, tempfile, zipfile, tarfile, socket, http, urllib or requests, nor tipping_point's engine, _git, ising.io, market.archive or market.book. Read or write in the caller or an I/O module such as ising/io.py, and pass the data in."
 files:
   - "python/tipping_point/src/tipping_point/ews/fss.py"
   - "python/tipping_point/src/tipping_point/ews/indicators.py"
@@ -176,27 +176,22 @@ rule:
         - kind: scoped_identifier
         - kind: scoped_type_identifier
       regex: '^(?:::)?std::(?:fs|io|net|process|env|thread)$'
-    - kind: identifier
-      regex: '^(?:fs|io|net|process|env|thread)$'
-      inside:
-        kind: use_list
-        inside:
-          kind: scoped_use_list
-          has:
-            field: path
-            regex: '^(?:::)?std$'
     - kind: scoped_identifier
-      regex: '^(?:fs|io|net|process|env|thread)::'
+      regex: '^::(?:tokio|futures_util|reqwest|hyper|hyper_util|axum|tower|tungstenite|tokio_tungstenite|rustls|duckdb|libduckdb_sys|arrow|parquet|zip)$'
+    - any:
+        - kind: identifier
+        - kind: scoped_identifier
+        - kind: scoped_use_list
+        - kind: use_as_clause
+      regex: '^(?:fs|io|net|process|env|thread)(?:::|\s|$)'
       inside:
-        kind: use_list
-        inside:
-          kind: scoped_use_list
-          has:
-            field: path
-            regex: '^(?:::)?std$'
-      not:
-        inside:
-          kind: scoped_identifier
+        kind: scoped_use_list
+        has:
+          field: path
+          regex: '^(?:::)?std$'
+        stopBy:
+          not:
+            kind: use_list
 ---
 id: tp-engine-no-harness
 language: Rust

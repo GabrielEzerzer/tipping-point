@@ -109,9 +109,19 @@ class RustLayers(unittest.TestCase):
         "use std::{env, fmt};",
         "pub fn f() -> u32 { std::process::id() }",
         "pub fn g() { let _ = reqwest::Client::new(); }",
+        "use std::{io::{self, Write}, fmt};",
+        "use ::tokio::sync::mpsc;",
+        "use std::{fs as files, fmt};",
         "",
     ])
-    GOOD = "use std::collections::BTreeMap;\nuse crate::venue::Venue;\npub fn f(a: &[u8], b: &[u8]) -> usize { a.iter().zip(b).count() }\n"
+    GOOD = "\n".join([
+        "use std::collections::BTreeMap;",
+        "use std::{sync::{Arc, mpsc}, fmt::{self, Write}};",
+        "use ::serde::Deserialize;",
+        "use crate::venue::Venue;",
+        "pub fn f(a: &[u8], b: &[u8]) -> usize { a.iter().zip(b).count() }",
+        "",
+    ])
 
     def test_core_modules_touch_no_io(self):
         hits = layer_hits({
@@ -119,7 +129,7 @@ class RustLayers(unittest.TestCase):
             "engine/src/store/run.rs": self.BAD,
             "engine/src/market/decimal.rs": self.GOOD,
         })
-        self.assertEqual({(f, line) for f, line, _ in hits}, {("engine/src/market/book.rs", line) for line in range(1, 7)})
+        self.assertEqual({(f, line) for f, line, _ in hits}, {("engine/src/market/book.rs", line) for line in range(1, 10)})
         self.assertEqual({rule for _, _, rule in hits}, {"tp-engine-core-no-io"})
 
     def test_engine_never_uses_the_harness(self):
