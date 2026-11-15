@@ -1,0 +1,68 @@
+# CI for this repo.
+# It runs on pushes to branches other than the default and on manual dispatch, so each push starts one run
+# and a branch has results before its PR exists.
+# Unit tests only: nothing here reads recorded data, needs a GPU or runs on Kaggle.
+# Never give this workflow production URLs, real secrets, .env.local or a service_role key.
+name: ci
+
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comment-ban lint
+        env:
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+          python3 -m venv "$RUNNER_TEMP/lint"
+          "$RUNNER_TEMP/lint/bin/pip" install --quiet ast-grep-cli==0.51.1
+          PATH="$RUNNER_TEMP/lint/bin:$PATH" python3 setup/lint/ratchet --base "origin/$BASE"
+      - name: Lint pack tests
+        run: PATH="$RUNNER_TEMP/lint/bin:$PATH" python3 -m unittest discover -s setup/lint/tests
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Python environment
+        run: uv sync --extra cpu --locked
+      - name: Ruff
+        run: |
+          uv run ruff check
+          uv run ruff format --check
+      - name: Pyright
+        run: uv run pyright
+      - name: Pytest
+        run: uv run pytest -c pyproject.toml -q
+      - name: Kaggle runner self-test
+        run: uv run --no-sync python notebooks/kaggle_ising_runs.py --self-test
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rustfmt
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Cargo test
+        run: cargo test --workspace --no-fail-fast --locked
