@@ -1,6 +1,6 @@
-"""Property tests on the EWS core: each rolling indicator against its definition on every window,
-Gaussian smoothing and Kendall's tau against scipy, AUC and the alarm threshold against brute
-force, the scaled-temperature inverse pair, the power-law fit and the phase surrogates' spectrum."""
+# Property tests on the EWS core: each rolling indicator against its definition on every window,
+# Gaussian smoothing and Kendall's tau against scipy, AUC and the alarm threshold against brute
+# force, the scaled-temperature inverse pair, the power-law fit and the phase surrogates' spectrum.
 
 import numpy as np
 import scipy.ndimage

@@ -1,5 +1,5 @@
-"""Property tests on the labeller's run bounds and hysteresis: the bounds of each run of True
-rebuild the mask they came from, and the hysteresis equals the bar-by-bar state machine."""
+# Property tests on the labeller's run bounds and hysteresis: the bounds of each run of True
+# rebuild the mask they came from, and the hysteresis equals the bar-by-bar state machine.
 
 import numpy as np
 from hypothesis import given

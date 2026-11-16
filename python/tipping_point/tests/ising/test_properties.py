@@ -1,5 +1,5 @@
-"""Property tests on the autocorrelation estimator: the FFT rho(t) of each replica, averaged over
-the replicas, equals the direct lagged sum of products over the zero-lag sum."""
+# Property tests on the autocorrelation estimator: the FFT rho(t) of each replica, averaged over
+# the replicas, equals the direct lagged sum of products over the zero-lag sum.
 
 import numpy as np
 from hypothesis import assume, given

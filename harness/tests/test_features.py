@@ -1,6 +1,6 @@
-"""features.json, the feature map: every entry point (Cargo bin, guarded package module, guarded
-script, harness/explore script) is mapped, every mapped command's target exists, an argparse
-command's --help exits 0 naming only mapped subcommands, and every mapped test file exists."""
+# features.json, the feature map: every entry point (Cargo bin, guarded package module, guarded
+# script, harness/explore script) is mapped, every mapped command's target exists, an argparse
+# command's --help exits 0 naming only mapped subcommands, and every mapped test file exists.
 
 import ast
 import json
