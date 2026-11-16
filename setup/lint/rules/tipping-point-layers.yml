@@ -1,0 +1,204 @@
+id: tp-layer-root
+language: Python
+severity: error
+message: "The root modules of tipping_point (engine, _git, _build_info, __init__) sit below every subpackage and import none of them. Move the shared code into a root module, or move this code into the subpackage that needs it. Layers, low to high: root, ising, book, market, ews, jepa; only a __main__ CLI may import a higher layer."
+files:
+  - "python/tipping_point/src/tipping_point/__init__.py"
+  - "python/tipping_point/src/tipping_point/_build_info.py"
+  - "python/tipping_point/src/tipping_point/_git.py"
+  - "python/tipping_point/src/tipping_point/engine.py"
+rule:
+  any:
+    - kind: import_from_statement
+      regex: '^from\s+(?:\.|tipping_point\.)(?:ising|book|market|ews|jepa)\b'
+    - kind: import_from_statement
+      regex: '(?s)^from\s+(?:\.|tipping_point)\s+import\b.*\b(?:ising|book|market|ews|jepa)\b'
+    - kind: import_statement
+      regex: '\btipping_point\.(?:ising|book|market|ews|jepa)\b'
+---
+id: tp-layer-ising
+language: Python
+severity: error
+message: "ising is the lowest subpackage of tipping_point and imports only the root modules (engine, _git, _build_info, __version__). Move the shared code down into ising, or move this code up into the subpackage that needs it. Layers, low to high: root, ising, book, market, ews, jepa; only a __main__ CLI may import a higher layer."
+files:
+  - "python/tipping_point/src/tipping_point/ising/**/*.py"
+ignores:
+  - "**/__main__.py"
+rule:
+  any:
+    - kind: import_from_statement
+      regex: '^from\s+(?:\.\.|tipping_point\.)(?:book|market|ews|jepa)\b'
+    - kind: import_from_statement
+      regex: '(?s)^from\s+(?:\.\.|tipping_point)\s+import\b.*\b(?:book|market|ews|jepa)\b'
+    - kind: import_statement
+      regex: '\btipping_point\.(?:book|market|ews|jepa)\b'
+---
+id: tp-layer-book
+language: Python
+severity: error
+message: "book imports only ising and the root modules. Move the shared code down into book or ising, or move this code up into the subpackage that needs it. Layers, low to high: root, ising, book, market, ews, jepa; only a __main__ CLI may import a higher layer."
+files:
+  - "python/tipping_point/src/tipping_point/book/**/*.py"
+ignores:
+  - "**/__main__.py"
+rule:
+  any:
+    - kind: import_from_statement
+      regex: '^from\s+(?:\.\.|tipping_point\.)(?:market|ews|jepa)\b'
+    - kind: import_from_statement
+      regex: '(?s)^from\s+(?:\.\.|tipping_point)\s+import\b.*\b(?:market|ews|jepa)\b'
+    - kind: import_statement
+      regex: '\btipping_point\.(?:market|ews|jepa)\b'
+---
+id: tp-layer-market
+language: Python
+severity: error
+message: "market imports only book, ising and the root modules; ews builds on market, not the other way round. Move the shared code down into market, or move this code up into ews. Layers, low to high: root, ising, book, market, ews, jepa; only a __main__ CLI may import a higher layer."
+files:
+  - "python/tipping_point/src/tipping_point/market/**/*.py"
+ignores:
+  - "**/__main__.py"
+rule:
+  any:
+    - kind: import_from_statement
+      regex: '^from\s+(?:\.\.|tipping_point\.)(?:ews|jepa)\b'
+    - kind: import_from_statement
+      regex: '(?s)^from\s+(?:\.\.|tipping_point)\s+import\b.*\b(?:ews|jepa)\b'
+    - kind: import_statement
+      regex: '\btipping_point\.(?:ews|jepa)\b'
+---
+id: tp-layer-ews
+language: Python
+severity: error
+message: "ews never imports jepa: jepa builds on ews. Move the shared code down into ews, or move this code up into jepa. Layers, low to high: root, ising, book, market, ews, jepa; only a __main__ CLI may import a higher layer."
+files:
+  - "python/tipping_point/src/tipping_point/ews/**/*.py"
+ignores:
+  - "**/__main__.py"
+rule:
+  any:
+    - kind: import_from_statement
+      regex: '^from\s+(?:\.\.|tipping_point\.)jepa\b'
+    - kind: import_from_statement
+      regex: '(?s)^from\s+(?:\.\.|tipping_point)\s+import\b.*\bjepa\b'
+    - kind: import_statement
+      regex: '\btipping_point\.jepa\b'
+---
+id: tp-core-no-io
+language: Python
+severity: error
+message: "This module is pure computation (arrays and tensors in, arrays and tensors out), so it imports none of pathlib, io, pyarrow, subprocess, shutil, tempfile, zipfile, tarfile, socket, http, urllib or requests, nor tipping_point's engine, _git, ising.io, market.archive or market.book. Read or write in the caller or an I/O module such as ising/io.py, and pass the data in."
+files:
+  - "python/tipping_point/src/tipping_point/ews/fss.py"
+  - "python/tipping_point/src/tipping_point/ews/indicators.py"
+  - "python/tipping_point/src/tipping_point/ews/scoring.py"
+  - "python/tipping_point/src/tipping_point/ews/surrogates.py"
+  - "python/tipping_point/src/tipping_point/ews/trend.py"
+  - "python/tipping_point/src/tipping_point/ising/autocorr.py"
+  - "python/tipping_point/src/tipping_point/ising/exact.py"
+  - "python/tipping_point/src/tipping_point/ising/kernel.py"
+  - "python/tipping_point/src/tipping_point/ising/protocol.py"
+  - "python/tipping_point/src/tipping_point/jepa/lattice.py"
+  - "python/tipping_point/src/tipping_point/jepa/monitor.py"
+  - "python/tipping_point/src/tipping_point/jepa/objective.py"
+  - "python/tipping_point/src/tipping_point/jepa/readout.py"
+  - "python/tipping_point/src/tipping_point/market/bars.py"
+rule:
+  any:
+    - kind: import_statement
+      regex: '^import\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*(?:pathlib|io|pyarrow|subprocess|shutil|tempfile|zipfile|tarfile|socket|http|urllib|requests|tipping_point\.(?:engine|_git|ising\.io|market\.(?:archive|book)))\b'
+    - kind: import_from_statement
+      regex: '^from\s+(?:pathlib|io|pyarrow|subprocess|shutil|tempfile|zipfile|tarfile|socket|http|urllib|requests)\b'
+    - kind: import_from_statement
+      regex: '^from\s+(?:tipping_point\.|\.\.?)(?:engine|_git)\b'
+    - kind: import_from_statement
+      regex: '(?s)^from\s+(?:tipping_point|\.\.?)\s+import\b.*\b(?:engine|_git)\b'
+    - kind: import_from_statement
+      regex: '^from\s+(?:(?:tipping_point\.|\.\.)ising\.io|\.io|(?:tipping_point\.|\.\.)market\.(?:archive|book)|\.(?:archive|book))\b'
+    - kind: import_from_statement
+      regex: '(?s)^from\s+(?:(?:tipping_point\.|\.\.)ising|\.)\s+import\b.*\bio\b'
+    - kind: import_from_statement
+      regex: '(?s)^from\s+(?:(?:tipping_point\.|\.\.)market|\.)\s+import\b.*\b(?:archive|book)\b'
+---
+id: tp-library-no-tools
+language: Python
+severity: error
+message: "The tipping_point package never imports test, harness, fixture or notebook code: pytest, hypothesis, conftest, a tests package, or a module under harness/, notebooks/ or tests/fixtures/. Move the code the package needs into tipping_point, and keep the tool importing the package."
+files:
+  - "python/tipping_point/src/**/*.py"
+rule:
+  any:
+    - kind: import_statement
+      regex: '^import\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*(?:pytest|hypothesis|conftest|tests|harness|notebooks|explore|api_client|book_assemble|ews_planted|ews_v1_figure|ews_v1_golden|gate|ising_experiment|ising_figures|jepa_golden|jepa_ising|jepa_toy|kaggle_ising_runs|kaggle_ising_runs_selftest|m4_pilot|m8_primaries|make_archive_fixtures|make_ews_golden|make_ising_fixture|market_ews_explore|market_floor|market_garch|market_planted|market_toy|strays|wheel_provenance)\b'
+    - kind: import_from_statement
+      regex: '^from\s+(?:pytest|hypothesis|conftest|tests|harness|notebooks|explore|api_client|book_assemble|ews_planted|ews_v1_figure|ews_v1_golden|gate|ising_experiment|ising_figures|jepa_golden|jepa_ising|jepa_toy|kaggle_ising_runs|kaggle_ising_runs_selftest|m4_pilot|m8_primaries|make_archive_fixtures|make_ews_golden|make_ising_fixture|market_ews_explore|market_floor|market_garch|market_planted|market_toy|strays|wheel_provenance)\b'
+---
+id: tp-engine-core-no-io
+language: Rust
+severity: error
+message: "This engine module is pure logic (books, decimals, sync, frames, venue message and archive-row parsing) and touches no file, process, thread, environment or network: not std::fs, std::io, std::net, std::process, std::env or std::thread, and not tokio, futures_util, reqwest, hyper, hyper_util, axum, tower, tungstenite, tokio_tungstenite, rustls, duckdb, libduckdb_sys, arrow, parquet or zip. Do the I/O in the caller (store, api, market::live, venue::*::live or rest) and pass values in."
+files:
+  - "engine/src/api/messages.rs"
+  - "engine/src/market/book.rs"
+  - "engine/src/market/decimal.rs"
+  - "engine/src/market/feed.rs"
+  - "engine/src/market/mod.rs"
+  - "engine/src/market/pipeline.rs"
+  - "engine/src/market/sync.rs"
+  - "engine/src/store/frame.rs"
+  - "engine/src/store/replay.rs"
+  - "engine/src/venue/archive.rs"
+  - "engine/src/venue/mod.rs"
+  - "engine/src/venue/binance/archive.rs"
+  - "engine/src/venue/binance/messages.rs"
+  - "engine/src/venue/binance/mod.rs"
+  - "engine/src/venue/binance/sync.rs"
+  - "engine/src/venue/bybit/archive.rs"
+  - "engine/src/venue/bybit/messages.rs"
+  - "engine/src/venue/bybit/mod.rs"
+  - "engine/src/venue/bybit/sync.rs"
+rule:
+  any:
+    - kind: identifier
+      regex: '^(?:tokio|futures_util|reqwest|hyper|hyper_util|axum|tower|tungstenite|tokio_tungstenite|rustls|duckdb|libduckdb_sys|arrow|parquet|zip)$'
+      inside:
+        any:
+          - kind: scoped_identifier
+          - kind: scoped_type_identifier
+          - kind: scoped_use_list
+        field: path
+    - kind: identifier
+      regex: '^(?:tokio|futures_util|reqwest|hyper|hyper_util|axum|tower|tungstenite|tokio_tungstenite|rustls|duckdb|libduckdb_sys|arrow|parquet|zip)$'
+      inside:
+        kind: use_declaration
+        field: argument
+    - any:
+        - kind: scoped_identifier
+        - kind: scoped_type_identifier
+      regex: '^(?:::)?std::(?:fs|io|net|process|env|thread)$'
+    - kind: scoped_identifier
+      regex: '^::(?:tokio|futures_util|reqwest|hyper|hyper_util|axum|tower|tungstenite|tokio_tungstenite|rustls|duckdb|libduckdb_sys|arrow|parquet|zip)$'
+    - any:
+        - kind: identifier
+        - kind: scoped_identifier
+        - kind: scoped_use_list
+        - kind: use_as_clause
+      regex: '^(?:fs|io|net|process|env|thread)(?:::|\s|$)'
+      inside:
+        kind: scoped_use_list
+        has:
+          field: path
+          regex: '^(?:::)?std$'
+        stopBy:
+          not:
+            kind: use_list
+---
+id: tp-engine-no-harness
+language: Rust
+severity: error
+message: "The engine crate never depends on engine_harness: the harness verifies the engine, and production code must build without it. Move the shared code into engine and import it from engine-harness."
+files:
+  - "engine/**/*.rs"
+rule:
+  kind: identifier
+  regex: '^engine_harness$'
