@@ -1,7 +1,8 @@
-"""features.json, the feature map: every entry point (Cargo bin, package __main__, guarded script)
-is mapped, every mapped command's module, script or binary exists, an argparse command's --help
-exits 0 naming only mapped subcommands, and every mapped test file exists."""
+"""features.json, the feature map: every entry point (Cargo bin, guarded package module, guarded
+script, harness/explore script) is mapped, every mapped command's target exists, an argparse
+command's --help exits 0 naming only mapped subcommands, and every mapped test file exists."""
 
+import ast
 import json
 import re
 import shlex
@@ -19,6 +20,7 @@ FIELDS = {"name", "description", "command", "inputs", "outputs", "test"}
 MAIN_GUARD = re.compile(r'^if __name__ == "__main__":', re.MULTILINE)
 SUBCOMMANDS = re.compile(r"^  \{([\w,-]+)\}", re.MULTILINE)
 HELP_SECONDS = 120
+EXPLORE = "harness/explore"
 
 
 def parse(command: str) -> tuple[str, str | None]:
@@ -43,11 +45,11 @@ def scripts() -> dict[str, Path]:
         path, parts = ROOT / name, Path(name).parts
         if "tests" in parts or not MAIN_GUARD.search(path.read_text(encoding="utf-8")):
             continue
-        if path.name == "__main__.py":
-            key = ".".join(parts[3:-1]) if parts[0] == "python" else Path(name).parent.as_posix()
-            found[key] = path
-        elif parts[0] != "python":
-            found[name] = path
+        if parts[0] == "python":
+            module = parts[3:-1] if path.name == "__main__.py" else (*parts[3:-1], path.stem)
+            found[".".join(module)] = path
+        else:
+            found[Path(name).parent.as_posix() if path.name == "__main__.py" else name] = path
     return found
 
 
@@ -111,6 +113,21 @@ def test_every_entry_point_is_in_the_map() -> None:
     missing = sorted((set(scripts()) | binaries()) - set(mapped()) - tests)
     assert not missing, (
         f"add these entry points to features.json, as features or internal: {missing}"
+    )
+
+
+def test_every_explore_script_is_in_the_map() -> None:
+    door = ast.parse((ROOT / EXPLORE / "__main__.py").read_text(encoding="utf-8"))
+    (listed,) = [
+        ast.literal_eval(node.value)
+        for node in door.body
+        if isinstance(node, ast.Assign) and [ast.unparse(t) for t in node.targets] == ["SCRIPTS"]
+    ]
+    want, named = set(listed), mapped().get(EXPLORE, set())
+    assert named == want, (
+        f"{EXPLORE}/__main__.py SCRIPTS and features.json differ: add "
+        f"{sorted(want - named)} to features.json, as features or internal, and remove "
+        f"{sorted(map(str, named - want))}"
     )
 
 

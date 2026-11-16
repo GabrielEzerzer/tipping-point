@@ -371,12 +371,116 @@
       "test": "python/tipping_point/tests/ising/test_provenance.py"
     },
     {
-      "name": "Exploratory pass",
-      "description": "Runs one script of the exploratory pipeline, which logs no trial and refuses the scored seeds.",
-      "command": "uv run --no-sync python harness/explore latent_pass",
-      "inputs": "a data dir with simulator runs and latents tables",
-      "outputs": "tables, JSON and markdown reports in the output folder",
+      "name": "Join a Kaggle output to the local runs",
+      "description": "Makes a data dir that links a Kaggle output's latents tables beside the local runs they were read from, refusing a table read from other bytes.",
+      "command": "uv run --no-sync python harness/explore join_pilot --output <kaggle out> --into <folder>",
+      "inputs": "the local data dir (--local) and a Kaggle output's out/ folder",
+      "outputs": "<into>/ising/<run id>/ with hard links to each run's files, its latents tables and the tau_c records",
       "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory latent pass",
+      "description": "Runs every exploratory step for one training, its trained table beside its untrained twin, at each size; logs no trial and refuses the scored seeds.",
+      "command": "uv run --no-sync python harness/explore latent_pass --training <run id> --step <step> --data-dir <folder> --out <outputs>",
+      "inputs": "a data dir with the seeds 1-5 simulator runs and the training's latents tables",
+      "outputs": "each step's JSON and report.md per table and size, and latent-report-<training>.md, under --out",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory values at Tc",
+      "description": "Computes one size's values at Tc and its equilibrium curves against eps_L from the staircases, on |m| or a latents table.",
+      "command": "uv run --no-sync python harness/explore static_tc --L 16",
+      "inputs": "the seeds 1-5 staircases and the pilot run held at Tc in the data dir; --latents <table> for a table",
+      "outputs": "static.json and static-draws.npz under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory scaling table",
+      "description": "Takes the slope of each quantity at Tc on log L over the sizes given, from static_tc's outputs.",
+      "command": "uv run --no-sync python harness/explore scaling --sizes 16 32",
+      "inputs": "static_tc's outputs at each size",
+      "outputs": "scaling.json and scaling.md under <out>/<classic or table>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory AUC",
+      "description": "Computes the AUC of slow ramps against fixed-T nulls for every sensitivity cell and horizon, and the scorer's alarm rows at the headline cell.",
+      "command": "uv run --no-sync python harness/explore auc_alarms --L 16",
+      "inputs": "the seeds 1-5 slow ramps and null runs in the data dir; --latents <table> for a table's four pairs",
+      "outputs": "auc_alarms.json under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory peak positions",
+      "description": "Finds where each indicator peaks along each slow ramp at one size, or with --combine tests the positions over sizes.",
+      "command": "uv run --no-sync python harness/explore peaks --L 16",
+      "inputs": "the seeds 1-5 slow ramps; --combine reads each size's peaks.json",
+      "outputs": "peaks.json under <out>/<classic or table>/L<L>/; peaks-combined.json under <out>/<classic or table>/ with --combine",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory null runs",
+      "description": "Shows the indicators and their trend scores on the fixed-T null runs alone, per eps_L and pooled.",
+      "command": "uv run --no-sync python harness/explore nulls_explore --L 16",
+      "inputs": "the seeds 1-5 null runs at eps_L 2, 4 and 6",
+      "outputs": "nulls.json under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory surrogate calibration",
+      "description": "Scores each real null slice and slow-ramp positive against its own surrogates and reports the false-positive and detection rates.",
+      "command": "uv run --no-sync python harness/explore surrogates_cal --L 16",
+      "inputs": "the seeds 1-5 null runs and slow ramps; with --latents, surprise's directions",
+      "outputs": "surrogates-<observable>-<indicator>-<kind>.json per pair and kind under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory alarm threshold",
+      "description": "Reads what an alarm-threshold rule can do on the null runs' s(t) paths: the highest false-alarm rate, and each rule's theta and first alarms.",
+      "command": "uv run --no-sync python harness/explore alarms_explore --L 16",
+      "inputs": "the seeds 1-5 null runs and slow ramps; with --latents, surprise's directions",
+      "outputs": "alarms_explore-<observable>-<indicator>.json and cached st-*.npz under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory ramp ensembles",
+      "description": "Computes ensemble indicators along the fast and slow ramps and the Kibble-Zurek lag behind the staircase curve.",
+      "command": "uv run --no-sync python harness/explore fast_ramps --L 16",
+      "inputs": "the seeds 1-5 ramps and static_tc's static.json",
+      "outputs": "fast_ramps.json under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory fixed-eps slopes",
+      "description": "Sets the slopes over two sizes at fixed eps_L from the null runs, the staircases and the slow ramps beside the slopes at Tc.",
+      "command": "uv run --no-sync python harness/explore fixed_eps --sizes 16 32",
+      "inputs": "nulls.json, static.json and fast_ramps.json at both sizes, and scaling.json",
+      "outputs": "fixed-eps-<column>.json under <out>/<classic or table>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory size report",
+      "description": "Writes one size's exploratory JSON outputs as markdown tables.",
+      "command": "uv run --no-sync python harness/explore report --L 16",
+      "inputs": "the JSON the other steps wrote for that size",
+      "outputs": "report.md under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Market latent series",
+      "description": "Writes each market JEPA checkpoint's per-minute surprise and pc series for one symbol and span, refusing any day from 2024.",
+      "command": "uv run --no-sync python harness/explore market_latents --checkpoints <a.pt> --symbol ETHUSDT --scaling-run <training> --data <bybit-book-v3> --out <folder>",
+      "inputs": "market JEPA checkpoints, a training on the symbol for its scaling record, and the assembled book feature days",
+      "outputs": "<out>/<run id>-step<step>/<symbol>-<span>.parquet and .json",
+      "test": "harness/tests/test_explore_market.py"
+    },
+    {
+      "name": "Market exploratory pass",
+      "description": "Scores market_latents' 2023-Q4 series on event and control segments and proposes each pair's direction and the columns to judge.",
+      "command": "uv run --no-sync python harness/explore market_pass --latents <market_latents out> --labels <labels run>",
+      "inputs": "market_latents' output folder and a labels run",
+      "outputs": "market-pass.json, market-proposal.json and market-report.md in <latents>/pass, or --out",
+      "test": "harness/tests/test_explore_market.py"
     },
     {
       "name": "Exploratory latent plot",
@@ -409,6 +513,22 @@
     {
       "command": "cargo run -p engine-harness --bin crash-writer -- <run dir>",
       "reason": "test support: crash_recovery.rs kills it mid-write"
+    },
+    {
+      "command": "uv run --no-sync python harness/explore correlations --L 16 --latents <table>",
+      "reason": "run by latent_pass"
+    },
+    {
+      "command": "uv run --no-sync python harness/explore probes_explore --L 16 --latents <table>",
+      "reason": "run by latent_pass"
+    },
+    {
+      "command": "uv run --no-sync python harness/explore latent_report --training <run id> --step <step> --out <outputs>",
+      "reason": "run by latent_pass"
+    },
+    {
+      "command": "uv run python -m tipping_point.market.cascade",
+      "reason": "moved: it only exits, naming python -m tipping_point.market cascade"
     }
   ]
 }

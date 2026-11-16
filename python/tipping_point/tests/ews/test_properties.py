@@ -116,7 +116,7 @@ def test_threshold_at_far_is_the_lowest_theta_that_keeps_every_higher_one_under_
         assert (counts <= far * duration).all()
         return
     assert (counts[candidates >= found.theta] <= far * duration).all()
-    assert (counts[candidates < found.theta] > far * duration).any()
+    assert counts[candidates < found.theta][-1] > far * duration
 
 
 @given(st.floats(0.5, 5.0), st.integers(4, 256))
