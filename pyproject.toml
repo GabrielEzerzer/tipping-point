@@ -20,7 +20,7 @@ tipping-point = { workspace = true }
 members = ["python/*"]
 
 [dependency-groups]
-dev = ["ruff", "pytest", "pyright", "scipy"]
+dev = ["ruff", "pytest", "pyright", "scipy", "hypothesis"]
 
 [tool.ruff]
 target-version = "py313"

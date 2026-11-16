@@ -7,8 +7,12 @@ import urllib.request
 from typing import Any
 
 import pytest
+from hypothesis import settings
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+settings.register_profile("repo", derandomize=True, deadline=None, database=None)
+settings.load_profile("repo")
 
 
 @pytest.fixture

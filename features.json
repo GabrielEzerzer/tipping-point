@@ -1,0 +1,534 @@
+{
+  "features": [
+    {
+      "name": "Live order books",
+      "description": "Keeps Binance's BTCUSDT and ETHUSDT order books from the live streams and logs top of book and every resync.",
+      "command": "cargo run --release -p engine --bin ingest -- --seconds 60",
+      "inputs": "Binance USD-M depth and aggTrades streams (network)",
+      "outputs": "top-of-book and resync lines on stdout",
+      "test": "harness/engine-harness/tests/replay_equals_live.rs"
+    },
+    {
+      "name": "Record a live run",
+      "description": "Records every live input to a new run in the data dir until Ctrl-C.",
+      "command": "cargo run --release -p engine --bin ingest -- --record",
+      "inputs": "Binance USD-M depth and aggTrades streams (network)",
+      "outputs": "<data dir>/market/<run_id>/ with manifest.json and the binary log",
+      "test": "harness/engine-harness/tests/replay_equals_live.rs"
+    },
+    {
+      "name": "Engine API server",
+      "description": "Runs the live feed, or a recorded script, behind the local HTTP and WebSocket API on 127.0.0.1.",
+      "command": "cargo run --release -p engine --bin serve -- --port 0",
+      "inputs": "Binance live streams, or a JSON-lines script with --script; --record also records the feed",
+      "outputs": "the local API (book and trade messages, Arrow streams); with --record a run in the data dir",
+      "test": "harness/engine-harness/tests/api_contract.rs"
+    },
+    {
+      "name": "Recover a crashed run",
+      "description": "Closes a crashed run's newest log segment, cutting a torn tail back to the last good frame.",
+      "command": "cargo run --release -p engine --bin store -- recover <run dir>",
+      "inputs": "a run folder whose newest segment was left open",
+      "outputs": "the segment closed in place; damage in the middle is refused",
+      "test": "engine/tests/log_recovery.rs"
+    },
+    {
+      "name": "Rotate a run into Parquet",
+      "description": "Writes Parquet for every closed log segment of a run; safe to re-run.",
+      "command": "cargo run --release -p engine --bin store -- rotate <run dir>",
+      "inputs": "a run folder with closed log segments",
+      "outputs": "frames, depth_updates, trades, snapshots and book_samples Parquet per segment",
+      "test": "engine/tests/store_parquet.rs"
+    },
+    {
+      "name": "Replay a run",
+      "description": "Rebuilds a run's books from its log or its Parquet and prints what it rebuilt.",
+      "command": "cargo run --release -p engine --bin store -- replay <run dir> --parquet",
+      "inputs": "a run folder (log, or Parquet with --parquet)",
+      "outputs": "a summary of the rebuilt books on stdout",
+      "test": "harness/engine-harness/tests/replay_equals_live.rs"
+    },
+    {
+      "name": "Import an archive day",
+      "description": "Turns one downloaded Bybit order-book or Binance aggTrades archive day into a run.",
+      "command": "cargo run --release -p engine --bin store -- import <archive> --data-dir <dir>",
+      "inputs": "<date>_<SYMBOL>_ob200.data.zip or <SYMBOL>-aggTrades-<date>.zip; optional --seed with the day before's closing book",
+      "outputs": "<data dir>/market/<yyyymmdd>T000000Z-<venue>-<symbol>/ with Parquet, manifest.json and complete.json",
+      "test": "harness/engine-harness/tests/archive_import.rs"
+    },
+    {
+      "name": "Record a session for the replay check",
+      "description": "Records a live session with the live loop's transcript, then replays the log and says whether it matched.",
+      "command": "cargo run --release -p engine-harness --bin record -- --seconds 60",
+      "inputs": "Binance live streams (network)",
+      "outputs": "a run and live-transcript.json under harness/fixtures/recorded/ (gitignored), and the replay verdict",
+      "test": "harness/engine-harness/tests/replay_equals_live.rs"
+    },
+    {
+      "name": "Soak report",
+      "description": "Runs the live pipeline for hours and reports gaps, resyncs, reconnects and dropped frames per period.",
+      "command": "cargo run --release -p engine-harness --bin soak -- --hours 24",
+      "inputs": "Binance live streams (network)",
+      "outputs": "one line per period on stdout and in a file under harness/out/",
+      "test": "none",
+      "issue": 190
+    },
+    {
+      "name": "Ising staircase run",
+      "description": "Runs a quasi-static sweep down the temperature grid, with each dwell set by a pilot's tau.json.",
+      "command": "uv run python -m tipping_point.ising staircase --L 16 --tau <tau.json>",
+      "inputs": "a lattice size and a pilot's tau.json",
+      "outputs": "<data dir>/ising/<run_id>/ with manifest, configurations and statistics",
+      "test": "python/tipping_point/tests/ising/test_cli.py"
+    },
+    {
+      "name": "Ising cooling ramp",
+      "description": "Runs a linear cooling ramp at a Kibble-Zurek point of a pilot record's tau_c, or at an explicit rate.",
+      "command": "uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <pilot.json>",
+      "inputs": "a lattice size, --x with a pilot record, or --rate",
+      "outputs": "<data dir>/ising/<run_id>/",
+      "test": "python/tipping_point/tests/ising/test_cli.py"
+    },
+    {
+      "name": "Ising null run",
+      "description": "Runs a fixed-temperature null run above Tc at epsilon_L of 2, 4 or 6.",
+      "command": "uv run python -m tipping_point.ising null --L 16 --epsilon-L 2 --pilot <pilot.json>",
+      "inputs": "a lattice size, epsilon_L and a pilot record that measured that size",
+      "outputs": "<data dir>/ising/<run_id>/",
+      "test": "python/tipping_point/tests/ising/test_cli.py"
+    },
+    {
+      "name": "Ising pilot",
+      "description": "Measures the integrated autocorrelation time of |m| and the energy at given temperatures.",
+      "command": "uv run python -m tipping_point.ising pilot --L 16",
+      "inputs": "a lattice size and temperatures",
+      "outputs": "a run folder with tau.json",
+      "test": "python/tipping_point/tests/ising/test_cli.py"
+    },
+    {
+      "name": "Ising tau_c fit",
+      "description": "Fits tau_c(L) at Tc and A L^z from pilot runs, one per size.",
+      "command": "uv run python -m tipping_point.ising tauc <run dir> <run dir>",
+      "inputs": "pilot run folders at Tc",
+      "outputs": "pilot.json",
+      "test": "python/tipping_point/tests/ising/test_pilot.py"
+    },
+    {
+      "name": "Ising simulator validation",
+      "description": "Checks a small L = 4 run against exact results and exits 1 on a failure.",
+      "command": "uv run python -m tipping_point.ising validate",
+      "inputs": "none",
+      "outputs": "a run folder with the gate verdicts; exit code",
+      "test": "python/tipping_point/tests/ising/test_cli.py"
+    },
+    {
+      "name": "Resume an Ising run",
+      "description": "Continues a crashed or stopped simulator run from its checkpoint.",
+      "command": "uv run python -m tipping_point.ising resume <run dir>",
+      "inputs": "a run folder with a checkpoint",
+      "outputs": "the same run folder, completed",
+      "test": "python/tipping_point/tests/ising/test_reproducibility.py"
+    },
+    {
+      "name": "Surrogate-test calibration",
+      "description": "Measures the surrogate test's false-positive rate on synthetic nulls and exits 1 off the band.",
+      "command": "uv run python -m tipping_point.ews calibrate",
+      "inputs": "none (synthetic nulls from a seed)",
+      "outputs": "the false-positive rate on stdout; exit code",
+      "test": "python/tipping_point/tests/ews/test_calibration.py"
+    },
+    {
+      "name": "Score a pre-registration",
+      "description": "Scores the runs a frozen pre-registration names and logs every evaluated cell as a trial.",
+      "command": "uv run python -m tipping_point.ews score --prereg paper/prereg/ising-ews-v1.toml",
+      "inputs": "a frozen pre-registration and the runs it pins in the data dir",
+      "outputs": "<data dir>/ews/<run_id>/ and lines in <data dir>/ews/trials.jsonl",
+      "test": "python/tipping_point/tests/ews/test_score.py"
+    },
+    {
+      "name": "Freeze a pre-registration",
+      "description": "Tags the commit that holds paper/prereg/<id>-v<k>.toml as prereg/<id>-v<k>.",
+      "command": "uv run python -m tipping_point.ews prereg freeze <id>",
+      "inputs": "a committed pre-registration file",
+      "outputs": "a git tag",
+      "test": "python/tipping_point/tests/ews/test_prereg.py"
+    },
+    {
+      "name": "Train a JEPA",
+      "description": "Trains one model seed on the staircase runs of dedicated simulator seeds.",
+      "command": "uv run python -m tipping_point.jepa train --L 16 32 --train-seeds 101 102 --val-seed 103 --seed 1 --pilot <pilot.json>",
+      "inputs": "simulator staircase runs and a pilot record",
+      "outputs": "<data dir>/jepa/<run_id>/ with checkpoints and monitors",
+      "test": "python/tipping_point/tests/jepa/test_cli.py"
+    },
+    {
+      "name": "Resume a JEPA training",
+      "description": "Continues a training from its checkpoint after a crash or a killed session.",
+      "command": "uv run python -m tipping_point.jepa resume <run dir>",
+      "inputs": "a training folder with a checkpoint",
+      "outputs": "the same training folder, completed",
+      "test": "python/tipping_point/tests/jepa/test_train.py"
+    },
+    {
+      "name": "Extract latents",
+      "description": "Writes a checkpoint's latents table (surprise, pc_1..pc_8 per frame) for a simulator run.",
+      "command": "uv run python -m tipping_point.jepa extract <checkpoint> <run dir>",
+      "inputs": "a checkpoint and a simulator run",
+      "outputs": "<run>/latents/<training>-step<step>/",
+      "test": "python/tipping_point/tests/jepa/test_extract.py"
+    },
+    {
+      "name": "Probe a training",
+      "description": "Fits ridge probes of |m|, energy and L^2 Var(|m|) from frozen embeddings, trained beside the untrained twin.",
+      "command": "uv run python -m tipping_point.jepa probe --fit <run dir> <training dir>",
+      "inputs": "a training folder and simulator runs to fit and test on",
+      "outputs": "probe scores with their controls on stdout, or as JSON with --json",
+      "test": "python/tipping_point/tests/jepa/test_probes.py"
+    },
+    {
+      "name": "Verify finished folders",
+      "description": "Checks trainings, latents tables and simulator runs against their complete.json and exits 1 on any problem.",
+      "command": "uv run python -m tipping_point.jepa verify <dir>",
+      "inputs": "finished folders",
+      "outputs": "one verdict per folder; exit code",
+      "test": "python/tipping_point/tests/jepa/test_cli.py"
+    },
+    {
+      "name": "GPU budget",
+      "description": "Sums GPU hours per ISO week from the training log against a weekly quota.",
+      "command": "uv run python -m tipping_point.jepa budget",
+      "inputs": "<data dir>/jepa/gpu_hours.jsonl",
+      "outputs": "hours per week on stdout",
+      "test": "python/tipping_point/tests/jepa/test_cli.py"
+    },
+    {
+      "name": "Fetch Binance archives",
+      "description": "Downloads and verifies Binance's 1-minute klines, 5-minute metrics and monthly funding for a span of days.",
+      "command": "uv run python -m tipping_point.market fetch --start 2023-01-01 --end 2023-01-31",
+      "inputs": "a span of UTC days and symbols (network)",
+      "outputs": "verified files under harness/fixtures/archives/binance (gitignored) or --dest",
+      "test": "python/tipping_point/tests/market/test_archive.py"
+    },
+    {
+      "name": "Regime labels",
+      "description": "Labels volatility regimes for a span of days from the fetched files.",
+      "command": "uv run python -m tipping_point.market labels --start 2023-01-01 --end 2023-12-31",
+      "inputs": "fetched Binance files; --prereg for the confirmatory span",
+      "outputs": "<data dir>/labels/<run_id>/",
+      "test": "python/tipping_point/tests/market/test_cli.py"
+    },
+    {
+      "name": "Cascade candidates",
+      "description": "Lists liquidation-cascade candidates for a span of days from the fetched files.",
+      "command": "uv run python -m tipping_point.market cascade --start 2023-01-01 --end 2023-12-31",
+      "inputs": "fetched Binance files; --prereg for the confirmatory span",
+      "outputs": "<data dir>/labels/<run_id>/ holding the cascades table",
+      "test": "python/tipping_point/tests/market/test_cli.py"
+    },
+    {
+      "name": "Labels reports",
+      "description": "Writes the reports of a labels run, optionally against a cascade run.",
+      "command": "uv run python -m tipping_point.market reports --run <labels run>",
+      "inputs": "a labels run, the fetched files, optionally a cascade run",
+      "outputs": "reports in the labels run's reports/ folder",
+      "test": "python/tipping_point/tests/market/test_cli.py"
+    },
+    {
+      "name": "Book feature range",
+      "description": "Imports and reduces the Bybit order-book days of a range into per-day feature files.",
+      "command": "uv run python -m tipping_point.market book --range training",
+      "inputs": "Bybit archive days (network) and the engine's store binary",
+      "outputs": "<out>/<range>/manifest.json and features/<SYMBOL>/<day>.parquet",
+      "test": "python/tipping_point/tests/market/test_book.py"
+    },
+    {
+      "name": "Reduce one book day",
+      "description": "Reduces one day's book_samples Parquet to its feature file and prints the file's record as JSON.",
+      "command": "uv run python -m tipping_point.book <samples.parquet>",
+      "inputs": "an engine run's book_samples Parquet",
+      "outputs": "<out>/features/<SYMBOL>/<day>.parquet and one JSON line",
+      "test": "python/tipping_point/tests/book/test_features.py"
+    },
+    {
+      "name": "Gate",
+      "description": "Runs every Rust and Python check, judges each from its own evidence and writes a record.",
+      "command": "uv run python harness/gate.py",
+      "inputs": "the checkout; cargo on PATH",
+      "outputs": "one verdict per leg and a record under harness/out/; exit code",
+      "test": "harness/tests/test_gate.py"
+    },
+    {
+      "name": "Kill stray processes",
+      "description": "Finds and kills engine and harness processes that a killed test run left running.",
+      "command": "uv run python harness/strays.py --dry-run",
+      "inputs": "the running processes",
+      "outputs": "the strays found, and killed unless --dry-run",
+      "test": "harness/tests/test_strays.py"
+    },
+    {
+      "name": "Assemble book ranges",
+      "description": "Merges market book range folders made on separate machines into one data dir, refusing any gap or duplicate.",
+      "command": "uv run python harness/book_assemble.py --out <dir> --commit <sha> <source dir>",
+      "inputs": "range folders from market book",
+      "outputs": "<out>/<range>/manifest.json and the copied feature files",
+      "test": "harness/tests/test_m4_pilot.py"
+    },
+    {
+      "name": "ising-ews-v1 figure",
+      "description": "Draws the README's figure of the ising-ews-v1 result from its result folder.",
+      "command": "uv run --with matplotlib==3.10.3 python harness/ews_v1_figure.py <result dir> paper/figures/ising-ews-v1.png",
+      "inputs": "the result folder's fss, peaks and auc tables",
+      "outputs": "a PNG",
+      "test": "harness/tests/test_ews_v1_figure.py"
+    },
+    {
+      "name": "ising-ews-v1 golden",
+      "description": "Writes what the v1 scorer gives on planted data, so a later commit can be held to it.",
+      "command": "uv run python harness/ews_v1_golden.py",
+      "inputs": "the planted v1 dataset and paper/prereg/ising-ews-v1.toml",
+      "outputs": "the golden file",
+      "test": "python/tipping_point/tests/ews/test_v1_unchanged.py"
+    },
+    {
+      "name": "Latent experiment",
+      "description": "Runs a frozen latent pre-registration from its file to the result folder and its figures.",
+      "command": "uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml",
+      "inputs": "a frozen latent pre-registration, the runs and latents tables it pins",
+      "outputs": "<data dir>/ews/<run_id>/ with tables, csv/ and figures/",
+      "test": "python/tipping_point/tests/ews/test_experiment.py"
+    },
+    {
+      "name": "Latent experiment figures",
+      "description": "Draws a latent experiment's figures from its csv tables alone.",
+      "command": "uv run --isolated --no-project --with matplotlib==3.10.3 python harness/ising_figures.py <result dir>",
+      "inputs": "a result folder's csv/ tables",
+      "outputs": "five PNGs in figures/",
+      "test": "python/tipping_point/tests/ews/test_experiment.py"
+    },
+    {
+      "name": "Market JEPA pilot training",
+      "description": "Runs one of the four market JEPA CPU pilot trainings.",
+      "command": "uv run python harness/m4_pilot.py train --asset btc --size S --data <dir> --out <dir>",
+      "inputs": "an assembled book feature data dir",
+      "outputs": "a training folder with checkpoints",
+      "test": "harness/tests/test_m4_pilot.py"
+    },
+    {
+      "name": "Market JEPA pilot decision",
+      "description": "Applies the pilot's committed rules to the four finished pilots.",
+      "command": "uv run python harness/m4_pilot.py decide --out <dir>",
+      "inputs": "the four finished pilot trainings",
+      "outputs": "the decided size, steps and floors as JSON",
+      "test": "harness/tests/test_m4_pilot.py"
+    },
+    {
+      "name": "Market JEPA primary training",
+      "description": "Trains one market JEPA primary or spare seed.",
+      "command": "uv run python harness/m8_primaries.py train --asset btc --seed 101 --data <dir> --out <dir>",
+      "inputs": "an assembled book feature data dir",
+      "outputs": "a training folder with checkpoints and its step-0 twin",
+      "test": "harness/tests/test_m8_primaries.py"
+    },
+    {
+      "name": "Market JEPA primary pins",
+      "description": "Writes the pins of the finished primaries before any extraction.",
+      "command": "uv run python harness/m8_primaries.py pins --out <dir>",
+      "inputs": "the finished primary trainings",
+      "outputs": "<out>/pins.json",
+      "test": "harness/tests/test_m8_primaries.py"
+    },
+    {
+      "name": "Exploratory market indicators",
+      "description": "Shows the classic market warning indicators on the 2023 pilot year, logging no trial.",
+      "command": "uv run python harness/market_ews_explore.py --run <labels run>",
+      "inputs": "a labels run of the frozen labels file and the fetched Binance files",
+      "outputs": "AUC tables on stdout",
+      "test": "none",
+      "issue": 190
+    },
+    {
+      "name": "Circularity floor",
+      "description": "Runs GARCH paths through a labels run's own labeller and scores them, as a report.",
+      "command": "uv run python harness/market_floor.py --run <labels run> --garch BTCUSDT",
+      "inputs": "a labels run and a GARCH fit",
+      "outputs": "a floor report in the run's reports/ folder",
+      "test": "python/tipping_point/tests/market/test_cli.py"
+    },
+    {
+      "name": "GARCH fit",
+      "description": "Fits the circularity floor's GARCH(1,1)-t on the 2023 pilot year.",
+      "command": "uv run python harness/market_garch.py --run <labels run>",
+      "inputs": "a labels run and the fetched Binance klines",
+      "outputs": "the garch report in the run's reports/ folder",
+      "test": "python/tipping_point/tests/market/test_garch_fit.py"
+    },
+    {
+      "name": "Wheel provenance check",
+      "description": "Checks end to end that runs from a built wheel record the commit stamped into it.",
+      "command": "uv run python harness/wheel_provenance.py",
+      "inputs": "this checkout, or a wheel with --wheel",
+      "outputs": "a verdict per case on stdout; exit code",
+      "test": "python/tipping_point/tests/ising/test_provenance.py"
+    },
+    {
+      "name": "Join a Kaggle output to the local runs",
+      "description": "Makes a data dir that links a Kaggle output's latents tables beside the local runs they were read from, refusing a table read from other bytes.",
+      "command": "uv run --no-sync python harness/explore join_pilot --output <kaggle out> --into <folder>",
+      "inputs": "the local data dir (--local) and a Kaggle output's out/ folder",
+      "outputs": "<into>/ising/<run id>/ with hard links to each run's files, its latents tables and the tau_c records",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory latent pass",
+      "description": "Runs every exploratory step for one training, its trained table beside its untrained twin, at each size; logs no trial and refuses the scored seeds.",
+      "command": "uv run --no-sync python harness/explore latent_pass --training <run id> --step <step> --data-dir <folder> --out <outputs>",
+      "inputs": "a data dir with the seeds 1-5 simulator runs and the training's latents tables",
+      "outputs": "each step's JSON and report.md per table and size, and latent-report-<training>.md, under --out",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory values at Tc",
+      "description": "Computes one size's values at Tc and its equilibrium curves against eps_L from the staircases, on |m| or a latents table.",
+      "command": "uv run --no-sync python harness/explore static_tc --L 16",
+      "inputs": "the seeds 1-5 staircases and the pilot run held at Tc in the data dir; --latents <table> for a table",
+      "outputs": "static.json and static-draws.npz under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory scaling table",
+      "description": "Takes the slope of each quantity at Tc on log L over the sizes given, from static_tc's outputs.",
+      "command": "uv run --no-sync python harness/explore scaling --sizes 16 32",
+      "inputs": "static_tc's outputs at each size",
+      "outputs": "scaling.json and scaling.md under <out>/<classic or table>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory AUC",
+      "description": "Computes the AUC of slow ramps against fixed-T nulls for every sensitivity cell and horizon, and the scorer's alarm rows at the headline cell.",
+      "command": "uv run --no-sync python harness/explore auc_alarms --L 16",
+      "inputs": "the seeds 1-5 slow ramps and null runs in the data dir; --latents <table> for a table's four pairs",
+      "outputs": "auc_alarms.json under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory peak positions",
+      "description": "Finds where each indicator peaks along each slow ramp at one size, or with --combine tests the positions over sizes.",
+      "command": "uv run --no-sync python harness/explore peaks --L 16",
+      "inputs": "the seeds 1-5 slow ramps; --combine reads each size's peaks.json",
+      "outputs": "peaks.json under <out>/<classic or table>/L<L>/; peaks-combined.json under <out>/<classic or table>/ with --combine",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory null runs",
+      "description": "Shows the indicators and their trend scores on the fixed-T null runs alone, per eps_L and pooled.",
+      "command": "uv run --no-sync python harness/explore nulls_explore --L 16",
+      "inputs": "the seeds 1-5 null runs at eps_L 2, 4 and 6",
+      "outputs": "nulls.json under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory surrogate calibration",
+      "description": "Scores each real null slice and slow-ramp positive against its own surrogates and reports the false-positive and detection rates.",
+      "command": "uv run --no-sync python harness/explore surrogates_cal --L 16",
+      "inputs": "the seeds 1-5 null runs and slow ramps; with --latents, surprise's directions",
+      "outputs": "surrogates-<observable>-<indicator>-<kind>.json per pair and kind under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory alarm threshold",
+      "description": "Reads what an alarm-threshold rule can do on the null runs' s(t) paths: the highest false-alarm rate, and each rule's theta and first alarms.",
+      "command": "uv run --no-sync python harness/explore alarms_explore --L 16",
+      "inputs": "the seeds 1-5 null runs and slow ramps; with --latents, surprise's directions",
+      "outputs": "alarms_explore-<observable>-<indicator>.json and cached st-*.npz under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory ramp ensembles",
+      "description": "Computes ensemble indicators along the fast and slow ramps and the Kibble-Zurek lag behind the staircase curve.",
+      "command": "uv run --no-sync python harness/explore fast_ramps --L 16",
+      "inputs": "the seeds 1-5 ramps and static_tc's static.json",
+      "outputs": "fast_ramps.json under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory fixed-eps slopes",
+      "description": "Sets the slopes over two sizes at fixed eps_L from the null runs, the staircases and the slow ramps beside the slopes at Tc.",
+      "command": "uv run --no-sync python harness/explore fixed_eps --sizes 16 32",
+      "inputs": "nulls.json, static.json and fast_ramps.json at both sizes, and scaling.json",
+      "outputs": "fixed-eps-<column>.json under <out>/<classic or table>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Exploratory size report",
+      "description": "Writes one size's exploratory JSON outputs as markdown tables.",
+      "command": "uv run --no-sync python harness/explore report --L 16",
+      "inputs": "the JSON the other steps wrote for that size",
+      "outputs": "report.md under <out>/<classic or table>/L<L>/",
+      "test": "harness/tests/test_explore.py"
+    },
+    {
+      "name": "Market latent series",
+      "description": "Writes each market JEPA checkpoint's per-minute surprise and pc series for one symbol and span, refusing any day from 2024.",
+      "command": "uv run --no-sync python harness/explore market_latents --checkpoints <a.pt> --symbol ETHUSDT --scaling-run <training> --data <bybit-book-v3> --out <folder>",
+      "inputs": "market JEPA checkpoints, a training on the symbol for its scaling record, and the assembled book feature days",
+      "outputs": "<out>/<run id>-step<step>/<symbol>-<span>.parquet and .json",
+      "test": "harness/tests/test_explore_market.py"
+    },
+    {
+      "name": "Market exploratory pass",
+      "description": "Scores market_latents' 2023-Q4 series on event and control segments and proposes each pair's direction and the columns to judge.",
+      "command": "uv run --no-sync python harness/explore market_pass --latents <market_latents out> --labels <labels run>",
+      "inputs": "market_latents' output folder and a labels run",
+      "outputs": "market-pass.json, market-proposal.json and market-report.md in <latents>/pass, or --out",
+      "test": "harness/tests/test_explore_market.py"
+    },
+    {
+      "name": "Exploratory latent plot",
+      "description": "Draws surprise and pc_1 against eps_L for a checkpoint and its twin from the pass's JSON.",
+      "command": "uv run --isolated --no-project --with matplotlib==3.10.3 python harness/explore/latent_plot.py <out> <training> <step>",
+      "inputs": "the exploratory pass's JSON",
+      "outputs": "<out>/latent-curves-<training>.png",
+      "test": "none",
+      "issue": 190
+    },
+    {
+      "name": "Exploratory scaling plot",
+      "description": "Draws the static scaling plot from scaling.json.",
+      "command": "uv run --isolated --no-project --with matplotlib==3.10.3 python harness/explore/scaling_plot.py <scaling.json>",
+      "inputs": "scaling.json from the exploratory pass",
+      "outputs": "a PNG beside the JSON",
+      "test": "none",
+      "issue": 190
+    },
+    {
+      "name": "Kaggle plan runner",
+      "description": "Embeds a plan of simulator runs and JEPA trainings in a Kaggle kernel, or checks a plan without running it.",
+      "command": "uv run python notebooks/kaggle_ising_runs.py --dry-run notebooks/plans/job-a.json",
+      "inputs": "a plan JSON",
+      "outputs": "a kernel folder with --write-kernel; the checked plan with --dry-run",
+      "test": "notebooks/kaggle_ising_runs_selftest.py"
+    }
+  ],
+  "internal": [
+    {
+      "command": "cargo run -p engine-harness --bin crash-writer -- <run dir>",
+      "reason": "test support: crash_recovery.rs kills it mid-write"
+    },
+    {
+      "command": "uv run --no-sync python harness/explore correlations --L 16 --latents <table>",
+      "reason": "run by latent_pass"
+    },
+    {
+      "command": "uv run --no-sync python harness/explore probes_explore --L 16 --latents <table>",
+      "reason": "run by latent_pass"
+    },
+    {
+      "command": "uv run --no-sync python harness/explore latent_report --training <run id> --step <step> --out <outputs>",
+      "reason": "run by latent_pass"
+    },
+    {
+      "command": "uv run --no-sync python -m tipping_point.market.cascade",
+      "reason": "moved: it only exits, naming python -m tipping_point.market cascade"
+    }
+  ]
+}
