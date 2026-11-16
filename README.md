@@ -660,13 +660,15 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   `<data dir>/ews/`. `harness/latent_data_dir.py` assembles such a folder from the Kaggle outputs
   that hold the extracted runs and the trainings, and a data dir for the rest (the probes' fit
   runs, the pilot record), hard linking every file (copying where a link is refused, across
-  volumes) and checking it against its `complete.json`, each table's keys against its run's frames
-  included. Its `ews` is a link to the data dir whose trial log counts the budget, since
+  volumes). It then checks that every run the file scores is there, complete and with each table
+  it pins, with each L's fit staircase, and every file against its `complete.json`, each table's
+  keys against its run's frames included. Its `ews` is a link to the data dir whose trial log counts the budget, since
   `--data-dir` moves the trial log with everything else: a data dir with an `ews/` of its own would
   start an empty log, and the budget could be spent again there. Remove that link before deleting
-  the folder.
+  the folder: a delete that follows it, as PowerShell 5.1's `Remove-Item -Recurse` does, deletes
+  the trial log and the baseline result.
 - **Checking first.** `--check` runs every refusal that comes before the result folder is made, the
-  checkpoints' sha256 included, prints what the run would read and log and whether the checkout is
+  checkpoints' sha256 and a `--resume`'s resume key included, prints what the run would read and log and whether the checkout is
   clean, and stops, writing nothing and charging nothing:
 
   ```sh

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from explore.join_pilot import _link
+from ising_experiment import fit_runs
 from tipping_point import engine
 from tipping_point.ews import ising, prereg
 from tipping_point.ising import io
@@ -32,10 +33,12 @@ Never give a scoring a data dir with an ews/ of its own: its empty trial log wou
 be spent a second time. To delete <into>, remove the ews link first (rmdir <into>/ews on Windows,
 rm <into>/ews elsewhere): a delete that follows it would remove the trial log.
 
-Every run and table is then checked: its files against its complete.json, each table's keys
-against its run's frames (jepa.extract.verify), and each table against the complete.json it was
-read over. Problems are listed and the exit code is 1. Then run harness/ising_experiment.py
---prereg <file> --data-dir <into> --check.
+Every run and table is then checked: that each run the file scores is there and complete with
+every table it pins (ising.admit), and each L's validation staircase the probes fit on; each run's
+and table's files against its complete.json, each table's keys against its run's frames
+(jepa.extract.verify), and each table against the complete.json it was read over. Problems are
+listed and the exit code is 1. The checkpoints' sha256 pins, the freeze and the budget are left to
+harness/ising_experiment.py --prereg <file> --data-dir <into> --check, which comes next.
 """
 
 
@@ -95,8 +98,17 @@ def assemble(path: Path, sources: Sequence[Path], into: Path, ews_from: Path) ->
     return counts
 
 
-def problems(into: Path) -> list[str]:
+def problems(path: Path, into: Path) -> list[str]:
+    doc = prereg.load(path).doc
     found = []
+    for check in (
+        lambda: ising.admit(doc, into, say=lambda _: None, allow_stale=True),
+        lambda: fit_runs(doc, into),
+    ):
+        try:
+            check()
+        except (ising.IsingDataError, OSError) as exc:
+            found.append(f"inventory: {exc}")
     for run in sorted((into / "ising").glob("*/complete.json")):
         damaged = train.verify(run.parent)
         found += [f"{run.parent.name}: {p}" for p in damaged]
@@ -105,6 +117,9 @@ def problems(into: Path) -> list[str]:
             where = f"{run.parent.name}/{ising.LATENTS}/{table.name}"
             altered = train.verify(table)
             found += [f"{where}: {p}" for p in altered]
+            if not (table / "manifest.json").is_file():
+                found += [] if altered else [f"{where}: no manifest.json"]
+                continue
             read = io.read_json(table / "manifest.json")["params"]["dataset"]["complete_sha256"]
             if read != digest:
                 found.append(f"{where}: read over another complete.json than this run's")
@@ -140,7 +155,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"{args.into}: {counts}; ews -> {(args.ews_from / 'ews').resolve()}")
-    found = problems(args.into)
+    found = problems(args.prereg, args.into)
     for line in found:
         print(f"problem: {line}", file=sys.stderr)
     return 1 if found else 0

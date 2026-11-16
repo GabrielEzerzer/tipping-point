@@ -811,7 +811,17 @@ REFUSED = {  # what changed since the crash: what the refusal says
 }
 
 
-@pytest.mark.parametrize(("change", "said"), REFUSED.items(), ids=REFUSED.keys())
+KEYED = [
+    (change, said, mode)
+    for change, said in REFUSED.items()
+    for mode in ("run", "check")
+    if not (mode == "check" and change == "the other entry")
+]
+
+
+@pytest.mark.parametrize(
+    ("change", "said", "mode"), KEYED, ids=[f"{change}, {mode}" for change, _, mode in KEYED]
+)
 def test_a_resume_under_another_key_is_refused_and_touches_nothing(
     frozen: Frozen,
     tmp_path: Path,
@@ -820,6 +830,7 @@ def test_a_resume_under_another_key_is_refused_and_touches_nothing(
     clean: None,
     change: str,
     said: str,
+    mode: str,
 ) -> None:
     """--resume carries a torn result on only for a scoring that would end in the bytes it began to
     write: the same seed, inputs and fit runs, file and stamp, code and embedding, and the same
@@ -853,7 +864,7 @@ def test_a_resume_under_another_key_is_refused_and_touches_nothing(
         argv = ["score", "--prereg", str(frozen.path), "--data-dir", str(copy.root), "--cells-only"]
         code = ews_main([*argv, "--resume"])
     else:
-        code = _run(frozen.path, copy, "--no-figures", *resume)
+        code = _run(frozen.path, copy, "--no-figures", *resume, *(["--check"] * (mode == "check")))
     assert code == 1
     err = capsys.readouterr().err
     assert said in err, err

@@ -1,8 +1,33 @@
-"""The Ising experiment of a latent pre-registration (#28, slice 5): from a frozen file to the
+# The Ising experiment of a latent pre-registration (#28): from a frozen file to its result
+# folder and figures, charging its trial budget once. DESCRIPTION is the --help text.
+
+import argparse
+import csv
+import json
+import subprocess
+import sys
+from collections.abc import Callable, Sequence
+from io import StringIO
+from pathlib import Path
+from typing import Any, NamedTuple
+
+import ews_planted
+import numpy as np
+import pyarrow.parquet as pq
+import torch
+from tipping_point import engine
+from tipping_point.ews import ising, margins, prereg, scoring
+from tipping_point.ews.__main__ import begin, resume_key, score
+from tipping_point.ising import io
+from tipping_point.jepa import probes, readout, train
+
+DESCRIPTION = """\
+The Ising experiment of a latent pre-registration (#28, slice 5): from a frozen file to the
 result folder and its figures.
 
   uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml \
       [--data-dir D] [--seed 26] [--device cuda] [--allow-stale-pilot] [--no-figures] [--resume]
+      [--check]
   uv run python harness/ising_experiment.py --figures-only <result folder>
 
 <data dir>/ews/<run_id>/ holds what `ews score` writes, in its layout, and more:
@@ -33,37 +58,21 @@ extracted under another rule than latents.extraction gives its role among it, an
 that is not the file's on these runs, and a checkpoint that is not the one it pins.
 Probes and curves run before the cells, so that a fault in either costs minutes rather than a night.
 
+--check makes every one of those refusals, a --resume's comparison of its resume key with the torn
+result's among them, then stops: it writes nothing and charges no trial. Run it first, with the
+arguments the run will take.
+
 --planted scores a file with no freeze behind it, for the harness alone: it refuses a data dir
 holding any run the planted generator did not write (harness/ews_planted.py), so that it can never
 read the confirmatory data early, and frames are embedded by ews_planted.planted_embedding.
 
 Run time: see README, "The latent experiment". On the project's laptop the whole of ising-latent-v1
-is projected at days, not a night, and most of it is the surrogate and alarm tables, which no
-hypothesis judges, and the probes' embeddings on the CPU: --device cuda takes those to a GPU, if the
-whole run goes there. A run killed partway is carried on by the same command with --resume: each
+is projected at about a day, most of it the surrogate tests, which no hypothesis judges, and the
+probes' embeddings on the CPU: --device cuda takes the embeddings to a GPU, if the whole run goes
+there. A run killed partway is carried on by the same command with --resume: each
 probe (an L and a checkpoint) and each checkpoint's pass of the scorer is saved in the result folder
 as it ends, and read back, so the tables are the bytes an uninterrupted run writes.
 """
-
-import argparse
-import csv
-import json
-import subprocess
-import sys
-from collections.abc import Callable, Sequence
-from io import StringIO
-from pathlib import Path
-from typing import Any, NamedTuple
-
-import ews_planted
-import numpy as np
-import pyarrow.parquet as pq
-import torch
-from tipping_point import engine
-from tipping_point.ews import ising, margins, prereg, scoring
-from tipping_point.ews.__main__ import begin, score
-from tipping_point.ising import io
-from tipping_point.jepa import probes, readout, train
 
 FIGURES = Path(__file__).with_name("ising_figures.py")
 FIGURE_ENVIRONMENT = (
@@ -351,6 +360,14 @@ def alignment_quantities(doc: dict[str, Any], curves: Sequence[Row]) -> list[mar
     ]
 
 
+def embedding_key(device: str | None, fits: dict[int, ising.Run]) -> dict[str, Any]:
+    return {
+        "torch": torch.__version__,
+        "device": device or train.default_device(),
+        "fit_runs": {r.run_id: r.complete_sha256 for r in fits.values()},
+    }
+
+
 class Ready(NamedTuple):
     pre: prereg.Prereg
     ref: prereg.Frozen
@@ -371,6 +388,7 @@ def ready(
     embed: Embed | None = None,
     device: str | None = None,
     resume: bool = False,
+    seed: int = 26,
 ) -> Ready:
     pre = prereg.load(path)
     if "latents" not in pre.doc:
@@ -397,6 +415,9 @@ def ready(
                            runs_commit=runs_commit)  # fmt: skip
     baseline = baseline_rows(doc, data_dir, admitted.scored, runs_commit)
     fits = fit_runs(doc, data_dir)  # refused before the folder is made, not during the probes
+    if own is not None:
+        key = resume_key(pre, ref, seed, admitted, **embedding_key(device, fits))
+        prereg.carried_on(data_dir, pre, own, prereg.with_code(key))
     if embed is None:
         embed = (
             ews_planted.planted_embedding()
@@ -413,8 +434,9 @@ def check_report(found: Ready, data_dir: Path) -> str:
     frozen = f"frozen at {found.ref.tag} ({found.ref.commit})" if found.ref.commit else "planted"
     lines = [
         f"{pre.name}: {frozen}, every value set",
-        f"trials: {found.logged_before} of this version logged in "
-        f"{prereg.trials_path(data_dir).resolve()}; this run logs {found.planned} of its budget of "
+        f"trials: {prereg.trials(data_dir, pre)} of this version logged in "
+        f"{prereg.trials_path(data_dir).resolve()}, {found.logged_before} of them by other "
+        f"results; this run's cells: {found.planned} of its budget of "
         f"{pre.doc['trials']['budget']}",
         f"inputs: {len(admitted.scored)} runs, each with {len(tables)} latents tables, at "
         f"L = {sorted(admitted.chosen)}; pilot record {admitted.pilot.sha256}",
@@ -443,17 +465,10 @@ def run(
     """Everything but the figures; returns the result folder, its judged rows, the trials logged.
     With `resume`, the torn result of this file a crash left is carried on from what it saved."""
     pre, ref, own, planned, _, admitted, baseline, fits, embed = ready(
-        path, data_dir, planted, allow_stale, embed, device, resume
+        path, data_dir, planted, allow_stale, embed, device, resume, seed
     )
     doc = pre.doc
-    # in the resume key too: on another device or torch, or fitted on other staircases, the probes
-    # are other bytes
-    embedding = {
-        "torch": torch.__version__,
-        "device": device or train.default_device(),
-        "fit_runs": {r.run_id: r.complete_sha256 for r in fits.values()},
-    }
-    run_dir = begin(pre, ref, data_dir, seed, admitted, own, **embedding)
+    run_dir = begin(pre, ref, data_dir, seed, admitted, own, **embedding_key(device, fits))
     curves = curve_rows(doc, admitted.scored, admitted.passes)
     probe_rows, draws = probe_tables(
         doc, data_dir, admitted.scored, admitted.passes, embed, seed, run_dir
@@ -538,7 +553,7 @@ def draw_figures(run_dir: Path) -> str | None:
 
 
 def main(argv: Sequence[str] | None = None, embed: Embed | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
     entry = parser.add_mutually_exclusive_group(required=True)
     entry.add_argument("--prereg", type=Path)
@@ -575,6 +590,7 @@ def main(argv: Sequence[str] | None = None, embed: Embed | None = None) -> int:
                 embed,
                 args.device,
                 args.resume,
+                args.seed,
             )
             print(check_report(found, args.data_dir))
             return 0

@@ -183,10 +183,17 @@ def begin(
     the seed, every input with each latents table read over it, the pilot record, the libraries
     that draw and write, and whatever the caller adds in `extra` (the runner: its embedding and
     the runs its probes fit on)."""
+    key = resume_key(pre, ref, seed, admitted, **extra)
+    return prereg.begin_result(data_dir, pre, ref, key, own)
+
+
+def resume_key(
+    pre: prereg.Prereg, ref: prereg.Frozen, seed: int, admitted: ising.Admitted, **extra: Any
+) -> dict[str, Any]:
     if pre.doc["data"]["domain"] != "ising":
         raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
     read = [c.name for c in admitted.passes if c.name]
-    key = {
+    return {
         "prereg": prereg.stamp(pre, ref),
         "seed": seed,
         "inputs": {
@@ -198,7 +205,6 @@ def begin(
         "pyarrow": pa.__version__,
         **extra,
     }
-    return prereg.begin_result(data_dir, pre, ref, key, own)
 
 
 def score(
