@@ -35,7 +35,7 @@ jobs:
         run: PATH="$RUNNER_TEMP/lint/bin:$PATH" python3 -m unittest discover -s setup/lint/tests
 
   python:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -46,10 +46,10 @@ jobs:
           python-version: "3.13"
       - name: Python environment
         run: uv sync --extra cpu --locked
-      - name: Ruff
-        run: |
-          uv run ruff check
-          uv run ruff format --check
+      - name: Ruff check
+        run: uv run ruff check
+      - name: Ruff format
+        run: uv run ruff format --check
       - name: Pyright
         run: uv run pyright
       - name: Pytest
@@ -58,10 +58,8 @@ jobs:
         run: uv run --no-sync python notebooks/kaggle_ising_runs.py --self-test
 
   rust:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 120
-    env:
-      RUSTFLAGS: '-C link-arg=-Wl,-rpath,$ORIGIN:$ORIGIN/deps'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.1

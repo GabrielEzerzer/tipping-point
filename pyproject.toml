@@ -31,10 +31,9 @@ extend-exclude = ["harness/tests/fixtures", "setup/lint"]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.pyright]
-include = ["python", "harness", "notebooks"]
+include = ["python", "harness", "notebooks", "setup/lint"]
 exclude = ["**/.venv", "harness/out", "harness/tests/fixtures"]
 pythonVersion = "3.13"
-pythonPlatform = "Windows"
 typeCheckingMode = "standard"
 extraPaths = ["harness", "python/tipping_point/tests/fixtures"]
 
