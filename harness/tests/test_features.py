@@ -77,8 +77,17 @@ def mapped() -> dict[str, set[str | None]]:
     return commands
 
 
-def help_of(key: str, path: Path) -> tuple[str, subprocess.CompletedProcess[str]]:
-    target = ["-m", key] if "/" not in key else [key]
+def explore_scripts() -> tuple[str, ...]:
+    door = ast.parse((ROOT / EXPLORE / "__main__.py").read_text(encoding="utf-8"))
+    (listed,) = [
+        ast.literal_eval(node.value)
+        for node in door.body
+        if isinstance(node, ast.Assign) and [ast.unparse(t) for t in node.targets] == ["SCRIPTS"]
+    ]
+    return listed
+
+
+def help_of(key: str, *target: str) -> tuple[str, subprocess.CompletedProcess[str]]:
     return key, subprocess.run(
         [sys.executable, *target, "--help"],
         cwd=ROOT,
@@ -117,13 +126,7 @@ def test_every_entry_point_is_in_the_map() -> None:
 
 
 def test_every_explore_script_is_in_the_map() -> None:
-    door = ast.parse((ROOT / EXPLORE / "__main__.py").read_text(encoding="utf-8"))
-    (listed,) = [
-        ast.literal_eval(node.value)
-        for node in door.body
-        if isinstance(node, ast.Assign) and [ast.unparse(t) for t in node.targets] == ["SCRIPTS"]
-    ]
-    want, named = set(listed), mapped().get(EXPLORE, set())
+    want, named = set(explore_scripts()), mapped().get(EXPLORE, set())
     assert named == want, (
         f"{EXPLORE}/__main__.py SCRIPTS and features.json differ: add "
         f"{sorted(want - named)} to features.json, as features or internal, and remove "
@@ -162,7 +165,8 @@ def test_every_argparse_command_has_help_and_maps_each_subcommand() -> None:
     }
     commands = mapped()
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for key, done in pool.map(lambda item: help_of(*item), runnable.items()):
+        jobs = [(key, ["-m", key] if "/" not in key else [key]) for key in runnable]
+        for key, done in pool.map(lambda job: help_of(job[0], *job[1]), jobs):
             assert done.returncode == 0, (
                 f"{key} --help exits {done.returncode}: {done.stderr[-500:]}"
             )
@@ -171,4 +175,12 @@ def test_every_argparse_command_has_help_and_maps_each_subcommand() -> None:
             assert named == (subs or {None}), (
                 f"map every subcommand of {key} in features.json, and no other: "
                 f"mapped {sorted(map(str, named))}, --help lists {sorted(subs)}"
+            )
+
+
+def test_every_explore_script_has_help() -> None:
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for name, done in pool.map(lambda name: help_of(name, EXPLORE, name), explore_scripts()):
+            assert done.returncode == 0, (
+                f"{EXPLORE} {name} --help exits {done.returncode}: {done.stderr[-500:]}"
             )

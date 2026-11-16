@@ -527,7 +527,7 @@
       "reason": "run by latent_pass"
     },
     {
-      "command": "uv run python -m tipping_point.market.cascade",
+      "command": "uv run --no-sync python -m tipping_point.market.cascade",
       "reason": "moved: it only exits, naming python -m tipping_point.market cascade"
     }
   ]
