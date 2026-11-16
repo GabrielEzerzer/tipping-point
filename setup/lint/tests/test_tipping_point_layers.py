@@ -93,12 +93,23 @@ class PythonLayers(unittest.TestCase):
         })
 
     def test_library_imports_no_tools(self):
-        bad = "import pytest\nfrom jepa_toy import toy\nimport numpy as np, strays\nfrom explore.common import load\n"
+        bad = "\n".join([
+            "import pytest",
+            "from jepa_toy import toy",
+            "import numpy as np, strays",
+            "from explore.common import load",
+            "from harness import gate",
+            "import harness.gate",
+            "from notebooks import kaggle_ising_runs",
+            "import notebooks.kaggle_ising_runs",
+            "",
+        ])
+        good = "import numpy as np\nfrom ..ews.ising import Run\nimport harnessed\nfrom notebooks_util import load\nfrom tipping_point import harness_util\n"
         self.assert_hits({
             f"{SRC}/jepa/train.py": bad,
             "harness/m4_pilot.py": bad,
-            f"{SRC}/jepa/data.py": "import numpy as np\nfrom ..ews.ising import Run\n",
-        }, {(f"{SRC}/jepa/train.py", line, "tp-library-no-tools") for line in (1, 2, 3, 4)})
+            f"{SRC}/jepa/data.py": good,
+        }, {(f"{SRC}/jepa/train.py", line, "tp-library-no-tools") for line in range(1, 9)})
 
 
 class RustLayers(unittest.TestCase):
