@@ -298,6 +298,14 @@
       "test": "python/tipping_point/tests/ews/test_experiment.py"
     },
     {
+      "name": "Latent scoring data dir",
+      "description": "Assembles the data dir a latent pre-registration is scored from: its runs, latents tables and checkpoints hard linked from Kaggle outputs and data dirs, each checked against its complete.json, with ews/ linked to the data dir whose trial log counts the budget.",
+      "command": "uv run python harness/latent_data_dir.py --prereg <file> --from <folder> --into <new data dir>",
+      "inputs": "a latent pre-registration and data-dir-shaped folders holding its runs, latents tables and trainings",
+      "outputs": "<into>/ising/, <into>/jepa/ and the link <into>/ews",
+      "test": "harness/tests/test_latent_data_dir.py"
+    },
+    {
       "name": "Latent experiment figures",
       "description": "Draws a latent experiment's figures from its csv tables alone.",
       "command": "uv run --isolated --no-project --with matplotlib==3.10.3 python harness/ising_figures.py <result dir>",

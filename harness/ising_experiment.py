@@ -53,7 +53,7 @@ import sys
 from collections.abc import Callable, Sequence
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import ews_planted
 import numpy as np
@@ -351,18 +351,27 @@ def alignment_quantities(doc: dict[str, Any], curves: Sequence[Row]) -> list[mar
     ]
 
 
-def run(
+class Ready(NamedTuple):
+    pre: prereg.Prereg
+    ref: prereg.Frozen
+    resumed: str | None
+    planned: int
+    logged_before: int
+    admitted: ising.Admitted
+    baseline: list[Row]
+    fits: dict[int, ising.Run]
+    embed: Embed
+
+
+def ready(
     path: Path,
     data_dir: Path,
-    seed: int = 26,
     planted: bool = False,
     allow_stale: bool = False,
     embed: Embed | None = None,
     device: str | None = None,
     resume: bool = False,
-) -> tuple[Path, list[Row], int]:
-    """Everything but the figures; returns the result folder, its judged rows, the trials logged.
-    With `resume`, the torn result of this file a crash left is carried on from what it saved."""
+) -> Ready:
     pre = prereg.load(path)
     if "latents" not in pre.doc:
         raise prereg.PreregError(f"{pre.name} has no [latents]: `ews score` scores it")
@@ -380,7 +389,7 @@ def run(
         ref = prereg.frozen(pre)
     planned = prereg.cells(doc)
     own = prereg.resumable(data_dir, pre) if resume else None
-    prereg.charge(data_dir, pre, planned, own)
+    logged = prereg.charge(data_dir, pre, planned, own)
     if resume and own is None:  # after charge, which refuses several torn folders
         print("--resume: no torn result folder found, starting a fresh run", file=sys.stderr)
     runs_commit = prereg.baseline_commit(pre) if ref.commit else None
@@ -394,6 +403,49 @@ def run(
             if planted
             else checkpoint_embedder(data_dir, admitted.passes, device)
         )
+    return Ready(pre, ref, own, planned, logged, admitted, baseline, fits, embed)
+
+
+def check_report(found: Ready, data_dir: Path) -> str:
+    pre, admitted = found.pre, found.admitted
+    tables = sorted({c.name for c in admitted.passes if c.name})
+    code = io.code_version()
+    frozen = f"frozen at {found.ref.tag} ({found.ref.commit})" if found.ref.commit else "planted"
+    lines = [
+        f"{pre.name}: {frozen}, every value set",
+        f"trials: {found.logged_before} of this version logged in "
+        f"{prereg.trials_path(data_dir).resolve()}; this run logs {found.planned} of its budget of "
+        f"{pre.doc['trials']['budget']}",
+        f"inputs: {len(admitted.scored)} runs, each with {len(tables)} latents tables, at "
+        f"L = {sorted(admitted.chosen)}; pilot record {admitted.pilot.sha256}",
+        f"baseline: {pre.doc['baseline']['result']}, {len(found.baseline)} rows",
+        f"probes fit on: {', '.join(r.run_id for r in found.fits.values())}",
+        f"resume: {found.resumed or 'no torn result, a fresh run'}",
+        f"checkout: {code['git_sha']}, "
+        + (
+            "clean" if code["dirty"] is False else "not clean: a crash in the run cannot be resumed"
+        ),
+        "nothing written, no trial charged",
+    ]
+    return "\n".join(lines)
+
+
+def run(
+    path: Path,
+    data_dir: Path,
+    seed: int = 26,
+    planted: bool = False,
+    allow_stale: bool = False,
+    embed: Embed | None = None,
+    device: str | None = None,
+    resume: bool = False,
+) -> tuple[Path, list[Row], int]:
+    """Everything but the figures; returns the result folder, its judged rows, the trials logged.
+    With `resume`, the torn result of this file a crash left is carried on from what it saved."""
+    pre, ref, own, planned, _, admitted, baseline, fits, embed = ready(
+        path, data_dir, planted, allow_stale, embed, device, resume
+    )
+    doc = pre.doc
     # in the resume key too: on another device or torch, or fitted on other staircases, the probes
     # are other bytes
     embedding = {
@@ -505,8 +557,27 @@ def main(argv: Sequence[str] | None = None, embed: Embed | None = None) -> int:
     parser.add_argument(
         "--resume", action="store_true", help="carry on the result a crash left, from what it saved"
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="every refusal the run makes before it writes or charges, then stop: charges nothing",
+    )
     args = parser.parse_args(argv)
+    if args.check and args.figures_only:
+        parser.error("--check checks a scoring: give it --prereg, not --figures-only")
     try:
+        if args.check:
+            found = ready(
+                args.prereg,
+                args.data_dir,
+                args.planted,
+                args.allow_stale_pilot,
+                embed,
+                args.device,
+                args.resume,
+            )
+            print(check_report(found, args.data_dir))
+            return 0
         if args.figures_only:
             run_dir = args.figures_only
             if not (run_dir / "complete.json").is_file():  # its cells may be unlogged
