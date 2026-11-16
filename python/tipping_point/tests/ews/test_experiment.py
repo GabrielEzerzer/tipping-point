@@ -341,6 +341,21 @@ def test_a_second_scoring_past_the_budget_is_refused_before_it_reads_anything(
     assert {json.loads(line)["cell"]["checkpoint"] for line in lines} == CHECKPOINTS
 
 
+def test_the_check_refuses_what_the_run_refuses_and_writes_nothing(
+    frozen: Frozen, scored: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    copy = _copy(frozen.spare, tmp_path / "data", frozen.result)
+    assert _run(frozen.path, copy, "--check") == 0
+    out = capsys.readouterr().out
+    assert "0 of this version logged" in out and "nothing written, no trial charged" in out
+    assert not prereg.trials_path(copy.root).exists() and _results(copy) == []
+    pre = prereg.load(frozen.path)
+    assert _run(frozen.path, frozen.data, "--check") == 1
+    assert "exceed its budget" in capsys.readouterr().err
+    assert _results(frozen.data) == [scored]
+    assert prereg.trials(frozen.data.root, pre) == pre.doc["trials"]["budget"]
+
+
 def test_the_counter_refuses_the_3133rd_cell(tmp_path: Path) -> None:
     """On the draft itself, whose budget is its cells: all 3,132 of them may be spent, and at 3,132
     logged one more is refused, whichever way the 3,133rd comes."""
@@ -796,7 +811,17 @@ REFUSED = {  # what changed since the crash: what the refusal says
 }
 
 
-@pytest.mark.parametrize(("change", "said"), REFUSED.items(), ids=REFUSED.keys())
+KEYED = [
+    (change, said, mode)
+    for change, said in REFUSED.items()
+    for mode in ("run", "check")
+    if not (mode == "check" and change == "the other entry")
+]
+
+
+@pytest.mark.parametrize(
+    ("change", "said", "mode"), KEYED, ids=[f"{change}, {mode}" for change, _, mode in KEYED]
+)
 def test_a_resume_under_another_key_is_refused_and_touches_nothing(
     frozen: Frozen,
     tmp_path: Path,
@@ -805,6 +830,7 @@ def test_a_resume_under_another_key_is_refused_and_touches_nothing(
     clean: None,
     change: str,
     said: str,
+    mode: str,
 ) -> None:
     """--resume carries a torn result on only for a scoring that would end in the bytes it began to
     write: the same seed, inputs and fit runs, file and stamp, code and embedding, and the same
@@ -838,7 +864,7 @@ def test_a_resume_under_another_key_is_refused_and_touches_nothing(
         argv = ["score", "--prereg", str(frozen.path), "--data-dir", str(copy.root), "--cells-only"]
         code = ews_main([*argv, "--resume"])
     else:
-        code = _run(frozen.path, copy, "--no-figures", *resume)
+        code = _run(frozen.path, copy, "--no-figures", *resume, *(["--check"] * (mode == "check")))
     assert code == 1
     err = capsys.readouterr().err
     assert said in err, err

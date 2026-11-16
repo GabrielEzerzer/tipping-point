@@ -655,6 +655,29 @@ a result with no probes or margins, and the budget is spent once. The runner ref
 frozen or still holds a placeholder, and a scoring whose cells would pass `trials.budget`
 (`prereg.charge`: cell 3,133 of `ising-latent-v1` is never evaluated), before it reads anything.
 
+- **The data dir.** The runner reads each run's latents tables at `<run>/latents/<table>/`, the
+  checkpoints at `<data dir>/jepa/<training>/`, the baseline result and the trial log at
+  `<data dir>/ews/`. `harness/latent_data_dir.py` assembles such a folder from the Kaggle outputs
+  that hold the extracted runs and the trainings, and a data dir for the rest (the probes' fit
+  runs, the pilot record), hard linking every file (copying where a link is refused, across
+  volumes). It then checks that every run the file scores is there, complete and with each table
+  it pins, with each L's fit staircase, and every file against its `complete.json`, each table's
+  keys against its run's frames included. Its `ews` is a link to the data dir whose trial log counts the budget, since
+  `--data-dir` moves the trial log with everything else: a data dir with an `ews/` of its own would
+  start an empty log, and the budget could be spent again there. Remove that link before deleting
+  the folder: a delete that follows it, as PowerShell 5.1's `Remove-Item -Recurse` does, deletes
+  the trial log and the baseline result.
+- **Checking first.** `--check` runs every refusal that comes before the result folder is made, the
+  checkpoints' sha256 and a `--resume`'s resume key included, prints what the run would read and log and whether the checkout is
+  clean, and stops, writing nothing and charging nothing:
+
+  ```sh
+  uv run python harness/latent_data_dir.py --prereg paper/prereg/ising-latent-v1.toml \
+      --into <new data dir> --from <kaggle out> [--from <kaggle out> ...] --from <data dir>
+  uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml \
+      --data-dir <new data dir> --check
+  ```
+
 - **Tables.** `auc`, `surrogates`, `alarms`, `peaks`, `fss` as `ews score` writes them; `probes`, per
   checkpoint, L, target and column, fitted on the validation seed and scored on the scored seeds;
   `margins`; `curves`, each column's mean and L^2 Var per plateau, with the classic |m| on every saved
@@ -697,9 +720,16 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   static fits and reading the tables 4 h. It was about 125 hours before the sequential test and the
   faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. Those figures assume
   alarm scores every tau_c and surrogate tests at every h. The file now scores alarms every 5 tau_c
-  (`scoring.alarms.every = 5`) and runs its surrogate tests at h = 0 only, so both parts will take
-  less; the total has not been projected again. Scoring runs on up to 8 threads by default; on a
-  host with more cores, `TP_THREADS=<n>` sets the count to n, and the results do not depend on it.
+  (`scoring.alarms.every = 5`) and runs its surrogate tests at h = 0 only. Measured again on 16
+  November on the confirmatory inputs, with nothing else running, one primary checkpoint's pass at
+  L = 16 took 18 minutes (surrogates 14, alarms 1.4, AUC and the rest 2.4), and the probes'
+  embeddings 0.6, 2.2 and 8.8 ms a frame at L = 16, 32 and 64. The series hold about as many
+  samples at every L (L = 64's ramps 19% fewer), so the run is projected at about 21 hours: the ten
+  primary passes 9 h, the twelve ablation passes, at the headline cell with 199 surrogates, about
+  3 h, the probes' embeddings 8.5 h, the rest under an hour. Rows whose surrogate tests run all
+  their draws cost more than those measured, so it could reach about 30 hours. Scoring runs on up
+  to 8 threads by default; on a host with more cores, `TP_THREADS=<n>` sets the count to n, and the
+  results do not depend on it.
   A run's folder is made before its probes, so a run interrupted anywhere leaves a folder with no
   `complete.json`, which `--resume` (below) carries on. Its trials are logged in one
   write after its tables and before `complete.json`, so a crash in that write leaves a folder with no

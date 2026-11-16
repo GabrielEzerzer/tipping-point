@@ -1558,6 +1558,27 @@ def _differences(began: dict[str, Any], key: dict[str, Any]) -> dict[str, str]:
     return found
 
 
+def with_code(key: dict[str, Any], code: dict[str, Any] | None = None) -> dict[str, Any]:
+    code = io.code_version() if code is None else code
+    return key | {"code": code["git_sha"] if code["dirty"] is False else None}
+
+
+def carried_on(data_dir: Path, prereg: Prereg, own: str, key: dict[str, Any]) -> dict[str, Any]:
+    run_dir = Path(data_dir) / "ews" / own
+    manifest = io.read_json(run_dir / "manifest.json")
+    found = _differences(manifest.get("resume") or {}, key)
+    if key["code"] is None:
+        found["code"] = "this checkout has changes not committed, which no key can tell apart"
+    if found:
+        raise PreregError(
+            f"{prereg.name}: {own} in {run_dir.parent} is not carried on, since it began "
+            "otherwise and could not end in the bytes an uninterrupted scoring writes: "
+            + "; ".join(f"{part}: {why}" for part, why in found.items())
+            + ". Score it as it began, or delete it or amend the pre-registration"
+        )
+    return manifest
+
+
 def begin_result(
     data_dir: Path, prereg: Prereg, freeze_ref: Frozen, key: dict[str, Any], own: str | None = None
 ) -> Path:
@@ -1575,7 +1596,7 @@ def begin_result(
             "resumed",
             file=sys.stderr,
         )
-    key = key | {"code": code["git_sha"] if code["dirty"] is False else None}
+    key = with_code(key, code)
     started = {
         "started_ns": time.time_ns(),
         "host": socket.gethostname(),
@@ -1584,17 +1605,7 @@ def begin_result(
     }
     if own is not None:
         run_dir = Path(data_dir) / "ews" / own
-        manifest = io.read_json(run_dir / "manifest.json")
-        found = _differences(manifest.get("resume") or {}, key)
-        if key["code"] is None:
-            found["code"] = "this checkout has changes not committed, which no key can tell apart"
-        if found:
-            raise PreregError(
-                f"{prereg.name}: {own} in {run_dir.parent} is not carried on, since it began "
-                "otherwise and could not end in the bytes an uninterrupted scoring writes: "
-                + "; ".join(f"{part}: {why}" for part, why in found.items())
-                + ". Score it as it began, or delete it or amend the pre-registration"
-            )
+        manifest = carried_on(data_dir, prereg, own, key)
         manifest["resumptions"].append(started)
         io.write_json(run_dir / "manifest.json", manifest, replace=True)
         return run_dir
