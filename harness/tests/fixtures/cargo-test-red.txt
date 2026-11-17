@@ -1,4 +1,4 @@
-   Compiling engine v0.1.0 (C:\Users\gabri\Desktop\personal-os\vault\personal\projects\tipping-point\.worktrees\20-scaffold\engine)
+   Compiling engine v0.1.0 (C:\src\tipping-point\engine)
 warning: variable does not need to be mutable
   --> engine\src\lib.rs:26:27
    |

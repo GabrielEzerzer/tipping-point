@@ -494,7 +494,7 @@ def render(result: Mapping[str, Any], draws: int) -> str:
         "# Exploratory market latent pass, 2023-Q4",
         "",
         "Exploratory: nothing here is a pre-registered trial or a result. Every choice it proposes "
-        "is the owner's.",
+        "is left open.",
         "",
         "## Tables",
         "",
@@ -539,7 +539,7 @@ def render(result: Mapping[str, Any], draws: int) -> str:
         lines.append(f"| {pair} | **{d['same_asset']}** | {d['cross_asset']} | {detail} |")
     disagree = [p for p, d in result["directions"].items() if d["same_asset"] == "disagree"]
     if disagree:
-        lines += ["", f"The signs disagree for {', '.join(disagree)}: the owner decides."]
+        lines += ["", f"The signs disagree for {', '.join(disagree)}: left open."]
     for pair, d in result["directions"].items():
         if d["no_sign"]:
             lines.append(f"- {pair}: no sign (no kept event) at {', '.join(d['no_sign'])}")
@@ -568,7 +568,7 @@ def render(result: Mapping[str, Any], draws: int) -> str:
     j = result["judged"]
     lines += ["", "## Which columns to judge", ""]
     lines += [f"Rule: {j['rule']}.", ""]
-    shown = ", ".join(j["proposed"]) if j["proposed"] else "none passes; the owner decides"
+    shown = ", ".join(j["proposed"]) if j["proposed"] else "none passes; left open"
     lines += [f"Proposed: **{shown}**.", ""]
     lines += [
         "| column | mean \\|AUC - 0.5\\| trained | twin | margin | passing (same-asset cells) |",

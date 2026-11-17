@@ -774,7 +774,7 @@ uv run --no-sync python harness/explore latent_pass --training <run id> --step <
 ```
 
 Nothing here changes what ising-ews-v1 scores. `harness/ews_v1_golden.py` wrote every row and value
-of a v1 scoring on planted data from aa29cbc, the freeze lane's merge, and
+of a v1 scoring on planted data from aa29cbc, the freeze branch's merge, and
 `python/tipping_point/tests/ews/test_v1_unchanged.py` holds later commits to them, RNG stream
 included.
 

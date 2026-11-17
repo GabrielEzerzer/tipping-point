@@ -53,7 +53,7 @@ refractory = 288         # Q: bars after an event onset in which no other event 
 # (H = 0) with no event onset within `refractory` bars either side, at least `refractory` bars
 # from the first label and from the end, so any `clean`-bar window inside one is calm as a
 # pre-event window is, with no event near it. Flickers and other episodes break a stretch only
-# where H = 1. The owner chose it after the S5 pilot.
+# where H = 1. It was chosen after the S5 pilot.
 [nulls]
 rule = "matched-calm-windows"
 
