@@ -1,40 +1,6 @@
-"""The market warning test's segments (#30 M5; research pass sections 6.3 and 6.6, owner's calls
-9 and 11): what market-ews scores, cut from a labels run of the frozen market-labels file.
-
-  close_returns  a symbol's 1-minute close-to-close log returns on the minute grid, NaN for a minute
-                 with no kline or whose previous minute has none (prereg.MISSING_MINUTE)
-  slot_profile   per slot of the labeller's 2 x 288 (weekday or weekend, by 5-minute time of day),
-                 over a fit span of pilot days: the returns' root mean square ("scale") or mean
-                 ("mean"), the two prereg.DESEASON_METHODS
-  deseasonalise  each return divided by its slot's scale, or less its slot's mean
-  check_labels   the labels run's manifest, once the labels file is frozen at its tag and the run
-                 was labelled with its parameters (and its stamp, when it has one)
-  build          the event segments per (symbol, horizon) and the control segments per symbol
-  eth_only       which ETH onsets have no BTC event onset within a window (reporting's eth-only)
-
-Lengths: a segment is `span` minutes, Pipeline.span = window + length - 1. An onset is the start of
-a 5-minute bar; at horizon h bars its segment ends with the minute that closes at onset - 5h
-minutes, so it holds nothing of the h bars before the onset (market.nulls.pre_onset_rows, the
-floor's rule). The length is the same at every horizon, so at long horizons a segment starts before
-the labels' clean window of C bars and may read bars with H = 1: each segment's share of minutes
-in such bars is reported (call 11). Controls are the non-overlapping spans cut in time order from
-the start of each null stretch (market.nulls.null_rows), one set for every horizon, then
-optionally a seeded subsample of them. A segment that holds a minute with no return is excluded
-(the same segments for every indicator), and so is one that reaches outside the series given;
-both are counted. With `score_from`, an onset before that day, and a control segment starting before
-it, is not cut at all: the series may start earlier, as history for the first days' segments,
-without its own days being scored.
-
-The confirmatory span (from 2024-01-01) opens only through a frozen market-ews file, as the market
-command's --prereg opens it for labels: build refuses a series, onset or control segment reaching
-it unless `scoring` is a market-ews file frozen at its tag that names this labels file, and a run
-labelling those days must carry the frozen labels' stamp in its manifest. An environment switch,
-as cascade.recall takes, would open those days to any caller; the frozen file ties them to the
-pre-registered test. With it, build also takes nothing the file fixes from its caller: the
-horizons, the span (window + length - 1), the subsample and the seed must be the file's.
-
-This module reads labels and is fed the series; the labels package (market/) imports none of it.
-"""
+# The market warning test's segments (#30 M5; research pass 6.3 and 6.6, choices 9 and 11), cut
+# from a labels run of the frozen market-labels file. The README's market warning test section
+# holds the rules.
 
 from __future__ import annotations
 
@@ -239,14 +205,6 @@ def build(
     score_from: date | None = None,
     scoring: prereg.Prereg | None = None,
 ) -> Segments:
-    """The event segments of each symbol's regime-shift onsets at each horizon (in bars) and its
-    control segments, from the labels run `run` of the frozen file `labels` (check_labels), cut
-    from `series` (one Minutes per symbol: returns, raw or deseasonalised). With subsample n > 0,
-    at most n of each symbol's kept controls are kept: when there are more, n are drawn without
-    replacement, symbols in sorted order from one generator seeded with `seed`, and kept in time
-    order. With `score_from`, onsets before that UTC day and control segments starting before it
-    are not cut (the series before it is history only). Days from 2024-01-01 need `scoring`, whose
-    horizons, span, subsample and seed these must be (the module docstring says why)."""
     manifest = check_labels(run, labels, scoring)
     if scoring is not None:
         if score_from is not None:

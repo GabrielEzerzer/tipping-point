@@ -1,20 +1,5 @@
-"""What the ising-ews v1 scorer gives on planted data at aa29cbc, the freeze lane's merge, so that
-a later commit can be held to it: the same rows, the same values, in the same order.
-
-score() runs ising.evaluate on the planted v1 dataset (fss mode) under the committed
-paper/prereg/ising-ews-v1.toml. The file's settings change only as far as the planted data need
-(seeds, replicas, the tau_c record, the tau.json pins) and to run in seconds: 40 bootstrap draws,
-one surrogate, alarm scores every 200 tau_c, one window, two bandwidths and two horizons of the
-grid. Both observables, cadences and surrogate tests stay, so every loop of the scorer turns; and
-every draw of the one RNG feeds the CIs and surrogate rates of the rows after it, so a scorer that
-draws once more, once less or in another order moves them.
-
-The golden file was written by this script from aa29cbc, before any latent code existed. To check
-it again, run the script on that commit's tree (nothing here needs anything newer), never on a later
-one: rewriting the golden from the code it checks would prove nothing.
-
-  uv run python harness/ews_v1_golden.py [--out FILE]
-"""
+# What the ising-ews v1 scorer gives on planted data at aa29cbc, the freeze branch's merge, so a
+# later commit can be held to the same rows and values in the same order. Run it on aa29cbc only.
 
 import argparse
 import hashlib
@@ -39,7 +24,6 @@ TOLERANCE = 1e-9  # relative: rounding between machines, far below any value a d
 
 
 def v1_doc(data: V1) -> dict[str, Any]:
-    """The committed v1 file, set to score `data` as the module docstring says."""
     doc = tomllib.loads(V1_TOML.read_text("utf-8"))
     record = hashlib.sha256(data.pilot.read_bytes()).hexdigest()
     doc["data"] |= {"seeds": list(V1_SEEDS), "replicas": V1_REPLICAS}
@@ -114,7 +98,9 @@ def write(path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Write the ising-ews v1 golden; run it on aa29cbc's tree only."
+    )
     parser.add_argument("--out", type=Path, default=GOLDEN)
     args = parser.parse_args(argv)
     write(args.out)

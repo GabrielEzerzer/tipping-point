@@ -34,8 +34,6 @@ def _record(final: np.ndarray, twin: float = 1.5) -> dict:
 
 
 def test_s_is_chosen_only_when_it_matches_m_on_both_assets() -> None:
-    """Planted: M's daily errors near 0.80; S 0.5 % worse matches, 5 % worse does not, and an M
-    that does not beat its twin hands the choice to the owner."""
     rng = np.random.default_rng(1)
     m = 0.80 + 0.01 * rng.standard_normal(30)
     close, far = m * 1.005, m * 1.05

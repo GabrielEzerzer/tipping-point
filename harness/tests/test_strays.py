@@ -24,19 +24,19 @@ def _fixture(root: Path) -> tuple[list[Path], list[Process], list[Process]]:
     600 is the bash a killed background Git Bash forked, still alive under its gone parent, 601
     the cargo it ran, 602 a test binary whose cargo is gone; 604 is a live terminal (mintty)
     running bash 603, which runs cargo 605."""
-    main, lane = root / "code" / "target", root / ".worktrees" / "r2a" / "target"
+    main, linked = root / "code" / "target", root / ".worktrees" / "r2a" / "target"
     git_bin = root / "git" / "usr" / "bin"
     found = [
         Process(102, 9001, main / "debug" / "serve.exe", 11 * MIN),
-        Process(103, 302, lane / "debug" / "crash-writer.exe", 30 * MIN),  # parent PID reused
+        Process(103, 302, linked / "debug" / "crash-writer.exe", 30 * MIN),  # parent PID reused
         Process(104, 9002, main / "debug" / "deps" / f"crash_writer-{HASH}.exe", 30 * MIN),
-        Process(105, 9003, lane / "debug" / "deps" / f"api_python-{HASH}.exe", 12 * MIN),
+        Process(105, 9003, linked / "debug" / "deps" / f"api_python-{HASH}.exe", 12 * MIN),
         Process(106, 9004, main / "debug" / "store.exe", 90 * MIN),
         Process(107, 9004, main / "debug" / "ingest.exe", 90 * MIN),
         Process(108, 9004, main / "debug" / "record.exe", 90 * MIN),
         Process(109, 9004, main / "debug" / "soak.exe", 90 * MIN),
         Process(110, 601, main / "debug" / "serve.exe", 35 * MIN),  # under a dead shell's cargo
-        Process(111, 602, lane / "debug" / "crash-writer.exe", 30 * MIN),  # its test's cargo gone
+        Process(111, 602, linked / "debug" / "crash-writer.exe", 30 * MIN),  # its test's cargo gone
     ]
     spared = [
         Process(300, 9000, root / "bin" / "pwsh.exe", 600 * MIN),
@@ -45,7 +45,7 @@ def _fixture(root: Path) -> tuple[list[Path], list[Process], list[Process]]:
         Process(303, 4, Path(), math.inf),
         Process(600, 9009, git_bin / "bash.exe", 120 * MIN),
         Process(601, 600, root / "bin" / "cargo.exe", 40 * MIN),
-        Process(602, 9010, lane / "debug" / "deps" / f"crash_recovery-{HASH}.exe", 40 * MIN),
+        Process(602, 9010, linked / "debug" / "deps" / f"crash_recovery-{HASH}.exe", 40 * MIN),
         Process(603, 604, git_bin / "bash.exe", 100 * MIN),
         Process(604, 9011, root / "git" / "usr" / "bin" / "mintty.exe", 200 * MIN),
         Process(605, 603, root / "bin" / "cargo.exe", 50 * MIN),
@@ -53,10 +53,10 @@ def _fixture(root: Path) -> tuple[list[Path], list[Process], list[Process]]:
         Process(201, 300, main / "debug" / "serve.exe", 90 * MIN),  # `serve --record` by hand
         Process(202, 301, main / "debug" / "serve.exe", 20 * MIN),  # under a live cargo run
         Process(203, 303, main / "debug" / "store.exe", 60 * MIN),  # a parent it cannot read
-        Process(204, 9005, lane / "debug" / "deps" / f"api_load-{HASH}.exe", 41 * MIN),
+        Process(204, 9005, linked / "debug" / "deps" / f"api_load-{HASH}.exe", 41 * MIN),
         Process(205, 9006, main / "release" / "serve.exe", 300 * MIN),  # a recording session
         Process(206, 9006, main / "release" / "soak.exe", 1440 * MIN),  # the 24-hour soak
-        Process(207, 9007, lane / "debug" / "deps" / f"api_python-{HASH}.exe", 9 * MIN),
+        Process(207, 9007, linked / "debug" / "deps" / f"api_python-{HASH}.exe", 9 * MIN),
         Process(208, 9008, root / "other-repo" / "target" / "debug" / "serve.exe", 60 * MIN),
         Process(209, 9008, main / "debug" / "deps" / f"api_parity-{HASH}.exe", 60 * MIN),
         Process(210, 9008, main / "debug" / "build" / "cargo.exe", 60 * MIN),
@@ -64,7 +64,7 @@ def _fixture(root: Path) -> tuple[list[Path], list[Process], list[Process]]:
         Process(212, 9008, main / "debug" / "serve-extra.exe", 60 * MIN),
         Process(213, 9008, root / "code" / "target2" / "debug" / "serve.exe", 60 * MIN),
     ]
-    return [main, lane], found, spared
+    return [main, linked], found, spared
 
 
 def test_only_old_orphaned_debug_engine_processes_of_this_repo_are_strays(tmp_path: Path) -> None:
@@ -103,13 +103,13 @@ def _git(cwd: Path, *argv: str) -> None:
 
 
 def test_the_target_dirs_are_the_checkouts_and_every_worktrees(tmp_path: Path) -> None:
-    repo, lane = tmp_path / "code", tmp_path / "lane"
+    repo, linked = tmp_path / "code", tmp_path / "worktree"
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "commit", "-q", "--allow-empty", "-m", "init")
-    _git(repo, "worktree", "add", "-q", str(lane))
-    found = [d.resolve() for d in strays.target_dirs(lane)]
-    assert found == [(repo / "target").resolve(), (lane / "target").resolve()]
+    _git(repo, "worktree", "add", "-q", str(linked))
+    found = [d.resolve() for d in strays.target_dirs(linked)]
+    assert found == [(repo / "target").resolve(), (linked / "target").resolve()]
     outside = tmp_path / "not-a-checkout"
     outside.mkdir()
     assert strays.target_dirs(outside) == [outside / "target"]

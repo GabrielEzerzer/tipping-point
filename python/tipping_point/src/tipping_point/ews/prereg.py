@@ -141,15 +141,11 @@ MISSING = (
     "variance of 0 is a missing observation: the filter carries its prediction without an update, "
     "and nothing is floored"
 )
-# what market.msvol.nulls does: calm bars with no event onset within Q bars either side, the
-# owner's choice after the S5 pilot (5 November 2026)
 NULL_RULES = ("matched-calm-windows",)
 # the ranges the 2023 pilot chooses inside (#29 research pass, section 2, item 13)
 D_MIN = (6, 12, 36)
 THRESHOLDS = ((0.7, 0.3), (0.8, 0.2), (0.9, 0.1))  # (enter, exit)
 BASELINE_DAYS = (14, 28, 56)
-# C and Q at their start values: #29 declares no range for them, and the S5 pilot read sends a
-# shorter Q to the owner with an amendment, so a frozen file may not change them on its own
 CLEAN = (72,)
 REFRACTORY = (288,)
 CONFIRMATORY = date(2024, 1, 1)  # market.__main__.CONFIRMATORY: the first day the pilot never saw
