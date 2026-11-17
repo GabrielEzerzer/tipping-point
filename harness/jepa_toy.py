@@ -23,9 +23,6 @@ from tipping_point.jepa.train import Config
 
 L, FRAMES, CLASSES, P_MAX = 16, 8, 4, 0.2
 
-# d = 32 as in the research pass's sketch; 32 bursts a step at a flat twice the production
-# learning rate after warm-up (a cosine to 1e-6 stalls a run this short: 0.42 at step 200 instead
-# of 0.31); a budget of steps, never of wall-clock time, so the lane is deterministic
 CONFIG = Config(
     steps=150,
     model=ModelSpec(dim=32, pred_width=32),

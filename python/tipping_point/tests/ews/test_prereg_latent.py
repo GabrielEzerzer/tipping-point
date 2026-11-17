@@ -60,9 +60,6 @@ def test_the_draft_is_accepted_with_its_placeholders(draft: dict[str, Any]) -> N
 
 
 def test_the_draft_holds_the_decisions_on_the_research_pass(draft: dict[str, Any]) -> None:
-    """The owner's calls the schema carries (#28): pc_1 and surprise judged, level and slope on the
-    raw series with level's rows on the phase surrogate, N_s = 999 for primaries and twins and 199
-    for ablations, the tolerances of call 13, L = 128 out, 5 primaries and 6 ablations."""
     ind, dyn = draft["indicators"], draft["fss"]["dynamic"]
     assert set(ind["observables"]) == set(draft["latents"]["columns"]) == {"pc_1", "surprise"}
     assert ind["pairs"] == [
@@ -512,10 +509,6 @@ def test_a_key_inside_a_list_of_tables_is_found_too(draft: dict[str, Any]) -> No
 def test_a_row_with_a_verdict_may_be_judged_on_the_twins_alone(
     draft: dict[str, Any], value: str
 ) -> None:
-    """The owner's rule (#28): a check may be judged on the step-0 twins alone, its trained rows
-    reported. `judged` stands on a static row with a verdict, a pipeline check's or a reference's,
-    and on a dynamic pipeline check, draft or ready to freeze; "both" says what a row without the
-    key does."""
     filled = _filled(draft)
     for doc in (draft, filled):
         static, statistics = doc["fss"]["static"], doc["fss"]["dynamic"]["statistics"]

@@ -1,60 +1,5 @@
-"""The market JEPA's CPU pilot (#30 M4) and its rules, written and committed before any pilot runs.
-
-RUNS. Four trainings: BTCUSDT and ETHUSDT, each at size S (dim 64) and M (dim 96), model seed 100
-(never a primary or spare), 20,000 steps, warm-up 1,000 (steps / 20, as on Ising), every other
-setting minutes.Config's default, on the CPU in float32. stop_on_collapse is off: the floors are
-what this pilot recalibrates, so a run is not cut short by floors set on a toy; the detector's
-verdict is still recorded. Each run checkpoints every 500 steps and resumes by the same command.
-
-SPLIT. The training span [2023-01-18, 2023-10-01) (call 5), split as jepa/days.py asks, with the
-validation days a block after the training days: training 2023-01-18 .. 2023-08-31 (226 days),
-validation 2023-09-01 .. 2023-09-30 (30 days). PROPOSAL: the primaries use the same split.
-
-VALIDATION ERROR (PROPOSAL: a probe, not the JEPA loss). The JEPA's own error is measured against
-each model's own target encoder, which moves during training and differs between sizes: on a
-1,000-step smoke run (BTC, 10 days) the monitor's val_error fell to 0.44 at step 250 and rose to
-0.59 (S) and 0.63 (M) by step 1,000 while effective rank grew, and the richer M latent scored worse
-than S. A lower JEPA error can mean a poorer latent, so it can rank neither sizes nor steps. The
-validation error is instead a fixed task in input space: a ridge probe (jepa.probes.ridge, alpha
-1e-3) from the target encoder's latent of minute t (minutes.readouts) to the mean of each scaled
-feature over minute t + 1, over minute pairs both valid, fitted on validation days 1-15 and scored
-per day on days 16-30 as the mean over features of the squared error over the fit set's variance
-(1 = the fit mean). It is measured for final.pt, for the copy saved at step 10,000, and for the
-step-0 twin; the JEPA surprise of final.pt is kept beside it, descriptive. A run is usable when
-final.pt's mean probe error is below its twin's.
-
-SIZE (call 4: M unless S reaches the same validation error). S is chosen when, on both assets, both
-runs are usable and S matches M: the upper end of the 95% bootstrap interval of the mean over the
-scored days of (S - M), paired by day (2,000 draws, seed 0), is at most TOLERANCE = 2% of M's
-mean (PROPOSAL: the 2%). Otherwise M. If an M run is not usable, no size is chosen: the owner
-decides.
-
-STEPS (research pass 5.2, in the manner of Ising's call 9). On a run of the chosen size, e(s) is
-the mean probe error of its model at step s. The primaries train 10,000 steps if, on both assets,
-e(10,000) - e(20,000) <= 2% of e(20,000), and 20,000 otherwise: never below 10,000 (about 21
-passes over the training minutes), never above 20,000 (the pilot sees no further). The laptop's
-seconds per step are recorded but do not set the count: checkpoints make a CPU run of any length
-resumable, and the T4 rate the primaries would run at is unmeasured. In a 20,000-step run the
-learning rate at step 10,000 is still high, so e(10,000) overstates what a 10,000-step run
-reaches: the rule leans to 20,000, which costs time, never validity.
-
-FLOORS. For each floored statistic (spatial_std, here the spread of a latent over the minutes of a
-chunk; pooled_std, the spread of chunk means over chunks; effective_rank), h is its minimum over
-the usable runs of the chosen size, both assets, at evaluations from step 1,000 on; the new floor
-is h / 5 rounded down to one significant figure (PROPOSAL: the 5; Ising's toy had a healthy 0.87
-beside its floor 0.1). Patience stays 3. The new floors replace minutes.Config's defaults in a
-commit before the primaries, and test_market's collapse mutant must still fire under them; if it
-does not, the owner decides. The VICReg weights stay unless a usable pilot run's monitors fire
-under the new floors.
-
-  uv run --extra cpu python harness/m4_pilot.py train --asset btc --size M \\
-      --data <data>/bybit-book-v3/training --out <data>/m4-pilot      (again to resume)
-  uv run --extra cpu python harness/m4_pilot.py decide --out <data>/m4-pilot
-
-`train` writes <out>/<asset>-<size>/jepa/<run_id>/ (the trainer's layout) and, once the training
-is complete, <out>/<asset>-<size>/validation.json. --steps and --limit (the last K training and
-first K validation days) are for smoke runs only; `decide` refuses a run that used either.
-"""
+# The market JEPA's CPU pilot (#30 M4) and its rules for size, steps and floors, written before
+# any pilot ran. The rules are in the README's market JEPA pilot section.
 
 from __future__ import annotations
 
@@ -279,7 +224,6 @@ def matches(s: Sequence[float], m: Sequence[float], seed: int = 0) -> tuple[bool
 
 
 def choose_size(records: Mapping[str, Mapping[str, Mapping[str, Any]]]) -> dict[str, Any]:
-    """records[asset][size] -> validation.json; the SIZE rule's choice: S, M or owner."""
     detail: dict[str, Any] = {}
     choice = "S"
     for asset, by in sorted(records.items()):
@@ -347,8 +291,9 @@ def decide(out: Path) -> dict[str, Any]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.formatter_class = argparse.RawDescriptionHelpFormatter
+    parser = argparse.ArgumentParser(
+        description="The market JEPA's CPU pilot (#30 M4); the README holds its rules."
+    )
     sub = parser.add_subparsers(required=True, dest="command")
     p = sub.add_parser("train", help="start, resume or finish one pilot training")
     p.add_argument("--asset", choices=list(ASSETS), required=True)

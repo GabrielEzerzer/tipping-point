@@ -1,46 +1,6 @@
-"""The market JEPA's exploratory 2023-Q4 pass (#30 M6, research pass 6.2-6.4 and 4.3 item 6): event
-and control segments of market_latents' series, their trend scores, the AUC, and from them a
-proposal for each latent pair's direction and for which latent columns to judge. NOT
-pre-registered: exploratory, nothing here is a trial, and the owner makes every choice it proposes.
-
-Tables: each model's trained checkpoint and its untrained twin (step 0), each read on its own
-symbol's Q4 and the other's: four cells per table (BTC->BTC, BTC->ETH, ETH->ETH, ETH->BTC).
-
-Segments (research pass 6.3, the floor's rule in market.nulls): an onset is the start of a 5-minute
-bar; at horizon h bars the event segment is the Pipeline.span = 299 minutes of series ending just
-before minute 5 (onset - h), the 240 indicator values of a 60-minute window. The full 240 values
-are used at every horizon, so at h = 24 a segment starts before the 72-bar clean window (6.3 leaves
-that to market-ews-v1). Controls are the non-overlapping 299-minute spans cut in time order from
-each matched-calm null stretch (nulls.null_rows), clipped to the quarter. A segment touching a
-minute that any table read on that symbol marks invalid is excluded for every indicator and table
-alike, and counted; so is an event too early in the quarter for its segment. Every comparison is
-paired on the same segments.
-
-Statistics per (table, read symbol, column, indicator, h): the trend score s, Kendall's tau of the
-rolling indicator over the segment (ews.trend.Pipeline(indicator, 60, 240), no detrending); median
-s on events and on controls; AUC of events against controls (ews.scoring.auc) with a percentile
-95% CI from DRAWS bootstrap draws resampling events and controls independently; the twin margin
-(trained AUC minus twin AUC on the same draws). The four pairs are ising-latent-v1's: level and
-variance of surprise, variance and ac of pc_1. The screen adds every column: level and variance of
-surprise and surprise5, variance and ac of each pc.
-
-Proposals, by rules fixed here before the numbers are read:
-  direction  of a pair: the sign of the median event s on the trained tables ("greater" when > 0),
-             per cell and h. Reported as one word when every same-asset cell and h agrees, and
-             "disagree" otherwise; cross-asset cells are reported beside it. Never chosen for the
-             owner when the signs disagree.
-  judged     a column is proposed for judging when, in both same-asset cells, some indicator of it
-             at some h has a trained AUC whose CI excludes 0.5 and lies further from 0.5 than the
-             twin's AUC there. Columns are also ranked by the mean over same-asset cells and h of
-             |AUC - 0.5|, trained minus twin. With 17 BTC and 7 ETH events the CIs are wide.
-Memorisation (4.3 item 6): mean surprise by month on the model's own training-span days and on the
-quarter, trained beside twin.
-
-  .venv/Scripts/python.exe harness/explore market_pass --latents <market_latents' out>
-      --labels <labels run> [--out <folder>] [--draws 1000]
-
-Writes <out>/market-pass.json (every row), market-proposal.json and market-report.md.
-"""
+# The market JEPA's exploratory 2023-Q4 pass (#30 M6): segments, trend scores and AUCs of
+# market_latents' series, and proposed pair directions and judged columns. Not pre-registered:
+# nothing here is a trial. Its method is in the README's exploratory pipeline section.
 
 from __future__ import annotations
 
@@ -610,7 +570,7 @@ def render(result: Mapping[str, Any], draws: int) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description="The market JEPA's exploratory 2023-Q4 pass (#30 M6); the README describes it."
     )
     p.add_argument("--latents", type=Path, required=True, help="market_latents' --out")
     p.add_argument("--labels", type=Path, required=True, help="the labels run")

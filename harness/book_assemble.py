@@ -63,7 +63,7 @@ def plan(sources: Sequence[Path], out: Path, commit: str) -> Plan:
     result = Plan()
     if not re.fullmatch(r"[0-9a-f]{7,40}", commit):
         result.problems.append(f"--commit {commit!r} is not 7 to 40 hex digits")
-    owner: dict[tuple[str, str], Path] = {}  # (range, key) -> the source holding it
+    held_by: dict[tuple[str, str], Path] = {}  # (range, key) -> the source holding it
     entries: dict[str, dict[str, Any]] = {}
     for src in map(Path, sources):
         path = src / "manifest.json"
@@ -89,10 +89,10 @@ def plan(sources: Sequence[Path], out: Path, commit: str) -> Plan:
             {"folder": src.as_posix(), "manifest_sha256": _sha256(path)}
         )
         for key, entry in sorted(manifest.get("days", {}).items()):
-            if (name, key) in owner:
-                result.problems.append(f"{name} {key}: in both {owner[name, key]} and {src}")
+            if (name, key) in held_by:
+                result.problems.append(f"{name} {key}: in both {held_by[name, key]} and {src}")
                 continue
-            owner[name, key] = src
+            held_by[name, key] = src
             entries[f"{name}/{key}"] = entry
             reduced = entry.get("reduced") or {}
             why = []
@@ -130,11 +130,11 @@ def plan(sources: Sequence[Path], out: Path, commit: str) -> Plan:
             for s in SYMBOLS
             for d in range((last - first).days + 1)
         ]
-        missing = [k for k in wanted if (name, k) not in owner]
+        missing = [k for k in wanted if (name, k) not in held_by]
         if missing:
             shown = ", ".join(missing[:5]) + (" ..." if len(missing) > 5 else "")
             result.problems.append(f"{name}: {len(missing)} day(s) missing: {shown}")
-        extra = sorted(k for (r, k) in owner if r == name and k not in set(wanted))
+        extra = sorted(k for (r, k) in held_by if r == name and k not in set(wanted))
         if extra:
             result.problems.append(f"{name}: day(s) outside the range: {', '.join(extra[:5])}")
     return result

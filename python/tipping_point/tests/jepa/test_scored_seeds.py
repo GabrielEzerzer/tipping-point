@@ -1,7 +1,6 @@
-"""Where the seed refusal meets the readouts (#26 decision 6, #28): a staircase at a seed
-ising-ews-v1 scores stays out of training, and it is what `extract --select`, the probes' controls
-and the paired margins read. The refusal and the readouts came from separate lanes, each tested on
-its own terms; these checks hold the two together on runs the simulator wrote."""
+# Where the seed refusal meets the readouts (#26 decision 6, #28): a staircase at a seed
+# ising-ews-v1 scores stays out of training and is what `extract --select`, the probes' controls
+# and the paired margins read, checked together on runs the simulator wrote.
 
 import dataclasses
 import shutil

@@ -1,28 +1,6 @@
-"""The same-input tier of the market warning test (#30; research pass 6.4 item 2, owner's call 8):
-the Bybit book features themselves as classic series, so that a latent win cannot be put down to
-the book holding information Binance's price series lacks. In market-ews-v1 it is descriptive.
-
-  aggregate  one symbol-day's 1-second feature table (book.features.reduce_run) to 1-minute values
-             per feature: "sum" adds the minute's 60 seconds, "mean" averages them. A minute with
-             any gapped second (`gap`, which a missing second also sets) has no value, the rule
-             jepa.days applies to a minute frame (prereg.SAME_INPUT_MISSING); a value that is not
-             finite outside gap seconds is refused, as jepa.days refuses it
-  read       a symbol's minutes over a span of days from a bybit-book data folder, one
-             market_segments.Minutes per feature on the minute grid; a day with no feature file
-             has no value in any minute
-
-The minutes go through the same steps as the returns: market_segments.slot_profile and
-deseasonalise ([seasonality]'s method and fit span, per feature), then market_segments.build,
-which cuts the event and control segments by the same rule and excludes and counts a segment that
-holds a minute with no value. Every feature has a value in the same minutes, so every feature
-keeps the same segments.
-
-Leakage: `read` refuses any day from 2024-01-01 before it opens a file, so the data folder's
-`confirmatory` range is never opened; days route by market.book.RANGES to `training` or
-`exploratory`, and a day in neither (before the archive starts) has no file. A feature file must
-name its symbol and day and be the feature format this code reduces (book.features.FORMAT), as
-jepa.days.ParquetSource demands; the format read is recorded.
-"""
+# The same-input tier of the market warning test (#30; research pass 6.4 item 2, choice 8): the
+# Bybit book features as classic series, descriptive in market-ews-v1. The README's market warning
+# test section holds the rules.
 
 from __future__ import annotations
 

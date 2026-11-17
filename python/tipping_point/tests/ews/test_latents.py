@@ -705,12 +705,6 @@ def twin_judged(data: V1) -> ising.Evaluation:
 def test_a_check_judged_on_the_twins_alone_is_reported_on_the_trained_pass(
     twin_judged: ising.Evaluation,
 ) -> None:
-    """The owner's rule (#28): a trained pc_1 need not track |m|, so its pipeline checks are judged
-    on the step-0 twins alone. Held to kappa = 3, both passes miss it. The twin's row fails, a
-    pipeline fault. The trained row is computed in full, estimate, CI and the value and tolerance
-    it was held to, which it misses as plainly, and reads reported, which no fault list counts.
-    The dynamic check, which both pass, passes on the twin and is reported on the trained pass,
-    its 1/nu computed all the same."""
     (trained,) = _rows(twin_judged, "fss", checkpoint=TRAINED_A, quantity="l2_var_pc_1")
     (twin,) = _rows(twin_judged, "fss", checkpoint=TWIN_A, quantity="l2_var_pc_1")
     for row in (trained, twin):

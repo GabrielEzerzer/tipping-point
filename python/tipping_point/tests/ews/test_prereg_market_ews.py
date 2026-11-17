@@ -71,8 +71,6 @@ def doc() -> dict[str, Any]:
 
 
 def test_the_template_loads_with_its_placeholders(doc: dict[str, Any]) -> None:
-    """A draft: load takes it, and the strict check names each placeholder, nothing else: the
-    owner's open choices and the texts written at the freeze."""
     assert prereg.problems(doc) == []
     strict = prereg.problems(doc, strict=True)
     assert all(": placeholder " in p for p in strict), strict
@@ -311,8 +309,6 @@ def test_hypotheses_are_distinct_and_rising(doc: dict[str, Any]) -> None:
 
 
 def test_the_pilot_fit_is_held_to_its_numbers(doc: dict[str, Any]) -> None:
-    """With fit 'pilot' the GARCH must be the disclosed pilot fit; a placeholder fit lets any
-    stationary GARCH stand until the owner chooses."""
     doc["scoring"]["floor"]["garch"]["ETHUSDT"]["alpha"] = 0.08
     assert prereg.problems(doc) == []
     doc["scoring"]["floor"]["fit"] = "pilot"

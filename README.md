@@ -253,7 +253,9 @@ episodes, events, flickers and null stretches. A run lands in `<data dir>/labels
 `manifest.json` with every source file and parameter, Parquet tables `bars`, `labels`, `refits`,
 `episodes` and `nulls` keyed by `ts_ns`, then `complete.json`. Every labeller parameter is an
 option at the research pass's start value until the 2023 pilot sets it; days from 2024-01-01 are
-refused until `market-labels-v1` is frozen.
+refused until `market-labels-v1` is frozen. The clean window C and the refractory Q stay at their
+start values, for which #29 declares no range: a labels file with another value is refused, and a
+shorter Q, which the S5 pilot's read suggests, needs an amendment.
 
 ```sh
 uv run python -m tipping_point.market fetch --start 2022-07-01 --end 2023-12-31
@@ -773,10 +775,123 @@ uv run --no-sync python harness/explore latent_pass --training <run id> --step <
     --data-dir <folder> --out <outputs>
 ```
 
+Its scripts run at below-normal priority with at most 4 worker threads (`common.THREADS`), so they
+share the machine with other jobs.
+
+`market_pass` is the market JEPA's exploratory 2023-Q4 pass (#30 M6, research pass 6.2-6.4 and 4.3
+item 6). It proposes a direction for each latent pair and which latent columns to judge; nothing in
+it is a trial, and every choice it proposes is left open. It reads each model's trained checkpoint
+and its untrained twin (step 0), each on its own symbol's Q4 and on the other's: four cells per
+table (BTC->BTC, BTC->ETH, ETH->ETH, ETH->BTC).
+
+- **Segments** (research pass 6.3, the floor's rule in `market.nulls`): an onset is the start of a
+  5-minute bar; at horizon h bars the event segment is the `Pipeline.span` = 299 minutes of series
+  ending just before minute 5 (onset - h), the 240 indicator values of a 60-minute window. The full
+  240 values are used at every horizon, so at h = 24 a segment starts before the 72-bar clean
+  window (6.3 leaves that to market-ews-v1). Controls are the non-overlapping 299-minute spans cut
+  in time order from each matched-calm null stretch (`nulls.null_rows`), clipped to the quarter. A
+  segment touching a minute that any table read on that symbol marks invalid is excluded for every
+  indicator and table alike, and counted; so is an event too early in the quarter for its segment.
+  Every comparison is paired on the same segments.
+- **Statistics** per (table, read symbol, column, indicator, h): the trend score s, Kendall's tau of
+  the rolling indicator over the segment (`ews.trend.Pipeline(indicator, 60, 240)`, no
+  detrending); median s on events and on controls; the AUC of events against controls
+  (`ews.scoring.auc`) with a percentile 95% CI from `--draws` bootstrap draws resampling events and
+  controls independently; and the twin margin, trained AUC minus twin AUC on the same draws. The
+  four pairs are ising-latent-v1's: level and variance of surprise, variance and ac of pc_1. The
+  screen adds every column: level and variance of surprise and surprise5, variance and ac of each
+  pc.
+- **Proposals**, by rules fixed before the numbers were read. A pair's direction is the sign of the
+  median event s on the trained tables ("greater" when > 0), per cell and h, reported as one word
+  when every same-asset cell and h agrees and as "disagree" otherwise, with the cross-asset cells
+  beside it; when the signs disagree the direction is left open. A column is proposed for judging
+  when, in both same-asset cells, some indicator of it at some h has a trained AUC whose CI
+  excludes 0.5 and lies further from 0.5 than the twin's AUC there. Columns are also ranked by the
+  mean over same-asset cells and h of |AUC - 0.5|, trained minus twin. With 17 BTC and 7 ETH
+  events the CIs are wide.
+- **Memorisation** (4.3 item 6): mean surprise by month on the model's own training-span days and
+  on the quarter, trained beside twin.
+
+```sh
+uv run --no-sync python harness/explore market_pass --latents <market_latents' out> \
+    --labels <labels run> [--out <folder>] [--draws 1000]
+```
+
+It writes `<out>/market-pass.json` (every row), `market-proposal.json` and `market-report.md`.
+
 Nothing here changes what ising-ews-v1 scores. `harness/ews_v1_golden.py` wrote every row and value
 of a v1 scoring on planted data from aa29cbc, the freeze branch's merge, and
 `python/tipping_point/tests/ews/test_v1_unchanged.py` holds later commits to them, RNG stream
-included.
+included. The script runs `ising.evaluate` (fss mode) on the planted v1 dataset under the committed
+`paper/prereg/ising-ews-v1.toml`, its settings changed only as far as the planted data need (seeds,
+replicas, the tau_c record, the tau.json pins) and to run in seconds: 40 bootstrap draws, one
+surrogate, alarm scores every 200 tau_c, one window, two bandwidths and two horizons of the grid.
+Both observables, cadences and surrogate tests stay, so every loop of the scorer turns, and every
+draw of the one RNG feeds the CIs and surrogate rates of the rows after it, so a scorer that draws
+once more, once less or in another order moves them. The golden was written before any latent code
+existed. To check it again, run `uv run python harness/ews_v1_golden.py [--out FILE]` on aa29cbc's
+tree, which needs nothing newer, never on a later one: a golden rewritten from the code it checks
+would prove nothing.
+
+### The market warning test
+
+`ews/market_segments.py` cuts what market-ews scores from a labels run of the frozen market-labels
+file (#30 M5; research pass sections 6.3 and 6.6, choices 9 and 11):
+
+- `close_returns`: a symbol's 1-minute close-to-close log returns on the minute grid, NaN for a
+  minute with no kline or whose previous minute has none (`prereg.MISSING_MINUTE`).
+- `slot_profile`: per slot of the labeller's 2 x 288 (weekday or weekend, by 5-minute time of day),
+  over a fit span of pilot days, the returns' root mean square ("scale") or mean ("mean"), the two
+  `prereg.DESEASON_METHODS`. `deseasonalise` divides each return by its slot's scale, or subtracts
+  its slot's mean.
+- `check_labels`: the labels run's manifest, once the labels file is frozen at its tag and the run
+  was labelled with its parameters (and its stamp, when it has one).
+- `build`: the event segments per (symbol, horizon) and the control segments per symbol.
+- `eth_only`: which ETH onsets have no BTC event onset within a window (reporting's eth-only).
+
+A segment is `span` minutes, `Pipeline.span` = window + length - 1. An onset is the start of a
+5-minute bar; at horizon h bars its segment ends with the minute that closes at onset - 5h minutes,
+so it holds nothing of the h bars before the onset (`market.nulls.pre_onset_rows`, the floor's
+rule). The length is the same at every horizon, so at long horizons a segment starts before the
+labels' clean window of C bars and may read bars with H = 1: each segment's share of minutes in
+such bars is reported (choice 11). Controls are the non-overlapping spans cut in time order from
+the start of each null stretch (`market.nulls.null_rows`), one set for every horizon, then
+optionally a seeded subsample of them: with subsample n > 0, when a symbol has more than n kept
+controls, n are drawn without replacement, symbols in sorted order from one generator seeded with
+`seed`, and kept in time order. A segment that holds a minute with no return is excluded
+(the same segments for every indicator), and so is one that reaches outside the series given; both
+are counted. With `score_from`, an onset before that day, and a control segment starting before
+it, is not cut at all: the series may start earlier, as history for the first days' segments,
+without its own days being scored.
+
+The confirmatory span (from 2024-01-01) opens only through a frozen market-ews file, as the market
+command's `--prereg` opens it for labels: `build` refuses a series, onset or control segment
+reaching it unless `scoring` is a market-ews file frozen at its tag that names this labels file,
+and a run labelling those days must carry the frozen labels' stamp in its manifest. An environment
+switch, as `cascade.recall` takes, would open those days to any caller; the frozen file ties them
+to the pre-registered test. With it, `build` also takes nothing the file fixes from its caller: the
+horizons, the span (window + length - 1), the subsample and the seed must be the file's. The module
+reads labels and is fed the series; the labels package (`market/`) imports none of it.
+
+The same-input tier, `ews/same_input.py` (#30; research pass 6.4 item 2, choice 8), scores the
+Bybit book features themselves as classic series, so that a latent win cannot be put down to the
+book holding information Binance's price series lacks. In market-ews-v1 it is descriptive.
+`aggregate` turns one symbol-day's 1-second feature table (`book.features.reduce_run`) into
+1-minute values per feature: "sum" adds the minute's 60 seconds, "mean" averages them. A minute
+with any gapped second (`gap`, which a missing second also sets) has no value, the rule `jepa.days`
+applies to a minute frame (`prereg.SAME_INPUT_MISSING`); a value that is not finite outside gap
+seconds is refused, as `jepa.days` refuses it. `read` gives a symbol's minutes over a span of days
+from a bybit-book data folder, one `market_segments.Minutes` per feature on the minute grid; a day
+with no feature file has no value in any minute. The minutes go through the same steps as the
+returns: `market_segments.slot_profile` and `deseasonalise` (`[seasonality]`'s method and fit span,
+per feature), then `market_segments.build`, which cuts the event and control segments by the same
+rule and excludes and counts a segment that holds a minute with no value. Every feature has a value
+in the same minutes, so every feature keeps the same segments. `read` refuses any day from
+2024-01-01 before it opens a file, so the data folder's `confirmatory` range is never opened; days
+route by `market.book.RANGES` to `training` or `exploratory`, and a day in neither (before the
+archive starts) has no file. A feature file must name its symbol and day and be the feature format
+this code reduces (`book.features.FORMAT`), as `jepa.days.ParquetSource` demands; the format read is
+recorded.
 
 ## JEPA world model (Ising)
 
@@ -790,7 +905,17 @@ covariance terms on the visible tokens guard against collapse, and a detector wi
 on feature spread watches for it. Bursts are flipped to positive magnetisation, D4 and rolls are
 augmentations, and training reads staircase plateaus only, of dedicated simulator seeds: the
 seeds 1-10 (ising-ews-v1's 6-10 and its exploratory pilot's 1-5), ramps and null runs are
-refused.
+refused. The design is the #27 research pass's (22 October 2026), with its recommended choices.
+
+Its Ising modules: `lattice` (the circular ConvNeXt encoder, convolutional predictor, torus masks,
+canonicalisation, torus symmetries, bit unpacking) and `data` (simulator runs to packed bursts in
+RAM, run selection by seed, the held-out band). Its generic modules: `objective` (MSE on
+LayerNorm'd targets at hidden cells, VICReg terms, schedules), `monitor` (the collapse detector with
+absolute floors, effective rank, normalised error) and `train` (the loop: seeding, AMP per device,
+checkpoints, resume, manifest, GPU hours). `extract` fits the PCA basis and writes per-frame
+surprise and pc_k as a dataset run's `latents` table, and `probes` fits ridge probes from frozen
+frame embeddings, trained beside untrained. `python -m tipping_point.jepa --help` lists the
+commands.
 
 ```sh
 uv run python -m tipping_point.jepa train --L 16 32 64 --train-seeds 101 102 --val-seed 103 \
@@ -845,7 +970,69 @@ uv run python -m tipping_point.jepa budget --quota 30                # GPU hours
 The harness trains a planted-stripe toy on the CPU (`harness/jepa_toy.py`: validation error 1.37
 to 0.34 in 150 steps; probes cannot tell it from its twin, prediction error can), breaks the loss
 to check that the detector fires, and runs the extract round trip on runs the simulator itself
-writes (`harness/jepa_ising.py`).
+writes (`harness/jepa_ising.py`). The toy uses d = 32, as in the research pass's sketch, and 32
+bursts a step at a flat twice the production learning rate after warm-up: a cosine to 1e-6 stalls
+a run this short (0.42 at step 200 instead of 0.31). Its budget is a number of steps, never of
+wall-clock time, so the toy is deterministic.
+
+## Market JEPA pilot (#30 M4)
+
+`harness/m4_pilot.py` holds the market JEPA's CPU pilot and its rules, written and committed before
+any pilot ran.
+
+- **Runs.** Four trainings: BTCUSDT and ETHUSDT, each at size S (dim 64) and M (dim 96), model seed
+  100 (never a primary or spare), 20,000 steps, warm-up 1,000 (steps / 20, as on Ising), every
+  other setting `minutes.Config`'s default, on the CPU in float32. `stop_on_collapse` is off: the
+  floors are what this pilot recalibrates, so a run is not cut short by floors set on a toy; the
+  detector's verdict is still recorded. Each run checkpoints every 500 steps and resumes by the
+  same command.
+- **Split.** The training span [2023-01-18, 2023-10-01) (call 5), split as `jepa/days.py` asks,
+  with the validation days a block after the training days: training 2023-01-18 .. 2023-08-31 (226
+  days), validation 2023-09-01 .. 2023-09-30 (30 days). Proposed: the primaries use the same split.
+- **Validation error** (proposed: a probe, not the JEPA loss). The JEPA's own error is measured
+  against each model's own target encoder, which moves during training and differs between sizes:
+  on a 1,000-step smoke run (BTC, 10 days) the monitor's `val_error` fell to 0.44 at step 250 and
+  rose to 0.59 (S) and 0.63 (M) by step 1,000 while effective rank grew, and the richer M latent
+  scored worse than S. A lower JEPA error can mean a poorer latent, so it can rank neither sizes
+  nor steps. The validation error is instead a fixed task in input space: a ridge probe
+  (`jepa.probes.ridge`, alpha 1e-3) from the target encoder's latent of minute t
+  (`minutes.readouts`) to the mean of each scaled feature over minute t + 1, over minute pairs both
+  valid, fitted on validation days 1-15 and scored per day on days 16-30 as the mean over features
+  of the squared error over the fit set's variance (1 = the fit mean). It is measured for
+  `final.pt`, for the copy saved at step 10,000 and for the step-0 twin; the JEPA surprise of
+  `final.pt` is kept beside it, descriptive. A run is usable when `final.pt`'s mean probe error is
+  below its twin's.
+- **Size** (call 4: M unless S reaches the same validation error). S is chosen when, on both
+  assets, both runs are usable and S matches M: the upper end of the 95% bootstrap interval of the
+  mean over the scored days of (S - M), paired by day (2,000 draws, seed 0), is at most
+  `TOLERANCE` = 2% of M's mean (the 2% is proposed). Otherwise M. If an M run is not usable, the
+  rule chooses no size and `decide` stops there.
+- **Steps** (research pass 5.2, in the manner of Ising's call 9). On a run of the chosen size, e(s)
+  is the mean probe error of its model at step s. The primaries train 10,000 steps if, on both
+  assets, e(10,000) - e(20,000) <= 2% of e(20,000), and 20,000 otherwise: never below 10,000 (about
+  21 passes over the training minutes), never above 20,000 (the pilot sees no further). The
+  laptop's seconds per step are recorded but do not set the count: checkpoints make a CPU run of
+  any length resumable, and the T4 rate the primaries would run at is unmeasured. In a 20,000-step
+  run the learning rate at step 10,000 is still high, so e(10,000) overstates what a 10,000-step
+  run reaches: the rule leans to 20,000, which costs time, never validity.
+- **Floors.** For each floored statistic (`spatial_std`, here the spread of a latent over the
+  minutes of a chunk; `pooled_std`, the spread of chunk means over chunks; `effective_rank`), h is
+  its minimum over the usable runs of the chosen size, both assets, at evaluations from step 1,000
+  on; the new floor is h / 5 rounded down to one significant figure (the 5 is proposed; Ising's toy
+  had a healthy 0.87 beside its floor 0.1). Patience stays 3. The new floors replace
+  `minutes.Config`'s defaults in a commit before the primaries, and `test_market`'s collapse mutant
+  must still fire under them; if it does not, the floors are set outside this rule. The VICReg weights stay
+  unless a usable pilot run's monitors fire under the new floors.
+
+```sh
+uv run --extra cpu python harness/m4_pilot.py train --asset btc --size M \
+    --data <data>/bybit-book-v3/training --out <data>/m4-pilot      # again to resume
+uv run --extra cpu python harness/m4_pilot.py decide --out <data>/m4-pilot
+```
+
+`train` writes `<out>/<asset>-<size>/jepa/<run_id>/` (the trainer's layout) and, once the training
+is complete, `<out>/<asset>-<size>/validation.json`. `--steps` and `--limit` (the last K training
+and first K validation days) are for smoke runs only; `decide` refuses a run that used either.
 
 ## Running the gate
 

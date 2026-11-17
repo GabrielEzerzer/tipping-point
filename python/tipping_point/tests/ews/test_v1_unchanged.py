@@ -1,10 +1,5 @@
-"""ising-ews-v1 stays as it is at aa29cbc, the freeze lane's merge: every later commit must still
-score it the same, whatever it adds for the latent signals of #28.
-
-The golden (harness/ews_v1_golden.py) holds every row and value the scorer gave on planted data at
-that commit, before any latent code existed. A scorer that drops or adds a row, moves a value, or
-draws from the RNG once more, once less or in another order, differs from it: every draw feeds the
-CIs and surrogate rates of the rows after it."""
+# ising-ews-v1 stays as it is at aa29cbc, the freeze branch's merge: every later commit must score
+# planted data as the golden (harness/ews_v1_golden.py) holds it, row for row, draw for draw.
 
 import hashlib
 import json
@@ -19,7 +14,7 @@ from tipping_point.ews import ising
 
 V1_TOML = ews_v1_golden.V1_TOML
 KERNEL = ews_v1_golden.REPO / "python" / "tipping_point" / "src" / "tipping_point" / "ising"
-FROZEN = {  # the bytes at aa29cbc, the freeze lane's merge: a change is a new version, not an edit
+FROZEN = {
     V1_TOML: "f1765c2d8b35b970705cb47e9c197c701d88b15235d1936b8d54448526355ee4",
     KERNEL / "kernel.py": "197acfe347462373092e4c9fa04388c0602cabe2a8cd1652ac67c208e09ca6a7",
 }
@@ -44,7 +39,7 @@ def _without_checkpoint(scored: dict[str, Any]) -> dict[str, Any]:
     return scored | {"tables": tables}
 
 
-def test_the_golden_was_written_from_the_freeze_lanes_merge(golden: dict[str, Any]) -> None:
+def test_the_golden_was_written_from_the_freeze_merge_aa29cbc(golden: dict[str, Any]) -> None:
     """Catches a golden rewritten from a later commit, which would prove nothing."""
     assert golden["made_by"] == "aa29cbc887bd7507d241f9c48a83fc1a930b35be"
     assert {name: len(rows) for name, rows in golden["tables"].items()} == {
@@ -106,4 +101,6 @@ def test_the_golden_check_can_fail(golden: dict[str, Any]) -> None:
 def test_the_frozen_files_keep_their_bytes(path: Path) -> None:
     """The prereg's sha256 is what `frozen` holds a scoring to, and the kernel's what the #54 record
     was measured on (a stale record is refused)."""
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == FROZEN[path]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == FROZEN[path], (
+        f"{path.name} differs from its bytes at aa29cbc: a change is a new version, not an edit"
+    )
