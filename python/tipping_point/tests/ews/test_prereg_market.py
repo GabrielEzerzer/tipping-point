@@ -136,7 +136,7 @@ def test_the_freeze_refuses_a_placeholder(tmp_path: Path, left: str) -> None:
     """Every placeholder set but one: the freeze names it and tags nothing."""
     filled = _filled(TEMPLATE.read_text("utf-8"))
     kept = {
-        "nulls.rule": ('rule = "matched-calm-windows"', 'rule = "<settled by the owner>"'),
+        "nulls.rule": ('rule = "matched-calm-windows"', 'rule = "<set before the freeze>"'),
         "horizon.smallest": ("smallest = 5", 'smallest = "TBD"'),
         "question": ('question = "set"', 'question = "<one sentence>"'),
     }[left]

@@ -5,17 +5,17 @@
 # <id>-v<k+1>.toml with `supersedes` and `reason`. Units: bars are 5-minute bars on the UTC grid,
 # minutes are 1-minute klines, days are UTC days.
 #
-# Set here, at the #30 research pass's recommended values (sections 6.2-6.4, 7.2, owner's calls 9
+# Set here, at the #30 research pass's recommended values (sections 6.2-6.4, 7.2, choices 9
 # to 11): the frozen labels file, the series and missing-minute rule, variance and AC1 through a
-# 60-minute window and a 240-value trend, horizons 5, 6, 12 and 24 bars, the segment rule of call
+# 60-minute window and a 240-value trend, horizons 5, 6, 12 and 24 bars, the segment rule of choice
 # 11 (fixed length, segments may start before the clean window, the share of H = 1 minutes
-# reported), the slot profile of call 9 fitted on the JEPA's training span, the event-time shift
+# reported), the slot profile of choice 9 fitted on the JEPA's training span, the event-time shift
 # at 100 draws a day or more away, phase surrogates as secondary, pooled, per-asset and ETH-only
 # reporting.
 #
-# Open, for the owner before the freeze (placeholders): the detrending (none or a Gaussian
+# Open until the freeze (placeholders): the detrending (none or a Gaussian
 # bandwidth; the floor scored with none), the deseasonalisation method, the GARCH floor's fit
-# (#154), its noise band (#153) and its empty-cell rule (#138), and the alarm rate. Call 9 says
+# (#154), its noise band (#153) and its empty-cell rule (#138), and the alarm rate. Choice 9 says
 # "subtract per-slot means" ("mean"); the 1-minute returns' slot means are near zero, so their
 # seasonality is in the scale, which "scale" (divide by the slot's root mean square) removes. A
 # floor option is accepted only once its code is built: today "pilot", "bootstrap" and "mark".
@@ -23,7 +23,7 @@
 # pipelines its own (window 60, length 240, no detrend); its horizon 5 was added in M5, so the
 # floor reports are rerun before the freeze.
 #
-# The same-input tier (research pass 6.4 item 2, owner's call 8) is set as the owner decided it: the
+# The same-input tier (research pass 6.4 item 2, choice 8) is set here: the
 # Bybit book features' 1-minute aggregates scored like the returns, descriptively.
 
 id = "<lowercase-slug>"

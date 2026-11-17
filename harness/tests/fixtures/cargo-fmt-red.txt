@@ -1,4 +1,4 @@
-Diff in \\?\C:\Users\gabri\Desktop\personal-os\vault\personal\projects\tipping-point\.worktrees\20-scaffold\engine\src\lib.rs:20:
+Diff in \\?\C:\src\tipping-point\engine\src\lib.rs:20:
  mod deliberate {
      #[test]
      fn deliberately_fails() {
