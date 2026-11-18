@@ -1064,10 +1064,6 @@ fn received(messages: &[Value], topic: &str, id_field: &str) -> Outcome<(Vec<u64
     Ok((ids, lost))
 }
 
-/// A client that falls behind on an append topic is told so (#87, where the topics' drain loops
-/// became one): on ising and trades, a gap with the count lost and the newest after it, every
-/// message either delivered or counted. The hub holds two of each for a client, and a hundred are
-/// published at once, well inside the 16 ms a connection waits between sends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn falling_behind_on_an_append_topic_is_a_gap() -> Outcome {
     const BURST: u64 = 100;

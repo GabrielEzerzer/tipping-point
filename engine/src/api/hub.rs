@@ -48,7 +48,6 @@ pub struct HubConfig {
     pub samples_capacity: usize,
     /// Trades a WebSocket client may fall behind before it is sent a gap.
     pub trades_capacity: usize,
-    /// Relayed `ising` messages a client may fall behind by.
     pub relay_capacity: usize,
     /// Harness only: also keep every message in one channel in publish order, so a lossless
     /// client sees all of them, uncoalesced. `false` in production.

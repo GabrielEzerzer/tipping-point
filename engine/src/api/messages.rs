@@ -31,8 +31,6 @@ pub mod close {
     pub const BAD_REQUEST: u16 = 4000;
     /// A hello with another protocol version.
     pub const VERSION_MISMATCH: u16 = 4001;
-    /// The client stopped reading: its socket took nothing for the stall timeout, or it fell
-    /// behind a lossless feed.
     pub const TOO_SLOW: u16 = 4002;
 }
 

@@ -344,7 +344,7 @@ cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --
 | `GET /v1/runs` | every run in the data dir, by domain, a market run with its venue |
 | `GET /v1/live/book_samples` | Arrow IPC stream: live book samples, each batch one or more whole 100 ms instants (one per batch live; a backfill or an unpaced replay sends several); `?backfill_s=` first replays that much of the recent past from memory (no gap, no overlap), `?run=&speed=` replays a recorded run instead |
 | `GET /v1/table/{domain}/{run}/{table}` | Arrow IPC stream: any table of a market or Ising run, `?start=&end=` a range of its key, read through DuckDB and cast back to the schema stored in the Parquet footer |
-| `POST /v1/publish/{topic}` | a JSON result (`meters`, `pnl`, `ising`) relayed to the app |
+| `POST /v1/publish/{topic}` | a JSON result (`meters`, `pnl`, `ising`) relayed to the app; `meters` and `pnl` keep the latest per `venue` and `symbol` the result names, `ising` keeps every message |
 | `GET /v1/ws` | the app's WebSocket (protocol 2): JSON `book` (top 20 per venue and symbol), `trades`, `status` (per venue), and the relayed topics; replay and seek of recorded runs; binary frames carry only Ising lattices |
 
 - **Live samples come from rotate's own sampler** (`store/samples.rs`), each row carrying the log
@@ -388,6 +388,15 @@ under the bound plus three times the sleep's p99 (a message's two or three wakeu
 `SKIPPED:` line the gate counts, so a skip means the bound was missed under load. Past that it
 fails, loaded or not. The Python round trip (`api_python`) runs the repository's `.venv` Python,
 or `$TP_PYTHON`.
+
+`tipping_point.engine.read` follows the shared layout
+`<root>/<domain>/<run_id>/<table>/<first_key:020>.parquet`, and `run_id` names a new run by the
+engine's rule, so the engine can open it. Every Arrow stream keeps the stored schema, with
+`tp.schema = "<table>/<major>"` in its metadata. A market stream says where its rows come from in
+`tp.runs` and `tp.scales` (decoded by `tipping_point.engine.runs` and `scales`); an Ising stream
+names its run in `tp.run`. A column the schema declares non-nullable never holds a null, so
+`torch.from_dlpack(column)` shares its buffer; nullable book levels (past the book's depth, or
+while unsynced) must be filled first, which copies.
 
 ## Ising simulator
 

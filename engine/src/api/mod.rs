@@ -7,7 +7,6 @@
 //! | `GET /v1/runs` | JSON: every recorded run in the data dir, by domain, a market run with its venue |
 //! | `GET /v1/live/book_samples` | Arrow stream: live book samples, each batch one or more whole 100 ms instants (one per batch live); `?backfill_s=` starts with that much of the recent past, `?run=&speed=` replays a recorded run instead |
 //! | `GET /v1/table/{domain}/{run}/{table}` | Arrow stream: any table of a market or Ising run, `?start=&end=` a range of its key, through `DuckDB`, in the stored schema |
-//! | `POST /v1/publish/{topic}` | JSON object: a result (`meters`, `pnl`, `ising`) relayed to the app |
 //! | `GET /v1/ws` | the app's WebSocket ([`messages`] has the protocol) |
 //!
 //! Training reads Parquet directly (Kaggle cannot reach a local engine); the engine's Arrow

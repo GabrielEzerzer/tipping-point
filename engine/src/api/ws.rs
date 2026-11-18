@@ -1,11 +1,5 @@
 //! The app's WebSocket. The upgrade runs over hyper with tokio-tungstenite; each connection is
 //! one task that reads the client's messages and writes what it subscribed to.
-//!
-//! A connection sends at most every 16 ms. Between sends, latest-wins topics keep only their
-//! newest value, so a slow client skips book samples rather than queueing them; an append topic
-//! it falls behind on yields a `gap` with the count lost. A client whose socket takes nothing
-//! for the stall timeout is closed with 4002 when the close can still be sent, and dropped
-//! otherwise. None of this reaches the live loop: the hub never waits on a reader.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -831,8 +825,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     }
 }
 
-/// Everything waiting on an append topic's channel, and how many items the client lost by falling
-/// behind: one drain for ising and trades (#87).
 fn drain<T: Clone>(rx: &mut broadcast::Receiver<T>) -> (Vec<T>, u64) {
     let (mut fresh, mut lost) = (Vec::new(), 0);
     loop {
