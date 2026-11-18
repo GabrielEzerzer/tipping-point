@@ -44,6 +44,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from tipping_point.jepa import days, minutes, train
+from tipping_point.jepa.market_extract import COLUMNS as COLUMNS
+from tipping_point.jepa.market_extract import MINUTE_NS as MINUTE_NS
+from tipping_point.jepa.market_extract import PCS as PCS
+from tipping_point.jepa.market_extract import carried, project, table
 
 from explore import common
 
@@ -53,10 +57,7 @@ SPANS = {
     "training": (TRAIN_START, EXPLORATORY),
     "exploratory": (EXPLORATORY, days.CONFIRMATORY),
 }
-PCS = tuple(f"pc_{k}" for k in range(1, 9))
-COLUMNS = ("surprise", "surprise5", *PCS)
 BLOCK = 16  # days a read holds: about 0.5 GB of frames
-MINUTE_NS = 60 * 10**9
 
 
 class Folders:
@@ -100,26 +101,6 @@ def blocks(wanted: Sequence[date], size: int = BLOCK) -> Iterator[tuple[list[dat
             if first - timedelta(days=d) >= TRAIN_START
         ]
         yield lead, block
-
-
-def carried(
-    model: minutes.MarketJepa, parts: Iterable[tuple[torch.Tensor, torch.Tensor]]
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """minutes.readouts over consecutive parts (frames, valid) of one contiguous series, each read
-    with the last context - 1 minutes of the part before it: equal to one readout of the whole."""
-    keep = model.spec.context - 1
-    tail: tuple[torch.Tensor, torch.Tensor] | None = None
-    zs, ss = [], []
-    for f, v in parts:
-        skip = 0
-        if tail is not None:
-            skip = len(tail[0])
-            f, v = torch.cat([tail[0], f]), torch.cat([tail[1], v])
-        z, s = minutes.readouts(model, f, v)
-        zs.append(z[skip:])
-        ss.append(s[skip:])
-        tail = f[-keep:], v[-keep:]
-    return torch.cat(zs), torch.cat(ss)
 
 
 def _run_dir(ckpt: Path) -> Path:
@@ -178,13 +159,8 @@ def read(
         parts.append((got.frames, got.valid))
     out: dict[Path, dict[str, np.ndarray]] = {}
     for ckpt in checkpoints:
-        if ckpt.pca is None:
-            raise SystemExit(f"{ckpt.path}: no PCA basis; fit one as training does first")
         z, s = carried(ckpt.model, parts)
-        pcs = ckpt.pca.project(z).numpy()
-        columns = {"surprise": s[:, 0].double().numpy(), "surprise5": s[:, 4].double().numpy()}
-        columns.update({name: pcs[:, k] for k, name in enumerate(PCS)})
-        out[ckpt.path] = columns
+        out[ckpt.path] = project(ckpt, z, s)
     return out, torch.cat(feature_valid).numpy(), records
 
 
@@ -202,12 +178,10 @@ def write(
     run = _run_dir(ckpt.path)
     folder = Path(out) / f"{ckpt.run_id}-step{ckpt.step}"
     folder.mkdir(parents=True, exist_ok=True)
-    start = np.datetime64(wanted[0].isoformat(), "ns").astype(np.int64)
-    ts = start + MINUTE_NS * np.arange(len(feature_valid), dtype=np.int64)
-    valid = feature_valid & np.all([np.isfinite(columns[c]) for c in COLUMNS], axis=0)
-    table = pa.table({"ts_ns": ts, "valid": valid, **{c: columns[c] for c in COLUMNS}})
+    result = table(wanted[0], feature_valid, columns)
+    valid = result["valid"].to_numpy()
     target = folder / f"{symbol}-{span}.parquet"
-    pq.write_table(table, target)
+    pq.write_table(result, target)
     pca = ckpt.pca
     assert pca is not None
     manifest = {
