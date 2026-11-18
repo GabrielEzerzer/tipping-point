@@ -17,6 +17,7 @@ from ews_planted import (
     staircase,
     write_run,
 )
+from latent_prereg import on_baseline
 from tipping_point.ews import prereg
 
 PREREG = Path(__file__).resolve().parents[4] / "paper" / "prereg"
@@ -64,8 +65,10 @@ def frozen(tmp_path_factory: pytest.TempPathFactory) -> tuple[prereg.Prereg, pre
     folder.mkdir(parents=True)
     for name in ("market-labels-v1.toml", "market-ews-v1.toml"):
         (folder / name).write_bytes((PREREG / name).read_bytes())
+    latent = on_baseline((PREREG / "market-ews-v1.toml").read_bytes())
+    (folder / "market-latent-v1.toml").write_bytes(latent.encode())
     _git(root, "add", ".")
     _git(root, "commit", "-q", "-m", "preregs")
-    prereg.freeze(root, "market-labels")
-    prereg.freeze(root, "market-ews")
+    for prereg_id in ("market-labels", "market-ews", "market-latent"):
+        prereg.freeze(root, prereg_id)
     return prereg.load(folder / "market-labels-v1.toml"), prereg.load(folder / "market-ews-v1.toml")

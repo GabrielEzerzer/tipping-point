@@ -81,7 +81,8 @@ def read(
     elif last >= prereg.CONFIRMATORY:
         raise SegmentError(
             f"the book features of days from {prereg.CONFIRMATORY}, the confirmatory span, which "
-            f"only a frozen {prereg.MARKET_EWS} file opens (scoring=)"
+            f"only a frozen {prereg.MARKET_EWS} file opens (scoring=), with "
+            f"{prereg.MARKET_LATENT} frozen too"
         )
     days = (last - first).days + 1
     values = {f: np.full(days * MINUTES, np.nan) for f in aggregation}

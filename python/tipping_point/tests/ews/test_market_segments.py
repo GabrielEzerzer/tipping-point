@@ -4,6 +4,7 @@ controls do not overlap, a missing minute excludes and counts a segment, the H =
 planted one, the labels must be the frozen file's, and the confirmatory span stays closed without
 a frozen market-ews file."""
 
+import subprocess
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 import pytest
+from latent_prereg import on_baseline
 from tipping_point.ews import market_segments as ms
 from tipping_point.ews import prereg
 from tipping_point.market import archive, msvol, nulls
@@ -267,6 +269,36 @@ def test_the_confirmatory_span_needs_a_frozen_market_ews_file(
     early = ms.Minutes(archive.day_ms(date(2023, 12, 27)), np.zeros(5 * 1440))
     with pytest.raises(ms.SegmentError, match="onsets reach"):
         ms.build(claims, labels, {"BTCUSDT": early}, (5,), SPAN)
+
+
+def test_the_confirmatory_span_needs_market_latent_frozen_too(tmp_path: Path) -> None:
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True, check=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    git("config", "core.autocrlf", "false")
+    folder = tmp_path / "paper" / "prereg"
+    folder.mkdir(parents=True)
+    ews = (REPO / "paper" / "prereg" / "market-ews-v1.toml").read_bytes()
+    (folder / "market-ews-v1.toml").write_bytes(ews)
+    git("add", ".")
+    git("commit", "-q", "-m", "market-ews")
+    prereg.freeze(tmp_path, "market-ews")
+    scoring = prereg.load(folder / "market-ews-v1.toml")
+    with pytest.raises(ms.SegmentError, match="opens only when market-latent is frozen too"):
+        ms.check_scoring(scoring)
+
+    (folder / "market-latent-v1.toml").write_bytes(on_baseline(ews).encode())
+    git("add", ".")
+    git("commit", "-q", "-m", "market-latent")
+    assert prereg.freeze(tmp_path, "market-latent") == "prereg/market-latent-v1"
+    ms.check_scoring(scoring)
+
+    (folder / "market-latent-v1.toml").write_bytes(b"edited after the freeze")
+    with pytest.raises(ms.SegmentError, match="opens only when market-latent is frozen too"):
+        ms.check_scoring(scoring)
 
 
 def test_returns_and_the_slot_profile() -> None:

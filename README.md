@@ -975,7 +975,10 @@ without its own days being scored.
 The confirmatory span (from 2024-01-01) opens only through a frozen market-ews file, as the market
 command's `--prereg` opens it for labels: `build` refuses a series, onset or control segment
 reaching it unless `scoring` is a market-ews file frozen at its tag that names this labels file,
-and a run labelling those days must carry the frozen labels' stamp in its manifest. An environment
+and a run labelling those days must carry the frozen labels' stamp in its manifest. The span also
+stays closed until a market-latent file is frozen in the same repository: at least one
+`prereg/market-latent-v<k>` tag, each tagged file still the blob frozen at its tag, so neither
+test is scored on those days before both are pre-registered. An environment
 switch, as `cascade.recall` takes, would open those days to any caller; the frozen file ties them
 to the pre-registered test. With it, `build` also takes nothing the file fixes from its caller: the
 horizons, the span (window + length - 1), the subsample and the seed must be the file's. And it

@@ -168,6 +168,27 @@ def check_scoring(scoring: prereg.Prereg) -> None:
     if scoring.doc["data"]["domain"] != prereg.MARKET_EWS:
         raise SegmentError(f"{scoring.path} is not a {prereg.MARKET_EWS} file")
     prereg.frozen(scoring)
+    root = prereg.repo_root(scoring.path)
+    pattern = f"prereg/{prereg.MARKET_LATENT}-v*"
+    tags = [
+        t
+        for t in prereg._git(root, "tag", "--list", pattern).split()
+        if t[len(pattern) - 1 :].isdigit()
+    ]
+    if not tags:
+        raise SegmentError(
+            f"no {pattern} tag in {root}: the confirmatory span opens only when "
+            f"{prereg.MARKET_LATENT} is frozen too"
+        )
+    for tag in tags:
+        path = root / prereg.PREREG_DIR / f"{tag.removeprefix('prereg/')}.toml"
+        try:
+            prereg.frozen(prereg.load(path))
+        except (OSError, prereg.PreregError) as exc:
+            raise SegmentError(
+                f"{tag}: {exc}; the confirmatory span opens only when "
+                f"{prereg.MARKET_LATENT} is frozen too"
+            ) from exc
 
 
 def _closed(what: str) -> str:
