@@ -10,6 +10,7 @@ FILES = {
     ".gitattributes",
     ".gitignore",
     ".lint-baseline.json",
+    "CITATION.cff",
     "Cargo.lock",
     "Cargo.toml",
     "LICENSE",
