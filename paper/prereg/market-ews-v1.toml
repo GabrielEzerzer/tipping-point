@@ -1,0 +1,175 @@
+# Pre-registration: the classic market warning test (#30 M5). Written from TEMPLATE-market-ews.toml
+# after the 2023 exploratory pass and the GARCH floor reports, all on 2022-07-01..2023-12-31;
+# [disclosure] says what was seen and when. Units: bars are 5-minute bars on the UTC grid, minutes
+# are 1-minute klines, days are UTC days.
+
+id = "market-ews"
+version = 1
+supersedes = ""
+reason = ""
+question = "Do the rolling variance and lag-1 autocorrelation of 1-minute returns of the BTC and ETH perpetuals rise before regime-shift onsets more than over matched calm windows, 25 minutes to 2 hours ahead?"
+
+# One per scored indicator. The prediction states the decision rule; h = 5 and 6 are decisive.
+[[hypotheses]]
+name = "variance-rises"
+indicator = "variance"
+statement = "The rolling variance of 1-minute returns rises over the four hours before a regime-shift onset, more than over matched calm windows."
+prediction = "Pooled and per asset at h = 5 and 6: the AUC's 95 % CI above 0.5, above the GARCH floor's AUC at that horizon, and above the event-time shift's 97.5th percentile; h = 12 and 24 are reported, not decisive. A CI is above a value when its lower end is. The pooled cell's floor is the larger of the BTCUSDT and ETHUSDT floor AUCs at that horizon. The hypothesis holds when all six cells (pooled, BTCUSDT and ETHUSDT, at h = 5 and 6) pass; a cell marked inconclusive does not pass."
+direction = "greater"
+
+[[hypotheses]]
+name = "ac1-rises"
+indicator = "ac"
+statement = "The lag-1 autocorrelation of 1-minute returns rises over the four hours before a regime-shift onset, more than over matched calm windows."
+prediction = "Pooled and per asset at h = 5 and 6: the AUC's 95 % CI above 0.5, above the GARCH floor's AUC at that horizon, and above the event-time shift's 97.5th percentile; h = 12 and 24 are reported, not decisive. A CI is above a value when its lower end is. The pooled cell's floor is the larger of the BTCUSDT and ETHUSDT floor AUCs at that horizon. The hypothesis holds when all six cells (pooled, BTCUSDT and ETHUSDT, at h = 5 and 6) pass; a cell marked inconclusive does not pass."
+direction = "greater"
+
+[data]
+domain = "market-ews"
+symbols = ["BTCUSDT", "ETHUSDT"]   # Binance USD-M perpetuals
+series = "Binance USD-M 1-minute klines, the archives market-labels-v1 reads: close-to-close log returns, the return of minute m being ln(close_m / close_(m-1)), known when minute m closes"
+missing = "a minute with no kline, or whose previous minute has none, has no return; a segment holding such a minute is excluded for every indicator and counted"
+
+[data.labels]            # the frozen labels file the segments are cut from
+tag = "prereg/market-labels-v1"
+sha256 = "d5988eab9e1bab7442e8d56dd7d80388d1696a6cb0ef6d6b4d4bb50f26507458"
+
+[data.events]
+primary = "regime-shifts"   # the labels' events
+stress = "cascades"         # the pooled cascade list, a stress test
+
+# Each indicator through ews.trend.Pipeline(name, window, length): a rolling window of `window`
+# minutes, then Kendall's tau over the last `length` values; a score reads window + length - 1
+# minutes.
+[indicators]
+names = ["variance", "ac"]
+window = 60
+length = 240
+lag = 1
+detrend = "none"
+
+# Per slot of the labeller's 2 x 288 (weekday or weekend, by 5-minute time of day) over the fit
+# span: "mean" subtracts each return's slot mean return. The raw series and the "scale" method
+# (divide by the slot's root mean square) are scored beside it, descriptively.
+[seasonality]
+method = "mean"
+fit = { start = 2023-01-18, end = 2023-09-30 }   # the JEPA's training span (#30 call 5)
+strata = ["onset-hour"]  # AUCs per UTC hour of the onset, descriptively
+
+[segments]
+horizons = [5, 6, 12, 24]   # bars; the smallest is the labels' horizon.smallest
+rule = "an event segment at horizon h bars ends with the minute that closes at the onset minus 5h minutes and holds the window + length - 1 minutes up to it; the length is the same at every horizon, a segment may start before the labels' clean window, and the share of its minutes in bars with H = 1 is reported"
+controls = "control segments are the non-overlapping runs of window + length - 1 minutes cut in time order from the start of each null stretch of the labels run, one set for every horizon; with subsample n > 0, at most n of each symbol's are kept, drawn without replacement under the seed after the exclusions when there are more"
+subsample = 0            # 0: every control segment
+seed = 30
+
+[scoring]
+ci_level = 0.95
+bootstrap = 2000         # AUC CI: positives and negatives resampled with replacement, per symbol
+seed = 30
+
+# The GARCH(1,1)-t circularity floor (harness/market_floor.py), per minute: the pilot fits, the
+# real AUC's own bootstrap CI as the noise band, and a floor cell with an empty side marked
+# inconclusive.
+[scoring.floor]
+fit = "pilot"
+noise = "bootstrap"
+empty = "mark"
+paths = 30
+days = 546               # simulated days from 2022-07-04, ending before 2024-01-01
+seed = 29
+
+[scoring.floor.garch.BTCUSDT]   # the pilot fit market-labels-v1 discloses
+omega = 8.651445052105347e-11
+alpha = 0.07110265726317705
+beta = 0.9288274749829264
+nu = 5.085328354482213
+
+[scoring.floor.garch.ETHUSDT]
+omega = 6.419879719145039e-10
+alpha = 0.0801166904491908
+beta = 0.9197468505253973
+nu = 4.97264822567892
+
+[scoring.shift]          # the event-time shift null (market.nulls.shift_onsets)
+draws = 100
+min_offset_bars = 288    # a day
+
+[scoring.surrogates]
+secondary = "phase"
+n = 999
+
+# eth-only: the ETH events with no BTC event onset within eth_only_bars bars either side, against
+# the ETH controls
+[reporting]
+groups = ["pooled", "per-asset", "eth-only"]
+eth_only_bars = 12       # an hour, the labels' coincidence window
+
+[alarms]
+rule = "per indicator, horizon and symbol, the alarm threshold is the lowest whose false alarms on the 2023 control segments stay within far_per_day; lead times and false alarms per day under it are reported, descriptively"
+far_per_day = 1.0
+
+[trials]
+budget = 32              # 2 indicators x 4 horizons x (pooled + 2 assets + eth-only)
+counted = "One trial per AUC evaluation of an (indicator, horizon, reporting group) cell; every scoring run appends its cells to ews/trials.jsonl in the data dir. The raw-series, onset-hour and cascade stress-test AUCs are descriptive, read by no hypothesis, and not counted."
+
+# The same-input tier (ews.same_input): variance and AC1 of 1-minute aggregates of the Bybit book
+# features themselves, through the price series' pipelines, on the same event and control segments
+# cut by the same rule, so that a latent win (market-latent) cannot be put down to the book holding
+# information Binance's price series lacks. Mid return is `ret` (the sum of the second's 100 ms log
+# mid returns), so its minute sum is the minute's log mid return.
+[same_input]
+series = "Bybit USDT perpetual order books, the 1-second features of tipping_point.book.features in the bybit-book range folders, each aggregated over the 60 seconds of a UTC minute as `aggregation` says (sum adds them, mean averages them); the minute's value is known when it closes"
+features = ["ret", "imb_5", "ofi", "depth_5"]
+aggregation = { ret = "sum", imb_5 = "mean", ofi = "sum", depth_5 = "mean" }
+missing = "a minute with any gapped or missing second has no value, as jepa.days rules (a symbol-day with no feature file has none), and nor has a minute with no return; a segment holding such a minute is excluded for every feature and indicator of the tier and counted, and the returns are also reported on the tier's segments"
+indicators = ["variance", "ac"]
+window = 60
+length = 240
+detrend = "none"
+seasonality = "each feature is deseasonalised as the returns are: [seasonality]'s method, with a slot profile fitted per feature and symbol over [seasonality]'s fit span"
+counted = false
+descriptive = "A comparator with no hypothesis: its AUCs are reported beside the price series' per feature, indicator, horizon and reporting group, read by no decision rule, and count no trial."
+
+[disclosure]
+exploratory = """
+All of the following read 2022-07-01..2023-12-31 only. No warning indicator, segment, AUC or alarm on a day from 2024-01-01 on was computed or looked at, and ews/trials.jsonl holds no market-ews trial.
+
+6 November 2026: the pilot GARCH(1,1)-t fits and the circularity floor at horizons 0, 3, 6, 12 and 24 bars, disclosed in market-labels-v1. The variance floor AUC fell from 0.682 (BTC) and 0.658 (ETH) at horizon 0 to 0.503 and 0.486 at 24 bars; the AC1 floor stayed between 0.499 and 0.512.
+
+8 November 2026, the exploratory pass of harness/market_ews_explore.py (merged in #184): the 2023 onsets and control segments of the 2023 labels run at market-labels-v1's parameters (42 BTC and 19 ETH events, 315 and 293 control segments, none excluded), the returns raw and deseasonalised by both methods, at h = 5, 6, 12 and 24, pooled, per asset and eth-only. Variance separated weakly at h = 5 and 6: pooled AUC 0.595 [0.52, 0.67] raw, 0.600 [0.53, 0.68] with mean and 0.524 [0.44, 0.60] with scale, fading to 0.535 by h = 24. AC1 was at or below chance everywhere (pooled 0.45 to 0.46). Eth-only (10 events) was below 0.5 for both indicators.
+
+8 and 13 November 2026, the exploratory latent passes on 2023-Q4 for market-latent-v1 (the second on the book features re-reduced after #170): they read the JEPA's latents on the Q4 event and control segments, not the classic indicators. Neither found a latent column whose trained AUC cleared both chance and the untrained twin in both same-asset cells.
+
+10 November 2026, the same-input tier's exploratory 2023 read (harness/market_ews_explore.py --book, merged in #186): pooled raw variance AUC at h = 5 of 0.608 for the returns on the tier's segments, 0.606 for ret, 0.623 for ofi, 0.438 for imb_5 and 0.454 for depth_5; AC1 at or below 0.5 everywhere.
+
+12 November 2026, the floor rerun with horizon 5 added, on labels run 20261106T182828Z-binance-20220701-20231231-dmin36 (30 paths of 546 days per symbol, seed 29), and again on 18 November 2026 from commit bba6974, with the same numbers. Floor AUC at h = 5, 6, 12 and 24: variance 0.603, 0.593, 0.552 and 0.503 (BTC), 0.580, 0.570, 0.534 and 0.486 (ETH); AC1 0.507, 0.507, 0.508 and 0.502 (BTC), 0.512, 0.512, 0.511 and 0.499 (ETH). Per path, the variance floor at h = 5 ranged from 0.519 to 0.679 (BTC) and from 0.487 to 0.652 (ETH), and the AC1 floor from 0.454 to 0.571 and from 0.422 to 0.583. No path had an empty side.
+
+The Bybit book features of 2024-01-01..2026-09-30, which the same-input tier reads, were made on 7 and 8 November 2026 and made again after the #170 fix; nothing has read them. The labels of 2024-01-01 on were made from the frozen market-labels-v1, and ews.market_segments refuses to cut a segment from them until a market-ews file is frozen.
+"""
+decisions = """
+Chosen on 9 November 2026 with the exploratory pass in view: seasonality.method mean, the method the research pass's choice 9 named, which the pass showed leaves variance's AUC where scale lowers it (0.600 against 0.524 at h = 5); scale and the raw series stay descriptive. Decisive horizons h = 5 and 6 only, since variance faded to 0.535 by h = 24; h = 12 and 24 are still scored, counted as trials and reported. indicators.detrend none, as the floor and the pass scored it; no Gaussian bandwidth was explored. alarms.far_per_day 1.0, which sets only which threshold's lead times are reported.
+
+Chosen on 9 November 2026: the floor options pilot, bootstrap and mark, the only ones built (#154, #153 and #138 stay open), and the same-input tier as a descriptive comparator, built in #186 and its exploratory read seen before this file was written. The floor rerun was read after these choices and changed none of them. Its variance AUC at h = 5 and 6 (0.603 and 0.593 for BTC, 0.580 and 0.570 for ETH) is about the 2023 pass's real pooled variance AUC (0.60), so variance-rises holds only if the confirmatory AUC's CI clears a floor about as high as the 2023 point estimate.
+
+Chosen while writing this file, after the floor rerun: in the predictions, a CI is above a value when its lower end is; the pooled cell's floor is the larger of the two symbols' floor AUCs, since the floor is simulated per symbol; a hypothesis holds only when all six decisive cells pass, and a cell marked inconclusive does not pass. Both hypotheses keep the direction greater, the research pass's, which is the only direction the scorer reads, although AC1 was below chance in 2023.
+"""
+confirmatory = "v1 scores BTCUSDT and ETHUSDT on 2024-01-01..2026-09-30 from the tagged commit: the regime-shift events whose onsets fall in that span and the control segments that start in it, cut from market-labels-v1's labels by the rules above, the cascades as the stress test, and the same-input tier on the Bybit book features of those days. Days before 2024-01-01 enter only as the slot profile's fit span, the alarm thresholds' control segments, the floor's fit and history for the first segments of 2024. The order of pre-registration is market-ews-v1 first, then market-latent-v1 (#30 research pass 7.1, chosen on 6 November 2026 and kept on 9 November): market-ews-v1 is frozen first, and neither file is scored on any day from 2024-01-01 until market-latent-v1 is frozen too."
+links = [
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6693115897",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6693216856",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6727600600",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6727679635",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6750573940",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6755152944",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6978230082",
+    "https://github.com/GabrielEzerzer/tipping-point/pull/184",
+    "https://github.com/GabrielEzerzer/tipping-point/pull/186",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/138",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/153",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/154",
+]
+
+[deviations]
+policy = "Any change after the freeze is a new version with supersedes and reason, frozen before anything it changes is scored on a day from 2024-01-01; results scored under v1 stay bound to v1 and are reported beside the new version's. A floor option built later (a deseasonalised fit, #154; count-matched noise, #153; a refusal of empty cells, #138) enters only that way."
+log = []

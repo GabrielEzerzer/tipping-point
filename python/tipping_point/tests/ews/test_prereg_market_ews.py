@@ -23,6 +23,7 @@ TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE-market-ews.toml"
 LABELS_V1 = REPO / "paper" / "prereg" / "market-labels-v1.toml"
 LABELS_TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE-market-labels.toml"
 ISING = REPO / "paper" / "prereg" / "ising-ews-v1.toml"
+V1 = REPO / "paper" / "prereg" / "market-ews-v1.toml"
 DELETE = object()
 # each open choice of the template, set to an option that is built
 CHOICES = {
@@ -338,3 +339,9 @@ def test_the_domain_picks_the_schema(doc: dict[str, Any]) -> None:
     labels["data"]["domain"] = "market-ews"
     found = prereg.problems(labels)
     assert "hypotheses: missing" in found and "segments: missing" in found
+
+
+def test_v1_may_be_frozen() -> None:
+    pre = prereg.load(V1)
+    assert pre.name == V1.stem
+    assert prereg.problems(pre.doc, strict=True) == []
