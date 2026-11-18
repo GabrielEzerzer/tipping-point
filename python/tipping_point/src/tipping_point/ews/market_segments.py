@@ -216,6 +216,9 @@ def _latent_frozen(root: Path, tag: str, scoring: prereg.Prereg) -> None:
             f"{relative} at {tag} is scored on {baseline['tag']} (sha256 {baseline['sha256']}), "
             f"not on {scoring.tag} (sha256 {scoring.sha256})"
         )
+    found = prereg.baseline_problems(doc, scoring.doc)
+    if found:
+        raise prereg.PreregError(f"{relative} at {tag}:\n  " + "\n  ".join(found))
     path = root / relative
     if path.exists() and path.read_bytes() != blob:
         raise prereg.PreregError(f"{relative} differs from the version frozen at {tag}")

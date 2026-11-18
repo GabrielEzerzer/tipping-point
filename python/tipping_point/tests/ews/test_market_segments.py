@@ -347,8 +347,9 @@ LATENT = on_baseline(EWS_V1.read_bytes())
             LATENT.replace(hashlib.sha256(EWS_V1.read_bytes()).hexdigest(), "f" * 64, 1),
             "f" * 64,
         ),
+        (LATENT.replace("\nwindow = 60\n", "\nwindow = 61\n", 1), "as the baseline holds it"),
     ],
-    ids=["bare", "string-version", "other-baseline", "other-sha256"],
+    ids=["bare", "string-version", "other-baseline", "other-sha256", "other-cells"],
 )
 def test_a_tagged_latent_file_must_be_a_frozen_file_on_this_baseline(
     tmp_path: Path, text: str, why: str
