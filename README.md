@@ -978,7 +978,8 @@ reaching it unless `scoring` is a market-ews file frozen at its tag that names t
 and a run labelling those days must carry the frozen labels' stamp in its manifest. The span also
 stays closed until a market-latent file is frozen in the same repository: at least one
 `prereg/market-latent-v<k>` tag, each holding `paper/prereg/market-latent-v<k>.toml`, a
-market-latent file of that id and version, read from the tag itself, so a checkout of the
+market-latent file of that id and version that passes the strict validator and whose `[baseline]`
+names this market-ews file's tag and sha256, read from the tag itself, so a checkout of the
 market-ews tag's commit is admitted once the latent tag is fetched; where the working tree also
 holds that file, it must be the tagged blob. Neither test is scored on those days before both are
 pre-registered. An environment
@@ -995,6 +996,13 @@ the bars the event-time shift may move its onsets to, restricted to the scored s
 holds a minute with no value or reaches outside the series has NaN there, so it drops out of that
 draw's AUC and is never redrawn. `shift_threshold` takes the 97.5th percentile of the draws' AUCs
 against the controls, and NaN, an inconclusive cell, when any draw has no AUC.
+Every random draw of the scoring has its own stream, so that no result hangs on the order a
+scorer visits the cells: `bootstrap_aucs` draws a cell's AUC bootstrap (events, then controls,
+each resampled per symbol) from `default_rng([seed, 1, indicator, horizon, group])`, the shift
+draws from `default_rng([seed, 2, horizon, group])`, and `surrogate_pvalues` draws each segment's
+phase surrogates from `default_rng([seed, 3, indicator, horizon, group, control, row])`, a control
+segment at horizon 0; `group_code` numbers the groups (pooled 0, each symbol its position plus 1,
+eth-only last). The second entry keeps the streams apart, since numpy pads a seed list with zeros.
 The module reads labels and is fed the series; the labels package (`market/`) imports none of it.
 
 The same-input tier, `ews/same_input.py` (#30; research pass 6.4 item 2, choice 8), scores the

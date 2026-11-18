@@ -18,12 +18,15 @@ import numpy as np
 from .. import engine
 from ..market import archive, msvol, nulls
 from . import prereg
-from .scoring import auc
+from .scoring import auc, surrogate_test
+from .surrogates import phase_randomised
+from .trend import Pipeline
 
 MINUTE_MS = 60_000
 BAR_MINUTES = 5
 BAR_MS = BAR_MINUTES * MINUTE_MS
 CONFIRMATORY_MS = archive.day_ms(prereg.CONFIRMATORY)
+BOOTSTRAP_STREAM, SHIFT_STREAM, SURROGATE_STREAM = 1, 2, 3
 
 
 class SegmentError(ValueError):
@@ -185,7 +188,7 @@ def check_scoring(scoring: prereg.Prereg) -> None:
         )
     for tag in tags:
         try:
-            _latent_frozen(root, tag)
+            _latent_frozen(root, tag, scoring)
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, prereg.PreregError) as exc:
             raise SegmentError(
                 f"{tag}: {exc}; the confirmatory span opens only when "
@@ -193,7 +196,7 @@ def check_scoring(scoring: prereg.Prereg) -> None:
             ) from exc
 
 
-def _latent_frozen(root: Path, tag: str) -> None:
+def _latent_frozen(root: Path, tag: str, scoring: prereg.Prereg) -> None:
     name = tag.removeprefix("prereg/")
     relative = (prereg.PREREG_DIR / f"{name}.toml").as_posix()
     blob = prereg._git(root, "cat-file", "blob", f"{tag}:{relative}", binary=True)
@@ -201,9 +204,18 @@ def _latent_frozen(root: Path, tag: str) -> None:
     data = doc.get("data")
     if not isinstance(data, dict) or data.get("domain") != prereg.MARKET_LATENT:
         raise prereg.PreregError(f"{relative} at {tag} is not a {prereg.MARKET_LATENT} file")
-    held = f"{doc.get('id')}-v{doc.get('version')}"
+    found = prereg.problems(doc, strict=True)
+    if found:
+        raise prereg.PreregError(f"{relative} at {tag}:\n  " + "\n  ".join(found))
+    held = f"{doc['id']}-v{doc['version']}"
     if held != name:
         raise prereg.PreregError(f"{relative} at {tag} holds {held}")
+    baseline = doc["baseline"]
+    if (baseline["tag"], baseline["sha256"]) != (scoring.tag, scoring.sha256):
+        raise prereg.PreregError(
+            f"{relative} at {tag} is scored on {baseline['tag']} (sha256 {baseline['sha256']}), "
+            f"not on {scoring.tag} (sha256 {scoring.sha256})"
+        )
     path = root / relative
     if path.exists() and path.read_bytes() != blob:
         raise prereg.PreregError(f"{relative} differs from the version frozen at {tag}")
@@ -212,6 +224,7 @@ def _latent_frozen(root: Path, tag: str) -> None:
 def shifted_rows(
     segments: Segments,
     series: Minutes,
+    symbols: Sequence[str],
     symbol: str,
     horizon: int,
     *,
@@ -220,7 +233,7 @@ def shifted_rows(
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     block = segments.events[symbol, horizon]
-    rng = np.random.default_rng([seed, horizon, *symbol.encode()])
+    rng = np.random.default_rng([seed, SHIFT_STREAM, horizon, group_code(symbols, symbol)])
     moved, kept = nulls.shift_onsets(
         block.anchor_ns, segments.eligible[symbol], min_offset_bars * msvol.BAR_NS, draws, rng
     )
@@ -237,6 +250,57 @@ def shift_threshold(positives: np.ndarray, negatives: np.ndarray) -> float:
     if not aucs.size or np.isnan(aucs).any():
         return math.nan
     return float(np.nanquantile(aucs, 0.975))
+
+
+def group_code(symbols: Sequence[str], group: str) -> int:
+    if group == "pooled":
+        return 0
+    if group == "eth-only":
+        return len(symbols) + 1
+    if group not in symbols:
+        raise SegmentError(f"no reporting group {group!r} for symbols {list(symbols)}")
+    return list(symbols).index(group) + 1
+
+
+def bootstrap_aucs(
+    events: Sequence[np.ndarray],
+    controls: Sequence[np.ndarray],
+    *,
+    seed: int,
+    indicator: int,
+    horizon: int,
+    group: int,
+    draws: int,
+) -> np.ndarray:
+    rng = np.random.default_rng([seed, BOOTSTRAP_STREAM, indicator, horizon, group])
+    out = np.empty(draws)
+    for d in range(draws):
+        drawn_events = [v[rng.integers(0, len(v), len(v))] for v in events]
+        drawn_controls = [v[rng.integers(0, len(v), len(v))] for v in controls]
+        out[d] = auc(np.concatenate(drawn_events), np.concatenate(drawn_controls))
+    return out
+
+
+def surrogate_pvalues(
+    x: np.ndarray,
+    pipeline: Pipeline,
+    n: int,
+    *,
+    seed: int,
+    indicator: int,
+    horizon: int,
+    symbol: int,
+    control: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    at = 0 if control else horizon
+    x = np.atleast_2d(np.asarray(x, dtype=np.float64))
+    observed, p = np.empty(len(x)), np.empty(len(x))
+    for j, row in enumerate(x):
+        entropy = [seed, SURROGATE_STREAM, indicator, at, symbol, int(control), j]
+        rng = np.random.default_rng(entropy)
+        score, pvalue = surrogate_test(row[None], pipeline, phase_randomised, n, rng)
+        observed[j], p[j] = score[0], pvalue[0]
+    return observed, p
 
 
 def _closed(what: str) -> str:
