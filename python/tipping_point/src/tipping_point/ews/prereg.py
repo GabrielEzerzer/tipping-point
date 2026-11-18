@@ -918,12 +918,11 @@ def _market_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         f"{key}: nothing reads this key in a market-labels file; take it out"
         for key in _unread(doc, _MARKET_SCHEMA)
     ]
-    for table in ("labeller", "cascade"):  # TOML allows nan and inf, and nan passes every check
-        found += [
-            f"{table}.{key}: a finite number, not {value!r}"
-            for key, value in doc[table].items()
-            if isinstance(value, float) and not math.isfinite(value)
-        ]
+    found += [
+        f"{where}: a finite number, not {value!r}"
+        for where, value in _numbers(doc)
+        if not math.isfinite(value)
+    ]
     if not _SLUG.fullmatch(doc["id"]) and not _PLACEHOLDER.search(doc["id"]):
         found.append(f"id: {doc['id']!r} is not a lowercase slug")
     if doc["version"] < 1:
