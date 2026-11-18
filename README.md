@@ -726,10 +726,14 @@ frozen or still holds a placeholder, and a scoring whose cells would pass `trial
   November on the confirmatory inputs, with nothing else running, one primary checkpoint's pass at
   L = 16 took 18 minutes (surrogates 14, alarms 1.4, AUC and the rest 2.4), and the probes'
   embeddings 0.6, 2.2 and 8.8 ms a frame at L = 16, 32 and 64. The series hold about as many
-  samples at every L (L = 64's ramps 19% fewer), so the run is projected at about 21 hours: the ten
-  primary passes 9 h, the twelve ablation passes, at the headline cell with 199 surrogates, about
-  3 h, the probes' embeddings 8.5 h, the rest under an hour. Rows whose surrogate tests run all
-  their draws cost more than those measured, so it could reach about 30 hours. Scoring runs on up
+  samples at every L (L = 64's ramps 19% fewer), so the run was projected at about 21 hours. It took
+  about 39, from 16 to 18 November with other work running: the probes' embeddings 20.3 h, the ten
+  primary passes 15.2 h and the twelve ablation passes, at the headline cell with 199 surrogates,
+  3.1 h. The embeddings and the first two passes ran on CPython 3.13, where the scoring threads used
+  about one core between them; the run was then resumed on the free-threaded CPython 3.14t build
+  with 6 threads. The two primary passes on 3.13 took 2.6 and 2.8 hours; the eight on 3.14t took
+  from 48 minutes to 2.5 hours, the first of them counting the resume's loading.
+  Scoring runs on up
   to 8 threads by default; on a host with more cores, `TP_THREADS=<n>` sets the count to n, and the
   results do not depend on it.
   A run's folder is made before its probes, so a run interrupted anywhere leaves a folder with no
