@@ -25,7 +25,7 @@ from typing import Any
 
 DESCRIPTION = """\
 Tipping Point: an explicit plan of simulator runs and JEPA trainings and extractions on Kaggle's
-GPUs. A Kaggle script kernel.
+GPUs, or a shard of the market JEPA's latent extraction on its CPUs. A Kaggle script kernel.
 
 A plan is plain JSON: an ordered list of runs, each an `ising` or `jepa` subcommand with its
 arguments. --write-kernel embeds a plan in a copy of this file and writes kernel-metadata.json
@@ -122,6 +122,34 @@ training stops its GPU's queue and blocks the runs that read it; the other queue
 extraction blocks only the runs that read it, and its queue's other tables go on. No run starts
 once /kaggle/working holds 18 GB (Kaggle keeps 20 GB) or past 8 h 15 min.
 
+A market plan holds a "market" section in place of runs and inputs: one shard of
+`python -m tipping_point.jepa.market_extract run` (#30 M8), whose units (checkpoint x symbol x block
+of days) are independent, so the job splits across kernels and across processes in each.
+
+    {"kernel": "tp-m8-latents-k0",
+     "commit": "<the gate record's code head>",
+     "datasets": ["<owner>/<book>", "<owner>/<primaries>", "<owner>/<gate>"],
+     "market": {"book": "<book>",                 exploratory/ and confirmatory/, or training/ (fit)
+                "primaries": "<primaries>",       pins.json and <asset>-s<seed>/jepa/<run id>/ with
+                                                  final.pt, ckpt/step_0000000.pt and manifest.json
+                "gate": "<gate>",                 gate.json; fit and confirmatory need it
+                "span": "confirmatory",           fit, exploratory or confirmatory
+                "shard": [0, 5],                  this kernel's index k of K kernels
+                "processes": 4, "threads": 1,     optional: 1 and 1
+                "runs": ["<run id>"], "symbols": ["BTCUSDT"], "days": 4}}   optional
+
+Process p runs `--shard (k*P+p)/(K*P)` on a CPU kernel (no GPU, so no GPU quota, and every unit is
+bitwise what one read gives), with its output in out/logs/market-<p>.log and its units in
+out/market/units/. --resume works as for runs: a session first copies the previous output's units
+into its own, the extractor skips every unit already written and intact, and a unit cut off by the
+deadline is redone. After the processes end, `market_extract verify` checks every unit's parquet
+against its record. STATUS is complete when every process exited 0 and the check passed, incomplete
+when the deadline stopped them, failed otherwise. Merge the K kernels' outputs where the repository
+is: `market_extract merge --gate <gate.json> --units <each kernel's out/market> ...`, which checks
+the gate again with git. --dry-run-market PLAN rehearses a market plan locally: a wheel from HEAD,
+--input SLUG=DIR for each dataset, a first session stopped once it has written a unit, and a second
+with the first's output attached.
+
 Status: out/STATUS holds one line (running, complete, incomplete, failed or refused) with the
 measured rates: seconds per training step after warm-up, from the training's own GPU-hour ledger,
 and microseconds per extracted frame, by checkpoint and L. out/kaggle-ising-runs.json holds every
@@ -137,6 +165,13 @@ DEFAULT_WHEEL = f"{OWNER}/{WHEEL_DATASET}"  # training jobs attach the latest wh
 PYTHON = "3.13"  # the wheel's Requires-Python
 TORCH = "torch==2.14.1+cu126"
 TORCH_INDEX = "https://download.pytorch.org/whl/cu126"
+TORCH_CPU = "torch==2.14.1+cpu"
+TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+MARKET = "market"
+MARKET_SPANS = ("fit", "exploratory", "confirmatory")
+MARKET_KEYS = {"book", "primaries", "gate", "span", "shard", "processes", "threads", "runs"}
+MARKET_KEYS |= {"symbols", "days"}
+MARKET_MODULE = "tipping_point.jepa.market_extract"
 PINNED = ("numpy==2.5.4", "pyarrow==26.0.0")  # uv.lock's versions
 # Kaggle's image puts a sitecustomize that imports wrapt on the path of its /usr/bin/python3, which
 # is the venv's interpreter, so -I does not skip it: without wrapt every child prints two error
@@ -549,6 +584,7 @@ def load_plan(plan: object) -> dict:
         "kernel_sources",
         "inputs",
         "runs",
+        MARKET,
     }
     if set(plan) - keys:
         problems.append(f"unknown keys {sorted(set(plan) - keys)}")
@@ -581,7 +617,10 @@ def load_plan(plan: object) -> dict:
     if inputs and not sources:
         problems.append("inputs need a dataset or a kernel source to be found in")
     runs = plan.get("runs")
-    if not (isinstance(runs, list) and runs):
+    if MARKET in plan:
+        problems += market_problems(plan[MARKET], plan)
+        runs = []
+    elif not (isinstance(runs, list) and runs):
         problems.append("runs: a non-empty list")
         runs = []
     earlier: dict[str, dict] = {}
@@ -597,6 +636,46 @@ def load_plan(plan: object) -> dict:
     if problems:
         raise PlanError("\n".join(problems))
     return plan
+
+
+def market_problems(market: object, plan: dict) -> list[str]:
+    if not isinstance(market, dict):
+        return ["market: an object"]
+    problems = []
+    if set(market) - MARKET_KEYS:
+        problems.append(f"market: unknown keys {sorted(set(market) - MARKET_KEYS)}")
+    if "runs" in plan or "inputs" in plan:
+        problems.append("a market plan takes no runs or inputs")
+    attached = {s.split("/", 1)[-1] for s in plan.get("datasets", []) if isinstance(s, str)}
+    for key in ("book", "primaries", *(["gate"] if "gate" in market else [])):
+        if market.get(key) not in attached:
+            problems.append(f"market.{key} {market.get(key)!r}: the slug of one of the datasets")
+    span = market.get("span")
+    if span not in MARKET_SPANS:
+        problems.append(f"market.span {span!r}: one of {', '.join(MARKET_SPANS)}")
+    if span in ("fit", "confirmatory") and "gate" not in market:
+        problems.append(f"market: the {span} span opens only under a gate")
+    if "gate" in market and "days" in market:
+        problems.append("market.days is for timing runs, without a gate")
+    shard = market.get("shard", [0, 1])
+    if not (
+        isinstance(shard, list)
+        and len(shard) == 2
+        and all(type(v) is int for v in shard)
+        and 0 <= shard[0] < shard[1]
+    ):
+        problems.append(f"market.shard {shard!r}: [k, K], this kernel's index k of K kernels")
+    for key in ("processes", "threads", "days"):
+        value = market.get(key, 1)
+        if not (type(value) is int and value >= 1):
+            problems.append(f"market.{key} {value!r}: a whole number from 1")
+    for key in ("runs", "symbols"):
+        value = market.get(key, [])
+        if not (
+            isinstance(value, list) and all(isinstance(v, str) and NAME.fullmatch(v) for v in value)
+        ):
+            problems.append(f"market.{key}: a list of names")
+    return problems
 
 
 @dataclass
@@ -812,7 +891,8 @@ def ensure_env(ctx: Ctx, wheel: Path) -> dict:
     stream([*uv, "venv", "--python", PYTHON, env_dir], env=uv_env, cwd=ctx.cwd)
     ctx.py = str(env_dir / "bin" / "python")
     install = [*uv, "pip", "install", "--python", ctx.py]
-    stream([*install, TORCH, "--index-url", TORCH_INDEX], env=uv_env, cwd=ctx.cwd)
+    torch, index = (TORCH, TORCH_INDEX) if ctx.device == "cuda" else (TORCH_CPU, TORCH_CPU_INDEX)
+    stream([*install, torch, "--index-url", index], env=uv_env, cwd=ctx.cwd)
     stream([*install, *PINNED, *SITE_NOISE, wheel], env=uv_env, cwd=ctx.cwd)
     shutil.rmtree(uv_cache, ignore_errors=True)
     return probe(ctx)
@@ -1895,7 +1975,7 @@ def rates_text(rates: dict[str, dict]) -> str:
 
 def exit_code(ctx: Ctx) -> int:
     """Non-zero only when the output holds no run folder: a failed version may lose its output."""
-    folders = [ctx.out / "ising", ctx.out / "jepa"]
+    folders = [ctx.out / "ising", ctx.out / "jepa", ctx.out / MARKET]
     held = any(p.is_dir() for f in folders if f.is_dir() for p in f.iterdir())
     return 0 if held else 1
 
@@ -1924,10 +2004,15 @@ def kernel_main(ctx: Ctx) -> int:
         if PLAN_JSON is None:
             raise Refused("no plan is embedded: write the kernel folder with --write-kernel")
         plan = load_plan(json.loads(PLAN_JSON))
-        summary.update(kernel=plan["kernel"], plan=plan)
-        log(f"== {plan['kernel']}: {len(plan['runs'])} runs")
+        market = MARKET in plan
+        if market:
+            ctx.device = "cpu"
+        summary.update(kernel=plan["kernel"], plan=plan, device=ctx.device)
+        log(
+            f"== {plan['kernel']}: " + ("a market shard" if market else f"{len(plan['runs'])} runs")
+        )
         log("== previous sessions (this kernel's output attached as an input)")
-        prior = carry_forward(ctx, plan)
+        prior = carry_units(ctx, plan) if market else carry_forward(ctx, plan)
         if prior is not None:  # a refusal from here on still hands the chain on
             summary.update(prior={k: prior[k] for k in ("path", "status")}, runs=prior["runs"])
         log("== wheel and environment")
@@ -1939,6 +2024,8 @@ def kernel_main(ctx: Ctx) -> int:
         env = summary["env"] = probe(ctx) if ctx.py else ensure_env(ctx, wheel)
         log(json.dumps(env, indent=2))
         check_env(ctx, env, commit)
+        if market:
+            return market_session(ctx, plan, summary)
         gpus = ctx.gpus or len(env["devices"])
         session = Session(ctx, plan, summary, commit, env["torch"], gpus, prior)
         return session.run()
@@ -1951,6 +2038,136 @@ def kernel_main(ctx: Ctx) -> int:
         if session is not None:
             session.shutdown()
             guarded("unstaging the plain copies of inputs", session.unstage)
+
+
+def carry_units(ctx: Ctx, plan: dict) -> dict | None:
+    found = []
+    for path in ctx.input.rglob(STATE):
+        state = read_json(path)
+        if state and state.get("kernel") == plan["kernel"]:
+            found.append((str(state.get("updated_utc") or ""), str(path), path, state))
+    if not found:
+        log("none attached")
+        return None
+    _, _, path, state = max(found, key=lambda f: (f[0], f[1]))
+    if (path.parent / MARKET).is_dir():
+        shutil.copytree(path.parent / MARKET, ctx.out / MARKET, dirs_exist_ok=True)
+    log(f"{path}: {state.get('status')}; {len(market_units(ctx))} units carried forward")
+    return {"path": str(path), "status": state.get("status"), "runs": []}
+
+
+def market_units(ctx: Ctx) -> list[Path]:
+    return sorted((ctx.out / MARKET / "units").rglob("*.json"))
+
+
+def market_inputs(ctx: Ctx, market: dict) -> dict[str, Path]:
+    def holder(slug: str, marker: str) -> Path:
+        root = find_input(ctx.input, slug)
+        hits = sorted(root.rglob(marker), key=lambda p: (len(p.parts), str(p)))
+        if not hits:
+            raise Refused(f"dataset {slug} holds no {marker}")
+        return hits[0]
+
+    pins = holder(market["primaries"], "pins.json")
+    found = {"pins": pins, "primaries": pins.parent}
+    folder = "training" if market["span"] == "fit" else "exploratory"
+    found["data"] = holder(market["book"], f"{folder}/manifest.json").parent.parent
+    if "gate" in market:
+        found["gate"] = holder(market["gate"], "gate.json")
+    return found
+
+
+def market_argv(ctx: Ctx, market: dict, found: dict[str, Path], p: int) -> list[str]:
+    k, kernels = market.get("shard", [0, 1])
+    processes = market.get("processes", 1)
+    argv = [ctx.py, "-I", "-u", "-m", MARKET_MODULE, "run", "--span", market["span"]]
+    argv += ["--pins", found["pins"], "--primaries", found["primaries"], "--data", found["data"]]
+    argv += ["--out", ctx.out / MARKET, "--shard", f"{k * processes + p}/{kernels * processes}"]
+    argv += ["--threads", market.get("threads", 1)]
+    if "gate" in found:
+        argv += ["--gate", found["gate"]]
+    for key in ("runs", "symbols"):
+        if market.get(key):
+            argv += [f"--{key}", *market[key]]
+    if "days" in market:
+        argv += ["--days", market["days"]]
+    return [str(a) for a in argv]
+
+
+def market_wait(ctx: Ctx, procs: list[subprocess.Popen], held: int) -> str:
+    beat = time.time()
+    while any(proc.poll() is None for proc in procs):
+        if time.time() - T0 > ctx.stop_s:
+            stopped = "the session's deadline"
+        elif ctx.interrupt and len(market_units(ctx)) > held:
+            stopped = "a simulated deadline"
+        else:
+            if time.time() - beat > HEARTBEAT_S:
+                beat = time.time()
+                write_text(ctx.out / "STATUS", f"running: {len(market_units(ctx))} units\n")
+            time.sleep(ctx.poll_s)
+            continue
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+        return stopped
+    return ""
+
+
+def market_session(ctx: Ctx, plan: dict, summary: dict) -> int:
+    market = plan[MARKET]
+    found = market_inputs(ctx, market)
+    summary["inputs"] = {key: str(path) for key, path in found.items()}
+    for tmp in (ctx.out / MARKET).rglob("*.tmp"):
+        tmp.unlink()
+    held = len(market_units(ctx))
+    threads = str(market.get("threads", 1))
+    env = dict(child_env(ctx), OMP_NUM_THREADS=threads, MKL_NUM_THREADS=threads)
+    (ctx.out / "logs").mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as sinks:
+        procs = []
+        for p in range(market.get("processes", 1)):
+            argv = market_argv(ctx, market, found, p)
+            path = ctx.out / "logs" / f"market-{p}.log"
+            sink = sinks.enter_context(open(path, "a", encoding="utf-8"))
+            log(f"[{p}] $ {' '.join(argv)}")
+            out = {"stdout": sink, "stderr": subprocess.STDOUT}
+            proc = subprocess.Popen(argv, **out, env=env, cwd=ctx.cwd)
+            procs.append({"p": p, "shard": argv[argv.index("--shard") + 1], "proc": proc})
+        stopped = market_wait(ctx, [r["proc"] for r in procs], held)
+        for r in procs:
+            r["exit"] = r["proc"].wait()
+    failed = [r for r in procs if r["exit"] != 0 and not stopped]
+    for r in failed:
+        tail = (ctx.out / "logs" / f"market-{r['p']}.log").read_text(encoding="utf-8").splitlines()
+        log(f"process {r['p']} (shard {r['shard']}) exited {r['exit']}:\n" + "\n".join(tail[-30:]))
+    verify = [ctx.py, "-I", "-m", MARKET_MODULE, "verify", ctx.out / MARKET]
+    checked = stream(verify, env=env, cwd=ctx.cwd, check=False)[0]
+    units = len(market_units(ctx))
+    if checked != 0:
+        status, detail = "failed", "a unit's parquet is not the file its record names"
+    elif stopped:
+        status, detail = "incomplete", f"stopped by {stopped}; push again with --resume"
+    elif failed:
+        status, detail = "failed", f"process {', '.join(str(r['p']) for r in failed)} failed"
+    else:
+        status, detail = "complete", f"every unit of shard {market.get('shard', [0, 1])}"
+    summary.update(
+        status=status,
+        status_detail=detail,
+        units=units,
+        held=held,
+        made=units - held,
+        processes=[{k: r[k] for k in ("p", "shard", "exit")} for r in procs],
+        runs=[],
+        updated_utc=now_utc(),
+        ended_utc=now_utc(),
+    )
+    write_text(ctx.out / STATE, json.dumps(summary, indent=2, default=str))
+    line = f"{status}: {detail}; {units} units, {units - held} made this session"
+    write_text(ctx.out / "STATUS", line + "\n")
+    log(f"STATUS {line}")
+    return exit_code(ctx)
 
 
 # -- local: the kernel folder, the dry run, the self-test --------------------------------------
@@ -2000,7 +2217,7 @@ def only(plan: dict, names: list[str]) -> dict:
 def write_kernel(plan: dict, dest: Path, resume: bool = False) -> Path:
     """A pushable kernel folder: this script with the plan embedded, and kernel-metadata.json."""
     load_plan(plan)
-    errors = cli_errors(plan)
+    errors = [] if MARKET in plan else cli_errors(plan)
     if errors:
         raise PlanError("the CLI refuses:\n" + "\n".join(errors))
     source = Path(__file__).read_text(encoding="utf-8")
@@ -2032,6 +2249,9 @@ def write_kernel(plan: dict, dest: Path, resume: bool = False) -> Path:
         "kernel_sources": [*plan.get("kernel_sources", []), *own],
         "model_sources": [],
     }
+    if MARKET in plan:
+        metadata.update(enable_gpu=False)
+        del metadata["machine_shape"]
     dest.mkdir(parents=True, exist_ok=True)
     (dest / f"{slug}.py").write_text(script, encoding="utf-8", newline="\n")
     text = json.dumps(metadata, indent=2) + "\n"
@@ -2265,6 +2485,45 @@ def dry_run_report(sessions: list[tuple[int, dict]], root: Path, python: str) ->
     return 0 if all(findings.values()) else 1
 
 
+def dry_run_market(args: argparse.Namespace) -> int:
+    plan = read_plan(Path(args.dry_run_market))
+    if MARKET not in plan:
+        raise PlanError(f"{args.dry_run_market} is not a market plan")
+    root = dry_root(args, "tp-dry-market-")
+    python = build_wheel_env(root)
+    for spec in args.input:
+        slug, _, folder = spec.partition("=")
+        shutil.copytree(folder, root / "input" / slug)
+    script = write_kernel(plan, root / "kernel", resume=True)
+    units = root / "working" / "out" / MARKET / "units"
+
+    def session(n: int) -> tuple[int, dict]:
+        log(f"== dry-run session {n}" + (", stopped once it writes a unit" if n == 1 else ""))
+        argv = [sys.executable, script, "--local-session", "--root", root, "--python", python]
+        argv += ["--interrupt"] if n == 1 else []
+        ran = subprocess.run([str(a) for a in argv], check=False)
+        return ran.returncode, read_json(root / "working" / "out" / STATE) or {}
+
+    _, one = session(1)
+    first = {p.relative_to(units): sha256_file(p) for p in sorted(units.rglob("*.json"))}
+    os.replace(root / "working", root / "input" / plan["kernel"])
+    code, two = session(2)
+    kept = {p: sha256_file(units / p) for p in first if (units / p).is_file()}
+    fresh = subprocess.run([python, "-I", "-m", MARKET_MODULE, "verify", str(units.parent)])
+    findings = {
+        "session 1 stopped with units written": one.get("status") == "incomplete" and bool(first),
+        "session 2 is complete": two.get("status") == "complete" and code == 0,
+        "session 2 kept session 1's units": kept == first and two.get("held") == len(first),
+        "session 2 made only the units session 1 lacked": two.get("made")
+        == two.get("units", 0) - len(first),
+        "a fresh market_extract verify passes": fresh.returncode == 0,
+    }
+    for what, ok in findings.items():
+        print(f"{'PASS' if ok else 'FAIL'}  {what}")
+    print(f"dry run {'OK' if all(findings.values()) else 'FAILED'}; everything is under {root}")
+    return 0 if all(findings.values()) else 1
+
+
 def local_ctx(args: argparse.Namespace) -> Ctx:
     root = Path(args.root)
     return Ctx(
@@ -2309,6 +2568,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="rehearse a tiny JEPA plan on the CPU: train, resume, extract, verify",
     )
+    mode.add_argument(
+        "--dry-run-market", metavar="PLAN", help="rehearse a market plan on the CPU, twice"
+    )
     mode.add_argument("--self-test", action="store_true", help="check the runner in-process")
     mode.add_argument("--local-session", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -2338,6 +2600,7 @@ def main(argv: list[str] | None = None) -> int:
         args.write_kernel
         or args.dry_run
         or args.dry_run_jepa
+        or args.dry_run_market
         or args.self_test
         or args.local_session
     )
@@ -2354,6 +2617,8 @@ def main(argv: list[str] | None = None) -> int:
             return dry_run(args)
         if args.dry_run_jepa:
             return dry_run_jepa(args)
+        if args.dry_run_market:
+            return dry_run_market(args)
     except PlanError as why:
         print(f"the plan is refused:\n{why}", file=sys.stderr)
         return 2

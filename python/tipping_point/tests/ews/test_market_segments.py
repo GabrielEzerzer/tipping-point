@@ -4,7 +4,7 @@ controls do not overlap, a missing minute excludes and counts a segment, the H =
 planted one, the labels must be the frozen file's, and the confirmatory span stays closed without
 a frozen market-ews file."""
 
-import re
+import hashlib
 import subprocess
 from dataclasses import replace
 from datetime import date, timedelta
@@ -14,13 +14,17 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 import pytest
+from latent_prereg import on_baseline
 from tipping_point.ews import market_segments as ms
-from tipping_point.ews import prereg
+from tipping_point.ews import prereg, scoring
+from tipping_point.ews.surrogates import phase_randomised
+from tipping_point.ews.trend import Pipeline
 from tipping_point.market import archive, msvol, nulls
 
 REPO = Path(__file__).resolve().parents[4]
 LABELS_V1 = REPO / "paper" / "prereg" / "market-labels-v1.toml"
-TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE-market-ews.toml"
+EWS_V1 = REPO / "paper" / "prereg" / "market-ews-v1.toml"
+SYMBOLS = ("BTCUSDT", "ETHUSDT")
 SPAN = 299  # Pipeline("variance", 60, 240).span
 HORIZONS = (5, 6, 12, 24)
 DAYS = 4
@@ -30,53 +34,12 @@ STRETCHES = ((800, 200), (1100, 40))  # null stretches (start bar, bars): 3 and 
 GAP = 4400  # a minute with no return, inside the second control segment
 
 
-def filled(text: str) -> str:
-    """The market-ews template with every placeholder set, as test_prereg_market_ews fills it."""
-    text = text.replace('id = "<lowercase-slug>"', 'id = "market-ews"', 1)
-    for key, value in {
-        "detrend": "none",
-        "method": "scale",
-        "fit": "pilot",
-        "noise": "bootstrap",
-        "empty": "mark",
-    }.items():
-        text = re.sub(rf'^{key} = "<[^"]*>"', f'{key} = "{value}"', text, count=1, flags=re.M)
-    text = re.sub(r'far_per_day = "<[^"]*>"', "far_per_day = 1.0", text)
-    return re.sub(r'"<[^"]*>"', '"set"', text)
-
-
-def _git(root: Path, *args: str) -> str:
-    done = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
-    )
-    return done.stdout.strip()
-
-
-@pytest.fixture(scope="module")
-def frozen(tmp_path_factory: pytest.TempPathFactory) -> tuple[prereg.Prereg, prereg.Prereg]:
-    """A scratch repository with market-labels-v1 byte for byte and a filled market-ews file that
-    names it, both frozen at their tags."""
-    root = tmp_path_factory.mktemp("repo")
-    _git(root, "init", "-q")
-    _git(root, "config", "user.name", "Test")
-    _git(root, "config", "user.email", "test@example.com")
-    _git(root, "config", "core.autocrlf", "false")
-    folder = root / "paper" / "prereg"
-    folder.mkdir(parents=True)
-    (folder / "market-labels-v1.toml").write_bytes(LABELS_V1.read_bytes())
-    (folder / "market-ews-v1.toml").write_bytes(filled(TEMPLATE.read_text("utf-8")).encode())
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "preregs")
-    prereg.freeze(root, "market-labels")
-    prereg.freeze(root, "market-ews")
-    return prereg.load(folder / "market-labels-v1.toml"), prereg.load(folder / "market-ews-v1.toml")
-
-
 def _run(
     data: Path,
     labels: prereg.Prereg,
     first: date = date(2023, 3, 1),
     stamp: bool = False,
+    null_bars: tuple[tuple[int, int], ...] = STRETCHES,
     **labeller: Any,
 ) -> Path:
     """A labels run of DAYS days from `first` for BTCUSDT: H = 1 on HIGH and from ONSET for 100
@@ -103,7 +66,7 @@ def _run(
             "bars": k,
             "missing": 0,
         }
-        for b, k in STRETCHES
+        for b, k in null_bars
     ]
     tables = {
         "labels": pa.Table.from_pylist(rows, schema=msvol.SCHEMAS["labels"]),
@@ -313,6 +276,142 @@ def test_the_confirmatory_span_needs_a_frozen_market_ews_file(
         ms.build(claims, labels, {"BTCUSDT": early}, (5,), SPAN)
 
 
+def test_the_confirmatory_span_needs_market_latent_frozen_too(tmp_path: Path) -> None:
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True, check=True)
+
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    git("config", "core.autocrlf", "false")
+    folder = tmp_path / "paper" / "prereg"
+    folder.mkdir(parents=True)
+    ews = (REPO / "paper" / "prereg" / "market-ews-v1.toml").read_bytes()
+    (folder / "market-ews-v1.toml").write_bytes(ews)
+    git("add", ".")
+    git("commit", "-q", "-m", "market-ews")
+    prereg.freeze(tmp_path, "market-ews")
+    scoring = prereg.load(folder / "market-ews-v1.toml")
+    with pytest.raises(ms.SegmentError, match="opens only when market-latent is frozen too"):
+        ms.check_scoring(scoring)
+
+    (folder / "market-latent-v1.toml").write_bytes(on_baseline(ews).encode())
+    git("add", ".")
+    git("commit", "-q", "-m", "market-latent")
+    assert prereg.freeze(tmp_path, "market-latent") == "prereg/market-latent-v1"
+    ms.check_scoring(scoring)
+
+    (folder / "market-latent-v1.toml").write_bytes(b"edited after the freeze")
+    with pytest.raises(ms.SegmentError, match="opens only when market-latent is frozen too"):
+        ms.check_scoring(scoring)
+
+    git("checkout", "-q", "-f", "prereg/market-ews-v1")
+    assert not (folder / "market-latent-v1.toml").exists()
+    ms.check_scoring(prereg.load(folder / "market-ews-v1.toml"))
+
+
+def _scratch(root: Path) -> tuple[Path, prereg.Prereg]:
+    for args in (
+        ("init", "-q"),
+        ("config", "user.name", "Test"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "core.autocrlf", "false"),
+    ):
+        _git(root, *args)
+    folder = root / "paper" / "prereg"
+    folder.mkdir(parents=True)
+    (folder / "market-ews-v1.toml").write_bytes(EWS_V1.read_bytes())
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "market-ews")
+    prereg.freeze(root, "market-ews")
+    return folder, prereg.load(folder / "market-ews-v1.toml")
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True)
+
+
+LATENT = on_baseline(EWS_V1.read_bytes())
+
+
+@pytest.mark.parametrize(
+    ("text", "why"),
+    [
+        ('id = "market-latent"\nversion = 1\n\n[data]\ndomain = "market-latent"\n', "question"),
+        (LATENT.replace("\nversion = 1\n", '\nversion = "1"\n', 1), "version"),
+        (
+            LATENT.replace('tag = "prereg/market-ews-v1"', 'tag = "prereg/market-ews-v2"', 1),
+            "is scored on prereg/market-ews-v2",
+        ),
+        (
+            LATENT.replace(hashlib.sha256(EWS_V1.read_bytes()).hexdigest(), "f" * 64, 1),
+            "f" * 64,
+        ),
+        (LATENT.replace("\nwindow = 60\n", "\nwindow = 61\n", 1), "as the baseline holds it"),
+    ],
+    ids=["bare", "string-version", "other-baseline", "other-sha256", "other-cells"],
+)
+def test_a_tagged_latent_file_must_be_a_frozen_file_on_this_baseline(
+    tmp_path: Path, text: str, why: str
+) -> None:
+    folder, scoring = _scratch(tmp_path)
+    (folder / "market-latent-v1.toml").write_bytes(text.encode())
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-q", "-m", "market-latent")
+    _git(tmp_path, "tag", "-a", "prereg/market-latent-v1", "-m", "tagged by hand")
+    with pytest.raises(ms.SegmentError, match="opens only when market-latent is frozen too") as e:
+        ms.check_scoring(scoring)
+    assert why in str(e.value)
+
+
+def _shift_case() -> tuple[ms.Segments, ms.Minutes]:
+    start_ms = archive.day_ms(date(2023, 3, 1))
+    values = np.arange(4 * 1440, dtype=np.float64)
+    values[2000] = np.nan
+    bar_ns = (start_ms + ms.BAR_MS * np.arange(4 * 288, dtype=np.int64)) * 1_000_000
+    onsets = bar_ns[[700, 900]]
+    block = ms.Block(np.zeros((2, 10)), np.zeros(2, np.int64), onsets, np.zeros(2))
+    eligible = bar_ns[[2, 380, 406, 420, 1000, 1100]]
+    segments = ms.Segments(10, {("BTCUSDT", 5): block}, {}, {}, [], {"BTCUSDT": eligible})
+    return segments, ms.Minutes(start_ms, values)
+
+
+def test_the_shift_moves_the_horizons_kept_onsets_to_eligible_bars_a_day_away() -> None:
+    segments, series = _shift_case()
+    rows, kept = ms.shifted_rows(
+        segments, series, SYMBOLS, "BTCUSDT", 5, draws=400, min_offset_bars=288, seed=30
+    )
+    assert rows.shape == (400, 2, 10) and kept.tolist() == [True, True]
+    again, _ = ms.shifted_rows(
+        segments, series, SYMBOLS, "BTCUSDT", 5, draws=400, min_offset_bars=288, seed=30
+    )
+    np.testing.assert_array_equal(rows, again)
+    last = rows[:, :, -1]
+    end_minute = np.where(np.isnan(last), -1, last + 1)
+    onset_bar = (end_minute + 5 * 5) // 5
+    complete = ~np.isnan(rows).any(axis=2)
+    assert set(onset_bar[:, 0][complete[:, 0]].tolist()) == {380, 1000, 1100}
+    assert set(onset_bar[:, 1][complete[:, 1]].tolist()) == {380, 420}
+    first = rows[complete][:, 0]
+    np.testing.assert_array_equal(rows[complete], first[:, None] + np.arange(10, dtype=np.float64))
+    dropped = ~complete
+    assert dropped[:, 0].any() and dropped[:, 1].any()
+    all_nan = np.isnan(rows[dropped]).all(axis=1)
+    assert all_nan.any() and not all_nan.all()
+
+
+def test_a_shift_cell_with_a_draw_and_no_auc_is_inconclusive() -> None:
+    rng = np.random.default_rng(0)
+    negatives = rng.normal(size=50)
+    positives = rng.normal(0.3, 1.0, size=(100, 20))
+    positives[3, :5] = np.nan
+    aucs = [scoring.auc(row, negatives) for row in positives]
+    assert ms.shift_threshold(positives, negatives) == np.nanquantile(aucs, 0.975)
+    positives[7] = np.nan
+    assert np.isnan(ms.shift_threshold(positives, negatives))
+    assert np.isnan(ms.shift_threshold(np.empty((100, 0)), negatives))
+
+
 def test_returns_and_the_slot_profile() -> None:
     """Close-to-close returns leave a minute without a kline, and the one after it, empty; the slot
     profile divides each return by its slot's root mean square over the fit days."""
@@ -360,3 +459,95 @@ def test_eth_only_keeps_the_eth_onsets_with_no_btc_onset_within_the_window() -> 
     assert ms.eth_only(eth, btc, 12).tolist() == [True, False, False, True]
     assert ms.eth_only(eth, btc, 11).tolist() == [True, True, True, True]
     assert ms.eth_only(eth, np.array([], np.int64), 12).all()
+
+
+def test_scoring_cuts_only_the_confirmatory_span(
+    tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg]
+) -> None:
+    labels, scoring = frozen
+    first = date(2023, 12, 30)
+    stretches = ((100, 150), (560, 130), (800, 200))
+    run = _run(tmp_path, labels, first=first, stamp=True, null_bars=stretches)
+    values = np.arange(6 * 1440, dtype=np.float64)
+    series = {"BTCUSDT": ms.Minutes(archive.day_ms(first - timedelta(1)), values)}
+    got = ms.build(run, labels, series, HORIZONS, SPAN, seed=30, scoring=scoring)
+    for h in HORIZONS:
+        block = got.events["BTCUSDT", h]
+        assert block.anchor_ns.tolist() == [(ms.CONFIRMATORY_MS + 2 * 3_600_000) * 1_000_000]
+    assert got.events["BTCUSDT", 5].first_ms[0] < ms.CONFIRMATORY_MS
+    events = [c for c in got.counts if c["kind"] == "event"]
+    assert all((c["cut"], c["kept"]) == (1, 1) for c in events)
+    controls = got.controls["BTCUSDT"]
+    assert len(controls.x) == 4 and controls.first_ms.min() >= ms.CONFIRMATORY_MS
+    n = DAYS * msvol.DAY_BARS
+    h = np.zeros(n, np.int8)
+    h[slice(*HIGH)] = 1
+    h[ONSET : ONSET + 100] = 1
+    ts = archive.day_ms(first) * 1_000_000 + msvol.BAR_NS * np.arange(n, dtype=np.int64)
+    every = ts[nulls.eligible_onsets(h, msvol.Params(**labels.doc["labeller"]))]
+    later = every[every >= ms.CONFIRMATORY_MS * 1_000_000]
+    assert 0 < len(later) < len(every)
+    assert np.array_equal(got.eligible["BTCUSDT"], later)
+    pilot_run = _run(tmp_path / "pilot", labels)
+    pilot_bars = every - ts[0] + archive.day_ms(date(2023, 3, 1)) * 1_000_000
+    pilot = ms.build(pilot_run, labels, {"BTCUSDT": _minutes()}, (5,), SPAN)
+    assert np.array_equal(pilot.eligible["BTCUSDT"], pilot_bars)
+    day = date(2023, 3, 3)
+    late = ms.build(pilot_run, labels, {"BTCUSDT": _minutes()}, (5,), SPAN, score_from=day)
+    kept = pilot_bars[pilot_bars >= archive.day_ms(day) * 1_000_000]
+    assert 0 < len(kept) < len(pilot_bars)
+    assert np.array_equal(late.eligible["BTCUSDT"], kept)
+
+
+def test_the_shift_draws_from_its_own_stream() -> None:
+    segments, series = _shift_case()
+    rows, _ = ms.shifted_rows(
+        segments, series, SYMBOLS, "BTCUSDT", 5, draws=50, min_offset_bars=288, seed=30
+    )
+    block = segments.events["BTCUSDT", 5]
+    moved, _ = nulls.shift_onsets(
+        block.anchor_ns,
+        segments.eligible["BTCUSDT"],
+        288 * msvol.BAR_NS,
+        50,
+        np.random.default_rng([30, ms.SHIFT_STREAM, 5, 1]),
+    )
+    end_minute = np.where(np.isnan(rows[:, :, -1]), -1, rows[:, :, -1] + 1)
+    complete = ~np.isnan(rows).any(axis=2)
+    want = (moved - series.start_ms * 1_000_000) // msvol.BAR_NS
+    np.testing.assert_array_equal(((end_minute + 25) // 5)[complete], want[complete])
+
+
+def test_group_codes() -> None:
+    codes = [ms.group_code(SYMBOLS, g) for g in ("pooled", "BTCUSDT", "ETHUSDT", "eth-only")]
+    assert codes == [0, 1, 2, 3]
+    with pytest.raises(ms.SegmentError, match="no reporting group"):
+        ms.group_code(SYMBOLS, "SOLUSDT")
+
+
+def test_the_bootstrap_draws_events_then_controls_from_the_cells_stream() -> None:
+    events = [np.array([0.1, 0.5, 0.9]), np.array([0.3, 0.7])]
+    controls = [np.array([0.0, 0.2, 0.4, 0.6]), np.array([0.25, 0.35, 0.8])]
+    got = ms.bootstrap_aucs(events, controls, seed=30, indicator=1, horizon=6, group=0, draws=5)
+    np.testing.assert_allclose(got, [0.8, 5 / 7, 23 / 35, 22 / 35, 17 / 35])
+    rng = np.random.default_rng([30, ms.BOOTSTRAP_STREAM, 1, 6, 0])
+    for value in got:
+        drawn = [[v[rng.integers(0, len(v), len(v))] for v in side] for side in (events, controls)]
+        assert value == scoring.auc(np.concatenate(drawn[0]), np.concatenate(drawn[1]))
+
+
+def test_each_segments_surrogates_come_from_its_own_stream() -> None:
+    x = np.random.default_rng(1).normal(size=(3, 40))
+    pipe = Pipeline("variance", 5, 20)
+    observed, p = ms.surrogate_pvalues(
+        x, pipe, 19, seed=30, indicator=0, horizon=5, symbol=2, control=False
+    )
+    np.testing.assert_allclose(p, [0.55, 0.1, 0.55])
+    for j in range(3):
+        rng = np.random.default_rng([30, ms.SURROGATE_STREAM, 0, 5, 2, 0, j])
+        alone = scoring.surrogate_test(x[j : j + 1], pipe, phase_randomised, 19, rng)
+        assert (observed[j], p[j]) == (alone[0][0], alone[1][0])
+    ids = {"seed": 30, "indicator": 0, "symbol": 2, "control": True}
+    at = {h: ms.surrogate_pvalues(x, pipe, 19, horizon=h, **ids) for h in (5, 12)}
+    np.testing.assert_array_equal(at[5][1], at[12][1])
+    np.testing.assert_allclose(at[12][1], [0.35, 0.2, 0.75])

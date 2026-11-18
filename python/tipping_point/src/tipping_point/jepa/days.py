@@ -106,6 +106,13 @@ class DataError(ValueError):
     """A day the market loader refuses or cannot read."""
 
 
+def refuse(day: date, until: date = CONFIRMATORY) -> None:
+    if day >= CONFIRMATORY and until <= CONFIRMATORY:
+        raise DataError(f"{day} is in the confirmatory span (from {CONFIRMATORY}): never read")
+    if day >= until:
+        raise DataError(f"{day} is on or after {until}, the end of the days this read may open")
+
+
 class DaySource(Protocol):
     def read(self, symbol: str, day: date) -> tuple[pa.Table, str]:
         """One symbol-day under the input contract, with the sha256 of the bytes it came from."""
@@ -116,12 +123,14 @@ class ParquetSource:
     """The per-day feature files under `root`, as `book.features.reduce_run` writes them:
     `<root>/features/<SYMBOL>/<YYYY-MM-DD>.parquet`, hashed over the file's bytes."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, since: date = date.min, until: date = CONFIRMATORY) -> None:
         self.root = Path(root)
+        self.since, self.until = since, until
 
     def read(self, symbol: str, day: date) -> tuple[pa.Table, str]:
-        if day >= CONFIRMATORY:
-            raise DataError(f"{day} is in the confirmatory span (from {CONFIRMATORY}): never read")
+        refuse(day, self.until)
+        if day < self.since:
+            raise DataError(f"{day} is before {self.root}'s days, from {self.since}")
         path = self.root / "features" / symbol / f"{day.isoformat()}.parquet"
         if not path.is_file():
             raise DataError(f"{symbol} {day}: no feature file at {path}")
@@ -409,6 +418,7 @@ def frames(
     days: Sequence[date],
     scaling: dict[str, Any],
     lead: Sequence[date] = (),
+    until: date = CONFIRMATORY,
 ) -> tuple[Minutes, list[dict[str, Any]]]:
     """Minutes of `days` through a frozen record (a manifest's `data["scaling"]`), for readouts
     and extraction, with a record of every day read: nothing is refitted. Relative depth draws on
@@ -424,8 +434,7 @@ def frames(
     if not days or [*lead, *days] != sorted({*lead, *days}):
         raise DataError("days must be given, unique and in date order, after every lead day")
     for day in (*lead, *days):
-        if day >= CONFIRMATORY:
-            raise DataError(f"{day} is in the confirmatory span (from {CONFIRMATORY}): never read")
+        refuse(day, until)
     fitted = {date.fromisoformat(d) for d in record.days}
     if _relative(record.features):
         held = {*lead, *days}

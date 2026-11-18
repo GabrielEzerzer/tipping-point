@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import math
+import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -14,13 +16,17 @@ from typing import Any
 import numpy as np
 
 from .. import engine
-from ..market import archive, msvol
+from ..market import archive, msvol, nulls
 from . import prereg
+from .scoring import auc, surrogate_test
+from .surrogates import phase_randomised
+from .trend import Pipeline
 
 MINUTE_MS = 60_000
 BAR_MINUTES = 5
 BAR_MS = BAR_MINUTES * MINUTE_MS
 CONFIRMATORY_MS = archive.day_ms(prereg.CONFIRMATORY)
+BOOTSTRAP_STREAM, SHIFT_STREAM, SURROGATE_STREAM = 1, 2, 3
 
 
 class SegmentError(ValueError):
@@ -57,6 +63,7 @@ class Segments:
     controls: dict[str, Block]  # by symbol, one set for every horizon
     onsets: dict[str, np.ndarray]  # every event onset (ns) of each symbol the run labels
     counts: list[dict[str, Any]]  # per (symbol, kind, horizon): _count
+    eligible: dict[str, np.ndarray]
 
 
 def close_returns(klines: Mapping[str, np.ndarray], start_ms: int, minutes: int) -> Minutes:
@@ -151,9 +158,7 @@ def check_labels(
     if stamp is not None and (stamp["sha256"], stamp["tag"]) != (labels.sha256, ref.tag):
         raise SegmentError(f"{run} was labelled under another file than {labels.name}")
     if scoring is not None:
-        if scoring.doc["data"]["domain"] != prereg.MARKET_EWS:
-            raise SegmentError(f"{scoring.path} is not a {prereg.MARKET_EWS} file")
-        prereg.frozen(scoring)
+        check_scoring(scoring)
         named = scoring.doc["data"]["labels"]
         if (named["tag"], named["sha256"]) != (ref.tag, labels.sha256):
             raise SegmentError(f"{scoring.name} names other labels than {labels.name}")
@@ -163,6 +168,142 @@ def check_labels(
         if stamp is None:
             raise SegmentError(f"{run} labels confirmatory days without {labels.name}'s stamp")
     return manifest
+
+
+def check_scoring(scoring: prereg.Prereg) -> None:
+    if scoring.doc["data"]["domain"] != prereg.MARKET_EWS:
+        raise SegmentError(f"{scoring.path} is not a {prereg.MARKET_EWS} file")
+    prereg.frozen(scoring)
+    root = prereg.repo_root(scoring.path)
+    pattern = f"prereg/{prereg.MARKET_LATENT}-v*"
+    tags = [
+        t
+        for t in prereg._git(root, "tag", "--list", pattern).split()
+        if t[len(pattern) - 1 :].isdigit()
+    ]
+    if not tags:
+        raise SegmentError(
+            f"no {pattern} tag in {root}: the confirmatory span opens only when "
+            f"{prereg.MARKET_LATENT} is frozen too"
+        )
+    for tag in tags:
+        try:
+            _latent_frozen(root, tag, scoring)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, prereg.PreregError) as exc:
+            raise SegmentError(
+                f"{tag}: {exc}; the confirmatory span opens only when "
+                f"{prereg.MARKET_LATENT} is frozen too"
+            ) from exc
+
+
+def _latent_frozen(root: Path, tag: str, scoring: prereg.Prereg) -> None:
+    name = tag.removeprefix("prereg/")
+    relative = (prereg.PREREG_DIR / f"{name}.toml").as_posix()
+    blob = prereg._git(root, "cat-file", "blob", f"{tag}:{relative}", binary=True)
+    doc = tomllib.loads(blob.decode("utf-8"))
+    data = doc.get("data")
+    if not isinstance(data, dict) or data.get("domain") != prereg.MARKET_LATENT:
+        raise prereg.PreregError(f"{relative} at {tag} is not a {prereg.MARKET_LATENT} file")
+    found = prereg.problems(doc, strict=True)
+    if found:
+        raise prereg.PreregError(f"{relative} at {tag}:\n  " + "\n  ".join(found))
+    held = f"{doc['id']}-v{doc['version']}"
+    if held != name:
+        raise prereg.PreregError(f"{relative} at {tag} holds {held}")
+    baseline = doc["baseline"]
+    if (baseline["tag"], baseline["sha256"]) != (scoring.tag, scoring.sha256):
+        raise prereg.PreregError(
+            f"{relative} at {tag} is scored on {baseline['tag']} (sha256 {baseline['sha256']}), "
+            f"not on {scoring.tag} (sha256 {scoring.sha256})"
+        )
+    found = prereg.baseline_problems(doc, scoring.doc)
+    if found:
+        raise prereg.PreregError(f"{relative} at {tag}:\n  " + "\n  ".join(found))
+    path = root / relative
+    if path.exists() and path.read_bytes() != blob:
+        raise prereg.PreregError(f"{relative} differs from the version frozen at {tag}")
+
+
+def shifted_rows(
+    segments: Segments,
+    series: Minutes,
+    symbols: Sequence[str],
+    symbol: str,
+    horizon: int,
+    *,
+    draws: int,
+    min_offset_bars: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    block = segments.events[symbol, horizon]
+    rng = np.random.default_rng([seed, SHIFT_STREAM, horizon, group_code(symbols, symbol)])
+    moved, kept = nulls.shift_onsets(
+        block.anchor_ns, segments.eligible[symbol], min_offset_bars * msvol.BAR_NS, draws, rng
+    )
+    first = moved // 1_000_000 - (BAR_MINUTES * horizon + segments.span) * MINUTE_MS
+    start = (first - series.start_ms) // MINUTE_MS
+    inside = (start >= 0) & (start + segments.span <= len(series.values))
+    rows = np.full((*first.shape, segments.span), np.nan)
+    rows[inside] = series.values[start[inside, None] + np.arange(segments.span)]
+    return rows, kept
+
+
+def shift_threshold(positives: np.ndarray, negatives: np.ndarray) -> float:
+    aucs = np.array([auc(row, negatives) for row in np.atleast_2d(positives)])
+    if not aucs.size or np.isnan(aucs).any():
+        return math.nan
+    return float(np.nanquantile(aucs, 0.975))
+
+
+def group_code(symbols: Sequence[str], group: str) -> int:
+    if group == "pooled":
+        return 0
+    if group == "eth-only":
+        return len(symbols) + 1
+    if group not in symbols:
+        raise SegmentError(f"no reporting group {group!r} for symbols {list(symbols)}")
+    return list(symbols).index(group) + 1
+
+
+def bootstrap_aucs(
+    events: Sequence[np.ndarray],
+    controls: Sequence[np.ndarray],
+    *,
+    seed: int,
+    indicator: int,
+    horizon: int,
+    group: int,
+    draws: int,
+) -> np.ndarray:
+    rng = np.random.default_rng([seed, BOOTSTRAP_STREAM, indicator, horizon, group])
+    out = np.empty(draws)
+    for d in range(draws):
+        drawn_events = [v[rng.integers(0, len(v), len(v))] for v in events]
+        drawn_controls = [v[rng.integers(0, len(v), len(v))] for v in controls]
+        out[d] = auc(np.concatenate(drawn_events), np.concatenate(drawn_controls))
+    return out
+
+
+def surrogate_pvalues(
+    x: np.ndarray,
+    pipeline: Pipeline,
+    n: int,
+    *,
+    seed: int,
+    indicator: int,
+    horizon: int,
+    symbol: int,
+    control: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    at = 0 if control else horizon
+    x = np.atleast_2d(np.asarray(x, dtype=np.float64))
+    observed, p = np.empty(len(x)), np.empty(len(x))
+    for j, row in enumerate(x):
+        entropy = [seed, SURROGATE_STREAM, indicator, at, symbol, int(control), j]
+        rng = np.random.default_rng(entropy)
+        score, pvalue = surrogate_test(row[None], pipeline, phase_randomised, n, rng)
+        observed[j], p[j] = score[0], pvalue[0]
+    return observed, p
 
 
 def _closed(what: str) -> str:
@@ -249,10 +390,14 @@ def build(
         for symbol in manifest["params"]["symbols"]
     }
     first_day_ms = archive.day_ms(score_from) if score_from else None
+    if scoring is not None:
+        first_day_ms = CONFIRMATORY_MS
+    params = msvol.Params(**manifest["params"]["labeller"])
     rng = np.random.default_rng(seed)
     events: dict[tuple[str, int], Block] = {}
     controls: dict[str, Block] = {}
     counts: list[dict[str, Any]] = []
+    eligible: dict[str, np.ndarray] = {}
     for symbol in sorted(series):
         minutes = series[symbol]
         onsets = all_onsets[symbol]
@@ -271,6 +416,11 @@ def build(
             bar_ns, bar_ns[0] + msvol.BAR_NS * np.arange(len(bar_ns))
         ):
             raise SegmentError(f"{run}: {symbol}'s labels are not on one 5-minute grid")
+        h_bars = np.array([-1 if table["h"][i] is None else table["h"][i] for i in mine], np.int8)
+        bars = bar_ns[nulls.eligible_onsets(h_bars, params)]
+        if first_day_ms is not None:
+            bars = bars[bars // 1_000_000 >= first_day_ms]
+        eligible[symbol] = bars
         if first_day_ms is not None:
             onsets = onsets[onsets // 1_000_000 >= first_day_ms]
         onset_ms = onsets // 1_000_000
@@ -304,7 +454,7 @@ def build(
         counts.append(
             _count(symbol, "control", None, len(first), len(rows), len(block.x), invalid, outside)
         )
-    return Segments(span, events, controls, all_onsets, counts)
+    return Segments(span, events, controls, all_onsets, counts, eligible)
 
 
 def _count(

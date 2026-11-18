@@ -4123,6 +4123,109 @@ def extract_seeds(k: ModuleType) -> None:
         )
 
 
+MARKET_PLAN: dict[str, Any] = {
+    "kernel": "tp-m8-latents-k1",
+    "datasets": ["gabrielezerzer/tp-book", "gabrielezerzer/tp-primaries", "gabrielezerzer/tp-gate"],
+    "market": {
+        "book": "tp-book",
+        "primaries": "tp-primaries",
+        "gate": "tp-gate",
+        "span": "confirmatory",
+        "shard": [1, 3],
+        "processes": 4,
+    },
+}
+
+
+def market_plans(k: ModuleType, root: Path) -> None:
+    check("a market plan loads", not refused(k, MARKET_PLAN), refused(k, MARKET_PLAN))
+    wrong = [
+        ({"gate": None}, "the confirmatory span opens only under a gate"),
+        ({"gate": None, "span": "fit"}, "the fit span opens only under a gate"),
+        ({"days": 4}, "market.days is for timing runs"),
+        ({"shard": [3, 3]}, "market.shard [3, 3]"),
+        ({"processes": 0}, "market.processes 0"),
+        ({"book": "tp-other"}, "market.book 'tp-other'"),
+        ({"span": "training"}, "market.span 'training'"),
+        ({"symbols": ["BTC USDT"]}, "market.symbols: a list of names"),
+        ({"device": "cuda"}, "market: unknown keys ['device']"),
+    ]
+    for change, why in wrong:
+        plan = copy.deepcopy(MARKET_PLAN)
+        plan["market"].update(change)
+        plan["market"] = {key: v for key, v in plan["market"].items() if v is not None}
+        check(f"a market plan with {change} is refused", why in refused(k, plan), refused(k, plan))
+    mixed = dict(copy.deepcopy(MARKET_PLAN), runs=BASE["runs"])
+    check("... and one with runs beside it", "takes no runs" in refused(k, mixed))
+
+    k.write_kernel(MARKET_PLAN, root / "kernel", resume=True)
+    meta = json.loads((root / "kernel" / "kernel-metadata.json").read_text(encoding="utf-8"))
+    check(
+        "a market kernel runs on the CPU, with its datasets and its own output",
+        meta["enable_gpu"] is False
+        and "machine_shape" not in meta
+        and meta["dataset_sources"][1:] == MARKET_PLAN["datasets"]
+        and meta["kernel_sources"] == ["gabrielezerzer/tp-m8-latents-k1"],
+        meta,
+    )
+
+    ctx = ctx_at(k, root / "session")
+    ctx.py = "python"
+    for slug, rel in (
+        ("tp-book", "bybit-book-v4/exploratory/manifest.json"),
+        ("tp-primaries", "m8/pins.json"),
+        ("tp-gate", "gate.json"),
+    ):
+        (ctx.input / slug / rel).parent.mkdir(parents=True, exist_ok=True)
+        (ctx.input / slug / rel).write_text("{}", encoding="utf-8")
+    found = k.market_inputs(ctx, MARKET_PLAN["market"])
+    check(
+        "a market session finds the book, the pins, the primaries and the gate",
+        found["data"] == ctx.input / "tp-book" / "bybit-book-v4"
+        and found["primaries"] == ctx.input / "tp-primaries" / "m8"
+        and found["gate"] == ctx.input / "tp-gate" / "gate.json",
+        found,
+    )
+    shards = [
+        argv[argv.index("--shard") + 1]
+        for kernel in range(3)
+        for p in range(4)
+        for argv in [k.market_argv(ctx, dict(MARKET_PLAN["market"], shard=[kernel, 3]), found, p)]
+    ]
+    check(
+        "3 kernels of 4 processes take each of the 12 shards once",
+        shards == [f"{i}/12" for i in range(12)],
+        shards,
+    )
+    argv = k.market_argv(ctx, MARKET_PLAN["market"], found, 2)
+    check(
+        "... kernel 1's process 2 runs shard 6/12 under the gate",
+        argv[argv.index("--shard") + 1] == "6/12"
+        and argv[argv.index("--gate") + 1] == str(found["gate"])
+        and "--days" not in argv,
+        argv,
+    )
+
+    unit = Path("market/units/r-step0/BTCUSDT-confirmatory/2024-01-01.json")
+    previous = ctx.input / "tp-m8-latents-k1" / "out"
+    (previous / unit).parent.mkdir(parents=True)
+    (previous / unit).write_text("{}", encoding="utf-8")
+    (previous / k.STATE).write_text(
+        json.dumps({"kernel": "tp-m8-latents-k1", "status": "incomplete", "runs": []}),
+        encoding="utf-8",
+    )
+    prior = k.carry_units(ctx, MARKET_PLAN)
+    check(
+        "the previous session's units are copied into this output first",
+        prior is not None
+        and prior["status"] == "incomplete"
+        and (ctx.out / unit).is_file()
+        and k.market_units(ctx) == [ctx.out / unit],
+        prior,
+    )
+    check("... and an output holding only units keeps its version", k.exit_code(ctx) == 0)
+
+
 def run_all(k: ModuleType) -> int:
     with tempfile.TemporaryDirectory(prefix="tp-self-test-", ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
@@ -4149,6 +4252,7 @@ def run_all(k: ModuleType) -> int:
         v1_confirmatory(k, root / "v1-confirmatory")
         ablations_28(k, root / "ablations-28")
         extract_seeds(k)
+        market_plans(k, root / "market")
         real_runs(k, root / "real")
     print(f"{sum(results)}/{len(results)} checks passed")
     return 0 if all(results) else 1
