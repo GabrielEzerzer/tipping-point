@@ -1,4 +1,4 @@
-{"t":"welcome","v":2,"mode":"live","runs":{"binance-usdm":"20231114T221320Z-session","bybit-linear":"20231114T221320Z-bybit"},"levels":20,"sample_every_ms":100,"symbols":[{"venue":"binance-usdm","symbol":"BTCUSDT","price_decimals":1,"qty_decimals":3},{"venue":"binance-usdm","symbol":"ETHUSDT","price_decimals":2,"qty_decimals":3},{"venue":"bybit-linear","symbol":"BTCUSDT","price_decimals":1,"qty_decimals":3}],"topics":["book","trades","status","meters","jev","pnl","lattice","ising"]}
+{"t":"welcome","v":2,"mode":"live","runs":{"binance-usdm":"20231114T221320Z-session","bybit-linear":"20231114T221320Z-bybit"},"levels":20,"sample_every_ms":100,"symbols":[{"venue":"binance-usdm","symbol":"BTCUSDT","price_decimals":1,"qty_decimals":3},{"venue":"binance-usdm","symbol":"ETHUSDT","price_decimals":2,"qty_decimals":3},{"venue":"bybit-linear","symbol":"BTCUSDT","price_decimals":1,"qty_decimals":3}],"topics":["book","trades","status","meters","pnl","lattice","ising"]}
 {"t":"book","venue":"binance-usdm","symbol":"BTCUSDT","ts_ms":1700000000300,"seq":12,"synced":true,"last_update_id":106,"bids":[[499990,500],[499980,3000]],"asks":[[500010,1500]]}
 {"t":"book","venue":"binance-usdm","symbol":"ETHUSDT","ts_ms":1700000000300,"seq":12,"synced":false,"last_update_id":null,"bids":[],"asks":[]}
 {"t":"trades","trades":[{"venue":"binance-usdm","symbol":"BTCUSDT","seq":5,"ts_ms":1700000000149,"id":"1","px":500005,"qty":10,"buyer_is_maker":false}]}
@@ -12,6 +12,5 @@
 {"t":"source","mode":"ended","run":"20231114T221320Z-session"}
 {"t":"source","mode":"failed","run":"20231114T221320Z-session","error":"parquet: no magic bytes at the end of the file"}
 {"t":"meters","data":{"ac1":0.5,"latent":1.5,"symbol":"BTCUSDT","ts_ms":1700000002000,"variance":0.25}}
-{"t":"jev","data":{"label":"regime_shift","p":0.8,"symbol":"BTCUSDT","ts_ms":1700000002000}}
 {"t":"pnl","data":{"pnl":-2.5,"position":1,"symbol":"BTCUSDT","ts_ms":1700000002000}}
 {"t":"ising","data":{"E":-1.5,"T":2.3,"m":0.25,"run":"20261022T000000Z-fixture","step":3}}

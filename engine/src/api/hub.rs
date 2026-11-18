@@ -48,7 +48,7 @@ pub struct HubConfig {
     pub samples_capacity: usize,
     /// Trades a WebSocket client may fall behind before it is sent a gap.
     pub trades_capacity: usize,
-    /// Relayed `jev` and `ising` messages a client may fall behind by.
+    /// Relayed `ising` messages a client may fall behind by.
     pub relay_capacity: usize,
     /// Harness only: also keep every message in one channel in publish order, so a lossless
     /// client sees all of them, uncoalesced. `false` in production.
@@ -179,7 +179,6 @@ pub struct Hub {
     status: watch::Sender<Option<Arc<Status>>>,
     meters: watch::Sender<Latest>,
     pnl: watch::Sender<Latest>,
-    jev: broadcast::Sender<Arc<Value>>,
     ising: broadcast::Sender<Arc<Value>>,
     ordered: Option<broadcast::Sender<Ordered>>,
     /// Bumped on every publish, so a connection waits on one thing.
@@ -195,7 +194,6 @@ impl Hub {
         Arc::new(Self {
             samples: broadcast::channel(config.samples_capacity.max(1)).0,
             trades: broadcast::channel(config.trades_capacity.max(1)).0,
-            jev: broadcast::channel(config.relay_capacity.max(1)).0,
             ising: broadcast::channel(config.relay_capacity.max(1)).0,
             config,
             feeds: Mutex::new(BTreeMap::new()),
@@ -352,9 +350,6 @@ impl Hub {
             Topic::Pnl => self.pnl.send_modify(|latest| {
                 Arc::make_mut(latest).insert(key, Arc::clone(&data));
             }),
-            Topic::Jev => {
-                let _ = self.jev.send(Arc::clone(&data));
-            }
             Topic::Ising => {
                 let _ = self.ising.send(Arc::clone(&data));
             }
@@ -474,7 +469,6 @@ impl Hub {
     #[must_use]
     pub fn subscribe_relayed(&self, topic: Topic) -> Option<broadcast::Receiver<Arc<Value>>> {
         match topic {
-            Topic::Jev => Some(self.jev.subscribe()),
             Topic::Ising => Some(self.ising.subscribe()),
             _ => None,
         }

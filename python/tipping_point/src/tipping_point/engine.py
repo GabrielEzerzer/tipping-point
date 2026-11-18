@@ -7,7 +7,7 @@ root the engine uses, so both halves share it without configuration.
 The engine is only on the live path: `live` streams book samples as Arrow record batches, each
 one or more whole 100 ms grid instants of one venue with one row per symbol (one instant per
 batch live; a backfill or an unpaced replay sends several), `table` reads a range of any table
-through the engine, and `publish` hands results (meters, Jev labels, P&L) back for the app.
+through the engine, and `publish` hands results (meters, P&L, Ising measurements) back for the app.
 
 Market data comes from several venues, and two can share a symbol (Binance and Bybit both say
 `BTCUSDT`), so every market row but a frame's has a `venue` column, and a book is keyed by
@@ -192,7 +192,7 @@ def table(
 
 def publish(topic: str, payload: Mapping[str, Any], url: str = DEFAULT_URL) -> None:
     """Sends one result to the app through the engine: `meters` and `pnl` keep the latest per
-    `venue` and `symbol` the payload names, `jev` and `ising` keep every message."""
+    `venue` and `symbol` the payload names, `ising` keeps every message."""
     body = json.dumps(payload).encode()
     request = urllib.request.Request(
         _url(url, f"/v1/publish/{quote(topic)}", {}),

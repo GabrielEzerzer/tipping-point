@@ -8,10 +8,7 @@ with lattice size as finite-size scaling predicts. The project trains a JEPA (jo
 predictive architecture) world model on raw Ising configurations, derives early-warning signals
 from its latents and tests them against that prediction, alongside the classic indicators computed
 on the raw signal. Crypto order books are the application: the same pre-registered protocol is run
-on volatility-regime shifts in Bitcoin and Ether perpetual futures. For live streams the framework
-also plans triage and an agent layer: Jev, a decision model that TypeSafe offers through a public
-API, answers fixed questions about a JSON summary of the measurements, and a tool-calling agent
-investigates only when its answer is confident. The desktop app and the agent layer are product,
+on volatility-regime shifts in Bitcoin and Ether perpetual futures. The desktop app is product,
 not part of the paper's claim.
 
 ## Status as of 4 November 2026
@@ -347,7 +344,7 @@ cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --
 | `GET /v1/runs` | every run in the data dir, by domain, a market run with its venue |
 | `GET /v1/live/book_samples` | Arrow IPC stream: live book samples, each batch one or more whole 100 ms instants (one per batch live; a backfill or an unpaced replay sends several); `?backfill_s=` first replays that much of the recent past from memory (no gap, no overlap), `?run=&speed=` replays a recorded run instead |
 | `GET /v1/table/{domain}/{run}/{table}` | Arrow IPC stream: any table of a market or Ising run, `?start=&end=` a range of its key, read through DuckDB and cast back to the schema stored in the Parquet footer |
-| `POST /v1/publish/{topic}` | a JSON result (`meters`, `jev`, `pnl`, `ising`) relayed to the app |
+| `POST /v1/publish/{topic}` | a JSON result (`meters`, `pnl`, `ising`) relayed to the app |
 | `GET /v1/ws` | the app's WebSocket (protocol 2): JSON `book` (top 20 per venue and symbol), `trades`, `status` (per venue), and the relayed topics; replay and seek of recorded runs; binary frames carry only Ising lattices |
 
 - **Live samples come from rotate's own sampler** (`store/samples.rs`), each row carrying the log

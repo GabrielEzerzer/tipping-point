@@ -3,10 +3,9 @@
 //!
 //! A connection sends at most every 16 ms. Between sends, latest-wins topics keep only their
 //! newest value, so a slow client skips book samples rather than queueing them; an append topic
-//! it falls behind on yields a `gap` with the count lost (`jev`, never dropped, closes it with
-//! 4002 instead). A client whose socket takes nothing for the stall timeout is closed with 4002
-//! when the close can still be sent, and dropped otherwise. None of this reaches the live loop:
-//! the hub never waits on a reader.
+//! it falls behind on yields a `gap` with the count lost. A client whose socket takes nothing
+//! for the stall timeout is closed with 4002 when the close can still be sent, and dropped
+//! otherwise. None of this reaches the live loop: the hub never waits on a reader.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -185,7 +184,6 @@ struct Connection<S> {
     sent_meters: Latest,
     sent_pnl: Latest,
     trades: Option<broadcast::Receiver<Arc<TradeMessage>>>,
-    jev: Option<broadcast::Receiver<Arc<Value>>>,
     ising: Option<broadcast::Receiver<Arc<Value>>>,
     ordered: Option<broadcast::Receiver<Ordered>>,
     /// The newest book instant sent, per venue.
@@ -224,7 +222,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             mode: Mode::Live,
             outbox: Vec::new(),
             trades: None,
-            jev: None,
             ising: None,
             last_book: BTreeMap::new(),
             status_due: false,
@@ -342,7 +339,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 }
             }
             sleep_until(next_flush).await;
-            self.collect(&mut heartbeat)?;
+            self.collect(&mut heartbeat);
             if !self.outbox.is_empty() {
                 self.flush().await?;
                 next_flush = Instant::now() + FLUSH_EVERY;
@@ -584,11 +581,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             symbols,
             levels: levels.unwrap_or(most).clamp(1, most),
         };
-        self.jev = self
-            .sub
-            .has(Topic::Jev)
-            .then(|| hub.subscribe_relayed(Topic::Jev))
-            .flatten();
         self.ising = self
             .sub
             .has(Topic::Ising)
@@ -738,7 +730,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 
     /// Moves what changed since the last send into the outbox, newest values only. A status sent
     /// starts the `heartbeat`'s second again.
-    fn collect(&mut self, heartbeat: &mut Interval) -> Result<(), Closing> {
+    fn collect(&mut self, heartbeat: &mut Interval) {
         match &self.mode {
             Mode::Live => self.collect_live(),
             Mode::Replay { paused: false, .. } => self.queue_replayed(),
@@ -759,18 +751,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         }
         self.collect_latest(Topic::Meters);
         self.collect_latest(Topic::Pnl);
-        if let Some(jev) = self.jev.as_mut() {
-            let (fresh, lost) = drain(jev);
-            if lost > 0 {
-                return Err(Closing::Code(
-                    close::TOO_SLOW,
-                    "fell behind on jev, which is never dropped".to_owned(),
-                ));
-            }
-            for data in fresh {
-                self.queue(&ServerMessage::relay(Topic::Jev, &data));
-            }
-        }
         if let Some(ising) = self.ising.as_mut() {
             let (fresh, lost) = drain(ising);
             self.queue_gap(Topic::Ising, lost);
@@ -778,7 +758,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 self.queue(&ServerMessage::relay(Topic::Ising, &data));
             }
         }
-        Ok(())
     }
 
     /// The replay's newest book and its trades since the last send.
@@ -853,7 +832,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
 }
 
 /// Everything waiting on an append topic's channel, and how many items the client lost by falling
-/// behind: one drain for jev, ising and trades, which differ only in what a loss means (#87).
+/// behind: one drain for ising and trades (#87).
 fn drain<T: Clone>(rx: &mut broadcast::Receiver<T>) -> (Vec<T>, u64) {
     let (mut fresh, mut lost) = (Vec::new(), 0);
     loop {
