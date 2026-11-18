@@ -1129,12 +1129,11 @@ def _market_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         f"{key}: nothing reads this key in a market-labels file; take it out"
         for key in _unread(doc, _MARKET_SCHEMA)
     ]
-    for table in ("labeller", "cascade"):  # TOML allows nan and inf, and nan passes every check
-        found += [
-            f"{table}.{key}: a finite number, not {value!r}"
-            for key, value in doc[table].items()
-            if isinstance(value, float) and not math.isfinite(value)
-        ]
+    found += [
+        f"{where}: a finite number, not {value!r}"
+        for where, value in _numbers(doc)
+        if not math.isfinite(value)
+    ]
     if not _SLUG.fullmatch(doc["id"]) and not _PLACEHOLDER.search(doc["id"]):
         found.append(f"id: {doc['id']!r} is not a lowercase slug")
     if doc["version"] < 1:
@@ -1809,6 +1808,13 @@ def freeze(root: Path, prereg_id: str) -> str:
         raise PreregError(f"{relative} is not committed")
     if _git(root, "status", "--porcelain", "--", relative):
         raise PreregError(f"{relative} differs from HEAD: commit it before the freeze")
+    committed = _git(root, "cat-file", "blob", f"HEAD:{relative}", binary=True)
+    if hashlib.sha256(committed).hexdigest() != prereg.sha256:
+        raise PreregError(
+            f"{relative} is not byte for byte its blob at HEAD, though git reports no change "
+            "(its line ends, or an assume-unchanged or skip-worktree flag): the tag would hold "
+            "other bytes than the file runs read"
+        )
     if _git(root, "tag", "--list", prereg.tag):
         raise PreregError(f"{prereg.tag} exists: a frozen version is never re-tagged; amend it")
     baseline_commit(prereg)  # the runs it reads must already be fixed

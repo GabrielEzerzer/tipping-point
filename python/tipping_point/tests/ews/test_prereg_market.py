@@ -242,6 +242,27 @@ def test_the_freeze_refuses_a_number_that_is_not_finite(
     assert named in prereg.problems(doc, strict=True)
 
 
+@pytest.mark.parametrize("hidden", ["crlf", "assume-unchanged", "skip-worktree"])
+def test_the_freeze_refuses_a_file_git_reports_unchanged_that_is_not_heads_blob(
+    tmp_path: Path, hidden: str
+) -> None:
+    path = _repo(tmp_path, _filled(TEMPLATE.read_text("utf-8")))
+    relative = path.relative_to(tmp_path).as_posix()
+    if hidden == "crlf":
+        (tmp_path / ".gitattributes").write_bytes((REPO / ".gitattributes").read_bytes())
+        _git(tmp_path, "add", ".gitattributes")
+        _git(tmp_path, "commit", "-q", "-m", "line ends")
+        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        _git(tmp_path, "add", relative)
+    else:
+        _git(tmp_path, "update-index", f"--{hidden}", relative)
+        path.write_bytes(path.read_bytes().replace(b"tol = 1e-6 ", b"tol = 2e-6 "))
+    assert _git(tmp_path, "status", "--porcelain") == ""
+    with pytest.raises(prereg.PreregError, match="is not byte for byte its blob at HEAD"):
+        prereg.freeze(tmp_path, "market-labels")
+    assert _git(tmp_path, "tag", "--list") == ""
+
+
 def test_load_reports_a_broken_file(tmp_path: Path) -> None:
     """load refuses a file with its problems, as for an Ising one."""
     text = TEMPLATE.read_text("utf-8").replace("d_min = 12", 'd_min = "12"', 1)
