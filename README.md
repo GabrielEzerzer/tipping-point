@@ -1,1135 +1,193 @@
 ﻿# Tipping Point
 
-Tipping Point asks whether a self-supervised world model can warn of regime shifts in a real
-market earlier and more reliably than the classic early-warning indicators. It trains a JEPA
-(joint-embedding predictive architecture) on the order books of Bitcoin and Ether perpetual
-futures, and tests warnings read from its latents against classic indicators on volatility-regime
-shifts labelled by a pre-registered rule. The models are frozen before they see the 2024-2026 test
-data.
+Can a self-supervised world model warn of a market's volatility-regime shifts earlier and more
+reliably than the classic early-warning indicators? Tipping Point trains a JEPA (joint-embedding
+predictive architecture) on the order books of the BTC and ETH perpetual futures and tests warnings
+read from its latents against rolling variance, autocorrelation and skewness.
 
-A market has no ground truth for what a model "should" learn, so the approach is first tested where
-the physics is exact: the 2D Ising model, whose critical temperature and exponents are known. A
-signal that claims to track its transition must change with lattice size as finite-size scaling
-predicts. The Ising experiments are the supporting evidence; the market experiment is the claim.
+A market has no ground truth for what a model should learn, so the method is first checked on the
+2D Ising model, whose critical temperature and exponents are known exactly. A signal that claims to
+track the Ising transition must change with lattice size as finite-size scaling predicts. The
+market experiment is the claim; the Ising experiments are the supporting evidence.
 
-## Status as of 18 November 2026
+## Results
 
-- Market, built: the Bybit order-book archive import in the Rust engine; 1-second book features for
-  the BTCUSDT and ETHUSDT perpetuals from 18 January 2023 to 30 September 2026; the volatility-regime
-  labels, pre-registered and frozen as `prereg/market-labels-v1`; the market warning test (event and
-  control segments, the GARCH floor and the same-input tier); the market JEPA, its CPU pilot and the
-  trained models, five primary seeds and two spares per asset. The models train and validate on
-  18 January to 30 September 2023, are explored on 2023-Q4 and are tested, frozen, on January 2024 to September 2026,
-  within each asset and across them in both directions.
-- Market, next: freeze the classic market test (`market-ews-v1`); extract the trained models' and
-  their untrained twins' latents; write and freeze the latent test (`market-latent-v1`); score both
-  on the confirmatory span.
-- Ising, done: the GPU simulator, validated against exact results; the confirmatory datasets at
-  L = 16, 32 and 64; the classic baseline (`ising-ews-v1`, all five hypotheses pass) and the latent
-  experiment (`ising-latent-v1`, four of five pass), both scored below.
-- Planned: a paper on the market result, with the Ising experiments as its supporting evidence, for
-  a workshop in early 2027.
-
-The plan lives on the issue tracker, starting from the map in [#1](https://github.com/GabrielEzerzer/tipping-point/issues/1).
-The market experiment's design is in [#30](https://github.com/GabrielEzerzer/tipping-point/issues/30),
-and the Ising pre-registration's in [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26).
-
-## Results: the pre-registered classic baseline (ising-ews-v1)
-
-The pre-registration `paper/prereg/ising-ews-v1.toml`, frozen as the tag `prereg/ising-ews-v1`
-(commit aa29cbc), was scored on 4 November 2026 at commit 22da489 from a clean tree, with seed 26
-for the bootstrap and surrogate draws. It read the 75 confirmatory runs generated on Kaggle from the
-tagged commit (seeds 6-10 at L = 16, 32 and 64: slow ramps, fixed-T null runs and staircases), and
-no null block or staircase plateau was dropped. The result is run `20261104T095100Z-ising-ews-v1`,
-and that one scoring spent the whole budget of 972 trials.
+| experiment | what it tests | outcome | full numbers |
+|---|---|---|---|
+| ising-ews-v1 | Classic indicators of the magnetisation \|m\| on a slow cooling ramp: do they warn of the transition and obey finite-size scaling? | All five hypotheses pass. | [results](docs/results.md#ising-ews-v1-the-classic-baseline) |
+| ising-latent-v1 | The same indicators read from a JEPA's latents, and whether the trained model beats its untrained twin. | Four of five judged rows pass. The one that fails: the variance of the trained models' leading latent component mostly does not rise before the transition. | [results](docs/results.md#ising-latent-v1-the-latent-experiment) |
+| market-ews-v1 | Classic indicators of 1-minute returns before volatility-regime shifts in BTC and ETH perpetuals. | Pre-registered; frozen before scoring; not yet scored. | [paper/prereg/](paper/prereg/) |
+| market-latent-v1 | Warnings read from the market JEPA's latents, against the classic indicators and the untrained twins. | Pre-registered; frozen before scoring; not yet scored. | [paper/prereg/](paper/prereg/) |
 
 ![The five judged exponents against their exact values, and the eps_L at which the rolling variance of |m| peaks at each L](paper/figures/ising-ews-v1.png)
 
-Left, each judged exponent minus its exact value, with its 95% CI and its pre-registered tolerance in grey (1 - AC1 is judged on its sign alone, so it has no band); right, the median eps_L at which each replica's rolling Var(|m|) peaks, with interquartile ranges, where a flat line in L means finite-size scaling.
-
-All five hypotheses pass.
-
-1. **static-positive-control: pass.** At the staircase plateau nearest Tc, the fitted exponent of
-   L^2 Var(|m|) is 1.766 [1.739, 1.792] against 7/4 (tolerance 0.1), that of the mean |m| is
-   -0.1253 [-0.1289, -0.1219] against -1/8 (tolerance 0.02), and that of the skewness of |m| is
-   -0.011 [-0.022, 0.002] against 0 (tolerance 0.1). The exponent of tau_int(|m|), reported without
-   a verdict, is 2.199 [2.147, 2.252]; the dynamic exponent z of local Metropolis is about 2.17.
-2. **classic-rise: pass.** At the headline cell (window 20 tau_c, bandwidth 10 tau_c), on the dense
-   cadence, the AUC of Var(|m|) and of the lag-1 autocorrelation of |m| against the fixed-T nulls is
-   1.000, with CI [1.000, 1.000], at every L and at every horizon h = 0, 1 and 2.
-3. **skewness-falls: pass.** In the same cell, the AUC of the skewness of |m| lies between 0.000 and
-   0.028, and every CI lies below 0.5.
-4. **dynamic-fss: pass.** 1/nu, fitted on the eps_L at which each replica's rolling Var(|m|) peaks
-   on the dense cadence, is 1.007 [0.930, 1.143], with every bootstrap draw used. The median peak
-   eps_L is 0.63, 0.57 and 0.62 at L = 16, 32 and 64, and every replica's peak was located inside
-   the search band (edge fraction 0). The matched cadence's robustness row, reported without a
-   verdict, gives 0.935 [0.792, 1.095].
-5. **ac1-reference: pass.** The exponent of 1 - AC1(|m|) at a one-sweep lag is -1.728
-   [-1.757, -1.700], negative with a CI that excludes 0. It tracks -gamma/nu = -7/4, not -z.
-
-Reported without a verdict: with the alarm threshold set for one false alarm per 1000 tau_c, the
-held-out half of the null runs gives 0.72 to 1.29 false alarms per 1000 tau_c. On the dense
-cadence, Var and AC1 of |m| are already above their thresholds in every replica when the alarm band
-opens at eps_L = 2. The skewness is too in 76 to 80% of the replicas, and the rest alarm inside the
-band at a median eps_L of about 1.7. At the headline cell, the matched cadence weakens AC1 of |m| at
-L = 64 (AUC 0.80 to 0.83). With the energy as the observable, on the dense cadence, Var reaches an
-AUC of 0.999 to 1.000 and AC1 0.83 to 1.00, while the skewness is weak (0.18 to 0.46). The surrogate
-tests give 3.8 to 6.9% false positives at alpha = 0.05. At this ramp rate (x = 0.02) the classic
-indicators are a saturated positive control: the judged discrimination questions (hypotheses 2
-and 3) land at or near AUC 1 and 0, so the exponents are the informative numbers.
-
-To reproduce: with the 75 runs in the data dir, `uv run python -m tipping_point.ews score --prereg paper/prereg/ising-ews-v1.toml` scores them, and `uv run --with matplotlib==3.10.3 python harness/ews_v1_figure.py <result folder> paper/figures/ising-ews-v1.png` redraws the figure from the result.
-
-The exploratory tables from the seeds 1-5 datasets at L = 16 and 32, on
-[#26](https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6390788147), are
-superseded by this result.
-
-## Results: the pre-registered latent experiment (ising-latent-v1)
-
-The pre-registration `paper/prereg/ising-latent-v1.toml`, frozen as the tag
-`prereg/ising-latent-v1` (commit b19c2df), was scored at commit 25147a0 from a clean tree, from 16
-to 18 November 2026. It read the latents of five primary JEPA checkpoints (m1-m5), six ablation
-checkpoints and the untrained step-0 twin of each, extracted from the same 75 confirmatory runs.
-The result is run `20261116T163243Z-ising-latent-v1`, and it spent the whole budget of 3,132 trials.
-Cells are the headline cell on the matched cadence at L = 16, 32 and 64 and h = 0, 1 and 2, nine per
-checkpoint; intervals are 95% bootstrap percentiles.
+ising-ews-v1. Left: each judged exponent minus its exact value, with its 95% CI and tolerance.
+Right: where the rolling variance of |m| peaks at each L; a flat line in L means finite-size scaling.
 
 ![The static scaling of L^2 Var at Tc for the first principal component of the latent and for the JEPA's surprise, trained and twin, against |m| and the slope 7/4](paper/figures/ising-latent-v1-scaling.png)
 
-The static scaling at Tc, each line relative to its value at L = 16: the twins' first principal
-component (pc_1) follows |m| and the slope 7/4, and the trained checkpoints' does not.
+ising-latent-v1. Static scaling at Tc, relative to L = 16: the untrained twins' first principal
+component follows |m| and the exact slope 7/4; the trained models' does not.
 
-Four of the five judged rows pass.
+## Method
 
-1. **latent-pipeline-check: pass.** Every twin's exponent of L^2 Var(pc_1) lies within 0.15 of
-   7/4: 1.741 to 1.777, 11 of 11. The trained primaries' lie between -0.07 and +0.40, reported
-   without a verdict.
-2. **latent-variance-rises, trained: fail.** The rule asks every primary's AUC CI to lie above 0.5
-   at every L and h, for Var(pc_1) and AC1(pc_1). Var(pc_1) does so in 17 of 45 cells and lies
-   below 0.5 in 27. AC1(pc_1) does so in 42 of 45; m2 misses at L = 32, h = 1, and at L = 64,
-   h = 1 and 2. On the twins, read separately, both pass in all 45 cells (Var 0.998 to 1.000,
-   AC1 0.802 to 0.998).
-3. **latent-dynamic-fss: pass.** Every twin's 1/nu, fitted on where Var(pc_1) peaks, is 0.934 to
-   0.936, with CIs of about [0.79, 1.12], 11 of 11.
-4. **learned-beyond-random (a): pass.** The energy probe's R^2, trained minus twin, is +0.00249
-   [+0.00222, +0.00274] as the mean over L, and all 15 paired margins are positive.
-5. **learned-beyond-random (b): pass.** The same margin for the energy probe's selectivity is
-   +0.00043 [+0.00027, +0.00060], 15 of 15 positive.
+**Data.** The Ising data come from a GPU simulator of the 2D Ising model (checkerboard Metropolis)
+at lattice sizes L = 16, 32 and 64: slow cooling ramps through the critical temperature Tc,
+fixed-temperature null runs above it, and quasi-static staircases. The market data are Bybit's
+public order-book archive for the BTCUSDT and ETHUSDT linear perpetuals, reduced to 1-second book
+features, and Binance's public 1-minute klines, 5-minute metrics and funding rates, which the labels
+read. See [docs/ising.md](docs/ising.md), [docs/market.md](docs/market.md) and
+[docs/engine.md](docs/engine.md).
 
-Both margins in (a) and (b) are small. The untrained twin already reads the energy almost
-perfectly: its R^2 is 0.99507, 0.99787 and 0.99908 at L = 16, 32 and 64, against 0.99965, 0.99989
-and 0.99996 trained, so the margin shrinks with L (+0.0046, +0.0020, +0.0009). The selectivity
-margin lies below the file's tolerance of 0.002, but its CI excludes 0, which the file counts as a
-pass.
+**Model.** A JEPA has an encoder that maps an input to a latent vector and a predictor that
+predicts the latent of a hidden part of the input, as a slowly updated copy of the encoder (the
+target encoder) computes it. The loss lives in latent space, with variance and covariance terms
+against collapse. On Ising the input is a lattice frame; on the market it is one minute of book
+features, and a causal predictor reads past minutes' latents to predict the coming minutes'. Every trained model keeps its untrained
+twin (the same network at step 0), which goes through every test: a random local encoder already
+inherits some of the physics, so learning is claimed only as a margin over the twin.
 
-![Where Var(pc_1) and Var(surprise) peak at each L, trained and twin](paper/figures/ising-latent-v1-peaks.png)
+**Labels.** On Ising the event is the transition itself, at the known Tc, and temperature is
+measured as the scaled distance eps_L = L (T - Tc) / Tc. On the market a two-state hidden Markov
+model of deseasonalised 5-minute realised variance, refitted weekly and read only from past data,
+marks high- and low-volatility regimes. An event is a high-volatility episode that follows a calm
+window; controls are calm windows with no event nearby. The labelling rule was frozen before any
+day of the test span was labelled.
 
-The scaled temperature eps_L at which each rolling variance peaks, per L: left Var(pc_1), right
-Var(surprise). The twins' peaks sit at about the same eps_L at every L, as finite-size scaling
-predicts. The trained checkpoints' positions near eps_L = -3.4 lie on or next to the search band's
-cold edge, where most replicas have no located peak (for Var(pc_1), 78-83% of them at L = 16 and
-55-73% at L = 32). At L = 64 the trained Var(pc_1) spreads out, and the trained Var(surprise) moves
-to about eps_L = +0.4 to +0.6.
+**Warning indicators.** The classic indicators are the rolling variance, lag-1 autocorrelation and
+skewness of a series, and the trend of each over a window. On Ising the series is |m|; on the
+market it is the 1-minute returns. The latent indicators apply the same statistics to the JEPA's
+surprise (its prediction error) and to the leading principal components of its latent.
 
-Reported without a verdict:
+**Scoring.** A warning is scored by the AUC of an indicator's trend before events against the same
+trend on null or control segments, with bootstrap confidence intervals and surrogate tests. On
+Ising the indicators must also obey finite-size scaling: static exponents at Tc against the exact
+ones, and a peak position that scales as 1/nu = 1. The market template adds a floor from a
+volatility-clustering (GARCH) process with no critical dynamics. The scorer logs every evaluated
+cell and counts it against the trial budget the pre-registration fixes. See
+[docs/preregistration.md](docs/preregistration.md).
 
-- Beside the twin, the trained Var(pc_1) loses AUC: -0.592 [-0.730, -0.453] as the mean over L and
-  h, and from -0.39 to -0.85 by seed. AC1(pc_1) loses -0.051 [-0.149, +0.010]. Under ising-ews-v1,
-  |m| averages 0.9993 for its variance and 0.9264 for AC1.
-- Var(surprise) has its AUC CI above 0.5 in all 45 trained and all 45 twin cells. The trained
-  surprise's static exponent is 0.78 to 1.06 (twins 1.47 to 1.76), and its peaks give no 1/nu on
-  any primary.
-- The trained Var(pc_1)'s 1/nu, 1.04 to 1.91 across the primaries, is inconclusive under the
-  file's edge rule: at L = 16, 78-83% of each primary's replicas take their extremum on the band's
-  cold edge or within one window of it, so the fits rest on the few peaks that were located.
-- Other probes, trained minus twin, as the mean over L: L^2 Var R^2 +0.103 [+0.093, +0.112], its
-  selectivity +0.065 [+0.057, +0.073]; |m| R^2 -0.00019, with the twins at 0.99997 and above.
-- Ablations, three seeds each. EMA-only: energy R^2 margin +0.00248, selectivity +0.00003
-  [-0.00019, +0.00025], and on Var(pc_1) it reads like its twin (AUC margin +0.0005). Held-out band (trained
-  without the plateaus at T in [2.0, 2.5]): energy R^2 margin +0.00245, selectivity +0.00034, Var(pc_1) AUC margin -0.354.
+## Pre-registration
 
-In short: through a random encoder, the pipeline reproduces the exact Ising scaling, so the method
-can find it. The trained encoders do not keep it in their leading direction: the variance of their
-pc_1 mostly does not rise before Tc, and what they gain over the random encoder on the energy
-probe is small. The variance of their surprise rises before Tc on every trained checkpoint, as it
-does through the random encoder. How the
-run took its 39 hours is under [The latent experiment](#the-latent-experiment).
+Each test is written down in a file in [`paper/prereg/`](paper/prereg/): its hypotheses, the
+numbers that would confirm or refute them, its data, its parameters and its trial budget. The file
+is frozen at a git tag before its confirmatory data are read, and the scorer refuses a file that
+differs from the tagged one, runs not made from the tag's commit, or a scoring past the budget.
+Each file states what was seen before its freeze (`[disclosure]`) and logs any change after it
+(`[deviations]`); a change after the freeze is a new version. Choices made after an exploratory
+look are disclosed as such: ising-latent-v1's rules were rewritten after exploratory reads of two
+models, and market-labels-v1's null-stretch rule was chosen after the pilot, outside the ranges
+declared beforehand.
 
-To reproduce: with the runs and their latents in the data dir, `uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml` scores them, and `--figures-only <result folder>` redraws the figures from the result.
+| file | tag | what it fixes |
+|---|---|---|
+| [ising-ews-v1.toml](paper/prereg/ising-ews-v1.toml) | `prereg/ising-ews-v1` | the classic Ising baseline: five hypotheses on \|m\| |
+| [ising-latent-v1.toml](paper/prereg/ising-latent-v1.toml) | `prereg/ising-latent-v1` | the Ising latent experiment: the pinned checkpoints and their twins |
+| [market-labels-v1.toml](paper/prereg/market-labels-v1.toml) | `prereg/market-labels-v1` | the market regime, event, control and cascade labels |
 
-## Quick start
+The two market warning tests are frozen the same way, as `prereg/market-ews-v1` and
+`prereg/market-latent-v1`, before any day of the confirmatory span is scored. The templates the
+files start from sit beside them.
 
-With [uv](https://docs.astral.sh/uv/) installed, run these from the repository root:
+## Reproduce
+
+With [uv](https://docs.astral.sh/uv/) installed, from the repository root:
 
 ```sh
 uv sync --extra cpu                             # the Python environment (--extra cu126 on a CUDA machine)
-uv run python harness/gate.py                   # the gate: every Rust and Python check; needs cargo on PATH
-uv run python -m tipping_point.ising validate   # a small L = 4 simulator run, checked against exact results
+uv run python harness/gate.py                   # every Rust and Python check; needs cargo on PATH
+uv run python -m tipping_point.ising validate   # a small simulator run, checked against exact results
 ```
 
-The sections below document the engine, the simulator, the scoring and the JEPA in detail.
+The scorer accepts only runs made from the freeze tag's commit, from a clean tree, so check out
+that commit to regenerate data. GPU jobs run as Kaggle kernels from plans in `notebooks/plans/`
+(`uv run python notebooks/kaggle_ising_runs.py --write-kernel <plan> <dir>`, then
+`kaggle kernels push -p <dir>`); the runner's `--help` is its manual.
 
-## Licence
-
-Tipping Point is released under the MIT licence; see [LICENSE](LICENSE).
-
-## Layout
-
-- `engine/`: the Rust core, a member of the root Cargo workspace (`Cargo.toml`).
-- `python/tipping_point/`: the Python package (src layout), a member of the root uv workspace (`pyproject.toml`).
-- `app/`: the Tauri desktop app (not yet started).
-- `notebooks/`: the Kaggle kernel runner (`kaggle_ising_runs.py`) and the plans it runs (`plans/`).
-- `paper/`: the pre-registrations (`prereg/`) and the result figures (`figures/`).
-- `harness/`: supporting code that verifies the rest: the gate and its tests, plus `engine-harness/`,
-  a Cargo workspace member holding the engine's recorder, soak and crash-injection binaries, the
-  replay-equals-live checks and the API's contract, parity, Python and load checks (production code
-  never depends on it).
-
-## Release builds, one heavy job at a time
-
-Run the engine's binaries (`ingest`, `store` and `serve`, and the harness's `record` and `soak`)
-from a release build: `cargo build --release -p engine -p engine-harness` once, then the
-`cargo run --release ...` lines below, or `target/release/<bin>` directly. Plain `cargo run`
-builds the dev profile, where rotate (binary log to Parquet) is roughly ten times slower: 5.4-6.0
-minutes per recorded hour against 35-37 s (#63). `serve --record` rotates in the background as
-each segment closes, re-reading from the start, so in debug live-run replay finds gaps from about
-the fifth hour, and Ctrl-C after a day of recording waits about an hour for the final rotate
-(about 10 minutes in release). The app's Tauri sidecar, when it lands, ships the release binary.
-Tests stay in the dev profile, which compiles much faster: `cargo test` and the gate build it.
-
-On a laptop, run one heavy job at a time: a cargo build, `cargo test` or the gate, a recording
-session or a by-hand `store rotate`, a simulator run, a training. They share the same cores, so
-two at once each run slower, and a recording's live loop can fall behind the feed.
-
-## Venues and the live feed
-
-`engine/src/market/` is the market-data core every venue shares: integer-unit order books, a
-multi-symbol `feed.rs` that turns a venue's raw frames into book updates, and `pipeline.rs`, the
-one copy of how the engine reacts to every input; the network layer (`ws.rs`, `live.rs`) is thin
-around it. What differs between venues (wire format, sync rule, scales, endpoints) lives in
-`engine/src/venue/`, reached by matching on `enum Venue`. `venue/binance/` keeps a correct local
-order book for BTCUSDT and ETHUSDT from the USD-M depth stream (REST snapshot plus diffs,
-sequence-gap detection, resync, backpressure) and reads aggTrades; its sync rule is a pure state
-machine (`sync.rs`). `venue/bybit/` reads Bybit's linear order book, which comes in band (a
-snapshot, then deltas whose update id runs on by one; a skipped id drops the book until the next
-snapshot); it has no live loop yet and is read from Bybit's archive. One run holds one venue, and
-one `serve` hub takes several venues' loops at once.
-
-A run keeps the scales it started with, from its manifest to its Parquet and the API's `welcome`,
-so a tick or lot size made finer mid-run leaves that symbol's depth updates unconvertible and its
-book down (`parse_errors` climbs). After ten such updates in a row the Binance loop asks for the
-symbol's exchange info again, at most every ten minutes, and if the scales did change it says so
-(`ScalesChanged`, printed by `ingest` and `soak`); a restart records a new run at the new scales
-(#45). A check the venue fails (a 429, a timeout) says so as well (`ScalesCheckFailed`), so
-silence never stands for unchanged scales, and the symbols due a check at once share one
-exchange-info download (#100).
+**ising-ews-v1.** The 75 confirmatory runs come from `notebooks/plans/v1-confirmatory.json`: 2.62 h
+of wall time on Kaggle's two T4 GPUs. Then:
 
 ```sh
-cargo run --release -p engine --bin ingest -- --seconds 60            # live: logs top-of-book and resyncs
-cargo run --release -p engine --bin ingest -- --record                # ...and records a run to the data dir (Ctrl-C ends it cleanly)
-cargo run --release -p engine-harness --bin record -- --seconds 60    # a run + the live transcript → harness/fixtures/recorded/ (gitignored)
-cargo run --release -p engine-harness --bin soak -- --hours 24        # gaps/resyncs/reconnects/drops per hour → harness/out/
-```
-
-## Market data on disk
-
-`engine/src/store/` is the storage. The live loop logs every input right before applying it
-(depth and trade frames as received, snapshots, and control events: connects, disconnects, frames
-dropped under backpressure, failed snapshots) to an append-only binary log: 36-byte header, raw
-payload, CRC-32C, one `write_all` per frame, `sync_data` every second, a new segment every UTC hour
-or 1 GiB. A crash can only tear the tail; recovery cuts it back to the last good frame and refuses
-damage in the middle. An offline step rotates closed segments into Parquet (`frames`,
-`depth_updates`, `trades`, `snapshots`, `book_samples`), and DuckDB queries and replays it
-through the same pipeline the live loop runs.
-
-Runs live in `<data dir>/market/<run_id>/` (`manifest.json`, `log/`, one Parquet file per table per
-segment, `complete.json` after a clean end), the layout the Ising simulator shares. The data dir is
-`$TP_DATA_DIR`, or else `%LOCALAPPDATA%\tipping-point` (`$XDG_DATA_HOME/tipping-point` or
-`~/.local/share/tipping-point` elsewhere), never the repository. The Python CLIs (`ising`, `ews`,
-`jepa`) resolve the same folder when `--data-dir` is not given (`tipping_point.engine.data_dir`),
-so the engine and the simulator share one root with no configuration.
-
-```sh
-cargo run --release -p engine --bin store -- recover <run dir>              # after a crash: close the newest segment
-cargo run --release -p engine --bin store -- rotate <run dir>               # closed segments → Parquet (safe to re-run)
-cargo run --release -p engine --bin store -- replay <run dir> [--parquet]   # rebuild the books from the log or the Parquet
-```
-
-### Historical archives
-
-`store import` turns one downloaded archive day into a run: Bybit's free linear order-book
-archive (`<yyyy-mm-dd>_<SYMBOL>_ob200.data.zip`: 200 levels every 100 ms, 500 before 2025-08-21;
-the source of book features) or Binance's USD-M aggregated trades
-(`<SYMBOL>-aggTrades-<yyyy-mm-dd>.zip`). These trades are not the source of labels: the regime
-labels and the cascade proxy read Binance's klines, metrics and funding through `market/` (see
-Regime labels below), with taker flow from the klines. Within `market/`, aggTrades appear only as
-the stability report's optional cross-check of the variance estimator, and no code there reads
-these files yet. Each record goes through its
-venue's adapter as the frame the live stream would have carried, into the same pipeline and
-sampler the live loop and rotate run, and out as Parquet in
-`<data dir>/market/<yyyymmdd>T000000Z-<venue>-<symbol>/`: book samples for a book and trades for
-trades by default, `--tables` for more (`frames`, `depth_updates`, `snapshots`). There is no
-binary log: the downloaded file is the lossless copy, named in the manifest with its URL, size and
-SHA-256 (checked against Binance's `.CHECKSUM` when one sits beside it). An archive run runs on
-the exchange's clock (`clock: exchange`), so join it to live runs on exchange time, never on
-capture time. Its scales come from a pre-scan of the file, not from today's exchange info, and
-`complete.json` keeps the integrity checks: records, gaps in the venue's id chain, snapshots,
-times outside the day, and what the pipeline made of them, down to the book-sample rows written
-while the book was not synced. Re-running is safe; another archive
-for the same run is refused. Binance's archives are CC BY-NC-SA 4.0: anything derived from them
-and published carries that licence and the "Binance Vision" attribution.
-
-```sh
-cargo run --release -p engine --bin store -- import <archive> [--data-dir DIR] [--tables T,...]
-```
-
-Downloaded days stay outside the repository, in `<data dir>/archives/`; with `TP_ARCHIVE_DAYS`
-set, the import tests import every day found there (`TP_ARCHIVE_DAYS=1 cargo test --release -p
-engine-harness --test archive_import local_archive_days`). The committed tests use tiny synthetic archives in each venue's format
-(`engine/tests/fixtures/archives/`, made by `harness/engine-harness/tests/make_archive_fixtures.py`).
-
-DuckDB is linked from its prebuilt library, which the build downloads once per target dir
-(`DUCKDB_DOWNLOAD_LIB` in `.cargo/config.toml`), so the first build needs the network. On
-Windows the build accepts only the archive whose SHA-256 is pinned in
-`engine/build/duckdb_archive.rs` (x64's; Windows on Arm fails until its archive is pinned too)
-and fails on any other: libduckdb-sys checks no hash, and a GitHub release's assets can be
-replaced under the same tag (#66). A DuckDB bump changes that pin in the same commit as the
-`duckdb` and `libduckdb-sys` pins, taking the new release asset's digest from GitHub. On
-Windows the build also copies `duckdb.dll` next to the binaries (`target/<profile>/`,
-`engine/build.rs`), so `store.exe` and `serve.exe` start from any shell, not only under cargo;
-a binary copied elsewhere needs that DLL beside it. Linux and macOS binaries find the library
-through their rpath.
-
-Recorded fixtures are never committed; `replay_equals_live` replays any present locally and,
-with none, says so on a `SKIPPED:` line the gate counts rather than passing silently. A
-recording whose `live-transcript.json` an older harness wrote is skipped the same way: its
-`format` is below `FORMAT` (`harness/engine-harness/src/transcript.rs`, bumped whenever what a
-transcript step records changes), so there is nothing to compare it with. Record it again
-(`cargo run --release -p engine-harness --bin record -- --seconds 60`) and delete the old run
-from `harness/fixtures/recorded/market/` (#101). The committed tests use synthetic streams and a golden log
-(`engine/tests/fixtures/synthetic/`) and generated ones (property tests and fault injection in
-`engine/tests/`, crash injection and replay-equals-live in `harness/engine-harness/tests/`).
-`TP_CRASH_ROUNDS` lengthens the crash-injection run (24 kills by default). With `TP_ROTATE_SOAK`
-set, `cargo test --release -p engine-harness --test rotate_soak -- --nocapture` writes one full
-1 GiB segment of synthetic frames, rotates it, and records the time and peak memory in
-`harness/out/rotate-soak-<ms>.json` (#52; `TP_ROTATE_SOAK_MB` for another size).
-
-### Regime labels (#29)
-
-The market experiment's labels come from Binance's free USD-M archive and need no engine
-(`python/tipping_point/src/tipping_point/market/`, stdlib, numpy and pyarrow). `fetch` downloads a
-span's 1-minute klines, 5-minute metrics and monthly funding into
-`<data dir>/archives/binance/<kind>/<symbol>/` (`--dest` for another folder), checks each file's SHA-256
-against the `.CHECKSUM` beside it, skips files already verified, and lists every file in that
-folder's `manifest.json` with its URL, size, sha256 and row checks: gaps in the minute or 5-minute
-grid, duplicate stamps, rows out of order. `labels` turns a fetched span into 5-minute bars
-(Garman-Klass variance, close, volume, taker-buy share, open interest, funding) and labels them:
-a two-state Gaussian HMM on deseasonalised, baseline-relative log variance, refitted every Monday
-by deterministic EM, read through as-of filtered probabilities and a hysteresis rule into
-episodes, events, flickers and null stretches. A run lands in `<data dir>/labels/<run_id>/`:
-`manifest.json` with every source file and parameter, Parquet tables `bars`, `labels`, `refits`,
-`episodes` and `nulls` keyed by `ts_ns`, then `complete.json`. Every labeller parameter is an
-option at the research pass's start value until the 2023 pilot sets it; days from 2024-01-01 are
-refused until `market-labels-v1` is frozen. The clean window C and the refractory Q stay at their
-start values, for which #29 declares no range: a labels file with another value is refused, and a
-shorter Q, which the S5 pilot's read suggests, needs an amendment.
-
-```sh
-uv run python -m tipping_point.market fetch --start 2022-07-01 --end 2023-12-31
-uv run python -m tipping_point.market labels --start 2022-07-01 --end 2023-12-31
-```
-
-The cascade proxy, `market/cascade.py`, reads the same fetched files. No free source holds the
-span's liquidations, so a cascade is inferred per symbol from a trailing 30-minute window: open
-interest in contracts falls by at least `a` (as a log ratio), the price moves at least `b` one way,
-taker flow leans at least `c` the same way, and volume reaches `v` times the median 30-minute
-volume of the trailing 28 days. A long cascade falls and a short squeeze rises; a drop in open
-interest alone fires neither. A window touching a missing open-interest step is not evaluated and
-is counted. Candidates within 24 hours merge into the earliest, and both symbols firing within an
-hour count as one market event with two asset instances; both counts are reported. The pooled list,
-with each instance's onset and the bounds of its L2 window 12 hours either side, lands as the table
-`cascades` of a run in `<data dir>/labels/<run_id>/`. `a`, `b`, `c` and `v` are options at their
-start values (3 %, 2.5 %, 0.15, 3) until the 2023 pilot sets them, and days from 2024-01-01 are
-refused as the labels' are. How open interest lines up with price is not an option, because the
-feed's timing fixes it: a bar's row holds the open interest at its start and its close the price at
-its end, so each stamp pairs with the klines before it and all the legs span the same 30 minutes (in
-every month of 2023, on both symbols, a change in open interest correlates most with the 1-minute
-returns between its two stamps). A `liquidations` table in a market run (#90) is read when there is
-one; until then the run says `liquidations: not recorded`. The first 28 days only fill the trailing
-medians, so this span lists 2023 alone:
-
-```sh
-uv run python -m tipping_point.market cascade --start 2022-12-04 --end 2023-12-31
-```
-
-`market/documented_cascades.toml` lists documented cascades with their sources. With
-`TP_CASCADE_RECALL` set, `uv run pytest python/tipping_point/tests/market/test_cascade.py -k
-documented_cascades_on_real_days` runs the rule over each event found fetched, with the 29 days
-before it; without it the test skips and says so. Five of the six events lie in the confirmatory
-span, so the check gives only what the rule says inside each event's own days and reports recall
-with no floor: nothing is to be tuned on it. Two more checks read 2023 days if they are fetched, and
-otherwise skip and say so: the metrics stamp's timing, and 2023-08-17 at the start values.
-
-`market/reports.py` writes two reports on labelled series, each as Parquet tables plus a Markdown
-summary for the issue. The label-count report counts events, episodes, flickers, durations and time
-high per asset and month, clocks the onsets by UTC hour and weekday, and counts onsets that coincide
-across assets, the null hours and the 4-hour slices they hold. The stability report compares the
-as-of labels with an oracle (the final theta, smoothed over the whole sample) and with each declared
-variant and a plain threshold rule, follows theta over the refits with its flagged fits and the
-jumps they make in P, and gives the filter's detection delay. The calendar of CPI, NFP and FOMC
-releases, the cascade candidates and the aggTrades cross-check are optional inputs; a report without
-one says "not supplied". `market/releases.csv` is the committed calendar: the 18 CPI, 18 payroll
-and 12 FOMC statement times of July 2022 to December 2023 in UTC, each with the BLS or Federal
-Reserve page that gives its date. `market/nulls.py` holds the GARCH(1,1)-t simulator, the delay
-simulation, the event-time shift and the circularity floor.
-The floor simulates a minute GARCH(1,1)-t, bridges each minute to 10-second sub-steps, builds
-1-minute OHLC, runs the real bars and labeller, and scores 1-minute close-to-close returns, which
-gives the AUC a clustering process with no critical dynamics produces by construction. Its GARCH
-parameters, pipelines and `scoring.auc` are inputs, and no module in `market/` may import the
-feature code (`tests/market/test_circularity.py`). `harness/market_garch.py` fits the parameters
-per symbol on the 2023 pilot year's 1-minute returns and writes them as the report `garch` of a
-labels run; `harness/market_floor.py` holds them frozen in `PILOT_GARCH`.
-
-`reports` writes the label-count and stability reports of a labels run into the run's `reports/`
-folder. It labels the run's span again from the fetched files and refuses to write anything unless
-that gives back the run's own tables. The label-count report always counts the committed calendar.
-`--cascades` adds the pooled list of a cascade run of the same symbols whose span lies inside the
-labels run's, and the summary says when the candidates cover less than the labels span.
-`harness/market_floor.py` runs the floor with the run's own labeller and the variance and AC1
-pipelines, and writes it to the same folder, with one AUC per path beside the pooled one so that
-the floor's own spread shows.
-
-```sh
-uv run python -m tipping_point.market reports --run <labels run folder> --cascades <cascade run folder>
-uv run python harness/market_garch.py --run <labels run folder>
-uv run python harness/market_floor.py --run <labels run folder> --garch BTCUSDT --days 546
-```
-
-## Engine API
-
-`serve` runs the engine as its own process: the live feed plus one HTTP server on 127.0.0.1
-(`engine/src/api/`). The app is a WebSocket client and the Python worker a third process. It
-prints `serve listening on http://127.0.0.1:<port>` once it accepts connections, so a parent
-that passed `--port 0` reads the port from it.
-
-```sh
-cargo run --release -p engine --bin serve                                   # live Binance feed on 127.0.0.1:7731
-cargo run --release -p engine --bin serve -- --record                       # ...recorded, closed segments rotated in the background
-cargo run --release -p engine --bin serve -- --script <file.jsonl> --speed 10 --port 0   # a recorded script played back instead
-```
-
-| route | what |
-|---|---|
-| `GET /v1/health` | alive, protocol version, whether the live feed has started or ended, the run each venue records, and `errors`: samples that could not be made and live feeds refused because their venue had one, both never expected (#95) |
-| `GET /v1/runs` | every run in the data dir, by domain, a market run with its venue |
-| `GET /v1/live/book_samples` | Arrow IPC stream: live book samples, each batch one or more whole 100 ms instants (one per batch live; a backfill or an unpaced replay sends several); `?backfill_s=` first replays that much of the recent past from memory (no gap, no overlap), `?run=&speed=` replays a recorded run instead |
-| `GET /v1/table/{domain}/{run}/{table}` | Arrow IPC stream: any table of a market or Ising run, `?start=&end=` a range of its key, read through DuckDB and cast back to the schema stored in the Parquet footer |
-| `POST /v1/publish/{topic}` | a JSON result (`meters`, `pnl`, `ising`) relayed to the app; `meters` and `pnl` keep the latest per `venue` and `symbol` the result names, `ising` keeps every message |
-| `GET /v1/ws` | the app's WebSocket (protocol 2): JSON `book` (top 20 per venue and symbol), `trades`, `status` (per venue), and the relayed topics; replay and seek of recorded runs; binary frames carry only Ising lattices |
-
-- **Live samples come from rotate's own sampler** (`store/samples.rs`), each row carrying the log
-  seq of the last frame applied, which the live loop now assigns: the live stream equals the
-  `book_samples` table rotate writes later.
-- **Ingest never waits on a client.** The live loop publishes into `watch` (latest value) and
-  bounded `broadcast` channels. An app client is sent the newest book at most every 16 ms, a `gap`
-  when it falls behind on trades, and close code 4002 after a 10 s stall; an Arrow stream is
-  lossless or cut, its response aborted so a reader never takes it for a short table.
-- **Times on the wire are milliseconds** (`ts_ms`), prices and quantities integer ticks and lots at
-  the scales sent in `welcome`; storage keeps nanoseconds.
-- **Venues:** two venues can share a symbol (Binance and Bybit both say `BTCUSDT`), so every
-  message, table row and Arrow stream that names a symbol names its `venue` too; trade ids are
-  strings (Bybit's are UUIDs). A market stream's `tp.runs` and `tp.scales` are keyed by venue; the
-  market tables keyed by venue are at schema major 2.
-- **Checks on every request:** `Host` must name the server (stops DNS rebinding) and a browser's
-  `Origin` must be on the allowlist (the Tauri webview, the Vite dev server, `--allow-origin`).
-- **Replay and scrub:** rotated hours come from Parquet through DuckDB, the hour not yet rotated
-  from memory, as the same `book` and `trades` messages. The Parquet is read ten minutes of the
-  run at a time: each read pays a fixed cost (a DuckDB connection, every file's footer, an hour's
-  row group decoded), so reading 10 s at a time took 46 s per recorded hour at speed 0 in a debug
-  build, against 3.3 s now (#69). `replay_speed` in `engine/src/api/replay.rs` measures it:
-  `TP_REPLAY_HOURS=2 cargo test -p engine --lib replay_speed -- --ignored --nocapture`.
-
-Training reads Parquet directly (`tipping_point.engine.read`, no engine); the engine's Arrow
-streams serve live inference and replay tests of it (`live`, `table`, `publish`; stdlib and
-pyarrow only). The protocol is pinned by golden files in `engine/tests/fixtures/api/`, which the
-app's mock replays; a change fails `api_contract` until they are regenerated in the same commit
-(`TP_UPDATE_GOLDEN=1 cargo test -p engine-harness`). `api_load` drives ten times the live rate,
-its depth frames as deep as Binance's (20 to 60 levels a side, one in a hundred 150 to 500, from
-the captured frames, #83), into nine app clients, two Arrow clients and one stalled client of
-each kind, and writes its measurements, the live path's time per depth frame among them, to
-`harness/out/api-load-<ms>.json`; `TP_LOAD_SECONDS` runs it longer than its
-default 5 s. It fails if any input takes the live path half the stall timeout or longer; the rates
-achieved are recorded, not asserted, since on a shared machine they measure the CPU the test got.
-The report also holds the cores, how late a 1 ms sleep woke through the load and the share of its
-target rate the generator reached: the machine counts as loaded when the sleep's p99 passes a quarter
-of the latency bound or the generator falls under half its target (#106). The latency bound is
-checked on every run; only on a loaded machine is a p99 over it excused, and only while it stays
-under the bound plus three times the sleep's p99 (a message's two or three wakeups), with a
-`SKIPPED:` line the gate counts, so a skip means the bound was missed under load. Past that it
-fails, loaded or not. The Python round trip (`api_python`) runs the repository's `.venv` Python,
-or `$TP_PYTHON`.
-
-`tipping_point.engine.read` follows the shared layout
-`<root>/<domain>/<run_id>/<table>/<first_key:020>.parquet`, and `run_id` names a new run by the
-engine's rule, so the engine can open it. Every Arrow stream keeps the stored schema, with
-`tp.schema = "<table>/<major>"` in its metadata. A market stream says where its rows come from in
-`tp.runs` and `tp.scales` (decoded by `tipping_point.engine.runs` and `scales`); an Ising stream
-names its run in `tp.run`. A column the schema declares non-nullable never holds a null, so
-`torch.from_dlpack(column)` shares its buffer; nullable book levels (past the book's depth, or
-while unsynced) must be filled first, which copies.
-
-## Ising simulator
-
-`python/tipping_point/src/tipping_point/ising/` simulates the 2D Ising model with checkerboard
-Metropolis in PyTorch: int8 spins, a batch of independent replicas, one seeded generator per run.
-Runs follow the shared layout `<data dir>/ising/<run_id>/` (`manifest.json`, Parquet chunks under
-`stats/`, `configs/`, `balance/`, and `complete.json` after a clean end). A run id is the UTC start
-time plus a tag in the engine's charset (`tipping_point.engine.run_id`: ASCII letters, digits, `-`
-and `_`), so a number's `.` is written `p`, as in `20261023T010000Z-L16-ramp-x0p02-s1`; the
-engine's API opens no other name. The data dir is `--data-dir`, else the engine's (see Market data
-on disk); `--device` defaults to CUDA when available.
-
-```sh
-uv run python -m tipping_point.ising validate                        # Gates A-C on a small L = 4 run
-uv run python -m tipping_point.ising pilot --L 16 --sweeps 50000      # tau_int per T -> tau.json
-uv run python -m tipping_point.ising tauc <pilot run> ...             # tau_c(L) at Tc -> pilot.json
-uv run python -m tipping_point.ising staircase --L 16 --tau <pilot run>/tau.json
-uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <record>/pilot.json --eps-start 12 --eps-end -8  # x: 0.02 slow, 2 fast
-uv run python -m tipping_point.ising null --L 16 --epsilon-L 4 --pilot <record>/pilot.json --seed 6   # epsilon_L 2, 4, 6; v1's seeds 6-10
-uv run python -m tipping_point.ising resume <run dir>                 # after a crash or a killed session
-```
-
-### Which commit a run records (#109)
-
-Every manifest names the code that wrote it in `producer.git_sha` and `producer.dirty`: Ising
-runs, JEPA trainings and EWS results all take them from `io.code_version()`. Run from the
-checkout, where `uv sync` installs the package editable, they are git's HEAD and whether the tree
-has uncommitted changes, untracked files included. A wheel install sits in no checkout, so runs
-made from a wheel are stamped from the build: the build hook (`python/tipping_point/hatch_build.py`)
-writes `tipping_point/_build_info.py` (`commit`, `dirty`, `kernel_sha256` of `ising/kernel.py`,
-`built_at` in UTC) into every sdist and wheel built from a git checkout, and `code_version` reads
-it. `tauc` takes a stamped commit exactly as it takes one from git. An installed copy never reads
-a repository that only encloses it, such as a venv inside another project. A build made where no
-repository tracks the source records no commit, and `tauc` refuses its runs. The hook warns when it
-makes one, but `pip` and `uv pip install` hide build output, so `pilot` refuses to start from such
-an install rather than leave the refusal to `tauc`, hours later. To build a wheel for a GPU
-machine, check out the commit, keep the tree clean, and run:
-
-```sh
-uv build --package tipping-point --wheel     # -> dist/tipping_point-0.1.0-py3-none-any.whl, stamped
-uv run python harness/wheel_provenance.py --wheel dist/tipping_point-0.1.0-py3-none-any.whl
-```
-
-The second line checks a wheel end to end in throwaway venvs (about three minutes on a laptop
-CPU): its runs must record the stamped commit, inside or outside another repository, and `tauc`
-must accept them. `tauc` also needs every size from one commit and one kernel, so a record over
-new sizes re-runs the old sizes from the same build. #50's pilots predate `kernel_sha256` in any
-case, so #54 re-measured L = 16 and 32 beside 64 and 128.
-
-### Which stream a run draws
-
-A run's generator is seeded from its identity, not its seed alone: `run.stream_key` hashes the
-seed, L, replicas, start and schedule. The manifest holds the result in `params.rng.seed` and names
-the rule in `params.rng.derivation`, so the key can be checked from the manifest alone. Runs at one
-seed therefore draw different numbers, and one run made twice draws the same whatever its tag,
-which only names the folder. `--checkpoint-every` and Gate C's tallies stay out of it: they change
-what is written, not what is drawn.
-
-Runs made before this (the seeds 1-5 datasets, the grid pilots, #54's record) drew from the seed
-alone, so two of one shape at one seed shared their start and all their numbers, and two holding
-one temperature, as two ramps do during their equilibration, were bit-identical. The sharing does
-not fade: one field of random numbers moves the uphill flips of every run on it together, even
-after their lattices have parted. In a single cut-down CPU realisation on the old seeding, not the
-exploratory data (null runs at eps_L 2, 4 and 6 at one seed: L = 16, 32 replicas, 6,000 sweeps
-after 1,100; L = 32, 16 replicas, 4,000 sweeps after 4,500), energy correlates replica by replica
-at r about 0.2-0.3 and |m| at about 0.01-0.05; a cooling ramp against a null run, sweep to sweep
-(L = 16, the same lengths), at about 0.3 in energy and about 0.06 in |m|. Those runs were read
-about 20 tau_c after the shared start, so its transient is not in these figures. With a stream per
-run, all of them are within noise of zero. Signed M hides the effect. The coupling does touch one
-earlier check: the surrogate calibration's binomial band (3.1-6.9%) treated its 480 slices as
-independent while the three null runs at each of the five seeds shared a stream, so that pre-flight
-check is somewhat weaker than stated; no freeze call rests on it.
-
-### The pilot record: tau_c(L)
-
-The time unit of everything downstream (ramp rates, null-run lengths, the EWS scorer's windows) is
-tau_c(L) = tau_int(|m|) at exactly Tc, read from a pilot record and never from a constant. Run one
-pilot per L at Tc, then `tauc` fits tau_c = A L^z and writes the record:
-
-```sh
-uv run python -m tipping_point.ising pilot --L 16 --T 2.269185314213022 --replicas 64 --therm 2000 --sweeps 50000
-uv run python -m tipping_point.ising pilot --L 32 --T 2.269185314213022 --replicas 64 --therm 10000 --sweeps 100000
-uv run python -m tipping_point.ising pilot --L 64 --T 2.269185314213022 --replicas 16 --therm 40000 --sweeps 300000
-uv run python -m tipping_point.ising tauc <L16 run> <L32 run> <L64 run>    # -> <data dir>/ising/<id>-tauc-L16-32-64/pilot.json
-```
-
-`pilot.json` is `{"kernel_commit", "kernel_sha256", "per_L": {"16": {...}, ...}, "fit": {"A", "z",
-"A_ci", "z_ci"}}`, each `per_L` entry `{"tau_c", "tau_c_binning", "tau_e", "n_over_tau", "replicas",
-"sweeps", "seed"}` plus `"tau_c_ci"` (95%, optional for readers; field notes in `ising/pilot.py`).
-A size missing from `per_L` reads tau_c = A L^z. `tauc` refuses a run that is incomplete, never
-held exactly Tc, or holds fewer than 300 tau_c: subtracting each series' mean pulls the windowed
-estimate about 10 / (N / tau) low, so a recorded tau_c is at most ~3% short (`test_autocorr` pins
-the bias).
-
-**A stale record is refused.** `kernel_sha256` is the sha256 of `ising/kernel.py` (the sweep and
-its acceptance table) that the pilot runs ran; every run's manifest records its own as
-`params.algorithm.kernel_sha256`. `ramp --x`, `null` and `ews score` refuse a record whose
-`kernel_sha256` is not the running kernel's, since its tau_c would clock another kernel. The
-commit cannot decide this: it moves with every merge, kernel or not. A record written before #55
-has no `kernel_sha256` and counts as stale. `--allow-stale-pilot` uses a stale record anyway, with
-a warning. Either way the run's manifest names the record it read as `params.pilot`:
-`{"run_id", "sha256", "kernel_commit", "kernel_sha256", "stale"}`, and EWS results repeat that stamp
-for each input run beside their own record's `kernel_sha256` and `stale` in `params.pilot`. The
-record below measured the running kernel, so it reads as current; #50's record, which predates
-the field, needs `--allow-stale-pilot`.
-
-The record ising-ews-v1 pins (#54: run `20261025T194846Z-tauc-L16-32-64-128`, commit 655949a,
-seed 1), committed byte for byte as `python/tipping_point/tests/fixtures/ising_pilot.json`, sha256
-`7c5a4a296f2d8d1d55e223e4c775cd98267c43e6ae89f5e6ec594ac5c0581698`:
-
-| L | replicas x sweeps | tau_c = tau(\|m\|) [95% CI] | binning | tau(e) | N / tau_c |
-|---|---|---|---|---|---|
-| 16 | 64 x 50,000 | 53.3 [51.4, 55.2] | 51.1 | 26.3 | 939 |
-| 32 | 64 x 100,000 | 221.2 [209.9, 232.9] | 216.7 | 94.2 | 452 |
-| 64 | 64 x 400,000 | 1043.5 [994.3, 1102.5] | 988.9 | 346.2 | 383 |
-| 128 | 32 x 2,000,000 | 4619.5 [4246.6, 5006.8] | 4264.2 | 1342.5 | 433 |
-
-Fit: A = 0.132 [0.114, 0.152], z = 2.155 [2.113, 2.197], 95% CIs from a bootstrap over replicas.
-The interval holds the 2.17 of Liu, Polkovnikov and Sandvik's Kibble-Zurek collapse for
-Metropolis; the local slopes between consecutive sizes are 2.05, 2.24 and 2.15. v1 reads L = 16,
-32 and 64 only. #50's record on the same kernel (commit 5aac98e, CPU, 16 replicas at L = 64) read
-52.1, 231.5 and 875.4, with z = 2.04 [1.96, 2.11]. The pre-#47 kernel read 21.3, 85.7 and 376
-(A ~ 0.05): its fixed black-then-white order relayed level flips along domain walls (#50).
-
-### Protocol (#19)
-
-- **Staircase**, the quasi-static arm: the 40-point grid from 3.5 down to 1.5, each plateau
-  thermalised for max(500, 20 tau) sweeps and measured for max(2000, 100 tau), with tau from a
-  `pilot` run's tau.json at that temperature. The manifest records that file's sha256 as
-  `params.schedule.params.tau_sha256`, null when `--tau` is a number. The plateau nearest Tc costs
-  1,043 + 5,211 sweeps at L = 16.
-- **Ramps**, the dynamic arm: linear cooling at r = tau_c(L) L / (x Tc) sweeps per unit T, so
-  x = tau_c(L) / (sweeps per unit of epsilon_L = L (T - Tc) / Tc) at every L. tau_c(L) is the
-  pilot record's measurement at L; the fit A L^z stands in only for a size it did not measure,
-  and the manifest's `params.schedule.params.rate_source` says which (`measured` or `fit`, #56).
-  The ramp runs from 3.5 to 1.5, or over an epsilon_L window: `--eps-start 12 --eps-end -8` sets
-  T0 = Tc (1 + 12/L) and T1 = Tc (1 - 8/L), the window ising-ews-v1 scores at every L, and the
-  manifest records it as `eps_L`. The slow ramp, x = 0.02, spends 50 tau_c per unit epsilon_L and
-  crosses the critical window |epsilon_L| < 1 in 100 tau_c; the fast one, x = 2, crosses it in one
-  tau_c, the Kibble-Zurek regime. Sweeps of cooling (equilibration and hold not counted) at the
-  committed record's measured tau_c:
-
-  | | L = 16 | L = 32 | L = 64 | L = 128 |
-  |---|---|---|---|---|
-  | x = 0.02: critical window | 5,326 | 22,120 | 104,351 | 461,954 |
-  | x = 0.02: epsilon_L 12 to -8 | 53,258 | 221,199 | 1,043,507 | 4,619,544 |
-  | x = 0.02: 3.5 to 1.5 | 37,552 | 311,934 | 2,943,102 | 26,057,880 |
-  | x = 2: critical window | 53 | 221 | 1,044 | 4,620 |
-  | x = 2: epsilon_L 12 to -8 | 533 | 2,212 | 10,435 | 46,195 |
-  | x = 2: 3.5 to 1.5 | 376 | 3,120 | 29,432 | 260,578 |
-
-  Before #50 the rate was L^3.17 / (x Tc), with no A, at nominal x = 0.3 and 30. Under this
-  definition those were x = 0.016 and 1.6 on the pre-#47 kernel (A = 0.052), crossing the window
-  in about 130 and 1.3 tau_c; on the fixed kernel, where tau_c is about 2.5 times longer, they
-  are x = 0.030-0.038 and 3.0-3.8.
-
-  Bursts are saved every 0.005 of cooling, except inside the EWS analysis band epsilon_L in
-  [10, -5], where they come 28 per unit epsilon_L at every L (spaced evenly in T, L = 128
-  got 3.5 there); the manifest's `schedule.saves` records the gaps and the burst counts.
-
-- **Null runs**, the EWS scorer's negatives: `null --epsilon-L {2,4,6}` for each L, at least 5
-  seeds each, holds T = Tc (1 + epsilon_L / L) for 20 tau_c of thermalisation and 700 tau_c of
-  measurement, two scored slices at x = 0.02 (310-340 tau_c each), with a stats row every
-  tau_c / 50 sweeps and bursts at the slow ramp's in-band cadence. The manifest is a `fixed`
-  schedule whose params add `epsilon_L` and `tau_c`, and complete.json judges the run
-  thermalised like a staircase plateau. With the committed record one run is 38,346 sweeps at
-  L = 16, 159,264 at 32, 751,327 at 64 and 3,326,072 at 128. A size the record did not measure
-  is refused, since the manifest could not tell a fitted tau_c from a measured one.
-
-## Early-warning signals
-
-`python/tipping_point/src/tipping_point/ews/` holds the classic indicators (rolling variance,
-autocorrelation and skewness after Gaussian detrending), their Kendall-tau trend, surrogate tests,
-the scoring protocol (AUC, alarms, lead times, hierarchical bootstrap) and finite-size-scaling
-verdicts, on numpy alone. The definitions are ewstools 2.1.3's, pinned by a golden fixture that
-`python/tipping_point/tests/fixtures/make_ews_golden.py` regenerates in an isolated environment.
-Experiments are pre-registered in `paper/prereg/<id>-v<k>.toml` (start from `TEMPLATE.toml`) and
-frozen as git tags; the scorer refuses an unfrozen or edited file, reads tau_c(L) from a pilot
-run's `pilot.json`, never from the pre-registration, and scores only runs whose manifest names the
-commit the freeze tag points at, from a clean tree: ramps and null runs made against the pilot
-record the file pins, and staircases whose dwell was read from the tau.json it pins at that L
-(`data.staircase.tau_sha256`), so a staircase given `--tau` as a number is refused.
-
-```sh
-uv run python -m tipping_point.ews prereg freeze ising-ews           # tags prereg/ising-ews-v<k>
 uv run python -m tipping_point.ews score --prereg paper/prereg/ising-ews-v1.toml
-uv run python -m tipping_point.ews calibrate                         # 2,000 nulls x 999 surrogates
+uv run --with matplotlib==3.10.3 python harness/ews_v1_figure.py <result folder> paper/figures/ising-ews-v1.png
 ```
 
-Results land in `<data dir>/ews/<run_id>/`, and every evaluated cell is appended to
-`<data dir>/ews/trials.jsonl`.
-
-### Latent signals
-
-A pre-registration with a `[latents]` section scores a JEPA's readouts instead of |m| (#28). It
-names each training it scores, by its run id and the sha256 of `final.pt` and of its untrained twin,
-and the scorer takes both through every table, once per checkpoint.
-
-- **The join.** `ising.series(run, "matched", latents=<table>)` joins
-  `<run>/latents/<training>-step<step>/`, which `jepa extract` writes, onto the run's saved frames
-  with a plain Parquet reader, since `jepa.extract` imports the adapter. The six key columns must
-  equal those of the frames the table's own selection rule keeps, so a subsampled staircase reads
-  as the frames it holds. A key mismatch, a table without `complete.json`, or the dense cadence, for
-  which no latents exist, is refused with an error naming the run and the table.
-- **Two more indicators.** `level` (rolling mean) and `slope` (rolling OLS slope per sample) read
-  the raw series: the rolling mean of residuals is zero by construction, so `Pipeline` skips the
-  detrend for them. A level's rows carry the phase surrogate alone, and its bandwidth axis
-  collapses to one cell per window. The extremum of `slope` is the dynamic statistic of a channel
-  with no interior peak: finite-size scaling puts the steepest change at a fixed eps_L, 1/nu = 1,
-  and a feature anchored to a fixed T gives 1/nu = 0. The harness plants both, and the second is the
-  dynamic test's negative control. Positions are read half the headline window late (0.2 eps_L),
-  and a read position within noise of 0, a true steepest change near +0.2 eps_L rather than at Tc,
-  is inconclusive. A channel that only keeps rising towards an edge of the search band has its
-  maximum a few noisy samples inside it, at the same eps_L at every L, which would read as 1/nu = 1
-  with no peak there (#115): so `fss.dynamic.edge_margin = "window"`, which every latent file holds,
-  counts an extremum within one headline window of either edge as not located, and over half of an
-  L's replicas not located is inconclusive. ising-ews-v1 refuses the key and reads the band's first
-  and last samples alone. The `peaks` table of a file with the key says which way a peak was lost:
-  `edge_fraction` for an edge, `undefined` for a replica with no value in the band, as a bug that
-  empties a channel leaves. Both count as not located. v1's table keeps one `edge_fraction`, which
-  holds both.
-- **Rows.** Every row of every table has a `checkpoint` column, the table's folder name, and so does
-  each line of `trials.jsonl`; a classic row's is `""`. The file pins each checkpoint's sha256 and
-  role, and the result's manifest gives the sha256 of each table's `complete.json` per run.
-- **What a file holds.** `indicators.pairs` lists the (observable, indicator) pairs judged by AUC,
-  `indicators.direction_by_observable` overrides a direction for one observable, and
-  `fss.dynamic.statistics` lists the peak statistics the dynamic test reads. A statistic of role
-  `descriptive` is computed with the same intervals and edge rule and has no verdict. A static row
-  with a verdict, or a dynamic pipeline check, may say `judged = "twin"`: it is then judged on the
-  step-0 twins alone, and on a trained checkpoint its row is computed all the same and reads
-  `reported`. A primary checkpoint and its twin take the whole grid; an ablation's take the
-  headline cell, with `scoring.surrogates.n_ablation` surrogates. `prereg.cells` counts that.
-  Static quantities are `l2_var_<column>`, `mean_<column>` and `one_minus_ac1_<column>`, read from
-  the matched cadence.
-- **The freeze.** A latent file reads the runs of the version its `[baseline]` names, so those runs
-  must come from that tag's commit, and each table from the file's own tag and the checkpoint it
-  pins: the freeze comes before any extraction on a scored seed. `paper/prereg/ising-latent-v1.toml`
-  was rewritten on 2 November after the m1 and m2 reads, with its eleven checkpoints pinned and
-  `scoring.margins.tolerance` set. On 4 November its last placeholder, `baseline.result`, took
-  `20261104T095100Z-ising-ews-v1`, the run id of ising-ews-v1's result on these runs, and the file
-  was frozen as the tag `prereg/ising-latent-v1` on commit b19c2df (sha256 `33cf5917a224ca6583ceedf1469cf3e921ce9decd968d7638ba0e5b69343dc23`).
-  `python/tipping_point/tests/fixtures/ising_latent_draft.toml` is the schema's fixture, with every
-  value the pass was to set left open.
-- **What a file may say.** Frozen text must not claim what the scorer ignores, so a key outside the
-  latent schema is refused, wherever it stands: v1's `scoring.alarms.indicators` and
-  `indicators.thin`, the research pass's `fss.dynamic.band`, anything else. So is a value the scorer
-  would not act on: a name, observable or direction no pair of `indicators.pairs` reads, a column
-  nothing scores, a tolerance on a descriptive row, `sign_test = false`. `latents.extraction`,
-  `probes.fit`, `probes.test` and `probes.selectivity` are held to their sentence, word for word
-  where they state a rule: the scorer takes the frame limit and the probe seed from `probes.fit`,
-  and holds each table's manifest to the rule `latents.extraction` gives its checkpoint's role
-  (`prereg.SELECTIONS`), refusing a table extracted under another.
-
-### The latent experiment
-
-A latent file is scored whole by one runner, from the frozen file to the result and its figures:
+**ising-latent-v1.** The trainings come from `notebooks/plans/primary-28.json` (5.67 GPU-hours on
+Kaggle T4s) and `notebooks/plans/ablations-28.json` (6.62 GPU-hours), and the latents from
+`extract-s6.json` to `extract-s10.json` (129.3 GPU-hours). The scoring took about 39 hours on a
+4-core laptop CPU (i7-1185G7):
 
 ```sh
-uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml [--device cuda]
+uv run python harness/latent_data_dir.py --prereg paper/prereg/ising-latent-v1.toml --into <new data dir> --from <kaggle out> ...
+uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml --data-dir <new data dir>
 ```
 
-`ews score` refuses such a file without `--cells-only`, since it would spend the whole trial budget on
-a result with no probes or margins, and the budget is spent once. The runner refuses a file that is not
-frozen or still holds a placeholder, and a scoring whose cells would pass `trials.budget`
-(`prereg.charge`: cell 3,133 of `ising-latent-v1` is never evaluated), before it reads anything.
-
-- **The data dir.** The runner reads each run's latents tables at `<run>/latents/<table>/`, the
-  checkpoints at `<data dir>/jepa/<training>/`, the baseline result and the trial log at
-  `<data dir>/ews/`. `harness/latent_data_dir.py` assembles such a folder from the Kaggle outputs
-  that hold the extracted runs and the trainings, and a data dir for the rest (the probes' fit
-  runs, the pilot record), hard linking every file (copying where a link is refused, across
-  volumes). It then checks that every run the file scores is there, complete and with each table
-  it pins, with each L's fit staircase, and every file against its `complete.json`, each table's
-  keys against its run's frames included. Its `ews` is a link to the data dir whose trial log counts the budget, since
-  `--data-dir` moves the trial log with everything else: a data dir with an `ews/` of its own would
-  start an empty log, and the budget could be spent again there. Remove that link before deleting
-  the folder: a delete that follows it, as PowerShell 5.1's `Remove-Item -Recurse` does, deletes
-  the trial log and the baseline result.
-- **Checking first.** `--check` runs every refusal that comes before the result folder is made, the
-  checkpoints' sha256 and a `--resume`'s resume key included, prints what the run would read and log and whether the checkout is
-  clean, and stops, writing nothing and charging nothing:
-
-  ```sh
-  uv run python harness/latent_data_dir.py --prereg paper/prereg/ising-latent-v1.toml \
-      --into <new data dir> --from <kaggle out> [--from <kaggle out> ...] --from <data dir>
-  uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml \
-      --data-dir <new data dir> --check
-  ```
-
-- **Tables.** `auc`, `surrogates`, `alarms`, `peaks`, `fss` as `ews score` writes them; `probes`, per
-  checkpoint, L, target and column, fitted on the validation seed and scored on the scored seeds;
-  `margins`; `curves`, each column's mean and L^2 Var per plateau, with the classic |m| on every saved
-  frame as checkpoint `""`; and `baseline`, the rows read from the result `baseline.result` names,
-  which must be that version's, on these runs. Every row has its checkpoint. All of them are also in
-  `csv/`, from the Parquet.
-- **Margins.** Paired by model seed, with a percentile bootstrap over the seeds nested in one data
-  resample per replicate, and the sign test. Three rows are judged, over the primary checkpoints: the
-  energy probe's R^2 and its selectivity, each checkpoint's value being the mean over L
-  (`scoring.margins.sizes`), and the surprise FSS verdicts, by the hypothesis's own rule: a surprise
-  statistic passing for at least 4 of 5 trained checkpoints and for none of their twins. The third
-  is absent from a file with no surprise statistic of role `test`. With
-  `scoring.margins.sizes = "every"` the judged value and its CI stay the mean over L, and the sign
-  test also asks every seed's margin at every L to carry the predicted sign. Each L's value, AUC
-  (parity, with |m|'s beside it as `reference`), the chi alignment and all of an ablation's rows
-  report a margin and its CI with no verdict.
-- **Figures.** `figures/` holds `scaling.png`, `peaks.png`, `curves.png`, `collapse.png` and
-  `probes.png`, primary checkpoints only, drawn by `harness/ising_figures.py` from the CSV tables
-  alone, in a throwaway environment (matplotlib is no dependency of the project). The tables are
-  written and logged first: if the figures fail the run exits 2 and prints the command to draw them.
-  A run that dies with its result complete but its CSV not has spent its budget and left that command
-  nothing to read: `harness/ising_experiment.py --figures-only <result folder>` writes `csv/` again,
-  over what is there, then draws the figures, charging nothing and logging no trial. It refuses a
-  folder with no `complete.json`, whose cells may be unlogged. A latent variance is divided by a per-checkpoint number before anything is drawn together, because
-  a PCA basis is per checkpoint and raw latent magnitudes do not compare.
-- **Planted runs.** `--planted` scores a file with no freeze behind it and refuses a data dir holding
-  any run the planted generator did not write, so it can never read the confirmatory data early.
-  `harness/ews_planted.py` plants the rest (`latent_doc`, `write_experiment_tables`,
-  `planted_embedding`, `write_baseline`), and two runs on a planted dataset give byte-identical
-  tables and figures.
-- **Surrogates in a latent file** stop drawing once a row's decision at alpha is settled
-  (`scoring.sequential_test`, Besag and Clifford 1991): the surrogate table reads only p <= alpha, and
-  on the same surrogates every decision is the one a full N_s gives. A null row draws about a quarter
-  of N_s. ising-ews-v1 keeps its whole test and its draws. `scoring.surrogates.cells` says where the
-  tests run: `"all"` at every cell, `"headline"` at the headline cell for every h, as ising-ews-v1
-  has it, and `"headline-h0"` at the headline cell for h = 0 only, as ising-latent-v1 has it.
-- **Run time.** On the project's laptop (i7-1185G7, 4 cores, other work running), the 22 checkpoints
-  of `ising-latent-v1` are projected to take about 59 hours, or about 41 with the probes' embeddings on
-  a GPU: surrogates 22 h, alarms 15 h, probe embeddings 18 h on the CPU (19 ms a frame at L = 64), AUC,
-  static fits and reading the tables 4 h. It was about 125 hours before the sequential test and the
-  faster Kendall count. `rolling_slope`, O(n window), is under 4 minutes of it. Those figures assume
-  alarm scores every tau_c and surrogate tests at every h. The file now scores alarms every 5 tau_c
-  (`scoring.alarms.every = 5`) and runs its surrogate tests at h = 0 only. Measured again on 16
-  November on the confirmatory inputs, with nothing else running, one primary checkpoint's pass at
-  L = 16 took 18 minutes (surrogates 14, alarms 1.4, AUC and the rest 2.4), and the probes'
-  embeddings 0.6, 2.2 and 8.8 ms a frame at L = 16, 32 and 64. The series hold about as many
-  samples at every L (L = 64's ramps 19% fewer), so the run was projected at about 21 hours. It took
-  about 39, from 16 to 18 November with other work running: the probes' embeddings 20.3 h, the ten
-  primary passes 15.2 h and the twelve ablation passes, at the headline cell with 199 surrogates,
-  3.1 h. The embeddings and the first two passes ran on CPython 3.13, where the scoring threads used
-  about one core between them; the run was then resumed on the free-threaded CPython 3.14t build
-  with 6 threads. The two primary passes on 3.13 took 2.6 and 2.8 hours; the eight on 3.14t took
-  from 48 minutes to 2.5 hours, the first of them counting the resume's loading.
-  Scoring runs on up
-  to 8 threads by default; on a host with more cores, `TP_THREADS=<n>` sets the count to n, and the
-  results do not depend on it.
-  A run's folder is made before its probes, so a run interrupted anywhere leaves a folder with no
-  `complete.json`, which `--resume` (below) carries on. Its trials are logged in one
-  write after its tables and before `complete.json`, so a crash in that write leaves a folder with no
-  `complete.json`, its trials logged or not, or a complete result with all of them. `prereg.charge`,
-  for any file, `ews score` included, refuses to score past a folder stamped with the file's id and
-  version and with no `complete.json`, since its tables can be read whether or not their cells were
-  logged: carry it on with `--resume`, or delete it or amend the file. Deleting it gives back no trial
-  the log holds, so a crash after
-  the log spends the budget: the tables are there, and scoring again means amending the file. A crash
-  inside the log's one write leaves a line that is no whole record, which `prereg.trials` refuses by
-  file and line: count that run as spent and amend the file. Every count reads the whole log, so first,
-  keeping a copy, replace the line with one whole record holding the `params.prereg` stamp from that
-  run's manifest. Cutting it instead could leave the version no line at all, and with its folder
-  deleted it could be scored again. With the record in place the budget refuses it, folder or no
-  folder, wherever `trials.budget` equals the file's cells, as both files' do. If no folder is left,
-  the record gives the id and version of the file that was being scored, or there is one for each file
-  it could have been. A blank line in the log is skipped.
-- **Resuming.** A run stopped partway, by a crash, a reboot or a sleep it never woke from, is carried
-  on by the same command with `--resume`, which `ews score` takes too. Each probe (one L and one
-  checkpoint) and each checkpoint's pass of the scorer is saved in the result folder's `parts/` as it
-  ends, the pass with the random generator's state, and a resumed run reads them back, so its tables
-  are the bytes an uninterrupted run writes. It refuses, saying what differs, unless the torn folder
-  began under the same file and stamp, seed, inputs, pilot record, numpy and pyarrow versions and
-  (for the runner) torch and device, from a clean checkout of the same commit: commit everything,
-  untracked files included, before a long run starts. Resume only once the run that began the folder
-  has stopped, since two at once would both write it. Its trials are logged once, at the end, even
-  when the crash came between the log and `complete.json`, and the manifest lists every start under
-  `resumptions`.
-
-### The exploratory pipeline
-
-The exploratory pipeline, `harness/explore/`, scores the seeds 1-5 datasets, which neither
-pre-registration scores: on |m|, or on a latents table with `--latents <table>`, one size at a time,
-through this adapter. It refuses any seed outside 1-5 and cannot log a trial, so nothing it prints
-counts as one. `join_pilot` links a Kaggle output's tables onto the local runs in a new data dir, and
-`latent_pass` runs every step for a training, its trained checkpoint beside its twin:
+**Market.** The labels and book features need the raw exchange data, which each reader downloads;
+the commands below fetch it from the exchanges' public archives. The market tests are not yet
+scored.
 
 ```sh
-uv run --no-sync python harness/explore join_pilot --output <kaggle out> --into <folder>
-uv run --no-sync python harness/explore latent_pass --training <run id> --step <step> \
-    --data-dir <folder> --out <outputs>
+uv run python -m tipping_point.market fetch --start 2022-07-01 --end 2026-09-30
+uv run python -m tipping_point.market labels --prereg paper/prereg/market-labels-v1.toml   # span and parameters from the file
+uv run python -m tipping_point.market book --range training
 ```
 
-Its scripts run at below-normal priority with at most 4 worker threads (`common.THREADS`), so they
-share the machine with other jobs.
+## Feature map
 
-`market_pass` is the market JEPA's exploratory 2023-Q4 pass (#30 M6, research pass 6.2-6.4 and 4.3
-item 6). It proposes a direction for each latent pair and which latent columns to judge; nothing in
-it is a trial, and every choice it proposes is left open. It reads each model's trained checkpoint
-and its untrained twin (step 0), each on its own symbol's Q4 and on the other's: four cells per
-table (BTC->BTC, BTC->ETH, ETH->ETH, ETH->BTC).
+In pipeline order. Paths are relative to `python/tipping_point/src/tipping_point/` unless they start
+with `engine/`, `harness/` or `notebooks/`.
 
-- **Segments** (research pass 6.3, the floor's rule in `market.nulls`): an onset is the start of a
-  5-minute bar; at horizon h bars the event segment is the `Pipeline.span` = 299 minutes of series
-  ending just before minute 5 (onset - h), the 240 indicator values of a 60-minute window. The full
-  240 values are used at every horizon, so at h = 24 a segment starts before the 72-bar clean
-  window (6.3 leaves that to market-ews-v1). Controls are the non-overlapping 299-minute spans cut
-  in time order from each matched-calm null stretch (`nulls.null_rows`), clipped to the quarter. A
-  segment touching a minute that any table read on that symbol marks invalid is excluded for every
-  indicator and table alike, and counted; so is an event too early in the quarter for its segment.
-  Every comparison is paired on the same segments.
-- **Statistics** per (table, read symbol, column, indicator, h): the trend score s, Kendall's tau of
-  the rolling indicator over the segment (`ews.trend.Pipeline(indicator, 60, 240)`, no
-  detrending); median s on events and on controls; the AUC of events against controls
-  (`ews.scoring.auc`) with a percentile 95% CI from `--draws` bootstrap draws resampling events and
-  controls independently; and the twin margin, trained AUC minus twin AUC on the same draws. The
-  four pairs are ising-latent-v1's: level and variance of surprise, variance and ac of pc_1. The
-  screen adds every column: level and variance of surprise and surprise5, variance and ac of each
-  pc.
-- **Proposals**, by rules fixed before the numbers were read. A pair's direction is the sign of the
-  median event s on the trained tables ("greater" when > 0), per cell and h, reported as one word
-  when every same-asset cell and h agrees and as "disagree" otherwise, with the cross-asset cells
-  beside it; when the signs disagree the direction is left open. A column is proposed for judging
-  when, in both same-asset cells, some indicator of it at some h has a trained AUC whose CI
-  excludes 0.5 and lies further from 0.5 than the twin's AUC there. Columns are also ranked by the
-  mean over same-asset cells and h of |AUC - 0.5|, trained minus twin. With 17 BTC and 7 ETH
-  events the CIs are wide.
-- **Memorisation** (4.3 item 6): mean surprise by month on the model's own training-span days and
-  on the quarter, trained beside twin.
+| step | feature | command | code |
+|---|---|---|---|
+| get the data | Fetch Binance archives | `uv run python -m tipping_point.market fetch --start <day> --end <day>` | `market/archive.py` |
+| get the data | Import an archive day | `cargo run --release -p engine --bin store -- import <archive>` | `engine/src/store/` |
+| get the data | Ising pilot and tau_c fit | `uv run python -m tipping_point.ising pilot --L 16` then `ising tauc <run dir> ...` | `ising/` |
+| get the data | Ising runs: staircase, ramp, null | `uv run python -m tipping_point.ising ramp --L 16 --x 0.02 --pilot <pilot.json>` | `ising/` |
+| get the data | Run a plan on Kaggle GPUs | `uv run python notebooks/kaggle_ising_runs.py --write-kernel <plan> <dir>` | `notebooks/` |
+| build book features | Book feature range | `uv run python -m tipping_point.market book --range training` | `market/book.py` |
+| build book features | Reduce one book day | `uv run python -m tipping_point.book <samples.parquet>` | `book/` |
+| build book features | Assemble book ranges | `uv run python harness/book_assemble.py --out <dir> --commit <sha> <source dir>` | `harness/book_assemble.py` |
+| train a model | Train an Ising JEPA | `uv run python -m tipping_point.jepa train --L 16 32 --train-seeds 101 102 --val-seed 103 --seed 1 --pilot <pilot.json>` | `jepa/` |
+| train a model | Market JEPA pilot | `uv run python harness/m4_pilot.py train --asset btc --size S --data <dir> --out <dir>` | `harness/m4_pilot.py`, `jepa/minutes.py` |
+| train a model | Market JEPA primaries | `uv run python harness/m8_primaries.py train --asset btc --seed 101 --data <dir> --out <dir>` | `harness/m8_primaries.py` |
+| extract latents | Extract latents | `uv run python -m tipping_point.jepa extract <checkpoint> <run dir>` | `jepa/extract.py` |
+| extract latents | Probe a training | `uv run python -m tipping_point.jepa probe --fit <run dir> <training dir>` | `jepa/probes.py` |
+| label events | Regime labels | `uv run python -m tipping_point.market labels --start <day> --end <day>` | `market/` |
+| label events | Cascade candidates | `uv run python -m tipping_point.market cascade --start <day> --end <day>` | `market/cascade.py` |
+| label events | Labels reports and GARCH floor | `uv run python -m tipping_point.market reports --run <labels run>` | `market/reports.py`, `harness/market_floor.py` |
+| score a test | Freeze a pre-registration | `uv run python -m tipping_point.ews prereg freeze <id>` | `ews/prereg.py` |
+| score a test | Score a classic pre-registration | `uv run python -m tipping_point.ews score --prereg <file>` | `ews/` |
+| score a test | Score a latent experiment | `uv run python harness/ising_experiment.py --prereg <file>` | `harness/ising_experiment.py` |
+| make figures | ising-ews-v1 figure | `uv run --with matplotlib==3.10.3 python harness/ews_v1_figure.py <result dir> <png>` | `harness/ews_v1_figure.py` |
+| make figures | Latent experiment figures | `uv run python harness/ising_experiment.py --figures-only <result dir>` | `harness/ising_figures.py` |
 
-```sh
-uv run --no-sync python harness/explore market_pass --latents <market_latents' out> \
-    --labels <labels run> [--out <folder>] [--draws 1000]
-```
+[`features.json`](features.json) lists every command with its inputs, outputs and test.
 
-It writes `<out>/market-pass.json` (every row), `market-proposal.json` and `market-report.md`.
+## Data and licences
 
-Nothing here changes what ising-ews-v1 scores. `harness/ews_v1_golden.py` wrote every row and value
-of a v1 scoring on planted data from aa29cbc, the freeze branch's merge, and
-`python/tipping_point/tests/ews/test_v1_unchanged.py` holds later commits to them, RNG stream
-included. The script runs `ising.evaluate` (fss mode) on the planted v1 dataset under the committed
-`paper/prereg/ising-ews-v1.toml`, its settings changed only as far as the planted data need (seeds,
-replicas, the tau_c record, the tau.json pins) and to run in seconds: 40 bootstrap draws, one
-surrogate, alarm scores every 200 tau_c, one window, two bandwidths and two horizons of the grid.
-Both observables, cadences and surrogate tests stay, so every loop of the scorer turns, and every
-draw of the one RNG feeds the CIs and surrogate rates of the rows after it, so a scorer that draws
-once more, once less or in another order moves them. The golden was written before any latent code
-existed. To check it again, run `uv run python harness/ews_v1_golden.py [--out FILE]` on aa29cbc's
-tree, which needs nothing newer, never on a later one: a golden rewritten from the code it checks
-would prove nothing.
+The raw Binance and Bybit data are not redistributed. The repository publishes the code, the frozen
+pre-registrations, the result figures and numbers, and small test fixtures, one of which holds a
+handful of book samples imported from a Bybit archive day. Simulator runs, trained models and
+latents are not committed; the commands above regenerate them.
 
-### The market warning test
+`tipping_point.market fetch` downloads Binance's USD-M archives from Binance Vision and checks each
+file against its published checksum; `tipping_point.market book` downloads Bybit's order-book
+archive a day at a time and keeps only the features. Binance's archives are licensed CC BY-NC-SA
+4.0: anything derived from them and published carries that licence and the attribution "Binance
+Vision". Bybit's archive is used under Bybit's terms.
 
-`ews/market_segments.py` cuts what market-ews scores from a labels run of the frozen market-labels
-file (#30 M5; research pass sections 6.3 and 6.6, choices 9 and 11):
+## Status
 
-- `close_returns`: a symbol's 1-minute close-to-close log returns on the minute grid, NaN for a
-  minute with no kline or whose previous minute has none (`prereg.MISSING_MINUTE`).
-- `slot_profile`: per slot of the labeller's 2 x 288 (weekday or weekend, by 5-minute time of day),
-  over a fit span of pilot days, the returns' root mean square ("scale") or mean ("mean"), the two
-  `prereg.DESEASON_METHODS`. `deseasonalise` divides each return by its slot's scale, or subtracts
-  its slot's mean.
-- `check_labels`: the labels run's manifest, once the labels file is frozen at its tag and the run
-  was labelled with its parameters (and its stamp, when it has one).
-- `build`: the event segments per (symbol, horizon) and the control segments per symbol.
-- `eth_only`: which ETH onsets have no BTC event onset within a window (reporting's eth-only).
+As of 18 November 2026:
 
-A segment is `span` minutes, `Pipeline.span` = window + length - 1. An onset is the start of a
-5-minute bar; at horizon h bars its segment ends with the minute that closes at onset - 5h minutes,
-so it holds nothing of the h bars before the onset (`market.nulls.pre_onset_rows`, the floor's
-rule). The length is the same at every horizon, so at long horizons a segment starts before the
-labels' clean window of C bars and may read bars with H = 1: each segment's share of minutes in
-such bars is reported (choice 11). Controls are the non-overlapping spans cut in time order from
-the start of each null stretch (`market.nulls.null_rows`), one set for every horizon, then
-optionally a seeded subsample of them: with subsample n > 0, when a symbol has more than n kept
-controls, n are drawn without replacement, symbols in sorted order from one generator seeded with
-`seed`, and kept in time order. A segment that holds a minute with no return is excluded
-(the same segments for every indicator), and so is one that reaches outside the series given; both
-are counted. With `score_from`, an onset before that day, and a control segment starting before
-it, is not cut at all: the series may start earlier, as history for the first days' segments,
-without its own days being scored.
+- Done: both Ising experiments, scored; the market labels, frozen; the market JEPAs, trained.
+- In progress: freezing the two market warning tests.
+- Next: extract the market latents and score both tests on January 2024 to September 2026.
 
-The confirmatory span (from 2024-01-01) opens only through a frozen market-ews file, as the market
-command's `--prereg` opens it for labels: `build` refuses a series, onset or control segment
-reaching it unless `scoring` is a market-ews file frozen at its tag that names this labels file,
-and a run labelling those days must carry the frozen labels' stamp in its manifest. An environment
-switch, as `cascade.recall` takes, would open those days to any caller; the frozen file ties them
-to the pre-registered test. With it, `build` also takes nothing the file fixes from its caller: the
-horizons, the span (window + length - 1), the subsample and the seed must be the file's. The module
-reads labels and is fed the series; the labels package (`market/`) imports none of it.
+The target is a workshop paper in early 2027. Design discussions are on the
+[issue tracker](https://github.com/GabrielEzerzer/tipping-point/issues).
 
-The same-input tier, `ews/same_input.py` (#30; research pass 6.4 item 2, choice 8), scores the
-Bybit book features themselves as classic series, so that a latent win cannot be put down to the
-book holding information Binance's price series lacks. In market-ews-v1 it is descriptive.
-`aggregate` turns one symbol-day's 1-second feature table (`book.features.reduce_run`) into
-1-minute values per feature: "sum" adds the minute's 60 seconds, "mean" averages them. A minute
-with any gapped second (`gap`, which a missing second also sets) has no value, the rule `jepa.days`
-applies to a minute frame (`prereg.SAME_INPUT_MISSING`); a value that is not finite outside gap
-seconds is refused, as `jepa.days` refuses it. `read` gives a symbol's minutes over a span of days
-from a bybit-book data folder, one `market_segments.Minutes` per feature on the minute grid; a day
-with no feature file has no value in any minute. The minutes go through the same steps as the
-returns: `market_segments.slot_profile` and `deseasonalise` (`[seasonality]`'s method and fit span,
-per feature), then `market_segments.build`, which cuts the event and control segments by the same
-rule and excludes and counts a segment that holds a minute with no value. Every feature has a value
-in the same minutes, so every feature keeps the same segments. `read` refuses any day from
-2024-01-01 before it opens a file, so the data folder's `confirmatory` range is never opened; days
-route by `market.book.RANGES` to `training` or `exploratory`, and a day in neither (before the
-archive starts) has no file. A feature file must name its symbol and day and be the feature format
-this code reduces (`book.features.FORMAT`), as `jepa.days.ParquetSource` demands; the format read is
-recorded.
+## Citation and licence
 
-## JEPA world model (Ising)
-
-`python/tipping_point/src/tipping_point/jepa/` is the JEPA of #27: one per-frame encoder shared by
-every L (2x2 patchify, three ConvNeXt blocks with circular depthwise 3x3 convolutions; 0.40M
-parameters, a receptive field of 14 sites, below the smallest L), a convolutional predictor
-(0.16M parameters, ~50 sites of range) and an EMA target encoder. It hides blocks of frame c (4-8
-sites a side, 20-25% of the cells, a one-cell buffer cut from the context) and predicts their
-LayerNorm'd target features in frame c + delta, delta 0-7 inside a burst; VICReg variance and
-covariance terms on the visible tokens guard against collapse, and a detector with absolute floors
-on feature spread watches for it. Bursts are flipped to positive magnetisation, D4 and rolls are
-augmentations, and training reads staircase plateaus only, of dedicated simulator seeds: the
-seeds 1-10 (ising-ews-v1's 6-10 and its exploratory pilot's 1-5), ramps and null runs are
-refused. The design is the #27 research pass's (22 October 2026), with its recommended choices.
-
-Its Ising modules: `lattice` (the circular ConvNeXt encoder, convolutional predictor, torus masks,
-canonicalisation, torus symmetries, bit unpacking) and `data` (simulator runs to packed bursts in
-RAM, run selection by seed, the held-out band). Its generic modules: `objective` (MSE on
-LayerNorm'd targets at hidden cells, VICReg terms, schedules), `monitor` (the collapse detector with
-absolute floors, effective rank, normalised error) and `train` (the loop: seeding, AMP per device,
-checkpoints, resume, manifest, GPU hours). `extract` fits the PCA basis and writes per-frame
-surprise and pc_k as a dataset run's `latents` table, and `probes` fits ridge probes from frozen
-frame embeddings, trained beside untrained. `python -m tipping_point.jepa --help` lists the
-commands.
-
-```sh
-uv run python -m tipping_point.jepa train --L 16 32 64 --train-seeds 101 102 --val-seed 103 \
-    --seed 1 --pilot <pilot run>/pilot.json [--held-out] [--prereg paper/prereg/<id>.toml]
-uv run python -m tipping_point.jepa resume <training>                # after a killed session
-uv run python -m tipping_point.jepa extract <training>/final.pt <simulator run> [--select tc-plus]
-uv run python -m tipping_point.jepa probe <training> --fit <val run> --test <scored run>
-uv run python -m tipping_point.jepa verify <training> <run>/latents/<set> ...
-uv run python -m tipping_point.jepa budget --quota 30                # GPU hours per ISO week
-```
-
-- **A training** lives in `<data dir>/jepa/<run_id>/`: the manifest (every input run with its
-  `complete.json` sha256, the pilot record's sha256, the pre-registration's id, the seeds, the git
-  commit), `train/` and `monitor/` Parquet, `ckpt/step_0000000.pt` (the untrained twin, saved
-  before any update), `final.pt`, and `complete.json` with every file's sha256 and the collapse
-  verdict. Both models carry a PCA basis fitted on training frames. Every session appends its
-  hours to `<data dir>/jepa/gpu_hours.jsonl`.
-- **Reproducibility:** one master seed gives each random stream its own generator;
-  `use_deterministic_algorithms(True)` is a tripwire and `CUBLAS_WORKSPACE_CONFIG` is set before
-  CUDA starts. Two CPU runs of a seed give bitwise-identical losses, and a resumed run continues
-  bit for bit. A T4 trains in fp16 autocast, anything else in float32; never bf16, never
-  `torch.compile`.
-- **The latents table** (#28's input) is written beside the frames, in
-  `<simulator run>/latents/<training>-step<step>/`: one row per `configs` row, keyed and ordered
-  like `configs` (step, replica, temperature, segment, burst, frame), with `surprise` (the delta = 0
-  prediction error over two fixed evaluation masks) and `pc_1`..`pc_8`, float32. Its manifest names
-  the checkpoint and the run by sha256; `tipping_point.jepa.extract.read` returns it. `--select`
-  subsamples staircases: `tc-plus` keeps the T = 2.269231 plateau whole and one burst in 8 (by
-  burst index) at every other plateau, and refuses a staircase whose plateaus save a number of
-  bursts 8 does not divide; `tc-only` keeps that plateau alone, for ablation checkpoints;
-  ramps and null runs are always read whole. The manifest records the rule, and `verify` checks
-  that the table holds exactly the rows it keeps.
-- **Probes** read |m|, the energy and L^2 (|m| - <|m|>_T)^2 from frozen embeddings by ridge
-  regression, each beside two control tasks: an i.i.d. Gaussian target (R^2 near 0) and the target
-  shuffled among the frames of each plateau. Selectivity, R^2 minus the shuffle's, is what the
-  embedding holds of a frame beyond its temperature.
-- **The untrained twin is the null:** a local encoder's pooled readouts inherit Ising scaling with
-  random weights, so learning is claimed only as a margin over each run's step-0 twin, which goes
-  through every test. `tipping_point.ews.margins.paired` judges one: the CI of the mean margin
-  over model seeds (nested with paired data-bootstrap draws) must exclude 0 in the predicted
-  direction, and every seed's margin must carry the predicted sign.
-- **Kaggle:** `notebooks/kaggle_ising_runs.py` runs a JSON plan from `notebooks/plans/` as a
-  kernel: simulator runs, `jepa train` and `jepa extract`, one queue per T4. It installs the
-  commit-stamped wheel from a wheel dataset (no clone and no token), stages the dataset runs a
-  plan reads, checks every run with `jepa verify`, and resumes from the previous version's output.
-  `--write-kernel <plan> <dir>` writes the folder `kaggle kernels push` takes; `--dry-run-jepa`
-  rehearses training, resume and extraction on the CPU. Its docstring is the manual. ising-latent-v1's
-  extraction runs from five plans, `extract-s6.json` to `extract-s10.json`, one per confirmatory
-  seed so that each kernel's output stays under 18 GB, from the wheel built at the freeze tag's
-  commit, which each plan's `commit` key pins.
-
-The harness trains a planted-stripe toy on the CPU (`harness/jepa_toy.py`: validation error 1.37
-to 0.34 in 150 steps; probes cannot tell it from its twin, prediction error can), breaks the loss
-to check that the detector fires, and runs the extract round trip on runs the simulator itself
-writes (`harness/jepa_ising.py`). The toy uses d = 32, as in the research pass's sketch, and 32
-bursts a step at a flat twice the production learning rate after warm-up: a cosine to 1e-6 stalls
-a run this short (0.42 at step 200 instead of 0.31). Its budget is a number of steps, never of
-wall-clock time, so the toy is deterministic.
-
-## Market JEPA pilot (#30 M4)
-
-`harness/m4_pilot.py` holds the market JEPA's CPU pilot and its rules, written and committed before
-any pilot ran.
-
-- **Runs.** Four trainings: BTCUSDT and ETHUSDT, each at size S (dim 64) and M (dim 96), model seed
-  100 (never a primary or spare), 20,000 steps, warm-up 1,000 (steps / 20, as on Ising), every
-  other setting `minutes.Config`'s default, on the CPU in float32. `stop_on_collapse` is off: the
-  floors are what this pilot recalibrates, so a run is not cut short by floors set on a toy; the
-  detector's verdict is still recorded. Each run checkpoints every 500 steps and resumes by the
-  same command.
-- **Split.** The training span [2023-01-18, 2023-10-01) (call 5), split as `jepa/days.py` asks,
-  with the validation days a block after the training days: training 2023-01-18 .. 2023-08-31 (226
-  days), validation 2023-09-01 .. 2023-09-30 (30 days). Proposed: the primaries use the same split.
-- **Validation error** (proposed: a probe, not the JEPA loss). The JEPA's own error is measured
-  against each model's own target encoder, which moves during training and differs between sizes:
-  on a 1,000-step smoke run (BTC, 10 days) the monitor's `val_error` fell to 0.44 at step 250 and
-  rose to 0.59 (S) and 0.63 (M) by step 1,000 while effective rank grew, and the richer M latent
-  scored worse than S. A lower JEPA error can mean a poorer latent, so it can rank neither sizes
-  nor steps. The validation error is instead a fixed task in input space: a ridge probe
-  (`jepa.probes.ridge`, alpha 1e-3) from the target encoder's latent of minute t
-  (`minutes.readouts`) to the mean of each scaled feature over minute t + 1, over minute pairs both
-  valid, fitted on validation days 1-15 and scored per day on days 16-30 as the mean over features
-  of the squared error over the fit set's variance (1 = the fit mean). It is measured for
-  `final.pt`, for the copy saved at step 10,000 and for the step-0 twin; the JEPA surprise of
-  `final.pt` is kept beside it, descriptive. A run is usable when `final.pt`'s mean probe error is
-  below its twin's.
-- **Size** (call 4: M unless S reaches the same validation error). S is chosen when, on both
-  assets, both runs are usable and S matches M: the upper end of the 95% bootstrap interval of the
-  mean over the scored days of (S - M), paired by day (2,000 draws, seed 0), is at most
-  `TOLERANCE` = 2% of M's mean (the 2% is proposed). Otherwise M. If an M run is not usable, the
-  rule chooses no size and `decide` stops there.
-- **Steps** (research pass 5.2, in the manner of Ising's call 9). On a run of the chosen size, e(s)
-  is the mean probe error of its model at step s. The primaries train 10,000 steps if, on both
-  assets, e(10,000) - e(20,000) <= 2% of e(20,000), and 20,000 otherwise: never below 10,000 (about
-  21 passes over the training minutes), never above 20,000 (the pilot sees no further). The
-  laptop's seconds per step are recorded but do not set the count: checkpoints make a CPU run of
-  any length resumable, and the T4 rate the primaries would run at is unmeasured. In a 20,000-step
-  run the learning rate at step 10,000 is still high, so e(10,000) overstates what a 10,000-step
-  run reaches: the rule leans to 20,000, which costs time, never validity.
-- **Floors.** For each floored statistic (`spatial_std`, here the spread of a latent over the
-  minutes of a chunk; `pooled_std`, the spread of chunk means over chunks; `effective_rank`), h is
-  its minimum over the usable runs of the chosen size, both assets, at evaluations from step 1,000
-  on; the new floor is h / 5 rounded down to one significant figure (the 5 is proposed; Ising's toy
-  had a healthy 0.87 beside its floor 0.1). Patience stays 3. The new floors replace
-  `minutes.Config`'s defaults in a commit before the primaries, and `test_market`'s collapse mutant
-  must still fire under them; if it does not, the floors are set outside this rule. The VICReg weights stay
-  unless a usable pilot run's monitors fire under the new floors.
-
-```sh
-uv run --extra cpu python harness/m4_pilot.py train --asset btc --size M \
-    --data <data>/bybit-book-v3/training --out <data>/m4-pilot      # again to resume
-uv run --extra cpu python harness/m4_pilot.py decide --out <data>/m4-pilot
-```
-
-`train` writes `<out>/<asset>-<size>/jepa/<run_id>/` (the trainer's layout) and, once the training
-is complete, `<out>/<asset>-<size>/validation.json`. `--steps` and `--limit` (the last K training
-and first K validation days) are for smoke runs only; `decide` refuses a run that used either.
-
-## Running the gate
-
-```sh
-uv sync --extra cpu                      # or --extra cu126 on a CUDA machine (the PyTorch build)
-uv run python harness/gate.py            # all legs
-uv run python harness/gate.py --leg pytest
-```
-
-Needs `cargo` on `PATH`. Each leg (cargo fmt, clippy, test; ruff check, format; pyright; pytest; the Kaggle runner's `--self-test`) runs on its own and is GREEN only when its exit code is 0 and its own summary evidence is positive. The gate exits nonzero if any leg is RED, and its last line counts any check a leg skipped (`gate GREEN (1 skipped)`); the full record lands in `harness/out/gate-<timestamp>.json`, with each leg's last 200 lines of output and, for cargo test, every `test result` line and every failing test's whole section of output (from its `---- <name> ----` header to the next `failures:` line), each under the binary and exe that printed it, and, for the self-test, every `FAIL` line, so a red leg can be read without a re-run however early it failed. A leg still running at its limit (in `harness/gate.py`, well above the slowest it has taken on this laptop under load) is killed with its whole process tree and judged RED, and the gate goes on to the next, so a hang still ends in a last line and a record. `cargo test` runs with `--no-fail-fast`, so one failing binary does not hide the ones after it. As it starts and ends, the gate kills strays (`harness/strays.py`; `uv run python harness/strays.py --dry-run` only lists them): processes of `serve`, `store`, `ingest`, `record`, `soak`, `crash-writer` or the `api_python` test that run from a debug target dir of this repository or any of its worktrees, are older than ten minutes and whose owner is gone, as a killed test run leaves them. The owner is looked for up through cargo, bash, sh, cmd and other debug binaries, since a background shell killed without its tree leaves the bash it forked and its cargo running in between. A process with a live owner (a debug `serve --record` started from a terminal) is spared, and so is `api_load`, which holds its server in-process however long `TP_LOAD_SECONDS` runs it. Release builds, where a soak or a recording runs, are never touched. Cargo builds on half the logical cores unless `CARGO_BUILD_JOBS` is set, every leg runs at BelowNormal priority on Windows, and the record notes the cores and how busy the CPU was at the start, so a leg that goes red under load says so. For a dedicated gate run on a machine you control, `TP_GATE_PRIORITY=normal` runs the legs at Normal instead: at BelowNormal, a data job or another session at Normal can starve the timing tests (`api_load`) red. `belownormal` is the default, anything else is refused, and the choice is on the `machine at start` line and in the record. The cargo legs cover only the root workspace's members: `harness/tests/test_gate.py` fails `engine/` or any crate under `harness/` that is outside it, so when `app/src-tauri` lands it must be added to `members` and to that check.
+To cite this work, use [CITATION.cff](CITATION.cff). Tipping Point is released under the MIT licence;
+see [LICENSE](LICENSE).
