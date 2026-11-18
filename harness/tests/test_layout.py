@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-FOLDERS = {".cargo", ".github", "app", "engine", "harness", "notebooks", "paper", "python", "setup"}
+FOLDERS = {".cargo", ".github", "engine", "harness", "notebooks", "paper", "python", "setup"}
 FILES = {
     ".gitattributes",
     ".gitignore",
