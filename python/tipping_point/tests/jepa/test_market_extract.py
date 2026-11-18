@@ -24,6 +24,7 @@ from tipping_point.jepa import market_extract as mx
 SHORT = market_toy.config(steps=12, checkpoint_every=4, monitor_every=4, pca_frames=128)
 SYMBOL = market_toy.SYMBOL
 SPANS = {
+    "fit": (mx.TRAIN_START, mx.TRAIN_START + timedelta(days=5)),
     "exploratory": (date(2023, 10, 1), date(2023, 10, 6)),
     "confirmatory": (date(2024, 1, 1), date(2024, 1, 4)),
 }
@@ -149,6 +150,48 @@ def test_a_killed_run_keeps_its_units_and_redoes_only_what_it_lacks(
     assert mx.extract(_book(), models, scaling, todo, out, None) == 0
 
 
+def test_a_unit_from_another_run_is_redone_not_skipped(
+    primaries: tuple[Path, Path], short: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, models, scaling = _loaded(primaries)
+    out = tmp_path / "units"
+    assert mx.extract(_book(), models, scaling, mx.tasks("exploratory", [SYMBOL]), out, None) == 6
+    shorter = mx.tasks("exploratory", [SYMBOL], limit=1)
+    assert mx.extract(_book(), models, scaling, shorter, out, None) == 2
+    record = io.read_json(next(out.rglob("2023-10-01.json")))
+    assert record["first"] == record["last"] == "2023-10-01"
+    assert mx.extract(_book(), models, scaling, shorter, out, None) == 0
+    monkeypatch.setattr(io, "code_version", lambda: {"git_sha": "e" * 40, "dirty": False})
+    assert mx.extract(_book(), models, scaling, shorter, out, None) == 2
+
+
+def test_the_fit_span_starts_at_the_book_start_without_a_day_before_or_a_baseline(
+    primaries: tuple[Path, Path], short: None, tmp_path: Path
+) -> None:
+    _, models, scaling = _loaded(primaries)
+    book, out = _book(), tmp_path / "units"
+    todo = mx.tasks("fit", [SYMBOL])
+    assert todo[0].first == mx.TRAIN_START and not todo[0].eve and not todo[0].lead
+    assert todo[1].eve == [todo[0].days[-1]] and len(todo[1].lead) == 1
+    assert mx.extract(book, models, scaling, todo, out, None) == 6
+    series = tmp_path / "series"
+    merged = mx.merge([out], series, "fit", primaries[1], None, symbols=[SYMBOL])
+    assert len(merged) == 2 and not mx.verify(series)
+
+    wanted = mx.span_days("fit")
+    got, _ = days.frames(book, SYMBOL, wanted, scaling[SYMBOL]["record"], lead=[])
+    for m in models:
+        z, s = minutes.readouts(m.ckpt.model, got.frames, got.valid)
+        one = mx.table(wanted[0], got.valid.numpy(), mx.project(m.ckpt, z, s))
+        read = pq.read_table(series / m.name / f"{SYMBOL}-fit.parquet")
+        for name in one.column_names:
+            assert read[name].to_numpy().tobytes() == one[name].to_numpy().tobytes(), name
+        assert not read["valid"].to_numpy()[: SHORT.model.context - 1].any()
+        record = io.read_json(series / m.name / f"{SYMBOL}-fit.json")
+        assert record["days"][0]["day"] == mx.TRAIN_START.isoformat()
+        assert not any(d.get("lead") or d.get("context") for d in record["days"][:1])
+
+
 def test_without_a_gate_no_confirmatory_day_is_opened(
     primaries: tuple[Path, Path], short: None, tmp_path: Path
 ) -> None:
@@ -217,6 +260,8 @@ def test_each_folder_opens_only_its_own_days_and_the_files_its_manifest_names(
         book.folder(date(2023, 1, 17))
     with pytest.raises(days.DataError, match="on or after 2026-10-01"):
         days.refuse(end, end)
+    with pytest.raises(days.DataError, match="on or after 2023-10-01"):
+        days.refuse(date(2023, 10, 5), mx.EXPLORATORY)
 
     other = date(2023, 12, 30)
     _day_file(exploratory, other)
@@ -364,6 +409,25 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
     ):
         with pytest.raises(mx.Refused, match=why):
             mx.admit(broken, pins, pins_sha)
+    assert "made again" in mx.admitted(record, primaries[1])
+
+    text = record["prereg"]["text"] + "# not the frozen file\n"
+    forged_stamp = {
+        **record["prereg"],
+        "text": text,
+        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
+    forged = {**record, "prereg": forged_stamp}
+    mx.admit(forged, pins, pins_sha)
+    with pytest.raises(mx.Refused, match="the gate made now is not the gate record's"):
+        mx.admitted(forged, primaries[1])
+
+    def no_repository(path: Path) -> Path:
+        raise prereg.PreregError("not a git repository")
+
+    with monkeypatch.context() as m:
+        m.setattr(prereg, "repo_root", no_repository)
+        assert "no repository" in mx.admitted(record, primaries[1])
 
     todo = mx.tasks("confirmatory", [SYMBOL])
     out = tmp_path / "units"
@@ -380,6 +444,30 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
     assert written["days"][days.BASELINE_DAYS]["day"] == "2023-12-31"
     assert written["days"][days.BASELINE_DAYS]["folder"] == "exploratory"
     assert {d["folder"] for d in written["days"][days.BASELINE_DAYS + 1 :]} == {"confirmatory"}
+    pre = mx.PRE_MINUTES["confirmatory"]
+    assert pre == 514 and written["pre_minutes"] == pre
+    assert written["days"][days.BASELINE_DAYS]["kept_minutes"] == pre
+
+    eve, wanted = date(2023, 12, 31), mx.span_days("confirmatory")
+    lead = [eve - timedelta(days=d) for d in range(days.BASELINE_DAYS, 0, -1)]
+    record_ = scaling[SYMBOL]["record"]
+    got, _ = days.frames(_book(mx.END), SYMBOL, [eve, *wanted], record_, lead=lead, until=mx.END)
+    keep = slice(days.MINUTES - pre, None)
+    m = next(m for m in models if m.name == merged[0].parent.name)
+    z, s = minutes.readouts(m.ckpt.model, got.frames, got.valid)
+    one = mx.table(wanted[0], got.valid[keep].numpy(), mx.project(m.ckpt, z[keep], s[keep]), pre)
+    read = pq.read_table(merged[0])
+    start = np.datetime64("2024-01-01", "ns").astype(np.int64) - pre * mx.MINUTE_NS
+    assert read["ts_ns"][0].as_py() == start and len(read) == len(wanted) * days.MINUTES + pre
+    for name in one.column_names:
+        assert read[name].to_numpy().tobytes() == one[name].to_numpy().tobytes(), name
+
+    _git(root, "tag", "-d", "prereg/market-latent-v1")
+    _git(root, "tag", "-a", "prereg/market-latent-v1", "-m", "frozen again")
+    with pytest.raises(mx.Refused, match="the gate made now is not the gate record's"):
+        mx.admitted(record, primaries[1])
+    _git(root, "tag", "-d", "prereg/market-latent-v1")
+    _freeze(root)
 
     later = root / "src" / "tipping_point" / mx.HELD[0]
     later.write_text("changed after the units were made\n")

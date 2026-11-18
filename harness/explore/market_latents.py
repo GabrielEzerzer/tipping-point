@@ -47,7 +47,7 @@ from tipping_point.jepa import days, minutes, train
 from tipping_point.jepa.market_extract import COLUMNS as COLUMNS
 from tipping_point.jepa.market_extract import MINUTE_NS as MINUTE_NS
 from tipping_point.jepa.market_extract import PCS as PCS
-from tipping_point.jepa.market_extract import carried, project, table
+from tipping_point.jepa.market_extract import project, table
 
 from explore import common
 
@@ -137,6 +137,24 @@ def _trained_on(run: Path) -> dict[str, Any]:
         "train": [data["train"][0]["day"], data["train"][-1]["day"]],
         "val": [data["val"][0]["day"], data["val"][-1]["day"]],
     }
+
+
+def carried(
+    model: minutes.MarketJepa, parts: Iterable[tuple[torch.Tensor, torch.Tensor]]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    keep = model.spec.context - 1
+    tail: tuple[torch.Tensor, torch.Tensor] | None = None
+    zs, ss = [], []
+    for f, v in parts:
+        skip = 0
+        if tail is not None:
+            skip = len(tail[0])
+            f, v = torch.cat([tail[0], f]), torch.cat([tail[1], v])
+        z, s = minutes.readouts(model, f, v)
+        zs.append(z[skip:])
+        ss.append(s[skip:])
+        tail = f[-keep:], v[-keep:]
+    return torch.cat(zs), torch.cat(ss)
 
 
 def read(

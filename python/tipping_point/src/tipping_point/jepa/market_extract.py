@@ -11,7 +11,7 @@ import platform
 import sys
 import time
 import tomllib
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -40,21 +40,27 @@ keyed by ts_ns, the minute's start. Every checkpoint reads both symbols (its own
 Features are scaled by the read symbol's own record, the one its pinned trainings fitted (one
 record per symbol, its sha256 the pins'), never refitted.
 
-Spans: confirmatory 2024-01-01 .. 2026-09-30 and exploratory 2023-10-01 .. 2023-12-31. Days come
-from <data>/training before 2023-10-01, <data>/exploratory to 2023-12-31 and <data>/confirmatory
-from 2024-01-01, each checked against its folder's manifest.json (range, feature format, and the
-day's sha256). Without --gate only the exploratory span runs and <data>/confirmatory is never
-opened; its output says pre_registered false.
+Spans: fit 2023-01-18 .. 2023-09-30 (the seasonality fit span, from the book's first day),
+exploratory 2023-10-01 .. 2023-12-31, and confirmatory from 514 minutes before 2024-01-01 (the last
+514 minutes of 2023-12-31, an exploratory day: 5 x 24 bars + window 60 + length 240 - 1 + context
+96 - 1) to 2026-09-30. Days come from <data>/training before 2023-10-01, <data>/exploratory to
+2023-12-31 and <data>/confirmatory from 2024-01-01, each checked against its folder's manifest.json
+(range, feature format, and the day's sha256). Without --gate the confirmatory span is refused and
+<data>/confirmatory is never opened; such output says pre_registered false.
 
 UNITS. A span is cut into blocks of 16 days. A task is one symbol's block and a unit one
 checkpoint's read of it: <out>/units/<run id>-step<step>/<symbol>-<span>/<first day>.parquet and
-.json. Each task reads its block with the 7 days before its first day's eve as the relative-depth
-lead and the eve itself as the predictor's context, so on the CPU every unit is bitwise the minutes
-one read of the eve and the whole span gives; no minute of a span lacks its context. Tasks are
-independent:
+.json. Each task reads its block with the 7 days before the day before it as the relative-depth
+lead and that day itself as the predictor's context, so on the CPU every unit is bitwise the
+minutes one read of the day before and the whole span gives. The book holds no day before
+2023-01-18, so the fit span's first block reads none, as training did: its first day has no depth
+baseline and all its minutes are gaps, days 2 to 7 use the 1 to 6 earlier days they have, and a
+minute with no valid minute in its context has no value. Tasks are independent:
 --shard i/n takes every n-th task from the i-th, so n processes, on one host or several, split a
-span with no overlap. A unit appears whole or not at all, and `run` skips the units already
-written and intact, so it resumes after a kill by the same command.
+span with no overlap. A unit appears whole or not at all, and `run` skips a unit already written
+and intact whose record names the task's first and last day and minutes before it, the
+checkpoint's and the scaling's sha256, the gate stamp and the code commit; any other is redone. So
+it resumes after a kill by the same command.
 
   python -m tipping_point.jepa.market_extract gate --prereg paper/prereg/market-latent-v1.toml \\
       --pins <data>/m8-primaries/pins.json --out <data>/m8-latents/gate.json
@@ -68,9 +74,12 @@ written and intact, so it resumes after a kill by the same command.
 `gate` refuses unless the file is a market-latent file byte for byte as frozen at its prereg/ tag,
 the code that makes the series (HELD) is its blob at the frozen commit, the code it runs (CLEAN) is
 committed, the checkout is clean, and its [[latents.checkpoints]] are pins.json's runs with their
-trained and twin sha256. Its record holds the file, its stamp, the code check and the pins' sha256.
-`run` refuses a gate record that is not self-consistent, other pins, or code that is not the
-record's clean commit (the installed wheel's on a host without the repository); it loads only
+trained and twin sha256. Its record holds the file, its stamp (with the tag object's sha, so a tag
+made again does not match), the code check and the pins' sha256. `run` refuses a gate record that
+is not self-consistent, other pins, or code that is not the record's clean commit; in the
+repository it makes the gate again and refuses a record whose frozen part differs, and only on a
+host without the repository (a Kaggle kernel) do the record and the installed wheel's commit stand
+alone. It loads only
 checkpoints whose sha256 (and the trained one's PCA basis) are the pins'. --days N (the span's first
 N days, a timing run) is refused with --gate. `merge` runs in the repository: it makes the gate
 again, takes only units made by one clean commit whose HELD files are the frozen commit's, under
@@ -89,7 +98,12 @@ FOLDERS = (
     ("exploratory", EXPLORATORY, days.CONFIRMATORY),
     ("confirmatory", days.CONFIRMATORY, END),
 )
-SPANS = {"exploratory": (EXPLORATORY, days.CONFIRMATORY), "confirmatory": (days.CONFIRMATORY, END)}
+SPANS = {
+    "fit": (TRAIN_START, EXPLORATORY),
+    "exploratory": (EXPLORATORY, days.CONFIRMATORY),
+    "confirmatory": (days.CONFIRMATORY, END),
+}
+PRE_MINUTES = {"confirmatory": 5 * 24 + 60 + 240 - 1 + 96 - 1}
 SYMBOLS = ("BTCUSDT", "ETHUSDT")
 PCS = tuple(f"pc_{k}" for k in range(1, 9))
 COLUMNS = ("surprise", "surprise5", *PCS)
@@ -98,7 +112,7 @@ BLOCK = 16
 KINDS = (("trained", train.FINAL), ("twin", train.TWIN))
 DOMAIN = "market-latent"
 UNITS = "units"
-GATE_FORMAT = 1
+GATE_FORMAT = 2
 SRC = Path(__file__).resolve().parents[1]
 HELD = (
     "jepa/market_extract.py",
@@ -118,24 +132,6 @@ class Refused(ValueError):
     pass
 
 
-def carried(
-    model: minutes.MarketJepa, parts: Iterable[tuple[torch.Tensor, torch.Tensor]]
-) -> tuple[torch.Tensor, torch.Tensor]:
-    keep = model.spec.context - 1
-    tail: tuple[torch.Tensor, torch.Tensor] | None = None
-    zs, ss = [], []
-    for f, v in parts:
-        skip = 0
-        if tail is not None:
-            skip = len(tail[0])
-            f, v = torch.cat([tail[0], f]), torch.cat([tail[1], v])
-        z, s = minutes.readouts(model, f, v)
-        zs.append(z[skip:])
-        ss.append(s[skip:])
-        tail = f[-keep:], v[-keep:]
-    return torch.cat(zs), torch.cat(ss)
-
-
 def project(
     ckpt: train.Checkpoint[minutes.Config, minutes.MarketJepa], z: torch.Tensor, s: torch.Tensor
 ) -> dict[str, np.ndarray]:
@@ -147,8 +143,10 @@ def project(
     return columns
 
 
-def table(first: date, feature_valid: np.ndarray, columns: dict[str, np.ndarray]) -> pa.Table:
-    start = np.datetime64(first.isoformat(), "ns").astype(np.int64)
+def table(
+    first: date, feature_valid: np.ndarray, columns: dict[str, np.ndarray], before: int = 0
+) -> pa.Table:
+    start = np.datetime64(first.isoformat(), "ns").astype(np.int64) - before * MINUTE_NS
     ts = start + MINUTE_NS * np.arange(len(feature_valid), dtype=np.int64)
     valid = feature_valid & np.all([np.isfinite(columns[c]) for c in COLUMNS], axis=0)
     return pa.table({"ts_ns": ts, "valid": valid, **{c: columns[c] for c in COLUMNS}})
@@ -244,6 +242,7 @@ def gate(path: Path, pins_path: Path) -> dict[str, Any]:
         "format": GATE_FORMAT,
         "prereg": {
             **prereg.stamp(pre, ref),
+            "tag_object": prereg._git(root, "rev-parse", ref.tag),
             "path": pre.path.resolve().relative_to(root.resolve()).as_posix(),
             "text": pre.path.read_bytes().decode("utf-8"),
         },
@@ -280,7 +279,7 @@ def admit(record: dict[str, Any], pins: dict[str, Any], pins_sha: str) -> None:
 def stamp_of(record: dict[str, Any] | None) -> dict[str, Any] | None:
     if record is None:
         return None
-    keys = ("id", "version", "sha256", "tag", "commit")
+    keys = ("id", "version", "sha256", "tag", "tag_object", "commit")
     return {
         **{k: record["prereg"][k] for k in keys},
         "head": record["code"]["head"],
@@ -360,18 +359,25 @@ class Task:
     symbol: str
     span: str
     days: tuple[date, ...]
+    pre: int = 0
 
     @property
     def first(self) -> date:
         return self.days[0]
 
     @property
-    def eve(self) -> date:
-        return self.days[0] - timedelta(days=1)
+    def eve(self) -> list[date]:
+        day = self.days[0] - timedelta(days=1)
+        return [day] if day >= TRAIN_START else []
 
     @property
     def lead(self) -> list[date]:
-        return [self.eve - timedelta(days=d) for d in range(days.BASELINE_DAYS, 0, -1)]
+        before = [self.first - timedelta(days=d) for d in range(days.BASELINE_DAYS + 1, 1, -1)]
+        return [d for d in before if d >= TRAIN_START]
+
+    @property
+    def keep(self) -> slice:
+        return slice(days.MINUTES * len(self.eve) - self.pre, None)
 
 
 def span_days(span: str, limit: int | None = None) -> list[date]:
@@ -385,8 +391,9 @@ def tasks(
 ) -> list[Task]:
     wanted = span_days(span, limit)
     size = size or BLOCK
+    pre = PRE_MINUTES.get(span, 0)
     return [
-        Task(symbol, span, tuple(wanted[k : k + size]))
+        Task(symbol, span, tuple(wanted[k : k + size]), pre if k == 0 else 0)
         for symbol in symbols
         for k in range(0, len(wanted), size)
     ]
@@ -402,13 +409,17 @@ def shard(found: Sequence[Task], spec: str) -> list[Task]:
 def read_task(
     book: Book, task: Task, scaling: dict[str, Any]
 ) -> tuple[days.Minutes, list[dict[str, Any]]]:
+    if task.pre and not task.eve:
+        raise Refused(f"{task.first}: {task.pre} minutes before it, but no day before it to read")
     got, records = days.frames(
-        book, task.symbol, [task.eve, *task.days], scaling, lead=task.lead, until=book.until
+        book, task.symbol, [*task.eve, *task.days], scaling, lead=task.lead, until=book.until
     )
     for r in records:
         r["folder"] = book.folder(date.fromisoformat(r["day"]))
-        if r["day"] == task.eve.isoformat():
+        if [r["day"]] == [d.isoformat() for d in task.eve]:
             r["context"] = True
+            if task.pre:
+                r["kept_minutes"] = task.pre
     return got, records
 
 
@@ -490,10 +501,24 @@ def unit_paths(out: Path, name: str, symbol: str, span: str, first: date) -> tup
     return folder / f"{first.isoformat()}.parquet", folder / f"{first.isoformat()}.json"
 
 
-def unit_done(parquet: Path, record_path: Path) -> bool:
+def unit_key(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "first": record.get("first"),
+        "last": record.get("last"),
+        "pre_minutes": record.get("pre_minutes"),
+        "checkpoint_sha256": (record.get("checkpoint") or {}).get("sha256"),
+        "scaling_sha256": record.get("scaling_sha256"),
+        "gate": record.get("gate"),
+        "git_sha": (record.get("code") or {}).get("git_sha"),
+    }
+
+
+def unit_done(parquet: Path, record_path: Path, want: dict[str, Any]) -> bool:
     if not (parquet.is_file() and record_path.is_file()):
         return False
     record = io.read_json(record_path)
+    if not isinstance(record, dict) or unit_key(record) != want:
+        return False
     return record.get("parquet_sha256") == file_sha256(parquet)
 
 
@@ -528,18 +553,31 @@ def extract(
         paths = {
             m.name: unit_paths(out, m.name, task.symbol, task.span, task.first) for m in models
         }
-        left = [m for m in models if not unit_done(*paths[m.name])]
+        want = {
+            m.name: {
+                "first": task.first.isoformat(),
+                "last": task.days[-1].isoformat(),
+                "pre_minutes": task.pre,
+                "checkpoint_sha256": m.ckpt.sha256,
+                "scaling_sha256": scaling[task.symbol]["sha256"],
+                "gate": stamp,
+                "git_sha": code.get("git_sha"),
+            }
+            for m in models
+        }
+        left = [m for m in models if not unit_done(*paths[m.name], want[m.name])]
         if not left:
             continue
         clock, cpu = time.perf_counter(), time.process_time()
         got, records = read_task(book, task, scaling[task.symbol]["record"])
         read_s, read_cpu_s = time.perf_counter() - clock, time.process_time() - cpu
-        keep = slice(days.MINUTES, None)
+        keep = task.keep
         feature_valid = got.valid[keep].numpy()
         for m in left:
             clock, cpu = time.perf_counter(), time.process_time()
             z, s = minutes.readouts(m.ckpt.model, got.frames, got.valid)
-            result = table(task.first, feature_valid, project(m.ckpt, z[keep], s[keep]))
+            columns = project(m.ckpt, z[keep], s[keep])
+            result = table(task.first, feature_valid, columns, task.pre)
             parquet, record_path = paths[m.name]
             parquet.parent.mkdir(parents=True, exist_ok=True)
             _write_parquet(parquet, result)
@@ -566,6 +604,7 @@ def extract(
                 "span": task.span,
                 "first": task.first.isoformat(),
                 "last": task.days[-1].isoformat(),
+                "pre_minutes": task.pre,
                 "scaling_sha256": scaling[task.symbol]["sha256"],
                 "book": book.provenance(),
                 "days": records,
@@ -606,6 +645,30 @@ def _same_held(root: Path, frozen_commit: str, commit: str) -> bool:
     return changed == ""
 
 
+def repository() -> Path | None:
+    try:
+        return prereg.repo_root(SRC)
+    except (prereg.PreregError, OSError):
+        return None
+
+
+def regate(record: dict[str, Any], pins_path: Path, root: Path) -> dict[str, Any]:
+    fresh = gate(root / record["prereg"]["path"], pins_path)
+    if _frozen_part(fresh) != _frozen_part(record):
+        raise Refused("the gate made now is not the gate record's")
+    return fresh
+
+
+def admitted(record: dict[str, Any], pins_path: Path) -> str:
+    pins, pins_sha = read_pins(pins_path)
+    admit(record, pins, pins_sha)
+    root = repository()
+    if root is None:
+        return "the record and the installed code's commit (no repository on this host)"
+    regate(record, pins_path, root)
+    return f"a gate made again in {root}"
+
+
 def merge(
     sources: Sequence[Path],
     out: Path,
@@ -620,9 +683,7 @@ def merge(
         raise Refused("the confirmatory span is merged only under a gate record (--gate)")
     if gate_record is not None:
         root = prereg.repo_root(SRC)
-        fresh = gate(root / gate_record["prereg"]["path"], pins_path)
-        if _frozen_part(fresh) != _frozen_part(gate_record):
-            raise Refused("the gate made now is not the gate record's")
+        fresh = regate(gate_record, pins_path, root)
         if not _same_held(root, fresh["prereg"]["commit"], gate_record["code"]["head"]):
             raise Refused("the gate record's commit holds other HELD files than the frozen one")
     stamp = stamp_of(gate_record)
@@ -684,6 +745,7 @@ def _unit_problems(
         ((c["run_id"], c["kind"]) == (pin["run_id"], kind), "another checkpoint's unit"),
         ((record["symbol"], record["span"]) == (task.symbol, task.span), "another symbol or span"),
         (read == expected_days, f"read {read[:1]}..{read[-1:]}, not its block"),
+        (record.get("pre_minutes") == task.pre, f"not {task.pre} minutes before its block"),
         (stamp is None or record["code"].get("dirty") is False, "made by uncommitted code"),
         (record["gate"] == stamp, "made under another gate"),
     )
@@ -701,8 +763,10 @@ def _write_merged(
 ) -> Path:
     merged = pa.concat_tables(parts)
     ts = merged["ts_ns"].to_numpy()
-    start = np.datetime64(SPANS[span][0].isoformat(), "ns").astype(np.int64)
-    expected = start + MINUTE_NS * np.arange(len(span_days(span)) * days.MINUTES, dtype=np.int64)
+    pre = PRE_MINUTES.get(span, 0)
+    start = np.datetime64(SPANS[span][0].isoformat(), "ns").astype(np.int64) - pre * MINUTE_NS
+    count = len(span_days(span)) * days.MINUTES + pre
+    expected = start + MINUTE_NS * np.arange(count, dtype=np.int64)
     if not np.array_equal(ts, expected):
         raise Refused(f"{name} {symbol}: the units' minutes are not the span's, in order")
     folder = Path(out) / name
@@ -729,7 +793,8 @@ def _write_merged(
         "scaling_sha256": first["scaling_sha256"],
         "symbol": symbol,
         "span": span,
-        "context": "each block reads its eve as context, so the span's first minutes have theirs",
+        "context": "each block reads the day before it as context when the book holds that day",
+        "pre_minutes": pre,
         "days": read,
         "units": [
             {
@@ -780,12 +845,12 @@ def _gate_arg(path: Path | None) -> dict[str, Any] | None:
 
 
 def _run(args: argparse.Namespace) -> int:
-    pins, pins_sha = read_pins(args.pins)
+    pins, _ = read_pins(args.pins)
     gate_record = _gate_arg(args.gate)
     if gate_record is None and args.span == "confirmatory":
         raise Refused("the confirmatory span opens only under a gate record (--gate)")
     if gate_record is not None:
-        admit(gate_record, pins, pins_sha)
+        print(f"gate admitted by {admitted(gate_record, args.pins)}", flush=True)
         if args.days:
             raise Refused("--days is for timing runs, without --gate")
     torch.set_num_threads(args.threads)

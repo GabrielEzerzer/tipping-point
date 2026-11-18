@@ -129,11 +129,11 @@ of days) are independent, so the job splits across kernels and across processes 
     {"kernel": "tp-m8-latents-k0",
      "commit": "<the gate record's code head>",
      "datasets": ["<owner>/<book>", "<owner>/<primaries>", "<owner>/<gate>"],
-     "market": {"book": "<book>",                 the dataset holding exploratory/ and confirmatory/
+     "market": {"book": "<book>",                 exploratory/ and confirmatory/, or training/ (fit)
                 "primaries": "<primaries>",       pins.json and <asset>-s<seed>/jepa/<run id>/ with
                                                   final.pt, ckpt/step_0000000.pt and manifest.json
                 "gate": "<gate>",                 gate.json; the confirmatory span needs it
-                "span": "confirmatory",
+                "span": "confirmatory",           fit, exploratory or confirmatory
                 "shard": [0, 5],                  this kernel's index k of K kernels
                 "processes": 4, "threads": 1,     optional: 1 and 1
                 "runs": ["<run id>"], "symbols": ["BTCUSDT"], "days": 4}}   optional
@@ -168,7 +168,7 @@ TORCH_INDEX = "https://download.pytorch.org/whl/cu126"
 TORCH_CPU = "torch==2.14.1+cpu"
 TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 MARKET = "market"
-MARKET_SPANS = ("exploratory", "confirmatory")
+MARKET_SPANS = ("fit", "exploratory", "confirmatory")
 MARKET_KEYS = {"book", "primaries", "gate", "span", "shard", "processes", "threads", "runs"}
 MARKET_KEYS |= {"symbols", "days"}
 MARKET_MODULE = "tipping_point.jepa.market_extract"
@@ -2070,7 +2070,8 @@ def market_inputs(ctx: Ctx, market: dict) -> dict[str, Path]:
 
     pins = holder(market["primaries"], "pins.json")
     found = {"pins": pins, "primaries": pins.parent}
-    found["data"] = holder(market["book"], "exploratory/manifest.json").parent.parent
+    folder = "training" if market["span"] == "fit" else "exploratory"
+    found["data"] = holder(market["book"], f"{folder}/manifest.json").parent.parent
     if "gate" in market:
         found["gate"] = holder(market["gate"], "gate.json")
     return found
@@ -2504,7 +2505,7 @@ def dry_run_market(args: argparse.Namespace) -> int:
         return ran.returncode, read_json(root / "working" / "out" / STATE) or {}
 
     _, one = session(1)
-    first = {p.relative_to(units): sha256_file(p) for p in sorted(units.rglob("*.parquet"))}
+    first = {p.relative_to(units): sha256_file(p) for p in sorted(units.rglob("*.json"))}
     os.replace(root / "working", root / "input" / plan["kernel"])
     code, two = session(2)
     kept = {p: sha256_file(units / p) for p in first if (units / p).is_file()}

@@ -107,7 +107,7 @@ class DataError(ValueError):
 
 
 def refuse(day: date, until: date = CONFIRMATORY) -> None:
-    if day >= until and until <= CONFIRMATORY:
+    if day >= CONFIRMATORY and until <= CONFIRMATORY:
         raise DataError(f"{day} is in the confirmatory span (from {CONFIRMATORY}): never read")
     if day >= until:
         raise DataError(f"{day} is on or after {until}, the end of the days this read may open")
