@@ -51,15 +51,11 @@ fn api_fixture(name: &str) -> PathBuf {
 }
 
 /// The results the session publishes for the app, one per relayed topic.
-fn results() -> [(&'static str, Value); 4] {
+fn results() -> [(&'static str, Value); 3] {
     [
         (
             "meters",
             json!({"symbol": "BTCUSDT", "ts_ms": 1_700_000_002_000_i64, "variance": 0.25, "ac1": 0.5, "latent": 1.5}),
-        ),
-        (
-            "jev",
-            json!({"symbol": "BTCUSDT", "ts_ms": 1_700_000_002_000_i64, "label": "regime_shift", "p": 0.8}),
         ),
         (
             "pnl",
@@ -173,7 +169,7 @@ async fn the_session_is_sent_as_its_golden_files_say() -> Outcome {
         })
         .collect::<Result<_, _>>()?;
     for kind in [
-        "welcome", "source", "book", "trades", "status", "meters", "jev", "pnl", "ising",
+        "welcome", "source", "book", "trades", "status", "meters", "pnl", "ising",
     ] {
         assert!(
             kinds.iter().any(|k| k == kind),
@@ -600,6 +596,16 @@ async fn protocol_errors_close_with_their_codes() -> Outcome {
     let mut ws = ws_connect(server.addr).await?;
     send_json(&mut ws, &json!({"t": "hello", "v": PROTOCOL})).await?;
     assert_eq!(next_json(&mut ws, WAIT).await?["t"], "welcome");
+    send_json(&mut ws, &json!({"t": "sub", "topics": ["book", "labels"]})).await?;
+    assert_eq!(
+        next_frame(&mut ws, WAIT).await,
+        Frame::Closed(Some(4000)),
+        "a topic the engine does not have"
+    );
+
+    let mut ws = ws_connect(server.addr).await?;
+    send_json(&mut ws, &json!({"t": "hello", "v": PROTOCOL})).await?;
+    assert_eq!(next_json(&mut ws, WAIT).await?["t"], "welcome");
     send_json(&mut ws, &json!({"t": "seek", "to_ms": 1})).await?;
     assert_eq!(
         next_frame(&mut ws, WAIT).await,
@@ -913,7 +919,7 @@ async fn only_objects_on_relayed_topics_are_published() -> Outcome {
             .body(body.to_owned())
             .send()
     };
-    let relayed = json!({"t": "sub", "topics": ["meters", "jev", "pnl", "ising"]});
+    let relayed = json!({"t": "sub", "topics": ["meters", "pnl", "ising"]});
     let mut app = ws_connect(server.addr).await?;
     hello(&mut app).await?;
     send_json(&mut app, &relayed).await?;
@@ -937,8 +943,8 @@ async fn only_objects_on_relayed_topics_are_published() -> Outcome {
         .collect();
     want.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(got, want, "each result once, on its own topic");
-    let mut pnl = results()[2].1.clone();
-    assert_eq!(results()[2].0, "pnl");
+    let mut pnl = results()[1].1.clone();
+    assert_eq!(results()[1].0, "pnl");
     pnl["pnl"] = json!(7.5);
     assert_eq!(post("pnl", &pnl.to_string()).await?.status(), 204);
     let got = relayed_until_quiet(&mut app, quiet).await?;
@@ -962,7 +968,7 @@ async fn only_objects_on_relayed_topics_are_published() -> Outcome {
     assert_eq!(post("book", r#"{"v":1}"#).await?.status(), 404);
     assert_eq!(post("meters", "[1,2]").await?.status(), 400);
     assert_eq!(post("meters", "not json").await?.status(), 400);
-    assert_eq!(post("jev", &"x".repeat(100 * 1024)).await?.status(), 413);
+    assert_eq!(post("ising", &"x".repeat(100 * 1024)).await?.status(), 413);
     server.stop().await;
     fs::remove_dir_all(&dir)?;
     Ok(())
@@ -1058,13 +1064,8 @@ fn received(messages: &[Value], topic: &str, id_field: &str) -> Outcome<(Vec<u64
     Ok((ids, lost))
 }
 
-/// A client that falls behind on an append topic is told so (#87, where the three topics' drain
-/// loops became one): on ising and trades, a gap with the count lost and the newest after it,
-/// every message either delivered or counted; on jev, which is never dropped, a 4002 close. The
-/// hub holds two of each for a client, and a hundred are published at once, well inside the
-/// 16 ms a connection waits between sends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn falling_behind_on_an_append_topic_is_a_gap_or_a_close() -> Outcome {
+async fn falling_behind_on_an_append_topic_is_a_gap() -> Outcome {
     const BURST: u64 = 100;
     let dir = scratch("api-behind");
     let config = HubConfig {
@@ -1116,19 +1117,6 @@ async fn falling_behind_on_an_append_topic_is_a_gap_or_a_close() -> Outcome {
     check(
         "trades",
         received(&until_quiet(&mut trades, quiet).await?, "trades", "seq")?,
-    );
-
-    let mut jev = subscribed(server.addr, "jev").await?;
-    for n in 0..BURST {
-        hub.relay(
-            Topic::Jev,
-            json!({"symbol": "BTCUSDT", "label": "regime_shift", "n": n}),
-        );
-    }
-    assert_eq!(
-        close_code(&mut jev).await,
-        Some(4002),
-        "jev is never dropped"
     );
     server.stop().await;
     fs::remove_dir_all(&dir)?;
