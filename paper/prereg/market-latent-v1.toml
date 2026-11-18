@@ -1,0 +1,355 @@
+# Pre-registration: the market JEPA's latent warning test (#30 M9). Written from
+# TEMPLATE-market-latent.toml after the M6 exploratory latent passes on 2023-Q4 and the M8 trainings;
+# [disclosure] says what was seen and when. Units as in market-ews-v1.
+
+id = "market-latent"
+version = 1
+supersedes = ""
+reason = ""
+question = "Do the latents of a JEPA trained on Bybit order books warn of regime-shift onsets in the BTC and ETH perpetuals, read on the model's own asset and across assets, beyond the model's untrained twin and beyond the classic indicators?"
+
+# One per judged pair (the four pairs only, 2026-11-09), each two-sided: the trend score's AUC is
+# read as its distance from 0.5. The prediction states the decision rule; h = 5 and 6 are decisive.
+
+[[hypotheses]]
+name = "pc1-variance"
+column = "pc_1"
+indicator = "variance"
+statement = "The rolling variance of the leading latent component moves away from its calm-window distribution over the four hours before a regime-shift onset, in either direction."
+prediction = "Decisive at h = 5 and 6; h = 12 and 24 are scored, counted and reported, not decisive. A CI lies above a value when its lower end does. The units read are the four judged cells, each holding the five primaries of its model's symbol, and, per model symbol, its five primaries' pooled groups, formed as cells.groups says: each primary's pooled group holds the events and controls of its two cells, and in each event-time shift draw on a pooled group each read symbol's onsets move within that symbol's own eligible bars. (1) Warns: in every unit, every primary's trained AUC 95 % CI excludes 0.5, all five on the same side of 0.5, and its |AUC - 0.5| lies above the 95th percentile of the same statistic over the event-time shift's draws, the two-sided counterpart, on a statistic folded about 0.5, of market-ews-v1's one-sided 97.5th percentile. (2) Learned: in every unit, the five primaries' trained-minus-twin margins, combined as scoring.twin.seeds says, pass under the tolerance rule, and every primary's margin carries the sign of the combined margin. (3) Beyond classic: in every unit, every primary's latent-minus-classic difference passes as scoring.classic.pairing says, against the classic indicator scoring.classic.against matches to the pair. Tolerance rule, with scoring.twin.tolerance 0.02 in |AUC - 0.5|: a combined margin whose 95 % CI lies above 0.02 passes; one whose CI holds 0 and lies inside [-0.02, 0.02] fails, as no margin; any other is inconclusive. The pair warns only when (1) holds at both h = 5 and h = 6. (2) and (3) are read, and claimed, only for a pair that warns, and each holds only when it holds at both h = 5 and h = 6; for a pair that does not warn they are reported with no verdict. A unit that is inconclusive does not pass, and every unit's outcome is reported."
+direction = "two-sided"
+
+[[hypotheses]]
+name = "pc1-ac"
+column = "pc_1"
+indicator = "ac"
+statement = "The lag-1 autocorrelation of the leading latent component moves away from its calm-window distribution over the four hours before a regime-shift onset, in either direction."
+prediction = "Decisive at h = 5 and 6; h = 12 and 24 are scored, counted and reported, not decisive. A CI lies above a value when its lower end does. The units read are the four judged cells, each holding the five primaries of its model's symbol, and, per model symbol, its five primaries' pooled groups, formed as cells.groups says: each primary's pooled group holds the events and controls of its two cells, and in each event-time shift draw on a pooled group each read symbol's onsets move within that symbol's own eligible bars. (1) Warns: in every unit, every primary's trained AUC 95 % CI excludes 0.5, all five on the same side of 0.5, and its |AUC - 0.5| lies above the 95th percentile of the same statistic over the event-time shift's draws, the two-sided counterpart, on a statistic folded about 0.5, of market-ews-v1's one-sided 97.5th percentile. (2) Learned: in every unit, the five primaries' trained-minus-twin margins, combined as scoring.twin.seeds says, pass under the tolerance rule, and every primary's margin carries the sign of the combined margin. (3) Beyond classic: in every unit, every primary's latent-minus-classic difference passes as scoring.classic.pairing says, against the classic indicator scoring.classic.against matches to the pair. Tolerance rule, with scoring.twin.tolerance 0.02 in |AUC - 0.5|: a combined margin whose 95 % CI lies above 0.02 passes; one whose CI holds 0 and lies inside [-0.02, 0.02] fails, as no margin; any other is inconclusive. The pair warns only when (1) holds at both h = 5 and h = 6. (2) and (3) are read, and claimed, only for a pair that warns, and each holds only when it holds at both h = 5 and h = 6; for a pair that does not warn they are reported with no verdict. A unit that is inconclusive does not pass, and every unit's outcome is reported."
+direction = "two-sided"
+
+[[hypotheses]]
+name = "surprise-variance"
+column = "surprise"
+indicator = "variance"
+statement = "The rolling variance of the surprise moves away from its calm-window distribution over the four hours before a regime-shift onset, in either direction."
+prediction = "Decisive at h = 5 and 6; h = 12 and 24 are scored, counted and reported, not decisive. A CI lies above a value when its lower end does. The units read are the four judged cells, each holding the five primaries of its model's symbol, and, per model symbol, its five primaries' pooled groups, formed as cells.groups says: each primary's pooled group holds the events and controls of its two cells, and in each event-time shift draw on a pooled group each read symbol's onsets move within that symbol's own eligible bars. (1) Warns: in every unit, every primary's trained AUC 95 % CI excludes 0.5, all five on the same side of 0.5, and its |AUC - 0.5| lies above the 95th percentile of the same statistic over the event-time shift's draws, the two-sided counterpart, on a statistic folded about 0.5, of market-ews-v1's one-sided 97.5th percentile. (2) Learned: in every unit, the five primaries' trained-minus-twin margins, combined as scoring.twin.seeds says, pass under the tolerance rule, and every primary's margin carries the sign of the combined margin. (3) Beyond classic: in every unit, every primary's latent-minus-classic difference passes as scoring.classic.pairing says, against the classic indicator scoring.classic.against matches to the pair. Tolerance rule, with scoring.twin.tolerance 0.02 in |AUC - 0.5|: a combined margin whose 95 % CI lies above 0.02 passes; one whose CI holds 0 and lies inside [-0.02, 0.02] fails, as no margin; any other is inconclusive. The pair warns only when (1) holds at both h = 5 and h = 6. (2) and (3) are read, and claimed, only for a pair that warns, and each holds only when it holds at both h = 5 and h = 6; for a pair that does not warn they are reported with no verdict. A unit that is inconclusive does not pass, and every unit's outcome is reported."
+direction = "two-sided"
+
+[[hypotheses]]
+name = "surprise-level"
+column = "surprise"
+indicator = "level"
+statement = "The level of the surprise moves away from its calm-window distribution over the four hours before a regime-shift onset, in either direction."
+prediction = "Decisive at h = 5 and 6; h = 12 and 24 are scored, counted and reported, not decisive. A CI lies above a value when its lower end does. The units read are the four judged cells, each holding the five primaries of its model's symbol, and, per model symbol, its five primaries' pooled groups, formed as cells.groups says: each primary's pooled group holds the events and controls of its two cells, and in each event-time shift draw on a pooled group each read symbol's onsets move within that symbol's own eligible bars. (1) Warns: in every unit, every primary's trained AUC 95 % CI excludes 0.5, all five on the same side of 0.5, and its |AUC - 0.5| lies above the 95th percentile of the same statistic over the event-time shift's draws, the two-sided counterpart, on a statistic folded about 0.5, of market-ews-v1's one-sided 97.5th percentile. (2) Learned: in every unit, the five primaries' trained-minus-twin margins, combined as scoring.twin.seeds says, pass under the tolerance rule, and every primary's margin carries the sign of the combined margin. (3) Beyond classic: in every unit, every primary's latent-minus-classic difference passes as scoring.classic.pairing says, against the classic indicator scoring.classic.against matches to the pair. Tolerance rule, with scoring.twin.tolerance 0.02 in |AUC - 0.5|: a combined margin whose 95 % CI lies above 0.02 passes; one whose CI holds 0 and lies inside [-0.02, 0.02] fails, as no margin; any other is inconclusive. The pair warns only when (1) holds at both h = 5 and h = 6. (2) and (3) are read, and claimed, only for a pair that warns, and each holds only when it holds at both h = 5 and h = 6; for a pair that does not warn they are reported with no verdict. A unit that is inconclusive does not pass, and every unit's outcome is reported."
+direction = "two-sided"
+
+[data]
+domain = "market-latent"
+symbols = ["BTCUSDT", "ETHUSDT"]   # both: each symbol's model reads both symbols
+missing = "a minute whose latent or surprise is not finite in any table read on that symbol (a feature gap in the minute, or no valid minute in the predictor's context) has no value; a segment holding such a minute, or one the baseline excludes on that symbol, is excluded for every column, indicator and checkpoint, latent and classic alike, and counted, so that every comparison is paired on the same segments"
+
+[data.labels]            # the baseline's labels, which the freeze holds equal
+tag = "prereg/market-labels-v1"
+sha256 = "d5988eab9e1bab7442e8d56dd7d80388d1696a6cb0ef6d6b4d4bb50f26507458"
+
+[data.events]
+primary = "regime-shifts"
+stress = "cascades"
+
+# The frozen classic test whose segments this file is scored on. Neither file is scored on
+# confirmatory data before both are frozen (#30 choice 10).
+[baseline]
+tag = "prereg/market-ews-v1"
+sha256 = "83e73ccd4a40b4380133369d1e60d5695afe728140ac8cad27c74662456d57c7"
+
+# The primaries (harness/m8_primaries.py): one model per symbol, each trained on its own symbol's
+# 1-second book features; the twin of each is its step-0 checkpoint.
+[training]
+span = { start = 2023-01-18, end = 2023-08-31 }
+validation = { start = 2023-09-01, end = 2023-09-30 }
+features = ["ret", "rv100", "moves", "micro_dev", "imb_1", "imb_5", "imb_20", "ofi", "depth_5", "depth_20", "depth_asym", "slope_b", "slope_a", "wide"]
+feature_format = 4       # book.features.FORMAT 4: second 0 seeded from the previous day's book (#170)
+scaling = "each model's features are scaled by the record fitted on its own symbol's training days (jepa.days); a model reading the other symbol takes that symbol's record, fitted on its training days, never refitted on what is read"
+size = "S"
+dim = 64
+steps = 10000
+primaries = [101, 102, 103, 104, 105]
+spares = [106, 107]
+replacement = "A primary is replaced by the next spare of its symbol, 106 and then 107, only when its training fails train.verify or the extraction refuses its checkpoint (unreadable, a sha256 that differs from its pin, or collapsed). The replacement is logged in deviations before any scored result is read, and a primary is never replaced for its scores. No replacement has happened: all 14 trainings ran to 10,000 steps at their first attempt, none records a collapse, all pass train.verify, and each checkpoint's sha256 values were recomputed from its files and equal its pin."
+refusals = "jepa.days refuses any day from 2024-01-01 as a training input, and any feature file whose metadata names another symbol, day, feature format or feature list; a checkpoint is pinned only from a complete training of the primaries' configuration whose every day read is its data manifest's file"
+
+# What a checkpoint's latent table holds, and the columns the pairs read; pc_2..pc_8 and surprise5
+# are extracted but judged by nothing. The entries are pins.json's, value for value.
+[latents]
+columns = ["pc_1", "surprise"]
+context = 96             # minutes a predictor chunk holds: the readout sees the 95 before minute m
+series = "per UTC minute m of the read symbol and per checkpoint, trained and twin alike: surprise, the error of the delta = 1 prediction of z_m from the context - 1 minutes before it, and pc_1 to pc_8, z_m on the PCA basis saved with that checkpoint, z_m being the target encoder's latent of minute m; read as two contiguous series, one over [seasonality]'s fit span and one from 5 x the largest horizon + window + length - 1 + context - 1 minutes before 2024-01-01 (514 minutes at horizons up to 24 bars, window 60, length 240 and context 96) to the end of the labels' confirmatory span, so that the first minute of a segment ending at the earliest confirmatory onset has its full context; each value known when minute m closes, and deseasonalised as [seasonality] says, with a slot profile fitted per column, checkpoint and read symbol over its fit span"
+pca = "each checkpoint's own basis, saved with it by the trainer (final.pt for the trained model, the step-0 checkpoint for its twin): 8 components fitted on 4,096 valid minutes of its training days drawn with replacement under the run's pca seed stream"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 101
+role = "primary"
+run_id = "20261111T105253Z-BTCUSDT-S-s101"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "be3ab0c7963f02761be47a1f1ed6d2068bbcc0e0d582b53ec9e9a2e50562cf4f"
+twin_sha256 = "e2250177b40a1cf6a16621cb676c722f427f27d83968183d1f60602b55f55f90"
+pca_sha256 = "0aeae83a005e89592e11b522792013a36ebfc3e953778df7f4ba05ee07c9326e"
+scaling_sha256 = "01a083031204d32020191d9de6108683be8ca48f3887286ffdde85eea6a1deae"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 102
+role = "primary"
+run_id = "20261111T152045Z-BTCUSDT-S-s102"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "7763c4620bcfb299c9b3937476f48160a3f6db5950cf2106cd862dd5fddc15af"
+twin_sha256 = "beebd7ab766506ea17d7741af8d2d2b7445fef6828da612cb1a24d36ae9e4f53"
+pca_sha256 = "932627713d1a6908b8dde675f9423a6e9488254203e46b0a8204efff1a4f9dbf"
+scaling_sha256 = "01a083031204d32020191d9de6108683be8ca48f3887286ffdde85eea6a1deae"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 103
+role = "primary"
+run_id = "20261111T183945Z-BTCUSDT-S-s103"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "639971680149051c7917a3c1cd41445d1fb99fad1737decae8ab49f563bc1896"
+twin_sha256 = "4e6d5f4ffdd941ad69ff6072e1262ac6de81aa62694c5c232057f1fc07c16499"
+pca_sha256 = "5aadb9ae6c38bd8f4752b52cb175be291d0949cdf3265a2f0bbef2576f7f254c"
+scaling_sha256 = "01a083031204d32020191d9de6108683be8ca48f3887286ffdde85eea6a1deae"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 104
+role = "primary"
+run_id = "20261111T205002Z-BTCUSDT-S-s104"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "2f1b6045f38489c9d9f9dc8bb65bb08aceb60ba3f3935beb69fc914ea594af49"
+twin_sha256 = "2e36252c307d66ecc846999ac29e508b68979cb97caefbd017e956b9a89d7b81"
+pca_sha256 = "40e8666ccbd853e4fa512e446d2e54923ca10b85cbd70b8054232657d818bc2e"
+scaling_sha256 = "01a083031204d32020191d9de6108683be8ca48f3887286ffdde85eea6a1deae"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 105
+role = "primary"
+run_id = "20261111T225854Z-BTCUSDT-S-s105"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "90d5d411b30b12db90b403b1a2555590a598db0dc296b4d032963f67b3996194"
+twin_sha256 = "4dd4a649e8a7235839fcf5b2440b32501c9c89250b6eb216ecf2b4ae3df7db81"
+pca_sha256 = "5c2a8c8bb190f3f23adf8cb9308a4021fd5628a23d3d0c5c4e407f5c0466a00e"
+scaling_sha256 = "01a083031204d32020191d9de6108683be8ca48f3887286ffdde85eea6a1deae"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 106
+role = "spare"
+run_id = "20261112T011314Z-BTCUSDT-S-s106"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "3324c264aac9bed15cb05b1d174ece91a288b79d1cc022697d13ec1eaa83fd6d"
+twin_sha256 = "6fc1c1ee9dd7c93d0b5d723023dc0390c210615f4b347357bc41cede243b9acf"
+pca_sha256 = "94726560a71822a5c0abb0c2c32951a0169487dc4be02f5c67479c7d6b1a24e4"
+scaling_sha256 = "01a083031204d32020191d9de6108683be8ca48f3887286ffdde85eea6a1deae"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 107
+role = "spare"
+run_id = "20261112T032127Z-BTCUSDT-S-s107"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "fca1c5496228ec42d32e47284e52c1ee270c672b0d6bfa4b1a6d1c725cbf2a69"
+twin_sha256 = "16407148d5763644a7d0bb59d8a6746e63304cec07e9519b4fa0519ea9c75a21"
+pca_sha256 = "dab122fa45f5e3fd094b11b18d85f253fd90c647f4452e47d968e5e3082550be"
+scaling_sha256 = "01a083031204d32020191d9de6108683be8ca48f3887286ffdde85eea6a1deae"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 101
+role = "primary"
+run_id = "20261111T131611Z-ETHUSDT-S-s101"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "1fb6b0f115470afc78e1dd19d912fbb7621bd7eed6caca8bc120c94a628bd741"
+twin_sha256 = "b773b354870d60c0b618328dca0fe334c68b7714e4e174f951c592342ca67840"
+pca_sha256 = "c298e6fcd7891e5730919954c3fecd1b9c8b4f14ac94f0a765d25704bc690220"
+scaling_sha256 = "896a243747b34e8e125d7ce0a02c85d83445b9da7560ee75a16d344f60201abd"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 102
+role = "primary"
+run_id = "20261111T171447Z-ETHUSDT-S-s102"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "7e335fcae93e32fe495feb64850174ea5c3a34fdc0f9683b89ce2ae54c5d3935"
+twin_sha256 = "8bffcbe89e4fb73a475a14c213c5be0d1a571f1b3319742d5c375f084363c33f"
+pca_sha256 = "9f310b7417e347ca7519092a7e0583c3e9d892330656c10267502a69e894fb1c"
+scaling_sha256 = "896a243747b34e8e125d7ce0a02c85d83445b9da7560ee75a16d344f60201abd"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 103
+role = "primary"
+run_id = "20261111T194344Z-ETHUSDT-S-s103"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "748b030764a9fad553518c66b05b2ebfafa99cdfccbfcb14c28de86f098bc3c0"
+twin_sha256 = "74d4908c4a7760ffe9f07321829f7adf8ad939affbf6005157e40eb1c6caa760"
+pca_sha256 = "72f112d4c4790b27e36d4c7e3ebafe3d76ec769067c023a2036c5e1d8a8f2aa0"
+scaling_sha256 = "896a243747b34e8e125d7ce0a02c85d83445b9da7560ee75a16d344f60201abd"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 104
+role = "primary"
+run_id = "20261111T215432Z-ETHUSDT-S-s104"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "d555f6fece850f1ca8fb9551af54a91c9c71276b3fd4becd0d565b3fae50626e"
+twin_sha256 = "9a8da57ee7db75be226857587e899307ad2de202ba22af0fbde9366b55686439"
+pca_sha256 = "65fa0cb5a99861d9f45405b9d32b2cae7c31ac3d7db5cd6185313c36de637e81"
+scaling_sha256 = "896a243747b34e8e125d7ce0a02c85d83445b9da7560ee75a16d344f60201abd"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 105
+role = "primary"
+run_id = "20261112T000138Z-ETHUSDT-S-s105"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "e953734d160660ad42f2121aba1b4631a889382e10ea8e64c6de64a3741d8d06"
+twin_sha256 = "9481981424ecc6f9148024a54c0e40eb15b7f11a5deeaaf590b7bd54e13cfd25"
+pca_sha256 = "968be6af9b3a786774866056f4239660aafb0bb0efab6892568b6e68cf6fb43b"
+scaling_sha256 = "896a243747b34e8e125d7ce0a02c85d83445b9da7560ee75a16d344f60201abd"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 106
+role = "spare"
+run_id = "20261112T021735Z-ETHUSDT-S-s106"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "0c5736fe7a3111d0443a1e20ac7bc072f3e15b7b88d215cb15c9c907becd851d"
+twin_sha256 = "c6c5b7e4d94fc24687e4d33a3bda7cfc41bb5abd85a94e5ccbc11b713c2db1c0"
+pca_sha256 = "5e42de607ccd0a21505cb4fea7d7f31e9b51c8fad976ced2f2f07edecd50ed55"
+scaling_sha256 = "896a243747b34e8e125d7ce0a02c85d83445b9da7560ee75a16d344f60201abd"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 107
+role = "spare"
+run_id = "20261112T042539Z-ETHUSDT-S-s107"
+data_commit = "7dc6d125999ff6571ef9afb7119329e6eb72337b"
+trained_sha256 = "a12587dd3e19eb43a0c9db35682bd15e2d43a7ba8cc59b2676a9a7177a1db5ac"
+twin_sha256 = "efe5e97455933bf32f7aa02b868d19942595e9b9781259f6a7feca002f7920b2"
+pca_sha256 = "59e81b0cec054315a534fb6f968f15e67f9e19d673d4613d67a0a23f03a41288"
+scaling_sha256 = "896a243747b34e8e125d7ce0a02c85d83445b9da7560ee75a16d344f60201abd"
+
+# Restated from the baseline and held equal to it by the freeze.
+[indicators]
+pairs = [["pc_1", "variance"], ["pc_1", "ac"], ["surprise", "variance"], ["surprise", "level"]]
+window = 60
+length = 240
+lag = 1
+detrend = "none"
+
+[seasonality]
+method = "mean"
+fit = { start = 2023-01-18, end = 2023-09-30 }
+strata = ["onset-hour"]
+
+[segments]
+horizons = [5, 6, 12, 24]
+rule = "an event segment at horizon h bars ends with the minute that closes at the onset minus 5h minutes and holds the window + length - 1 minutes up to it; the length is the same at every horizon, a segment may start before the labels' clean window, and the share of its minutes in bars with H = 1 is reported"
+controls = "control segments are the non-overlapping runs of window + length - 1 minutes cut in time order from the start of each null stretch of the labels run, one set for every horizon; with subsample n > 0, at most n of each symbol's are kept, drawn without replacement under the seed after the exclusions when there are more"
+subsample = 0
+seed = 30
+
+# [model's symbol, read symbol]: each model reads both symbols, each with that symbol's own scaling.
+[cells]
+read = [["BTCUSDT", "BTCUSDT"], ["BTCUSDT", "ETHUSDT"], ["ETHUSDT", "BTCUSDT"], ["ETHUSDT", "ETHUSDT"]]
+judged = "all"
+groups = "each primary checkpoint, trained and twin, is scored per [model's symbol, read symbol] cell (per-asset) and, with eth-only, per cell reading ETHUSDT; with judged 'all' each model's pooled group holds its two cells, and with judged 'same-asset' one pooled group per primary seed holds only that seed's BTCUSDT on BTCUSDT and ETHUSDT on ETHUSDT cells; the hypotheses read the judged cells and these pooled groups, and the other cells are reported; the classic AUCs are taken pooled over both symbols, per read symbol and on the eth-only segments"
+
+[scoring]
+statistic = "|AUC - 0.5|"
+ci_level = 0.95
+bootstrap = 2000
+seed = 30
+
+[scoring.shift]          # the latent's primary null: does it warn at all
+draws = 100
+min_offset_bars = 288
+
+[scoring.surrogates]
+secondary = "phase"
+n = 999
+
+[scoring.twin]           # did training matter
+pairing = "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the same bootstrap draws; a judged cell or pooled group passes only when every primary's trained AUC - 0.5 has the same sign, so that seeds warning in opposite directions never pass on their margins"
+seeds = "a percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws"
+sign_test = true         # every primary's margin must carry the sign of the combined margin
+tolerance = 0.02         # in |AUC - 0.5|: above it passes, a CI holding 0 inside it fails, else inconclusive
+
+[scoring.classic]        # does it warn better than the classic test
+pairing = "the latent pair's |AUC - 0.5| minus the classic indicator's AUC - 0.5 taken in the direction the baseline's hypothesis on that indicator pre-registers (AUC - 0.5 for 'greater'), the classic AUCs recomputed on the baseline's price series over the same segments; the difference passes only when it exceeds the 97.5th percentile of the same difference recomputed on each of [scoring.shift]'s draws under scoring.seed, the latent and classic sides shifted by the same offsets, a null that carries the same folding of the latent side; its paired-bootstrap CI, on the same bootstrap draws, is reported and decides nothing; 'matching' compares each variance and level pair with the classic variance and the ac pair with the classic ac"
+against = "matching"
+
+[descriptive]
+same_input = "the baseline's [same_input] tier, on the same segments, reported beside every latent cell; read by no decision rule, and counting no trial"
+incremental_rv = "per pair, horizon and cell, the AUC of a two-variable logistic model (the latent score and the realised variance of the read symbol's 1-minute returns of the baseline's data.series, before deseasonalising, over the rv_minutes minutes up to the segment end) minus that of the realised variance alone, with its bootstrap CI; each model is fitted and scored on the same segments, so the AUCs are in-sample and the report is descriptive only, counting no trial"
+rv_minutes = 60
+ablations = []           # no EMA-only checkpoint is trained
+
+[reporting]
+groups = ["pooled", "per-asset", "eth-only"]
+eth_only_bars = 12
+
+[trials]
+budget = 1312            # 2 (trained, twin) x 4 pairs x 4 horizons x 40 latent groups + 2 classic indicators x 4 horizons x 4 groups
+counted = "One trial per AUC evaluation: per primary checkpoint, trained and twin, pair and horizon, of each group cells.groups defines (each cell it reads, each cell reading ETHUSDT for eth-only, and the pooled groups, one per model with judged all or one per seed with judged same-asset); and per classic indicator compared and horizon, of the classic AUCs recomputed on the paired segments, pooled, per read symbol and eth-only, since data.missing drops segments for the classic side too. Every scoring run appends its cells to ews/trials.jsonl in the data dir. Margins and differences reuse those AUCs and count none, and the latent-minus-classic difference recomputed on each event-time shift draw reuses the shift null's draws and counts none; the spares unless they replace a primary, the onset-hour strata, the cascade stress test, the same-input tier, the incremental report and the ablations are not counted."
+
+[disclosure]
+exploratory = """
+All of the following read 2022-07-01..2023-12-31 only, and the trainings and the latent passes read 2023 only. No latent, indicator, segment, AUC or label of a day from 2024-01-01 on was computed or looked at, and ews/trials.jsonl holds no market-latent trial.
+
+7 and 8 November 2026, the M4 pilot (harness/m4_pilot.py, merged in #182; its rules were accepted on 7 November, before any pilot score was read): one seed (100) per symbol at sizes S and M, 20,000 steps, trained from f9efb5d on 2023-01-18..2023-08-31 of the book features as reduced before the #170 fix, and scored by a next-minute ridge probe on September 2023 (1.0 is no better than the mean). Probe error at step 10,000: 0.6327 for BTC S and 0.7746 for ETH S, beside 0.7463 and 0.9385 for their untrained twins. The upper 95 % CI of S - M was -0.010 (BTC) and -0.009 (ETH), and the step-10,000 model was within 2 % of the step-20,000 one on both symbols (BTC 0.6327 against 0.6313, ETH 0.7746 against 0.7752). By the rules: size S (d = 64) and 10,000 steps.
+
+8 November 2026, the M6 exploratory latent pass (merged in #183, run at e8c3121) on 2023-Q4, with the pilot's S checkpoints at step 10,000 and their step-0 twins, on the same pre-fix features: 15 BTC and 6 ETH events kept, against 31 and 39 controls, the midnight gap of #170 dropping a quarter to a third of the controls. Every pair's sign disagreed across horizons or symbols, and no column passed the screen rule (in both same-asset cells, some trained AUC whose CI excludes 0.5 and lies further from 0.5 than the twin's). The closest was pc_1 ac on ETH->ETH at h = 5 and 6, trained 0.718 and 0.709 beside twin 0.568 and 0.538, with nothing on BTC->BTC. Ranked by the mean trained-minus-twin |AUC - 0.5|, only pc_1 (+0.019) and pc_3 (+0.009) were above zero. The ETH model's pc_1 variance read on BTC reached 0.69-0.71, against 0.36-0.43 for BTC->BTC on the same pair.
+
+13 November 2026, posted on 18 November: the M6 pass run again at 7dc6d12 on the FORMAT 4 features (after the #170 fix), with model seed 101 of each symbol, the primaries 20261111T105253Z-BTCUSDT-S-s101 and 20261111T131611Z-ETHUSDT-S-s101 pinned below, each beside its step-0 twin. Every event segment was kept: 17 BTC and 7 ETH events at each h, against 41 BTC and 54 ETH controls. Only surprise variance had one sign across the same-asset cells (greater), and no column passed the screen rule (the best, pc_4, had a mean margin of +0.056 over its twin and passed only at BTC h = 12 and 24). In the same-asset cells no trained AUC interval of the four pairs excluded 0.5 at any h; cross-asset, ETH->BTC pc_1 variance did at h = 5, 6 and 12 (0.661, 0.661 and 0.693). Of the 64 trained-minus-twin margins of the four pairs, 3 had an interval excluding 0: BTC->ETH pc_1 variance at h = 12 (-0.299), ETH->ETH surprise variance at h = 24 (+0.304) and BTC->ETH surprise level at h = 12 (+0.294). The intervals were about +/-0.17 on BTC and +/-0.25 on ETH, and the twin often read as high as the trained model or higher (ETH pc_1 variance: twin 0.61-0.75, trained 0.39-0.42). Mean surprise, trained over twin, showed no rise on the quarter against the training months.
+
+The classic side's 2023 exploratory pass (8 November 2026), the same-input tier's 2023 read (10 November) and the GARCH floor reports (6, 12 and 18 November) were seen before this file was written; market-ews-v1's disclosure gives their numbers.
+
+11 and 12 November 2026, the M8 trainings (harness/m8_primaries.py, merged in #187, run at 7dc6d12): the 14 runs pinned below, each reading its own symbol's FORMAT 4 training range, 2023-01-18..2023-08-31 for the gradient and September 2023 for the monitor. Each ran to 10,000 steps at its first attempt, and pins.json was written on 12 November. Their training-loss logs were read. No exploratory pass on #30 reads seeds 102 to 107.
+
+By 18 November 2026, the confirmatory extraction's build (#212, commit 374f61d) was dry-run on 20 days of the 2023 exploratory range with a two-process plan, stopped after one unit and resumed, and its files verified. Its extractor refuses the confirmatory span without a gate record made from a frozen market-latent file, and none exists.
+"""
+decisions = """
+Chosen on 8 November 2026 by the M4 pilot's rules, on book features reduced before the midnight fix (#170): size S (d = 64) and 10,000 steps. On 9 November both were kept for the M8 trainings, without rerunning the pilot on the re-reduced features.
+
+Chosen on 9 November 2026 with the first M6 pass in view, and kept after the FORMAT 4 rerun: two-sided tests for all four pairs, read as |AUC - 0.5| with no direction pre-registered, because the directions disagreed across horizons and symbols (on the rerun, for every pair but surprise variance); and the four pairs as the only judged columns, because the exploratory screen proposed no column beyond them, on either pass.
+
+Chosen while writing this file, with both M6 passes in view. cells.judged all: the research pass names cross-asset generalisation, the BTC model reading ETH and the ETH model reading BTC, as the issue's test, so the cross-asset cells are judged with the same-asset ones; the trial budget is 1312. On the rerun a cross-asset cell (ETH->BTC pc_1 variance) separated where no same-asset cell did; under judged all a pair warns only if it warns in all four cells and the pooled groups. scoring.classic.against matching. training.replacement: a spare replaces a primary only on a failed train.verify or a refused checkpoint, never for its scores, and is logged before any scored result is read. scoring.twin.seeds as ising-latent-v1's: a percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws. scoring.twin.tolerance 0.02 in |AUC - 0.5|, with its rule: a combined margin whose 95 % CI lies above 0.02 passes; one whose CI holds 0 and lies inside [-0.02, 0.02] fails, as no margin; any other is inconclusive. On the rerun, one seed and one quarter, the margins' intervals were about +/-0.17 (BTC) and +/-0.25 (ETH), far wider than the tolerance. The predictions: three verdicts at h = 5 and 6 (warns, learned, beyond classic), h = 12 and 24 reported, and learned and beyond classic read and claimed only for a pair that warns. Warns asks every primary's |AUC - 0.5| to lie above the 95th percentile of the shift draws' |AUC - 0.5|, the two-sided counterpart of market-ews-v1's one-sided 97.5th percentile. Beyond classic asks every primary's difference in a unit to pass, as warns asks every primary's AUC. The pooled groups and their shift null follow market-ews-v1's pooled cell: a pooled group is formed as cells.groups says, and the shift moves each read symbol's onsets within that symbol's own eligible bars.
+
+The seasonality fit span, 2023-01-18..2023-09-30, is the baseline's and overlaps the days the models were trained and validated on, so each latent's slot profile is fitted on days its model read (and, read across assets, on the other symbol's training days). The scored days, from 2024-01-01, were read by neither the models nor the profiles.
+
+The latent-minus-classic rule passes above the 97.5th percentile of the 100 shift draws, so its level is between 3/101 and 4/101, not 2.5 %, depending on how the percentile is interpolated. In #210's simulation with no effect, it passed 3.0 % to 4.1 % of repetitions.
+"""
+confirmatory = "v1 scores, from the tagged commit, the primaries pinned above and their step-0 twins, each model reading both symbols, on BTCUSDT and ETHUSDT 2024-01-01..2026-09-30: the latents those checkpoints extract from the Bybit book features of those days, on the regime-shift events whose onsets fall in that span and the control segments that start in it, cut from market-labels-v1's labels by the baseline's rules and paired with its segments, the cascades as the stress test, and the classic AUCs recomputed on the same segments. Days before 2024-01-01 enter only as the slot profiles' fit span and as context and history for the first segments of 2024. The spares are extracted beside the primaries and scored only if training.replacement brings one in. The order of pre-registration is market-ews-v1 first, then market-latent-v1 (#30 research pass 7.1, chosen on 6 November 2026 and kept on 9 November): neither file is scored on any day from 2024-01-01 until both are frozen, and the extraction refuses the confirmatory span until this file is frozen."
+confirmatory_contact = "On 2026-11-06, while the book import was being built, a command-line test called the real downloader and fetched six Bybit order-book days from the confirmatory span, BTCUSDT and ETHUSDT 2024-01-01 to 2024-01-06, into a test's temporary folder. Every import failed, every archive was deleted, and the one partial file left was removed. No sample, feature, latent or label from those days was produced or looked at, and the book tests now refuse any network access. The Bybit book features of 2024-01-01..2026-09-30 were made on Kaggle CPU on 7 and 8 November 2026 (fcd5b6f, FORMAT 3) and made again after the #170 fix (7dc6d12, FORMAT 4): the order books of those days were downloaded, imported and reduced, and the assembly checked each day's manifest entry and sha256, but no model, indicator or pass has read a feature of those days. The labels of 2024-01-01 on were made from the frozen market-labels-v1, as market-ews-v1 discloses, and ews.market_segments refuses to cut a segment from them until a market-ews file is frozen."
+links = [
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6693115897",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6693216856",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6693744882",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6712457338",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6725652497",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6726586539",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6727600600",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6750573940",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6755152944",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/30#issuecomment-6978230082",
+    "https://github.com/GabrielEzerzer/tipping-point/issues/170",
+    "https://github.com/GabrielEzerzer/tipping-point/pull/187",
+    "https://github.com/GabrielEzerzer/tipping-point/pull/210",
+    "https://github.com/GabrielEzerzer/tipping-point/pull/212",
+]
+
+[deviations]
+policy = "Any change after the freeze is a new version with supersedes and reason, frozen before anything it changes is scored on a day from 2024-01-01; results scored under v1 stay bound to v1 and are reported beside the new version's. A primary is replaced by a spare only as training.replacement says, and the replacement is logged here before any scored result is read."
+log = []
