@@ -305,13 +305,13 @@ secondary = "phase"
 n = 999
 
 [scoring.twin]           # did training matter
-pairing = "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the same bootstrap draws; a judged cell passes only when every primary's trained AUC - 0.5 has the same sign, so that seeds warning in opposite directions never pass on their margins"
+pairing = "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the same bootstrap draws; a judged cell or pooled group passes only when every primary's trained AUC - 0.5 has the same sign, so that seeds warning in opposite directions never pass on their margins"
 seeds = "<how the five primaries' margins combine, e.g. a percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws>"
 sign_test = true         # every primary's margin must carry the sign of the combined margin
 tolerance = "<a number in (0, 0.5), in units of the statistic, set before the freeze>"
 
 [scoring.classic]        # does it warn better than the classic test
-pairing = "the latent pair's |AUC - 0.5| minus the classic indicator's AUC - 0.5 taken in the direction the baseline's hypothesis on that indicator pre-registers (AUC - 0.5 for 'greater'), the classic AUCs recomputed on the baseline's price series over the same segments, with the same bootstrap draws (a paired bootstrap); 'matching' compares each variance and level pair with the classic variance and the ac pair with the classic ac"
+pairing = "the latent pair's |AUC - 0.5| minus the classic indicator's AUC - 0.5 taken in the direction the baseline's hypothesis on that indicator pre-registers (AUC - 0.5 for 'greater'), the classic AUCs recomputed on the baseline's price series over the same segments; the difference passes only when it exceeds the 97.5th percentile of the same difference recomputed on each of [scoring.shift]'s draws under scoring.seed, the latent and classic sides shifted by the same offsets, a null that carries the same folding of the latent side; its paired-bootstrap CI, on the same bootstrap draws, is reported and decides nothing; 'matching' compares each variance and level pair with the classic variance and the ac pair with the classic ac"
 against = "<variance, ac, each or matching, the classic indicator each latent pair is compared with>"
 
 [descriptive]
@@ -326,7 +326,7 @@ eth_only_bars = 12
 
 [trials]
 budget = 1312            # 2 (trained, twin) x 4 pairs x 4 horizons x 40 latent groups + 2 classic indicators x 4 horizons x 4 groups; 1152 with judged = "same-asset"
-counted = "One trial per AUC evaluation: per primary checkpoint, trained and twin, pair and horizon, of each group cells.groups defines (each cell it reads, each cell reading ETHUSDT for eth-only, and the pooled groups, one per model with judged all or one per seed with judged same-asset); and per classic indicator compared and horizon, of the classic AUCs recomputed on the paired segments, pooled, per read symbol and eth-only, since data.missing drops segments for the classic side too. Every scoring run appends its cells to ews/trials.jsonl in the data dir. Margins and differences reuse those AUCs and count none; the spares unless they replace a primary, the onset-hour strata, the cascade stress test, the same-input tier, the incremental report and the ablations are not counted."
+counted = "One trial per AUC evaluation: per primary checkpoint, trained and twin, pair and horizon, of each group cells.groups defines (each cell it reads, each cell reading ETHUSDT for eth-only, and the pooled groups, one per model with judged all or one per seed with judged same-asset); and per classic indicator compared and horizon, of the classic AUCs recomputed on the paired segments, pooled, per read symbol and eth-only, since data.missing drops segments for the classic side too. Every scoring run appends its cells to ews/trials.jsonl in the data dir. Margins and differences reuse those AUCs and count none, and the latent-minus-classic difference recomputed on each event-time shift draw reuses the shift null's draws and counts none; the spares unless they replace a primary, the onset-hour strata, the cascade stress test, the same-input tier, the incremental report and the ablations are not counted."
 
 [disclosure]
 exploratory = "<what was seen before the freeze, and when>"

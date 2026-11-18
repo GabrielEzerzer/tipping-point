@@ -303,15 +303,20 @@ LOADER_REFUSALS = (
 )
 TWIN_PAIRING = (
     "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the "
-    "same bootstrap draws; a judged cell passes only when every primary's trained AUC - 0.5 has "
-    "the same sign, so that seeds warning in opposite directions never pass on their margins"
+    "same bootstrap draws; a judged cell or pooled group passes only when every primary's trained "
+    "AUC - 0.5 has the same sign, so that seeds warning in opposite directions never pass on their "
+    "margins"
 )
 CLASSIC_PAIRING = (
     "the latent pair's |AUC - 0.5| minus the classic indicator's AUC - 0.5 taken in the direction "
     "the baseline's hypothesis on that indicator pre-registers (AUC - 0.5 for 'greater'), the "
-    "classic AUCs recomputed on the baseline's price series over the same segments, with the same "
-    "bootstrap draws (a paired bootstrap); 'matching' compares each variance and level pair with "
-    "the classic variance and the ac pair with the classic ac"
+    "classic AUCs recomputed on the baseline's price series over the same segments; the "
+    "difference passes only when it exceeds the 97.5th percentile of the same difference "
+    "recomputed on each of [scoring.shift]'s draws under scoring.seed, the latent and classic "
+    "sides shifted by the same offsets, a null that carries the same folding of the latent side; "
+    "its paired-bootstrap CI, on the same bootstrap draws, is reported and decides nothing; "
+    "'matching' compares each variance and level pair with the classic variance and the ac pair "
+    "with the classic ac"
 )
 LATENT_GROUPS = (
     "each primary checkpoint, trained and twin, is scored per [model's symbol, read symbol] cell "
@@ -1488,7 +1493,7 @@ def _same_input_problems(doc: dict[str, Any]) -> list[str]:
     return found
 
 
-def market_latent_cells(doc: dict[str, Any]) -> int:
+def market_latent_cells(doc: dict[str, Any], names: Sequence[str] = EWS_INDICATORS) -> int:
     groups = doc["reporting"]["groups"]
     primaries = [e for e in doc["latents"]["checkpoints"] if e["role"] == "primary"]
     read = [tuple(cell) for cell in doc["cells"]["read"]]
@@ -1505,7 +1510,7 @@ def market_latent_cells(doc: dict[str, Any]) -> int:
     if against == "matching":
         classic = len({CLASSIC_MATCHING.get(indicator) for _, indicator in pairs})
     else:
-        classic = 1 if against in EWS_INDICATORS else len(EWS_INDICATORS)
+        classic = 1 if against in EWS_INDICATORS else len(names)
     per = sum(len(doc["data"]["symbols"]) if g == "per-asset" else 1 for g in groups)
     return 2 * len(pairs) * horizons * cells + classic * horizons * per
 
@@ -1693,11 +1698,17 @@ def _market_latent_problems(doc: dict[str, Any], strict: bool = False) -> list[s
             for where, text in _strings(doc)
             if _PLACEHOLDER.search(text)
         ]
-        if not found and doc["trials"]["budget"] < market_latent_cells(doc):
-            found.append(
-                f"trials.budget: one scoring run evaluates {market_latent_cells(doc)} cells"
-            )
+        each = doc["scoring"]["classic"]["against"] == "each"
+        if not found and not each:
+            found += _budget_problems(doc, EWS_INDICATORS)
     return found
+
+
+def _budget_problems(doc: dict[str, Any], names: Sequence[str]) -> list[str]:
+    cells = market_latent_cells(doc, names)
+    if doc["trials"]["budget"] < cells:
+        return [f"trials.budget: one scoring run evaluates {cells} cells"]
+    return []
 
 
 def _at(doc: dict[str, Any], where: str) -> Any:
@@ -1724,7 +1735,7 @@ def baseline_problems(doc: dict[str, Any], baseline: dict[str, Any]) -> list[str
         found.append(
             "scoring.classic.against: 'each', 'matching', or one of the baseline's indicators.names"
         )
-    return found
+    return found + _budget_problems(doc, names)
 
 
 def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:

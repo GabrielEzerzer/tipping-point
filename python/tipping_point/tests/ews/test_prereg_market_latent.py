@@ -13,6 +13,7 @@ from typing import Any
 
 import m4_pilot
 import m8_primaries
+import numpy as np
 import pytest
 from explore import common, market_pass
 from tipping_point.book import features
@@ -27,6 +28,18 @@ LABELS_V1 = REPO / "paper" / "prereg" / "market-labels-v1.toml"
 ISING_LATENT = REPO / "paper" / "prereg" / "ising-latent-v1.toml"
 DELETE = object()
 EWS_CHOICES = {"detrend": "none", "method": "mean", "fit": "pilot", "noise": "bootstrap"}
+SIGN_IN_CELLS_ONLY = (
+    "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the "
+    "same bootstrap draws; a judged cell passes only when every primary's trained AUC - 0.5 has "
+    "the same sign, so that seeds warning in opposite directions never pass on their margins"
+)
+DECIDED_BY_THE_CI = (
+    "the latent pair's |AUC - 0.5| minus the classic indicator's AUC - 0.5 taken in the direction "
+    "the baseline's hypothesis on that indicator pre-registers (AUC - 0.5 for 'greater'), the "
+    "classic AUCs recomputed on the baseline's price series over the same segments, with the same "
+    "bootstrap draws (a paired bootstrap); 'matching' compares each variance and level pair with "
+    "the classic variance and the ac pair with the classic ac"
+)
 
 
 def filled_ews(text: str) -> str:
@@ -259,13 +272,46 @@ def test_the_freeze_refuses_a_placeholder(tmp_path: Path) -> None:
     assert "cells.judged: placeholder" in str(refused.value)
 
 
-def test_a_filled_file_passes_strict_and_counts_its_trials(doc: dict[str, Any]) -> None:
+def test_a_filled_file_passes_strict_and_counts_its_trials(
+    doc: dict[str, Any], ews: dict[str, Any]
+) -> None:
     assert prereg.problems(doc, strict=True) == []
+    assert prereg.baseline_problems(doc, ews) == []
     doc["trials"]["budget"] = 1151
     assert prereg.problems(doc) == []
-    assert prereg.problems(doc, strict=True) == [
+    assert prereg.problems(doc, strict=True) == []
+    assert prereg.baseline_problems(doc, ews) == [
         "trials.budget: one scoring run evaluates 1152 cells"
     ]
+    ews["indicators"]["names"] = ["variance"]
+    doc["trials"]["budget"] = 1136
+    assert prereg.baseline_problems(doc, ews) == []
+    doc["scoring"]["classic"]["against"] = "variance"
+    doc["trials"]["budget"] = 1135
+    assert prereg.problems(doc, strict=True) == [
+        "trials.budget: one scoring run evaluates 1136 cells"
+    ]
+
+
+def _auc(events: np.ndarray, controls: np.ndarray) -> np.ndarray:
+    return np.searchsorted(np.sort(controls), events).mean(axis=-1) / len(controls)
+
+
+@pytest.mark.parametrize("rho", [0.0, 0.5])
+def test_the_shift_null_holds_the_latent_minus_classic_rule_near_its_level(rho: float) -> None:
+    rng = np.random.default_rng(30)
+    cov = [[1.0, rho], [rho, 1.0]]
+    observed, passed, reps = [], 0, 1000
+    for _ in range(reps):
+        controls = rng.multivariate_normal([0.0, 0.0], cov, 300)
+        events = rng.multivariate_normal([0.0, 0.0], cov, (101, 60))
+        latent, classic = _auc(events[..., 0], controls[:, 0]), _auc(events[..., 1], controls[:, 1])
+        difference = np.abs(latent - 0.5) - (classic - 0.5)
+        observed.append(difference[0])
+        passed += difference[0] > np.quantile(difference[1:], 0.975)
+    assert np.mean(observed) > 0.02
+    nominal = 3 / 101
+    assert nominal / 2 <= passed / reps <= 2 * nominal
 
 
 @pytest.mark.parametrize(
@@ -353,7 +399,9 @@ def test_the_trial_count_follows_the_judged_cells_and_the_classic_side(
         ("scoring.twin.tolerance", 0, "scoring.twin.tolerance: a number in (0, 0.5)"),
         ("scoring.twin.tolerance", 0.5, "scoring.twin.tolerance: a number in (0, 0.5)"),
         ("scoring.twin.tolerance", "small", "scoring.twin.tolerance: a number in (0, 0.5)"),
+        ("scoring.twin.pairing", SIGN_IN_CELLS_ONLY, "scoring.twin.pairing"),
         ("scoring.classic.pairing", "latent minus classic", "scoring.classic.pairing"),
+        ("scoring.classic.pairing", DECIDED_BY_THE_CI, "scoring.classic.pairing"),
         (
             "scoring.classic.pairing",
             prereg.CLASSIC_PAIRING.replace("AUC - 0.5 taken in the direction", "|AUC - 0.5|", 1),
