@@ -346,6 +346,38 @@
       "test": "harness/tests/test_m8_primaries.py"
     },
     {
+      "name": "Market latent gate",
+      "description": "Writes the gate record that opens the confirmatory span: a market-latent file frozen at its prereg tag, a clean tree, and checkpoints equal to the pins.",
+      "command": "uv run python -m tipping_point.jepa.market_extract gate --prereg paper/prereg/market-latent-v1.toml --pins <pins.json> --out <gate.json>",
+      "inputs": "the frozen market-latent file and pins.json",
+      "outputs": "<gate.json>",
+      "test": "python/tipping_point/tests/jepa/test_market_extract.py"
+    },
+    {
+      "name": "Market latent units",
+      "description": "Reads the pinned checkpoints and their step-0 twins over a span in units of checkpoint x symbol x block of days, one shard at a time, resuming after a kill.",
+      "command": "uv run python -m tipping_point.jepa.market_extract run --pins <pins.json> --primaries <dir> --data <bybit-book-v4> --span exploratory --out <dir>",
+      "inputs": "pins.json, the primary trainings, the book feature days, and a gate record for the confirmatory span",
+      "outputs": "<out>/units/<run id>-step<step>/<symbol>-<span>/<first day>.parquet and .json",
+      "test": "python/tipping_point/tests/jepa/test_market_extract.py"
+    },
+    {
+      "name": "Market latent merge",
+      "description": "Checks every unit of a span and joins them into one per-minute series per checkpoint and symbol.",
+      "command": "uv run python -m tipping_point.jepa.market_extract merge --units <dir> --span exploratory --pins <pins.json> --out <dir>",
+      "inputs": "unit folders, from one or several machines, and pins.json",
+      "outputs": "<out>/<run id>-step<step>/<symbol>-<span>.parquet and .json",
+      "test": "python/tipping_point/tests/jepa/test_market_extract.py"
+    },
+    {
+      "name": "Verify market latent files",
+      "description": "Checks every market latent unit or series against the sha256 its record names and exits 1 on any problem.",
+      "command": "uv run python -m tipping_point.jepa.market_extract verify <dir>",
+      "inputs": "unit or series folders",
+      "outputs": "one line per problem; exit code",
+      "test": "python/tipping_point/tests/jepa/test_market_extract.py"
+    },
+    {
       "name": "Exploratory market indicators",
       "description": "Shows the classic market warning indicators on the 2023 pilot year, logging no trial.",
       "command": "uv run python harness/market_ews_explore.py --run <labels run>",
