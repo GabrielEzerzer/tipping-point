@@ -4141,6 +4141,7 @@ def market_plans(k: ModuleType, root: Path) -> None:
     check("a market plan loads", not refused(k, MARKET_PLAN), refused(k, MARKET_PLAN))
     wrong = [
         ({"gate": None}, "the confirmatory span opens only under a gate"),
+        ({"gate": None, "span": "fit"}, "the fit span opens only under a gate"),
         ({"days": 4}, "market.days is for timing runs"),
         ({"shard": [3, 3]}, "market.shard [3, 3]"),
         ({"processes": 0}, "market.processes 0"),

@@ -177,33 +177,6 @@ def test_a_unit_from_another_run_is_redone_not_skipped(
     assert mx.extract(_book(), models, scaling, shorter, out, None) == 2
 
 
-def test_the_fit_span_starts_at_the_book_start_without_a_day_before_or_a_baseline(
-    primaries: tuple[Path, Path], short: None, tmp_path: Path
-) -> None:
-    _, models, scaling = _loaded(primaries)
-    book, out = _book(), tmp_path / "units"
-    todo = mx.tasks("fit", [SYMBOL])
-    assert todo[0].first == mx.TRAIN_START and not todo[0].eve and not todo[0].lead
-    assert todo[1].eve == [todo[0].days[-1]] and len(todo[1].lead) == 1
-    assert mx.extract(book, models, scaling, todo, out, None) == 6
-    series = tmp_path / "series"
-    merged = mx.merge([out], series, "fit", primaries[1], None, symbols=[SYMBOL])
-    assert len(merged) == 2 and not mx.verify(series)
-
-    wanted = mx.span_days("fit")
-    got, _ = days.frames(book, SYMBOL, wanted, scaling[SYMBOL]["record"], lead=[])
-    for m in models:
-        z, s = minutes.readouts(m.ckpt.model, got.frames, got.valid)
-        one = mx.table(wanted[0], got.valid.numpy(), mx.project(m.ckpt, z, s))
-        read = pq.read_table(series / m.name / f"{SYMBOL}-fit.parquet")
-        for name in one.column_names:
-            assert read[name].to_numpy().tobytes() == one[name].to_numpy().tobytes(), name
-        assert not read["valid"].to_numpy()[: SHORT.model.context - 1].any()
-        record = io.read_json(series / m.name / f"{SYMBOL}-fit.json")
-        assert record["days"][0]["day"] == mx.TRAIN_START.isoformat()
-        assert not any(d.get("lead") or d.get("context") for d in record["days"][:1])
-
-
 def test_without_a_gate_no_confirmatory_day_is_opened(
     primaries: tuple[Path, Path], short: None, tmp_path: Path
 ) -> None:
@@ -216,7 +189,7 @@ def test_without_a_gate_no_confirmatory_day_is_opened(
     assert set(book.ranges) == {"training", "exploratory"}
     with pytest.raises(days.DataError, match="confirmatory span"):
         book.read(SYMBOL, date(2024, 1, 1))
-    first = mx.tasks("confirmatory", [SYMBOL])[0]
+    first = mx.Task(SYMBOL, "confirmatory", (date(2024, 1, 1),))
     with pytest.raises(days.DataError, match="confirmatory span"):
         mx.read_task(_book(), first, scaling[SYMBOL]["record"])
     with pytest.raises(mx.Refused, match="only under a gate"):
@@ -504,7 +477,7 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
         m.setattr(prereg, "repo_root", no_repository)
         assert "no repository" in mx.admitted(record, pins_path)
 
-    todo = mx.tasks("confirmatory", [SYMBOL])
+    todo = mx.tasks("confirmatory", [SYMBOL], doc=mx.frozen_doc(record))
     out = tmp_path / "units"
     ungated = tmp_path / "ungated"
     assert mx.extract(_book(mx.END), models, scaling, todo, out, record) == 4
@@ -519,11 +492,11 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
     assert written["days"][days.BASELINE_DAYS]["day"] == "2023-12-31"
     assert written["days"][days.BASELINE_DAYS]["folder"] == "exploratory"
     assert {d["folder"] for d in written["days"][days.BASELINE_DAYS + 1 :]} == {"confirmatory"}
-    pre = mx.PRE_MINUTES["confirmatory"]
+    pre = mx.extent("confirmatory", mx.frozen_doc(record))[2]
     assert pre == 514 and written["pre_minutes"] == pre
     assert written["days"][days.BASELINE_DAYS]["kept_minutes"] == pre
 
-    eve, wanted = date(2023, 12, 31), mx.span_days("confirmatory")
+    eve, wanted = date(2023, 12, 31), mx.span_days("confirmatory", doc=mx.frozen_doc(record))
     lead = [eve - timedelta(days=d) for d in range(days.BASELINE_DAYS, 0, -1)]
     record_ = scaling[SYMBOL]["record"]
     got, _ = days.frames(_book(mx.END), SYMBOL, [eve, *wanted], record_, lead=lead, until=mx.END)
@@ -553,6 +526,93 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
     monkeypatch.setattr(io, "code_version", lambda: {"git_sha": "f" * 40, "dirty": False})
     with pytest.raises(mx.Refused, match="the gate record's"):
         mx.admit(record, pins, pins_sha)
+
+
+def _amend(root: Path, path: Path, *edits: tuple[str, str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    path.write_bytes(text.encode())
+    _git(root, "commit", "-q", "-am", "amend the extent")
+
+
+FIT = "fit = { start = 2023-01-18, end = 2023-09-30 }"
+
+
+def test_the_fit_span_and_the_tail_are_the_frozen_file_s(
+    repo: tuple[Path, Path, Path], primaries: tuple[Path, Path], short: None, tmp_path: Path
+) -> None:
+    root, path, pins_path = repo
+    end = mx.TRAIN_START + timedelta(days=4)
+    _amend(
+        root,
+        path,
+        (FIT, f"fit = {{ start = {mx.TRAIN_START}, end = {end} }}"),
+        ("\nwindow = 60\n", "\nwindow = 120\n"),
+    )
+    _freeze(root)
+    record = mx.gate(path, pins_path)
+    doc = mx.frozen_doc(record)
+    assert mx.extent("fit", doc) == (mx.TRAIN_START, end + timedelta(days=1), 0)
+    assert mx.extent("confirmatory", doc)[2] == 5 * 24 + 120 + 240 - 1 + 96 - 1 == 574
+    with pytest.raises(mx.Refused, match="only under a gate"):
+        mx.tasks("fit", [SYMBOL])
+    _, models, scaling = _loaded(primaries)
+    run = [mx.read_pins(primaries[1])[0]["checkpoints"][0]["run_id"]]
+    book, out = _book(), tmp_path / "units"
+    todo = mx.tasks("fit", [SYMBOL], doc=doc)
+    assert [len(t.days) for t in todo] == [2, 2, 1] and todo[-1].days[-1] == end
+    assert todo[0].first == mx.TRAIN_START and not todo[0].eve and not todo[0].lead
+    assert todo[1].eve == [todo[0].days[-1]] and len(todo[1].lead) == 1
+    assert mx.extract(book, models, scaling, todo, out, record) == 6
+    series = tmp_path / "series"
+    with pytest.raises(mx.Refused, match="only under a gate"):
+        mx.merge([out], series, "fit", pins_path, None, run, [SYMBOL])
+    merged = mx.merge([out], series, "fit", pins_path, record, run, [SYMBOL])
+    assert len(merged) == 2 and not mx.verify(series)
+
+    wanted = mx.span_days("fit", doc=doc)
+    got, _ = days.frames(book, SYMBOL, wanted, scaling[SYMBOL]["record"], lead=[])
+    for m in models:
+        z, s = minutes.readouts(m.ckpt.model, got.frames, got.valid)
+        one = mx.table(wanted[0], got.valid.numpy(), mx.project(m.ckpt, z, s))
+        read = pq.read_table(series / m.name / f"{SYMBOL}-fit.parquet")
+        assert len(read) == 5 * days.MINUTES
+        for name in one.column_names:
+            assert read[name].to_numpy().tobytes() == one[name].to_numpy().tobytes(), name
+        assert not read["valid"].to_numpy()[: SHORT.model.context - 1].any()
+        written = io.read_json(series / m.name / f"{SYMBOL}-fit.json")
+        assert written["days"][0]["day"] == mx.TRAIN_START.isoformat()
+        assert not any(d.get("lead") or d.get("context") for d in written["days"][:1])
+
+    first = mx.tasks("confirmatory", [SYMBOL], doc=doc)[:1]
+    assert first[0].pre == 574
+    tail = tmp_path / "tail"
+    assert mx.extract(_book(mx.END), models, scaling, first, tail, record) == 2
+    unit = next(tail.rglob("2024-01-01.json"))
+    assert io.read_json(unit)["days"][days.BASELINE_DAYS]["kept_minutes"] == 574
+    table = pq.read_table(unit.with_suffix(".parquet"))
+    start = np.datetime64("2024-01-01", "ns").astype(np.int64) - 574 * mx.MINUTE_NS
+    assert len(table) == len(first[0].days) * days.MINUTES + 574
+    assert table["ts_ns"][0].as_py() == start
+
+
+@pytest.mark.parametrize(
+    ("edit", "why"),
+    [
+        ((FIT, "fit = { start = 2023-02-01, end = 2023-09-30 }"), "the book's first day"),
+        (("\nwindow = 60\n", "\nwindow = 1200\n"), "one day before its span"),
+    ],
+)
+def test_the_gate_refuses_an_extent_a_read_cannot_take(
+    repo: tuple[Path, Path, Path], edit: tuple[str, str], why: str
+) -> None:
+    root, path, pins = repo
+    _amend(root, path, edit)
+    _freeze(root)
+    with pytest.raises(mx.Refused, match=why):
+        mx.gate(path, pins)
 
 
 def test_the_merge_refuses_a_missing_tampered_or_foreign_unit(

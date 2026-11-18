@@ -40,13 +40,16 @@ keyed by ts_ns, the minute's start. Every checkpoint reads both symbols (its own
 Features are scaled by the read symbol's own record, the one its pinned trainings fitted (one
 record per symbol, its sha256 the pins'), never refitted.
 
-Spans: fit 2023-01-18 .. 2023-09-30 (the seasonality fit span, from the book's first day),
-exploratory 2023-10-01 .. 2023-12-31, and confirmatory from 514 minutes before 2024-01-01 (the last
-514 minutes of 2023-12-31, an exploratory day: 5 x 24 bars + window 60 + length 240 - 1 + context
-96 - 1) to 2026-09-30. Days come from <data>/training before 2023-10-01, <data>/exploratory to
-2023-12-31 and <data>/confirmatory from 2024-01-01, each checked against its folder's manifest.json
-(range, feature format, and the day's sha256). Without --gate the confirmatory span is refused and
-<data>/confirmatory is never opened; such output says pre_registered false.
+Spans: fit, the frozen file's seasonality.fit, start and end inclusive (it must start on the book's
+first day, 2023-01-18); exploratory 2023-10-01 .. 2023-12-31; and confirmatory to 2026-09-30, from
+5 x max(segments.horizons) + indicators.window + indicators.length - 1 + latents.context - 1
+minutes before 2024-01-01 (514 at 24 bars, window 60, length 240 and context 96), the last minutes
+of 2023-12-31, an exploratory day. Fit and confirmatory open only under --gate, their extent read
+from the gate record's frozen file; the gate refuses a file whose extent a read cannot take. Days
+come from <data>/training before 2023-10-01, <data>/exploratory to 2023-12-31 and
+<data>/confirmatory from 2024-01-01, each checked against its folder's manifest.json (range,
+feature format, and the day's sha256). Without --gate <data>/confirmatory is never opened, and the
+exploratory output says pre_registered false.
 
 UNITS. A span is cut into blocks of 16 days. A task is one symbol's block and a unit one
 checkpoint's read of it: <out>/units/<run id>-step<step>/<symbol>-<span>/<first day>.parquet and
@@ -104,7 +107,6 @@ SPANS = {
     "exploratory": (EXPLORATORY, days.CONFIRMATORY),
     "confirmatory": (days.CONFIRMATORY, END),
 }
-PRE_MINUTES = {"confirmatory": 5 * 24 + 60 + 240 - 1 + 96 - 1}
 SYMBOLS = ("BTCUSDT", "ETHUSDT")
 PCS = tuple(f"pc_{k}" for k in range(1, 9))
 COLUMNS = ("surprise", "surprise5", *PCS)
@@ -231,6 +233,8 @@ def gate(path: Path, pins_path: Path) -> dict[str, Any]:
     pins, pins_sha = read_pins(pins_path)
     listed = checkpoints_of(pre.doc)
     _match(listed, pins, pre.name)
+    for span in ("fit", "confirmatory"):
+        extent(span, pre.doc)
     return {
         "format": GATE_FORMAT,
         "prereg": {
@@ -377,18 +381,48 @@ class Task:
         return slice(days.MINUTES * len(self.eve) - self.pre, None)
 
 
-def span_days(span: str, limit: int | None = None) -> list[date]:
+def frozen_doc(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    return None if record is None else tomllib.loads(record["prereg"]["text"])
+
+
+def extent(span: str, doc: dict[str, Any] | None) -> tuple[date, date, int]:
     start, end = SPANS[span]
+    if span == "exploratory":
+        return start, end, 0
+    if doc is None:
+        raise Refused(f"the {span} span is the frozen file's: read it only under a gate (--gate)")
+    if span == "fit":
+        fit = doc["seasonality"]["fit"]
+        if fit["start"] != TRAIN_START or not fit["start"] <= fit["end"] < days.CONFIRMATORY:
+            raise Refused(
+                f"seasonality.fit {fit['start']} .. {fit['end']}: a fit span reads from the "
+                f"book's first day, {TRAIN_START}, to a day before {days.CONFIRMATORY}"
+            )
+        return fit["start"], fit["end"] + timedelta(days=1), 0
+    ind = doc["indicators"]
+    pre = 5 * max(doc["segments"]["horizons"]) + ind["window"] + ind["length"] - 1
+    pre += doc["latents"]["context"] - 1
+    if not 0 <= pre <= days.MINUTES:
+        raise Refused(f"{pre} minutes before {start}: a read holds one day before its span")
+    return start, end, pre
+
+
+def span_days(span: str, limit: int | None = None, doc: dict[str, Any] | None = None) -> list[date]:
+    start, end, _ = extent(span, doc)
     out = [start + timedelta(days=k) for k in range((end - start).days)]
     return out[:limit] if limit else out
 
 
 def tasks(
-    span: str, symbols: Sequence[str], size: int | None = None, limit: int | None = None
+    span: str,
+    symbols: Sequence[str],
+    size: int | None = None,
+    limit: int | None = None,
+    doc: dict[str, Any] | None = None,
 ) -> list[Task]:
-    wanted = span_days(span, limit)
+    wanted = span_days(span, limit, doc)
     size = size or BLOCK
-    pre = PRE_MINUTES.get(span, 0)
+    pre = extent(span, doc)[2]
     return [
         Task(symbol, span, tuple(wanted[k : k + size]), pre if k == 0 else 0)
         for symbol in symbols
@@ -676,8 +710,8 @@ def merge(
     symbols: Sequence[str] = SYMBOLS,
 ) -> list[Path]:
     pins, _ = read_pins(pins_path)
-    if gate_record is None and span == "confirmatory":
-        raise Refused("the confirmatory span is merged only under a gate record (--gate)")
+    if gate_record is None and span != "exploratory":
+        raise Refused(f"the {span} span is merged only under a gate record (--gate)")
     if gate_record is not None:
         root = prereg.repo_root(SRC)
         fresh = regate(gate_record, pins_path, root)
@@ -686,7 +720,7 @@ def merge(
     stamp = stamp_of(gate_record)
     found = _units(sources, span)
     chosen = select(pins, runs)
-    plan = tasks(span, symbols)
+    plan = tasks(span, symbols, doc=frozen_doc(gate_record))
     written, problems, commits = [], [], set()
     for pin in chosen:
         for kind, _ in KINDS:
@@ -760,9 +794,10 @@ def _write_merged(
 ) -> Path:
     merged = pa.concat_tables(parts)
     ts = merged["ts_ns"].to_numpy()
-    pre = PRE_MINUTES.get(span, 0)
-    start = np.datetime64(SPANS[span][0].isoformat(), "ns").astype(np.int64) - pre * MINUTE_NS
-    count = len(span_days(span)) * days.MINUTES + pre
+    doc = frozen_doc(gate_record)
+    first_day, _, pre = extent(span, doc)
+    start = np.datetime64(first_day.isoformat(), "ns").astype(np.int64) - pre * MINUTE_NS
+    count = len(span_days(span, doc=doc)) * days.MINUTES + pre
     expected = start + MINUTE_NS * np.arange(count, dtype=np.int64)
     if not np.array_equal(ts, expected):
         raise Refused(f"{name} {symbol}: the units' minutes are not the span's, in order")
@@ -844,15 +879,15 @@ def _gate_arg(path: Path | None) -> dict[str, Any] | None:
 def _run(args: argparse.Namespace) -> int:
     pins, _ = read_pins(args.pins)
     gate_record = _gate_arg(args.gate)
-    if gate_record is None and args.span == "confirmatory":
-        raise Refused("the confirmatory span opens only under a gate record (--gate)")
+    if gate_record is None and args.span != "exploratory":
+        raise Refused(f"the {args.span} span opens only under a gate record (--gate)")
     if gate_record is not None:
         print(f"gate admitted by {admitted(gate_record, args.pins)}", flush=True)
         if args.days:
             raise Refused("--days is for timing runs, without --gate")
     torch.set_num_threads(args.threads)
     symbols = args.symbols or list(SYMBOLS)
-    todo = tasks(args.span, symbols, limit=args.days)
+    todo = tasks(args.span, symbols, limit=args.days, doc=frozen_doc(gate_record))
     todo = shard(todo, args.shard) if args.shard else todo
     chosen = select(pins, args.runs)
     models = load_models(args.primaries, pins, chosen)

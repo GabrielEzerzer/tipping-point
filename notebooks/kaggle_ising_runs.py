@@ -132,7 +132,7 @@ of days) are independent, so the job splits across kernels and across processes 
      "market": {"book": "<book>",                 exploratory/ and confirmatory/, or training/ (fit)
                 "primaries": "<primaries>",       pins.json and <asset>-s<seed>/jepa/<run id>/ with
                                                   final.pt, ckpt/step_0000000.pt and manifest.json
-                "gate": "<gate>",                 gate.json; the confirmatory span needs it
+                "gate": "<gate>",                 gate.json; fit and confirmatory need it
                 "span": "confirmatory",           fit, exploratory or confirmatory
                 "shard": [0, 5],                  this kernel's index k of K kernels
                 "processes": 4, "threads": 1,     optional: 1 and 1
@@ -653,8 +653,8 @@ def market_problems(market: object, plan: dict) -> list[str]:
     span = market.get("span")
     if span not in MARKET_SPANS:
         problems.append(f"market.span {span!r}: one of {', '.join(MARKET_SPANS)}")
-    if span == "confirmatory" and "gate" not in market:
-        problems.append("market: the confirmatory span opens only under a gate")
+    if span in ("fit", "confirmatory") and "gate" not in market:
+        problems.append(f"market: the {span} span opens only under a gate")
     if "gate" in market and "days" in market:
         problems.append("market.days is for timing runs, without a gate")
     shard = market.get("shard", [0, 1])
