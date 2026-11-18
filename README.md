@@ -18,8 +18,8 @@ predicts. The Ising experiments are the supporting evidence; the market experime
   the BTCUSDT and ETHUSDT perpetuals from 18 January 2023 to 30 September 2026; the volatility-regime
   labels, pre-registered and frozen as `prereg/market-labels-v1`; the market warning test (event and
   control segments, the GARCH floor and the same-input tier); the market JEPA, its CPU pilot and the
-  trained models, five primary seeds and two spares per asset. The models train on 18 January to
-  30 September 2023, are explored on 2023-Q4 and are tested, frozen, on January 2024 to September 2026,
+  trained models, five primary seeds and two spares per asset. The models train and validate on
+  18 January to 30 September 2023, are explored on 2023-Q4 and are tested, frozen, on January 2024 to September 2026,
   within each asset and across them in both directions.
 - Market, next: freeze the classic market test (`market-ews-v1`); extract the trained models' and
   their untrained twins' latents; write and freeze the latent test (`market-latent-v1`); score both
@@ -124,29 +124,35 @@ pass.
 
 ![Where Var(pc_1) and Var(surprise) peak at each L, trained and twin](paper/figures/ising-latent-v1-peaks.png)
 
-The scaled temperature eps_L at which each rolling variance peaks, per L. The twins' peaks sit at
-about the same eps_L at every L, as finite-size scaling predicts. The trained checkpoints' peaks lie
-near eps_L = -3.4 at L = 16 and 32 and spread out at L = 64.
+The scaled temperature eps_L at which each rolling variance peaks, per L: left Var(pc_1), right
+Var(surprise). The twins' peaks sit at about the same eps_L at every L, as finite-size scaling
+predicts. The trained checkpoints' positions near eps_L = -3.4 lie on or next to the search band's
+cold edge, where most replicas have no located peak (for Var(pc_1), 78-83% of them at L = 16 and
+55-73% at L = 32). At L = 64 the trained Var(pc_1) spreads out, and the trained Var(surprise) moves
+to about eps_L = +0.4 to +0.6.
 
 Reported without a verdict:
 
 - Beside the twin, the trained Var(pc_1) loses AUC: -0.592 [-0.730, -0.453] as the mean over L and
   h, and from -0.39 to -0.85 by seed. AC1(pc_1) loses -0.051 [-0.149, +0.010]. Under ising-ews-v1,
-  |m| reaches 0.9993 for its variance and 0.9264 for AC1.
+  |m| averages 0.9993 for its variance and 0.9264 for AC1.
 - Var(surprise) has its AUC CI above 0.5 in all 45 trained and all 45 twin cells. The trained
   surprise's static exponent is 0.78 to 1.06 (twins 1.47 to 1.76), and its peaks give no 1/nu on
   any primary.
-- The trained Var(pc_1) gives 1/nu from 1.04 [1.01, 1.07] (m2) to 1.91 [1.66, 2.10] (m1).
+- The trained Var(pc_1)'s 1/nu, 1.04 to 1.91 across the primaries, is inconclusive under the
+  file's edge rule: at L = 16, 78-83% of each primary's replicas take their extremum on the band's
+  cold edge or within one window of it, so the fits rest on the few peaks that were located.
 - Other probes, trained minus twin, as the mean over L: L^2 Var R^2 +0.103 [+0.093, +0.112], its
-  selectivity +0.065 [+0.057, +0.073]; |m| R^2 -0.00019, with the twins at 0.99998 and above.
+  selectivity +0.065 [+0.057, +0.073]; |m| R^2 -0.00019, with the twins at 0.99997 and above.
 - Ablations, three seeds each. EMA-only: energy R^2 margin +0.00248, selectivity +0.00003
   [-0.00019, +0.00025], and on Var(pc_1) it reads like its twin (AUC margin +0.0005). Held-out band (trained
-  without the plateaus in eps_L [2.0, 2.5]): energy R^2 margin +0.00245, selectivity +0.00034, Var(pc_1) AUC margin -0.354.
+  without the plateaus at T in [2.0, 2.5]): energy R^2 margin +0.00245, selectivity +0.00034, Var(pc_1) AUC margin -0.354.
 
 In short: through a random encoder, the pipeline reproduces the exact Ising scaling, so the method
 can find it. The trained encoders do not keep it in their leading direction: the variance of their
-pc_1 mostly does not rise before Tc, and what they gain over the random encoder on the probes is
-small. The variance of their surprise does rise before Tc, on every trained checkpoint. How the
+pc_1 mostly does not rise before Tc, and what they gain over the random encoder on the energy
+probe is small. The variance of their surprise rises before Tc on every trained checkpoint, as it
+does through the random encoder. How the
 run took its 39 hours is under [The latent experiment](#the-latent-experiment).
 
 To reproduce: with the runs and their latents in the data dir, `uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml` scores them, and `--figures-only <result folder>` redraws the figures from the result.
