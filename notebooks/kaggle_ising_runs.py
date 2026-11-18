@@ -2494,17 +2494,19 @@ def dry_run_market(args: argparse.Namespace) -> int:
         slug, _, folder = spec.partition("=")
         shutil.copytree(folder, root / "input" / slug)
     script = write_kernel(plan, root / "kernel", resume=True)
-    sessions, units = [], root / "working" / "out" / MARKET / "units"
-    for n in (1, 2):
-        if n == 2:
-            first = {p.relative_to(units): sha256_file(p) for p in sorted(units.rglob("*.parquet"))}
-            os.replace(root / "working", root / "input" / plan["kernel"])
+    units = root / "working" / "out" / MARKET / "units"
+
+    def session(n: int) -> tuple[int, dict]:
         log(f"== dry-run session {n}" + (", stopped once it writes a unit" if n == 1 else ""))
         argv = [sys.executable, script, "--local-session", "--root", root, "--python", python]
         argv += ["--interrupt"] if n == 1 else []
         ran = subprocess.run([str(a) for a in argv], check=False)
-        sessions.append((ran.returncode, read_json(root / "working" / "out" / STATE) or {}))
-    (_, one), (code, two) = sessions
+        return ran.returncode, read_json(root / "working" / "out" / STATE) or {}
+
+    _, one = session(1)
+    first = {p.relative_to(units): sha256_file(p) for p in sorted(units.rglob("*.parquet"))}
+    os.replace(root / "working", root / "input" / plan["kernel"])
+    code, two = session(2)
     kept = {p: sha256_file(units / p) for p in first if (units / p).is_file()}
     fresh = subprocess.run([python, "-I", "-m", MARKET_MODULE, "verify", str(units.parent)])
     findings = {
