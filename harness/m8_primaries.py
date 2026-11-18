@@ -37,7 +37,6 @@ Extraction is not here: it reads the confirmatory span, after `market-latent-v1`
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import sys
@@ -51,6 +50,8 @@ import m4_pilot
 from tipping_point.book.features import FORMAT
 from tipping_point.ising import io
 from tipping_point.jepa import days, train
+from tipping_point.jepa.market_extract import digest, pca_digest
+from tipping_point.jepa.readout import Pca
 
 PRIMARIES = (101, 102, 103, 104, 105)
 SPARES = (106, 107)
@@ -105,16 +106,11 @@ def run(asset: str, seed: int, data_dir: Path, out: Path, steps: int = STEPS) ->
     return m4_pilot.fit(cfg, root, f"{cfg.symbol}-{SIZE}-s{seed}", data_dir)[0]
 
 
-def _digest(record: Any) -> str:
-    """sha256 of a record's canonical JSON (sorted keys, no spaces)."""
-    text = json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(text.encode()).hexdigest()
-
-
-def _pca_digest(path: Path) -> str:
+def _pca(path: Path) -> Pca:
     pca = train.load_market(path).pca
-    assert pca is not None  # every saved market model carries its basis
-    return _digest({k: v.tolist() if hasattr(v, "tolist") else v for k, v in pca.record().items()})
+    if pca is None:
+        raise ValueError(f"{path} carries no PCA basis")
+    return pca
 
 
 def pin(run_dir: Path) -> dict[str, Any]:
@@ -167,8 +163,8 @@ def pin(run_dir: Path) -> dict[str, Any]:
         "feature_format": data["assembled"]["feature_format"],
         "trained_sha256": train.sha256((run_dir / train.FINAL).read_bytes()),
         "twin_sha256": train.sha256((run_dir / train.TWIN).read_bytes()),
-        "pca_sha256": _pca_digest(run_dir / train.FINAL),
-        "scaling_sha256": _digest(manifest["data"]["scaling"]),
+        "pca_sha256": pca_digest(_pca(run_dir / train.FINAL)),
+        "scaling_sha256": digest(manifest["data"]["scaling"]),
     }
 
 
