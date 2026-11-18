@@ -5,7 +5,9 @@
 import copy
 import hashlib
 import json
+import re
 import subprocess
+import tomllib
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,15 @@ from tipping_point.jepa import market_extract as mx
 
 SHORT = market_toy.config(steps=12, checkpoint_every=4, monitor_every=4, pca_frames=128)
 SYMBOL = market_toy.SYMBOL
+TEMPLATE = Path(__file__).resolve().parents[4] / "paper" / "prereg" / "TEMPLATE-market-latent.toml"
+ROW_KEYS = (
+    "run_id",
+    "data_commit",
+    "trained_sha256",
+    "twin_sha256",
+    "pca_sha256",
+    "scaling_sha256",
+)
 SPANS = {
     "fit": (mx.TRAIN_START, mx.TRAIN_START + timedelta(days=5)),
     "exploratory": (date(2023, 10, 1), date(2023, 10, 6)),
@@ -42,6 +53,7 @@ def primaries(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
         "seed": 101,
         "role": "primary",
         "run_id": run.name,
+        "data_commit": "abc1234",
         "trained_sha256": train.sha256((run / train.FINAL).read_bytes()),
         "twin_sha256": train.sha256((run / train.TWIN).read_bytes()),
         "pca_sha256": mx.pca_digest(trained.pca),
@@ -296,28 +308,60 @@ def _git(root: Path, *args: str) -> str:
     return done.stdout.strip()
 
 
-def _file(rows: list[dict[str, Any]]) -> str:
-    lines = ['id = "market-latent"', "version = 1", "", "[data]", 'domain = "market-latent"']
-    for row in rows:
-        lines += ["", "[[latents.checkpoints]]"]
-        lines += [f'{k} = "{row[k]}"' for k in ("run_id", "trained_sha256", "twin_sha256")]
-    return "\n".join(lines) + "\n"
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _filled(pin: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    text = TEMPLATE.read_text(encoding="utf-8")
+    pins = []
+    for i, row in enumerate(tomllib.loads(text)["latents"]["checkpoints"]):
+        mine = all(row[k] == pin[k] for k in ("symbol", "seed", "role"))
+        same = row["symbol"] == pin["symbol"]
+        made = (
+            pin
+            if mine
+            else {
+                **{k: row[k] for k in ("symbol", "seed", "role")},
+                "run_id": f"run-{i}",
+                "data_commit": "abc1234",
+                **{f"{k}_sha256": _sha(f"{k}{i}") for k in ("trained", "twin", "pca")},
+                "scaling_sha256": pin["scaling_sha256"] if same else _sha(row["symbol"]),
+            }
+        )
+        pins.append(made)
+        for key in ROW_KEYS:
+            text = re.sub(
+                rf'^{key} = "<[^"]*>"', f'{key} = "{made[key]}"', text, count=1, flags=re.M
+            )
+    text = text.replace('id = "<lowercase-slug>"', 'id = "market-latent"', 1)
+    for key, value in (
+        ("sha256", f'"{"0" * 64}"'),
+        ("judged", '"same-asset"'),
+        ("against", '"each"'),
+        ("tolerance", "0.02"),
+    ):
+        text = re.sub(rf'^{key} = "<[^"]*>"', f"{key} = {value}", text, flags=re.M)
+    return re.sub(r'"<[^"]*>"', '"set"', text), pins
 
 
 @pytest.fixture
 def repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primaries: tuple[Path, Path]
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     root = tmp_path / "repo"
     src = root / "src" / "tipping_point"
     for rel in (*mx.HELD, *mx.CLEAN):
         (src / rel).parent.mkdir(parents=True, exist_ok=True)
         (src / rel).write_text(f"{rel}\n")
     (root / "uv.lock").write_text("lock\n")
-    pins, _ = mx.read_pins(primaries[1])
+    toy, _ = mx.read_pins(primaries[1])
+    text, rows = _filled(toy["checkpoints"][0])
     path = root / "paper" / "prereg" / "market-latent-v1.toml"
     path.parent.mkdir(parents=True)
-    path.write_bytes(_file(pins["checkpoints"]).encode())
+    path.write_bytes(text.encode())
+    pins = tmp_path / "pins.json"
+    pins.write_text(json.dumps({**toy, "checkpoints": rows}))
     _git(root, "init", "-q")
     _git(root, "config", "user.name", "Test")
     _git(root, "config", "user.email", "test@example.com")
@@ -333,7 +377,7 @@ def repo(
             "dirty": _git(root, "status", "--porcelain") != "",
         },
     )
-    return root, path
+    return root, path, pins
 
 
 def _freeze(root: Path) -> None:
@@ -341,16 +385,24 @@ def _freeze(root: Path) -> None:
 
 
 def test_the_gate_refuses_an_unfrozen_or_edited_file_changed_code_or_a_dirty_tree(
-    repo: tuple[Path, Path], primaries: tuple[Path, Path]
+    repo: tuple[Path, Path, Path],
 ) -> None:
-    root, path = repo
-    pins = primaries[1]
+    root, path, pins = repo
     with pytest.raises(prereg.PreregError, match="not frozen"):
         mx.gate(path, pins)
     _freeze(root)
     record = mx.gate(path, pins)
     assert record["prereg"]["tag"] == "prereg/market-latent-v1"
-    assert record["checkpoints"] == mx.pinned(mx.read_pins(pins)[0])
+    rows = tomllib.loads(path.read_text(encoding="utf-8"))["latents"]["checkpoints"]
+    assert record["checkpoints"] == sorted(rows, key=lambda r: r["run_id"])
+    assert record["checkpoints"] == mx.pinned(mx.read_pins(pins)[0], sorted(rows[0]))
+    assert record["prereg"]["path"] == "paper/prereg/market-latent-v1.toml"
+
+    elsewhere = root / "paper" / "market-latent-v1.toml"
+    elsewhere.write_bytes(path.read_bytes())
+    with pytest.raises(prereg.PreregError, match="under its own name"):
+        mx.gate(elsewhere, pins)
+    elsewhere.unlink()
 
     path.write_bytes(path.read_bytes() + b"\n")
     with pytest.raises(prereg.PreregError, match="differs from the version frozen"):
@@ -376,40 +428,63 @@ def test_the_gate_refuses_an_unfrozen_or_edited_file_changed_code_or_a_dirty_tre
 
 
 def test_the_gate_refuses_checkpoints_that_are_not_the_pins(
-    repo: tuple[Path, Path], primaries: tuple[Path, Path], tmp_path: Path
+    repo: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
-    root, path = repo
+    root, path, pins_path = repo
     _freeze(root)
-    pins, _ = mx.read_pins(primaries[1])
+    pins, _ = mx.read_pins(pins_path)
+    for key, value in (
+        ("twin_sha256", "1" * 64),
+        ("data_commit", "def5678"),
+        ("seed", 999),
+        ("role", "spare"),
+    ):
+        other = copy.deepcopy(pins)
+        other["checkpoints"][0][key] = value
+        forged = tmp_path / f"pins-{key}.json"
+        forged.write_text(json.dumps(other))
+        with pytest.raises(mx.Refused, match="differ: only in market-latent-v1"):
+            mx.gate(path, forged)
     other = copy.deepcopy(pins)
-    other["checkpoints"][0]["twin_sha256"] = "1" * 64
-    forged = tmp_path / "pins.json"
+    del other["checkpoints"][-1]
     forged.write_text(json.dumps(other))
     with pytest.raises(mx.Refused, match="differ: only in market-latent-v1"):
         mx.gate(path, forged)
 
 
+def test_the_gate_refuses_a_file_the_strict_check_refuses(repo: tuple[Path, Path, Path]) -> None:
+    root, path, pins = repo
+    text = path.read_text(encoding="utf-8").replace("tolerance = 0.02", 'tolerance = "TBD"', 1)
+    path.write_bytes(text.encode())
+    _git(root, "commit", "-q", "-am", "leave a placeholder")
+    _freeze(root)
+    with pytest.raises(prereg.PreregError, match="cannot gate a run"):
+        mx.gate(path, pins)
+
+
 def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
-    repo: tuple[Path, Path],
+    repo: tuple[Path, Path, Path],
     primaries: tuple[Path, Path],
     short: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, path = repo
+    root, path, pins_path = repo
     _freeze(root)
-    record = mx.gate(path, primaries[1])
-    pins, models, scaling = _loaded(primaries)
-    pins_sha = mx.read_pins(primaries[1])[1]
+    record = mx.gate(path, pins_path)
+    _, models, scaling = _loaded(primaries)
+    pins, pins_sha = mx.read_pins(pins_path)
+    run = [mx.read_pins(primaries[1])[0]["checkpoints"][0]["run_id"]]
     mx.admit(record, pins, pins_sha)
     for broken, why in (
         ({**record, "pins_sha256": "0" * 64}, "pins.json is not the one"),
         ({**record, "prereg": {**record["prereg"], "text": "edited"}}, "not the one its stamp"),
         ({**record, "format": 0}, "not a gate record"),
+        ({**record, "prereg": {**record["prereg"], "path": "market-latent-v1.toml"}}, "not at"),
     ):
         with pytest.raises(mx.Refused, match=why):
             mx.admit(broken, pins, pins_sha)
-    assert "made again" in mx.admitted(record, primaries[1])
+    assert "made again" in mx.admitted(record, pins_path)
 
     text = record["prereg"]["text"] + "# not the frozen file\n"
     forged_stamp = {
@@ -420,14 +495,14 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
     forged = {**record, "prereg": forged_stamp}
     mx.admit(forged, pins, pins_sha)
     with pytest.raises(mx.Refused, match="the gate made now is not the gate record's"):
-        mx.admitted(forged, primaries[1])
+        mx.admitted(forged, pins_path)
 
     def no_repository(path: Path) -> Path:
         raise prereg.PreregError("not a git repository")
 
     with monkeypatch.context() as m:
         m.setattr(prereg, "repo_root", no_repository)
-        assert "no repository" in mx.admitted(record, primaries[1])
+        assert "no repository" in mx.admitted(record, pins_path)
 
     todo = mx.tasks("confirmatory", [SYMBOL])
     out = tmp_path / "units"
@@ -436,8 +511,8 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
     assert mx.extract(_book(mx.END), models, scaling, todo, ungated, None) == 4
     series = tmp_path / "series"
     with pytest.raises(mx.Refused, match="made under another gate"):
-        mx.merge([ungated], series, "confirmatory", primaries[1], record, symbols=[SYMBOL])
-    merged = mx.merge([out], series, "confirmatory", primaries[1], record, symbols=[SYMBOL])
+        mx.merge([ungated], series, "confirmatory", pins_path, record, run, [SYMBOL])
+    merged = mx.merge([out], series, "confirmatory", pins_path, record, run, [SYMBOL])
     written = io.read_json(merged[0].with_suffix(".json"))
     assert written["pre_registered"] is True
     assert written["gate"]["tag"] == "prereg/market-latent-v1"
@@ -465,7 +540,7 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
     _git(root, "tag", "-d", "prereg/market-latent-v1")
     _git(root, "tag", "-a", "prereg/market-latent-v1", "-m", "frozen again")
     with pytest.raises(mx.Refused, match="the gate made now is not the gate record's"):
-        mx.admitted(record, primaries[1])
+        mx.admitted(record, pins_path)
     _git(root, "tag", "-d", "prereg/market-latent-v1")
     _freeze(root)
 
@@ -473,7 +548,7 @@ def test_a_gated_run_reads_the_confirmatory_span_and_merges_under_its_gate(
     later.write_text("changed after the units were made\n")
     _git(root, "commit", "-q", "-am", "change held code")
     with pytest.raises(mx.Refused, match="differ from prereg/market-latent-v1"):
-        mx.merge([out], series, "confirmatory", primaries[1], record, symbols=[SYMBOL])
+        mx.merge([out], series, "confirmatory", pins_path, record, run, [SYMBOL])
 
     monkeypatch.setattr(io, "code_version", lambda: {"git_sha": "f" * 40, "dirty": False})
     with pytest.raises(mx.Refused, match="the gate record's"):

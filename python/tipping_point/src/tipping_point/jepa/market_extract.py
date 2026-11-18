@@ -71,10 +71,11 @@ it resumes after a kill by the same command.
       --span confirmatory --units <units dir> [<units dir> ...] --out <data>/m8-latents
   python -m tipping_point.jepa.market_extract verify <data>/m8-latents
 
-`gate` refuses unless the file is a market-latent file byte for byte as frozen at its prereg/ tag,
-the code that makes the series (HELD) is its blob at the frozen commit, the code it runs (CLEAN) is
-committed, the checkout is clean, and its [[latents.checkpoints]] are pins.json's runs with their
-trained and twin sha256. Its record holds the file, its stamp (with the tag object's sha, so a tag
+`gate` refuses unless the file is paper/prereg/<id>-v<k>.toml, a market-latent file that passes
+the strict schema check, byte for byte as frozen at its prereg/ tag, the code that makes the series
+(HELD) is its blob at the frozen commit, the code it runs (CLEAN) is committed, the checkout is
+clean, and its [[latents.checkpoints]] are pins.json's runs, each pin equal to its row in every key
+the row holds. Its record holds the file, its stamp (with the tag object's sha, so a tag
 made again does not match), the code check and the pins' sha256. `run` refuses a gate record that
 is not self-consistent, other pins, or code that is not the record's clean commit; in the
 repository it makes the gate again and refuses a record whose frozen part differs, and only on a
@@ -170,32 +171,20 @@ def _code_paths(root: Path, paths: Sequence[str]) -> list[str]:
     return [f"{base}/{p}" for p in paths]
 
 
-def load_file(path: Path) -> prereg.Prereg:
-    path = Path(path)
-    raw = path.read_bytes()
-    try:
-        doc = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise prereg.PreregError(f"{path}: {exc}") from exc
-    data = doc.get("data")
-    domain = data.get("domain") if isinstance(data, dict) else None
-    if domain != DOMAIN:
-        raise prereg.PreregError(f"{path} is a {domain!r} file, not a {DOMAIN} one")
-    return prereg.Prereg(path, doc, hashlib.sha256(raw).hexdigest())
+def checkpoints_of(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    return sorted((dict(row) for row in doc["latents"]["checkpoints"]), key=lambda r: r["run_id"])
 
 
-def checkpoints_of(doc: dict[str, Any]) -> list[dict[str, str]]:
-    latents = doc.get("latents")
-    rows = latents.get("checkpoints") if isinstance(latents, dict) else None
-    if not isinstance(rows, list) or not rows:
-        raise prereg.PreregError("the file has no [[latents.checkpoints]]")
-    keys = ("run_id", "trained_sha256", "twin_sha256")
-    out = []
-    for row in rows:
-        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) for k in keys):
-            raise prereg.PreregError(f"[[latents.checkpoints]] {row!r}: needs {', '.join(keys)}")
-        out.append({k: row[k] for k in keys})
-    return sorted(out, key=lambda r: r["run_id"])
+def _ready(doc: dict[str, Any], where: str) -> None:
+    if doc["data"]["domain"] != DOMAIN:
+        raise prereg.PreregError(f"{where} is a {doc['data']['domain']!r} file, not a {DOMAIN} one")
+    found = prereg.problems(doc, strict=True)
+    if found:
+        raise prereg.PreregError(f"{where} cannot gate a run:\n  " + "\n  ".join(found))
+
+
+def _home(doc: dict[str, Any]) -> str:
+    return (prereg.PREREG_DIR / f"{doc['id']}-v{doc['version']}.toml").as_posix()
 
 
 def read_pins(path: Path) -> tuple[dict[str, Any], str]:
@@ -203,13 +192,13 @@ def read_pins(path: Path) -> tuple[dict[str, Any], str]:
     return json.loads(raw), hashlib.sha256(raw).hexdigest()
 
 
-def pinned(pins: dict[str, Any]) -> list[dict[str, str]]:
-    keys = ("run_id", "trained_sha256", "twin_sha256")
-    return sorted(({k: p[k] for k in keys} for p in pins["checkpoints"]), key=lambda r: r["run_id"])
+def pinned(pins: dict[str, Any], keys: Sequence[str]) -> list[dict[str, Any]]:
+    rows = ({k: p.get(k) for k in keys} for p in pins["checkpoints"])
+    return sorted(rows, key=lambda r: str(r["run_id"]))
 
 
-def _match(listed: list[dict[str, str]], pins: dict[str, Any], what: str) -> None:
-    want = pinned(pins)
+def _match(listed: list[dict[str, Any]], pins: dict[str, Any], what: str) -> None:
+    want = pinned(pins, sorted({k for row in listed for k in row}))
     if listed == want:
         return
     have = {json.dumps(r, sort_keys=True) for r in listed}
@@ -221,7 +210,12 @@ def _match(listed: list[dict[str, str]], pins: dict[str, Any], what: str) -> Non
 
 
 def gate(path: Path, pins_path: Path) -> dict[str, Any]:
-    pre = load_file(path)
+    pre = prereg.load(path)
+    _ready(pre.doc, str(path))
+    root = prereg.repo_root(pre.path)
+    relative = pre.path.resolve().relative_to(root.resolve()).as_posix()
+    if relative != _home(pre.doc):
+        raise prereg.PreregError(f"{relative}: a gate reads {_home(pre.doc)}, under its own name")
     ref = prereg.frozen(pre)
     code = prereg.code_check(pre, ref, SRC, HELD, CLEAN)
     if code["changed"]:
@@ -237,13 +231,12 @@ def gate(path: Path, pins_path: Path) -> dict[str, Any]:
     pins, pins_sha = read_pins(pins_path)
     listed = checkpoints_of(pre.doc)
     _match(listed, pins, pre.name)
-    root = prereg.repo_root(pre.path)
     return {
         "format": GATE_FORMAT,
         "prereg": {
             **prereg.stamp(pre, ref),
             "tag_object": prereg._git(root, "rev-parse", ref.tag),
-            "path": pre.path.resolve().relative_to(root.resolve()).as_posix(),
+            "path": relative,
             "text": pre.path.read_bytes().decode("utf-8"),
         },
         "code": code,
@@ -258,9 +251,13 @@ def admit(record: dict[str, Any], pins: dict[str, Any], pins_sha: str) -> None:
     stamp = record["prereg"]
     if hashlib.sha256(stamp["text"].encode("utf-8")).hexdigest() != stamp["sha256"]:
         raise Refused("the gate record's file is not the one its stamp names")
-    doc = tomllib.loads(stamp["text"])
-    if (doc.get("data") or {}).get("domain") != DOMAIN:
-        raise Refused(f"the gate record's file is not a {DOMAIN} file")
+    try:
+        doc = tomllib.loads(stamp["text"])
+        _ready(doc, "the gate record's file")
+    except (tomllib.TOMLDecodeError, prereg.PreregError, KeyError, TypeError) as exc:
+        raise Refused(f"the gate record's file cannot gate a run: {exc}") from exc
+    if stamp["path"] != _home(doc):
+        raise Refused(f"the gate record's file is not at {_home(doc)}")
     if checkpoints_of(doc) != record["checkpoints"]:
         raise Refused("the gate record's checkpoints are not its file's")
     if record["pins_sha256"] != pins_sha:
