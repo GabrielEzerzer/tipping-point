@@ -1312,6 +1312,13 @@ def freeze(root: Path, prereg_id: str) -> str:
         raise PreregError(f"{relative} is not committed")
     if _git(root, "status", "--porcelain", "--", relative):
         raise PreregError(f"{relative} differs from HEAD: commit it before the freeze")
+    committed = _git(root, "cat-file", "blob", f"HEAD:{relative}", binary=True)
+    if hashlib.sha256(committed).hexdigest() != prereg.sha256:
+        raise PreregError(
+            f"{relative} is not byte for byte its blob at HEAD, though git reports no change "
+            "(its line ends, or an assume-unchanged or skip-worktree flag): the tag would hold "
+            "other bytes than the file runs read"
+        )
     if _git(root, "tag", "--list", prereg.tag):
         raise PreregError(f"{prereg.tag} exists: a frozen version is never re-tagged; amend it")
     baseline_commit(prereg)  # the runs it reads must already be fixed
