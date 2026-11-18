@@ -978,8 +978,13 @@ reaching it unless `scoring` is a market-ews file frozen at its tag that names t
 and a run labelling those days must carry the frozen labels' stamp in its manifest. An environment
 switch, as `cascade.recall` takes, would open those days to any caller; the frozen file ties them
 to the pre-registered test. With it, `build` also takes nothing the file fixes from its caller: the
-horizons, the span (window + length - 1), the subsample and the seed must be the file's. The module
-reads labels and is fed the series; the labels package (`market/`) imports none of it.
+horizons, the span (window + length - 1), the subsample and the seed must be the file's. And it
+scores only the confirmatory span, as `score_from` 2024-01-01 would: an onset before it, and a
+control segment starting before it, is not cut, so a labels run reaching back into 2022 and 2023
+puts none of those events into a confirmatory cell, while their minutes still serve as history.
+`build` also returns each symbol's `eligible` bars (`market.nulls.eligible_onsets` on its labels),
+the bars the event-time shift may move its onsets to, restricted to the scored span the same way.
+The module reads labels and is fed the series; the labels package (`market/`) imports none of it.
 
 The same-input tier, `ews/same_input.py` (#30; research pass 6.4 item 2, choice 8), scores the
 Bybit book features themselves as classic series, so that a latent win cannot be put down to the
@@ -997,7 +1002,9 @@ rule and excludes and counts a segment that holds a minute with no value. Every 
 in the same minutes, so every feature keeps the same segments. `read` refuses any day from
 2024-01-01 before it opens a file, so the data folder's `confirmatory` range is never opened; days
 route by `market.book.RANGES` to `training` or `exploratory`, and a day in neither (before the
-archive starts) has no file. A feature file must name its symbol and day and be the feature format
+archive starts) has no file. With `scoring`, a market-ews file frozen at its tag, as `build` takes
+it, `read` also routes days to `confirmatory`, and the aggregation must be the file's
+`[same_input]` one. A feature file must name its symbol and day and be the feature format
 this code reduces (`book.features.FORMAT`), as `jepa.days.ParquetSource` demands; the format read is
 recorded.
 

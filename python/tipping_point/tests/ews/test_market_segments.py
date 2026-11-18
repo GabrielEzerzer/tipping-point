@@ -4,8 +4,6 @@ controls do not overlap, a missing minute excludes and counts a segment, the H =
 planted one, the labels must be the frozen file's, and the confirmatory span stays closed without
 a frozen market-ews file."""
 
-import re
-import subprocess
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -20,7 +18,6 @@ from tipping_point.market import archive, msvol, nulls
 
 REPO = Path(__file__).resolve().parents[4]
 LABELS_V1 = REPO / "paper" / "prereg" / "market-labels-v1.toml"
-TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE-market-ews.toml"
 SPAN = 299  # Pipeline("variance", 60, 240).span
 HORIZONS = (5, 6, 12, 24)
 DAYS = 4
@@ -30,53 +27,12 @@ STRETCHES = ((800, 200), (1100, 40))  # null stretches (start bar, bars): 3 and 
 GAP = 4400  # a minute with no return, inside the second control segment
 
 
-def filled(text: str) -> str:
-    """The market-ews template with every placeholder set, as test_prereg_market_ews fills it."""
-    text = text.replace('id = "<lowercase-slug>"', 'id = "market-ews"', 1)
-    for key, value in {
-        "detrend": "none",
-        "method": "scale",
-        "fit": "pilot",
-        "noise": "bootstrap",
-        "empty": "mark",
-    }.items():
-        text = re.sub(rf'^{key} = "<[^"]*>"', f'{key} = "{value}"', text, count=1, flags=re.M)
-    text = re.sub(r'far_per_day = "<[^"]*>"', "far_per_day = 1.0", text)
-    return re.sub(r'"<[^"]*>"', '"set"', text)
-
-
-def _git(root: Path, *args: str) -> str:
-    done = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
-    )
-    return done.stdout.strip()
-
-
-@pytest.fixture(scope="module")
-def frozen(tmp_path_factory: pytest.TempPathFactory) -> tuple[prereg.Prereg, prereg.Prereg]:
-    """A scratch repository with market-labels-v1 byte for byte and a filled market-ews file that
-    names it, both frozen at their tags."""
-    root = tmp_path_factory.mktemp("repo")
-    _git(root, "init", "-q")
-    _git(root, "config", "user.name", "Test")
-    _git(root, "config", "user.email", "test@example.com")
-    _git(root, "config", "core.autocrlf", "false")
-    folder = root / "paper" / "prereg"
-    folder.mkdir(parents=True)
-    (folder / "market-labels-v1.toml").write_bytes(LABELS_V1.read_bytes())
-    (folder / "market-ews-v1.toml").write_bytes(filled(TEMPLATE.read_text("utf-8")).encode())
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "preregs")
-    prereg.freeze(root, "market-labels")
-    prereg.freeze(root, "market-ews")
-    return prereg.load(folder / "market-labels-v1.toml"), prereg.load(folder / "market-ews-v1.toml")
-
-
 def _run(
     data: Path,
     labels: prereg.Prereg,
     first: date = date(2023, 3, 1),
     stamp: bool = False,
+    null_bars: tuple[tuple[int, int], ...] = STRETCHES,
     **labeller: Any,
 ) -> Path:
     """A labels run of DAYS days from `first` for BTCUSDT: H = 1 on HIGH and from ONSET for 100
@@ -103,7 +59,7 @@ def _run(
             "bars": k,
             "missing": 0,
         }
-        for b, k in STRETCHES
+        for b, k in null_bars
     ]
     tables = {
         "labels": pa.Table.from_pylist(rows, schema=msvol.SCHEMAS["labels"]),
@@ -360,3 +316,41 @@ def test_eth_only_keeps_the_eth_onsets_with_no_btc_onset_within_the_window() -> 
     assert ms.eth_only(eth, btc, 12).tolist() == [True, False, False, True]
     assert ms.eth_only(eth, btc, 11).tolist() == [True, True, True, True]
     assert ms.eth_only(eth, np.array([], np.int64), 12).all()
+
+
+def test_scoring_cuts_only_the_confirmatory_span(
+    tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg]
+) -> None:
+    labels, scoring = frozen
+    first = date(2023, 12, 30)
+    stretches = ((100, 150), (560, 130), (800, 200))
+    run = _run(tmp_path, labels, first=first, stamp=True, null_bars=stretches)
+    values = np.arange(6 * 1440, dtype=np.float64)
+    series = {"BTCUSDT": ms.Minutes(archive.day_ms(first - timedelta(1)), values)}
+    got = ms.build(run, labels, series, HORIZONS, SPAN, seed=30, scoring=scoring)
+    for h in HORIZONS:
+        block = got.events["BTCUSDT", h]
+        assert block.anchor_ns.tolist() == [(ms.CONFIRMATORY_MS + 2 * 3_600_000) * 1_000_000]
+    assert got.events["BTCUSDT", 5].first_ms[0] < ms.CONFIRMATORY_MS
+    events = [c for c in got.counts if c["kind"] == "event"]
+    assert all((c["cut"], c["kept"]) == (1, 1) for c in events)
+    controls = got.controls["BTCUSDT"]
+    assert len(controls.x) == 4 and controls.first_ms.min() >= ms.CONFIRMATORY_MS
+    n = DAYS * msvol.DAY_BARS
+    h = np.zeros(n, np.int8)
+    h[slice(*HIGH)] = 1
+    h[ONSET : ONSET + 100] = 1
+    ts = archive.day_ms(first) * 1_000_000 + msvol.BAR_NS * np.arange(n, dtype=np.int64)
+    every = ts[nulls.eligible_onsets(h, msvol.Params(**labels.doc["labeller"]))]
+    later = every[every >= ms.CONFIRMATORY_MS * 1_000_000]
+    assert 0 < len(later) < len(every)
+    assert np.array_equal(got.eligible["BTCUSDT"], later)
+    pilot_run = _run(tmp_path / "pilot", labels)
+    pilot_bars = every - ts[0] + archive.day_ms(date(2023, 3, 1)) * 1_000_000
+    pilot = ms.build(pilot_run, labels, {"BTCUSDT": _minutes()}, (5,), SPAN)
+    assert np.array_equal(pilot.eligible["BTCUSDT"], pilot_bars)
+    day = date(2023, 3, 3)
+    late = ms.build(pilot_run, labels, {"BTCUSDT": _minutes()}, (5,), SPAN, score_from=day)
+    kept = pilot_bars[pilot_bars >= archive.day_ms(day) * 1_000_000]
+    assert 0 < len(kept) < len(pilot_bars)
+    assert np.array_equal(late.eligible["BTCUSDT"], kept)

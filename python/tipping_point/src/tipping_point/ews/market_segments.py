@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from .. import engine
-from ..market import archive, msvol
+from ..market import archive, msvol, nulls
 from . import prereg
 
 MINUTE_MS = 60_000
@@ -57,6 +57,7 @@ class Segments:
     controls: dict[str, Block]  # by symbol, one set for every horizon
     onsets: dict[str, np.ndarray]  # every event onset (ns) of each symbol the run labels
     counts: list[dict[str, Any]]  # per (symbol, kind, horizon): _count
+    eligible: dict[str, np.ndarray]
 
 
 def close_returns(klines: Mapping[str, np.ndarray], start_ms: int, minutes: int) -> Minutes:
@@ -151,9 +152,7 @@ def check_labels(
     if stamp is not None and (stamp["sha256"], stamp["tag"]) != (labels.sha256, ref.tag):
         raise SegmentError(f"{run} was labelled under another file than {labels.name}")
     if scoring is not None:
-        if scoring.doc["data"]["domain"] != prereg.MARKET_EWS:
-            raise SegmentError(f"{scoring.path} is not a {prereg.MARKET_EWS} file")
-        prereg.frozen(scoring)
+        check_scoring(scoring)
         named = scoring.doc["data"]["labels"]
         if (named["tag"], named["sha256"]) != (ref.tag, labels.sha256):
             raise SegmentError(f"{scoring.name} names other labels than {labels.name}")
@@ -163,6 +162,12 @@ def check_labels(
         if stamp is None:
             raise SegmentError(f"{run} labels confirmatory days without {labels.name}'s stamp")
     return manifest
+
+
+def check_scoring(scoring: prereg.Prereg) -> None:
+    if scoring.doc["data"]["domain"] != prereg.MARKET_EWS:
+        raise SegmentError(f"{scoring.path} is not a {prereg.MARKET_EWS} file")
+    prereg.frozen(scoring)
 
 
 def _closed(what: str) -> str:
@@ -249,10 +254,14 @@ def build(
         for symbol in manifest["params"]["symbols"]
     }
     first_day_ms = archive.day_ms(score_from) if score_from else None
+    if scoring is not None:
+        first_day_ms = CONFIRMATORY_MS
+    params = msvol.Params(**manifest["params"]["labeller"])
     rng = np.random.default_rng(seed)
     events: dict[tuple[str, int], Block] = {}
     controls: dict[str, Block] = {}
     counts: list[dict[str, Any]] = []
+    eligible: dict[str, np.ndarray] = {}
     for symbol in sorted(series):
         minutes = series[symbol]
         onsets = all_onsets[symbol]
@@ -271,6 +280,11 @@ def build(
             bar_ns, bar_ns[0] + msvol.BAR_NS * np.arange(len(bar_ns))
         ):
             raise SegmentError(f"{run}: {symbol}'s labels are not on one 5-minute grid")
+        h_bars = np.array([-1 if table["h"][i] is None else table["h"][i] for i in mine], np.int8)
+        bars = bar_ns[nulls.eligible_onsets(h_bars, params)]
+        if first_day_ms is not None:
+            bars = bars[bars // 1_000_000 >= first_day_ms]
+        eligible[symbol] = bars
         if first_day_ms is not None:
             onsets = onsets[onsets // 1_000_000 >= first_day_ms]
         onset_ms = onsets // 1_000_000
@@ -304,7 +318,7 @@ def build(
         counts.append(
             _count(symbol, "control", None, len(first), len(rows), len(block.x), invalid, outside)
         )
-    return Segments(span, events, controls, all_onsets, counts)
+    return Segments(span, events, controls, all_onsets, counts, eligible)
 
 
 def _count(
