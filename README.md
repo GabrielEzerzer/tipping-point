@@ -368,15 +368,16 @@ one frozen at its tag, the modules that make labels and cascades are byte for by
 commit's, the command line and `ews/prereg.py` have no change beyond HEAD, and the checkout has no
 uncommitted change or untracked file (the manifest's `producer.dirty` is false). The manifest
 records the sha256 of `uv.lock`, which pins the locked libraries but not the installed environment,
-so pre-registered runs use `uv run --locked`: `uv run` syncs the environment to the lock first, and
-`--locked` refuses a lock that is out of date with `pyproject.toml` instead of rewriting it. A
+so pre-registered runs use `uv run --locked --exact`: `--exact` syncs the environment to the lock,
+removing any package the lock does not name, and `--locked` refuses a lock that is out of date with
+`pyproject.toml` instead of rewriting it. A
 cascade run lists the windows that close from the confirmatory day's 00:00 on, as `cascade.recall`
 reads, so a candidate whose window closes in the first half hour can have its onset (`ts_ns`) up to
 30 minutes before midnight.
 
 ```sh
-uv run --locked python -m tipping_point.market labels --prereg paper/prereg/market-labels-v1.toml
-uv run --locked python -m tipping_point.market cascade --prereg paper/prereg/market-labels-v1.toml
+uv run --locked --exact python -m tipping_point.market labels --prereg paper/prereg/market-labels-v1.toml
+uv run --locked --exact python -m tipping_point.market cascade --prereg paper/prereg/market-labels-v1.toml
 ```
 
 `market/documented_cascades.toml` lists documented cascades with their sources. With
