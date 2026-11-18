@@ -1,0 +1,340 @@
+# Pre-registration template for the market JEPA's latent warning test (#30 M9): copy to
+# market-latent-v<k>.toml, replace every "<...>" and "TBD", commit, then
+# `python -m tipping_point.ews prereg freeze <id>` tags the commit prereg/<id>-v<k>. The freeze
+# refuses a file that still holds a placeholder, and one whose [baseline] is not a frozen
+# market-ews file with this file's sha256 and the same cells (below). To change anything after the
+# freeze, write <id>-v<k+1>.toml with `supersedes` and `reason`. Units as in market-ews: bars are
+# 5-minute bars on the UTC grid, minutes are 1-minute series, days are UTC days.
+#
+# Set here, at the #30 research pass's values (sections 6.1-6.6, 7.3) and the decisions of
+# 2026-11-06 and 2026-11-09: the frozen classic test as the baseline, whose labels, events,
+# pipelines, seasonality, segments, AUC bootstrap, event-time shift, phase surrogates and reporting
+# groups this file restates and the freeze holds equal to it, so that the latent and classic tests
+# are scored on the same segments; the primaries' training (size S, d = 64, 10,000 steps, seeds
+# 101-105 with spares 106 and 107 per asset, the M4 split); the four pairs, each tested two-sided
+# as |AUC - 0.5|, with no direction pre-registered; the four cross-asset cells; the event-time
+# shift as the latent's primary null (the GARCH floor needs a simulated order book and is not
+# computed); the margin over each checkpoint's untrained twin and the paired latent-minus-classic
+# difference; the same-input tier and the incremental AUC over trailing realised variance as
+# descriptive reports.
+#
+# Open until the freeze (placeholders): the baseline's sha256 (market-ews-v1 is not frozen yet),
+# every checkpoint pin (copied from m8_primaries' pins.json, one entry per pin), the rule for a
+# spare taking a primary's place, which cells the hypotheses judge, how the five primaries' twin
+# margins combine and their tolerance, which classic indicator each pair is compared with, the
+# hypotheses' decision rules, and the disclosure. disclosure.decisions must say that the size and
+# step count were chosen on data reduced before the midnight fix (#170), and that the exploratory
+# screen proposed no column beyond the four pairs.
+
+id = "<lowercase-slug>"
+version = 1
+supersedes = ""          # "<id>-v<k>" this version amends, or ""
+reason = ""              # why it amends that version (required when supersedes is set)
+question = "<what this test asks, in one sentence>"
+
+# One per judged pair (the four pairs only, 2026-11-09), each two-sided: the trend score's
+# AUC is read as its distance from 0.5. The prediction states the decision rule.
+
+[[hypotheses]]
+name = "pc1-variance"
+column = "pc_1"
+indicator = "variance"
+statement = "The rolling variance of the leading latent component moves away from its calm-window distribution over the four hours before a regime-shift onset, in either direction."
+prediction = "<the decision rule, e.g. in each judged cell and pooled at h = 5 and 6: the AUC's 95 % CI excludes 0.5, its distance from 0.5 lies above the event-time shift's 95th percentile, and the twin margin's CI lies above the tolerance>"
+direction = "two-sided"
+
+[[hypotheses]]
+name = "pc1-ac"
+column = "pc_1"
+indicator = "ac"
+statement = "The lag-1 autocorrelation of the leading latent component moves away from its calm-window distribution over the four hours before a regime-shift onset, in either direction."
+prediction = "<the decision rule, as for pc1-variance>"
+direction = "two-sided"
+
+[[hypotheses]]
+name = "surprise-variance"
+column = "surprise"
+indicator = "variance"
+statement = "The rolling variance of the surprise moves away from its calm-window distribution over the four hours before a regime-shift onset, in either direction."
+prediction = "<the decision rule, as for pc1-variance>"
+direction = "two-sided"
+
+[[hypotheses]]
+name = "surprise-level"
+column = "surprise"
+indicator = "level"
+statement = "The level of the surprise moves away from its calm-window distribution over the four hours before a regime-shift onset, in either direction."
+prediction = "<the decision rule, as for pc1-variance>"
+direction = "two-sided"
+
+[data]
+domain = "market-latent"
+symbols = ["BTCUSDT", "ETHUSDT"]   # both: each symbol's model reads both symbols
+missing = "a minute whose latent or surprise is not finite in any table read on that symbol (a feature gap in the minute, or no valid minute in the predictor's context) has no value; a segment holding such a minute, or one the baseline excludes on that symbol, is excluded for every column, indicator and checkpoint, latent and classic alike, and counted, so that every comparison is paired on the same segments"
+
+[data.labels]            # the baseline's labels, which the freeze holds equal
+tag = "prereg/market-labels-v1"
+sha256 = "d5988eab9e1bab7442e8d56dd7d80388d1696a6cb0ef6d6b4d4bb50f26507458"
+
+[data.events]
+primary = "regime-shifts"
+stress = "cascades"
+
+# The frozen classic test whose segments this file is scored on. Neither file is scored on
+# confirmatory data before both are frozen (#30 choice 10).
+[baseline]
+tag = "prereg/market-ews-v1"
+sha256 = "<sha256 of the frozen market-ews file>"
+
+# The primaries (harness/m8_primaries.py): one model per symbol, each trained on its own symbol's
+# 1-second book features; the twin of each is its step-0 checkpoint.
+[training]
+span = { start = 2023-01-18, end = 2023-08-31 }
+validation = { start = 2023-09-01, end = 2023-09-30 }
+features = ["ret", "rv100", "moves", "micro_dev", "imb_1", "imb_5", "imb_20", "ofi", "depth_5", "depth_20", "depth_asym", "slope_b", "slope_a", "wide"]
+feature_format = 4       # book.features.FORMAT 4: second 0 seeded from the previous day's book (#170)
+scaling = "each model's features are scaled by the record fitted on its own symbol's training days (jepa.days); a model reading the other symbol takes that symbol's record, fitted on its training days, never refitted on what is read"
+size = "S"
+dim = 64
+steps = 10000
+primaries = [101, 102, 103, 104, 105]
+spares = [106, 107]
+replacement = "<when a spare takes a primary's place, e.g. a primary whose training fails train.verify is replaced by the next spare, logged in deviations>"
+refusals = "jepa.days refuses any day from 2024-01-01 as a training input, and any feature file whose metadata names another symbol, day, feature format or feature list; a checkpoint is pinned only from a complete training of the primaries' configuration whose every day read is its data manifest's file"
+
+# What a checkpoint's latent table holds, and the columns the pairs read; pc_2..pc_8 and surprise5
+# are extracted but judged by nothing.
+[latents]
+columns = ["pc_1", "surprise"]
+context = 96             # minutes a predictor chunk holds: the readout sees the 95 before minute m
+series = "per UTC minute m of the read symbol and per checkpoint, trained and twin alike: surprise, the error of the delta = 1 prediction of z_m from the context - 1 minutes before it, and pc_1 to pc_8, z_m on the PCA basis saved with that checkpoint, z_m being the target encoder's latent of minute m; read as two contiguous series, one over [seasonality]'s fit span and one from 5 x the largest horizon + window + length - 1 + context - 1 minutes before 2024-01-01 (514 minutes at horizons up to 24 bars, window 60, length 240 and context 96) to the end of the labels' confirmatory span, so that the first minute of a segment ending at the earliest confirmatory onset has its full context; each value known when minute m closes, and deseasonalised as [seasonality] says, with a slot profile fitted per column, checkpoint and read symbol over its fit span"
+pca = "each checkpoint's own basis, saved with it by the trainer (final.pt for the trained model, the step-0 checkpoint for its twin): 8 components fitted on 4,096 valid minutes of its training days drawn with replacement under the run's pca seed stream"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 101
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 102
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 103
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 104
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 105
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 106
+role = "spare"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "BTCUSDT"
+seed = 107
+role = "spare"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 101
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 102
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 103
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 104
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 105
+role = "primary"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 106
+role = "spare"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+[[latents.checkpoints]]
+symbol = "ETHUSDT"
+seed = 107
+role = "spare"
+run_id = "<run id, from pins.json>"
+data_commit = "<data commit, from pins.json>"
+trained_sha256 = "<sha256 of final.pt, from pins.json>"
+twin_sha256 = "<sha256 of the step-0 twin, from pins.json>"
+pca_sha256 = "<sha256 of the PCA record, from pins.json>"
+scaling_sha256 = "<sha256 of the scaling record, from pins.json>"
+
+# Restated from the baseline and held equal to it by the freeze.
+[indicators]
+pairs = [["pc_1", "variance"], ["pc_1", "ac"], ["surprise", "variance"], ["surprise", "level"]]
+window = 60
+length = 240
+lag = 1
+detrend = "none"
+
+[seasonality]
+method = "mean"
+fit = { start = 2023-01-18, end = 2023-09-30 }
+strata = ["onset-hour"]
+
+[segments]
+horizons = [5, 6, 12, 24]
+rule = "an event segment at horizon h bars ends with the minute that closes at the onset minus 5h minutes and holds the window + length - 1 minutes up to it; the length is the same at every horizon, a segment may start before the labels' clean window, and the share of its minutes in bars with H = 1 is reported"
+controls = "control segments are the non-overlapping runs of window + length - 1 minutes cut in time order from the start of each null stretch of the labels run, one set for every horizon; with subsample n > 0, at most n of each symbol's are kept, drawn without replacement under the seed after the exclusions when there are more"
+subsample = 0
+seed = 30
+
+# [model's symbol, read symbol]: each model reads both symbols, each with that symbol's own scaling.
+[cells]
+read = [["BTCUSDT", "BTCUSDT"], ["BTCUSDT", "ETHUSDT"], ["ETHUSDT", "BTCUSDT"], ["ETHUSDT", "ETHUSDT"]]
+judged = "<same-asset or all, the cells the hypotheses judge; the others are reported>"
+groups = "each primary checkpoint, trained and twin, is scored per [model's symbol, read symbol] cell (per-asset) and, with eth-only, per cell reading ETHUSDT; with judged 'all' each model's pooled group holds its two cells, and with judged 'same-asset' one pooled group per primary seed holds only that seed's BTCUSDT on BTCUSDT and ETHUSDT on ETHUSDT cells; the hypotheses read the judged cells and these pooled groups, and the other cells are reported; the classic AUCs are taken pooled over both symbols, per read symbol and on the eth-only segments"
+
+[scoring]
+statistic = "|AUC - 0.5|"
+ci_level = 0.95
+bootstrap = 2000
+seed = 30
+
+[scoring.shift]          # the latent's primary null: does it warn at all
+draws = 100
+min_offset_bars = 288
+
+[scoring.surrogates]
+secondary = "phase"
+n = 999
+
+[scoring.twin]           # did training matter
+pairing = "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the same bootstrap draws; a judged cell or pooled group passes only when every primary's trained AUC - 0.5 has the same sign, so that seeds warning in opposite directions never pass on their margins"
+seeds = "<how the five primaries' margins combine, e.g. a percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws>"
+sign_test = true         # every primary's margin must carry the sign of the combined margin
+tolerance = "<a number in (0, 0.5), in units of the statistic, set before the freeze>"
+
+[scoring.classic]        # does it warn better than the classic test
+pairing = "the latent pair's |AUC - 0.5| minus the classic indicator's AUC - 0.5 taken in the direction the baseline's hypothesis on that indicator pre-registers (AUC - 0.5 for 'greater'), the classic AUCs recomputed on the baseline's price series over the same segments; the difference passes only when it exceeds the 97.5th percentile of the same difference recomputed on each of [scoring.shift]'s draws under scoring.seed, the latent and classic sides shifted by the same offsets, a null that carries the same folding of the latent side; its paired-bootstrap CI, on the same bootstrap draws, is reported and decides nothing; 'matching' compares each variance and level pair with the classic variance and the ac pair with the classic ac"
+against = "<variance, ac, each or matching, the classic indicator each latent pair is compared with>"
+
+[descriptive]
+same_input = "the baseline's [same_input] tier, on the same segments, reported beside every latent cell; read by no decision rule, and counting no trial"
+incremental_rv = "per pair, horizon and cell, the AUC of a two-variable logistic model (the latent score and the realised variance of the read symbol's 1-minute returns of the baseline's data.series, before deseasonalising, over the rv_minutes minutes up to the segment end) minus that of the realised variance alone, with its bootstrap CI; each model is fitted and scored on the same segments, so the AUCs are in-sample and the report is descriptive only, counting no trial"
+rv_minutes = 60
+ablations = []           # "ema-only" adds EMA-only checkpoints per symbol; none is trained yet
+
+[reporting]
+groups = ["pooled", "per-asset", "eth-only"]
+eth_only_bars = 12
+
+[trials]
+budget = 1312            # 2 (trained, twin) x 4 pairs x 4 horizons x 40 latent groups + 2 classic indicators x 4 horizons x 4 groups; 1152 with judged = "same-asset"
+counted = "One trial per AUC evaluation: per primary checkpoint, trained and twin, pair and horizon, of each group cells.groups defines (each cell it reads, each cell reading ETHUSDT for eth-only, and the pooled groups, one per model with judged all or one per seed with judged same-asset); and per classic indicator compared and horizon, of the classic AUCs recomputed on the paired segments, pooled, per read symbol and eth-only, since data.missing drops segments for the classic side too. Every scoring run appends its cells to ews/trials.jsonl in the data dir. Margins and differences reuse those AUCs and count none, and the latent-minus-classic difference recomputed on each event-time shift draw reuses the shift null's draws and counts none; the spares unless they replace a primary, the onset-hour strata, the cascade stress test, the same-input tier, the incremental report and the ablations are not counted."
+
+[disclosure]
+exploratory = "<what was seen before the freeze, and when>"
+decisions = "<which choices were made with it in view>"
+confirmatory = "<what v1 scores, from which commit, on which days>"
+confirmatory_contact = "On 2026-11-06, while the book import was being built, a command-line test called the real downloader and fetched six Bybit order-book days from the confirmatory span, BTCUSDT and ETHUSDT 2024-01-01 to 2024-01-06, into a test's temporary folder. Every import failed, every archive was deleted, and the one partial file left was removed. No sample, feature, latent or label from those days was produced or looked at, and the book tests now refuse any network access."
+links = []
+
+[deviations]
+policy = "<how changes after the freeze are handled>"
+log = []
