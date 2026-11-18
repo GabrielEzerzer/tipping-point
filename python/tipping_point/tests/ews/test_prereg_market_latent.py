@@ -3,7 +3,6 @@
 
 import copy
 import hashlib
-import itertools
 import re
 import subprocess
 import tomllib
@@ -15,6 +14,7 @@ import m4_pilot
 import m8_primaries
 import pytest
 from explore import common, market_pass
+from latent_prereg import filled
 from tipping_point.book import features
 from tipping_point.ews import __main__ as ews_cli
 from tipping_point.ews import prereg
@@ -46,30 +46,6 @@ def filled_ews(text: str) -> str:
     for key, value in (*EWS_CHOICES.items(), ("empty", "mark")):
         text = re.sub(rf'^{key} = "<[^"]*>"', f'{key} = "{value}"', text, count=1, flags=re.M)
     text = re.sub(r'far_per_day = "<[^"]*>"', "far_per_day = 1.0", text)
-    return re.sub(r'"<[^"]*>"', '"set"', text)
-
-
-def filled(text: str, baseline_sha256: str = "0" * 64) -> str:
-    count, scaling = itertools.count(), itertools.count()
-    per_symbol = len(prereg.LATENT_PRIMARIES + prereg.LATENT_SPARES)
-
-    def digest(match: re.Match[str]) -> str:
-        if match[1] == "scaling_sha256":
-            seed = f"scaling{next(scaling) // per_symbol}"
-        else:
-            seed = f"{match[1]}{next(count)}"
-        return f'{match[1]} = "{hashlib.sha256(seed.encode()).hexdigest()}"'
-
-    text = text.replace('id = "<lowercase-slug>"', 'id = "market-latent"', 1)
-    text = re.sub(r'^(\w+_sha256) = "<[^"]*>"', digest, text, flags=re.M)
-    text = re.sub(
-        r'^run_id = "<[^"]*>"', lambda _: f'run_id = "run-{next(count)}"', text, flags=re.M
-    )
-    text = re.sub(r'^data_commit = "<[^"]*>"', 'data_commit = "abc1234"', text, flags=re.M)
-    text = re.sub(r'^(sha256 = )"<[^"]*>"', rf'\1"{baseline_sha256}"', text, flags=re.M)
-    text = re.sub(r'^judged = "<[^"]*>"', 'judged = "same-asset"', text, flags=re.M)
-    text = re.sub(r'^against = "<[^"]*>"', 'against = "each"', text, flags=re.M)
-    text = re.sub(r'^tolerance = "<[^"]*>"', "tolerance = 0.02", text, flags=re.M)
     return re.sub(r'"<[^"]*>"', '"set"', text)
 
 
