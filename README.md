@@ -1,31 +1,38 @@
 ﻿# Tipping Point
 
-Tipping Point is a research project and an open-source framework built around one question: do
-learned early-warning signals of critical transitions pass a falsification test based on
-finite-size scaling? The 2D Ising model is where the ground truth is exact: its critical
-temperature and exponents are known, so a signal that claims to detect its transition must change
-with lattice size as finite-size scaling predicts. The project trains a JEPA (joint-embedding
-predictive architecture) world model on raw Ising configurations, derives early-warning signals
-from its latents and tests them against that prediction, alongside the classic indicators computed
-on the raw signal. Crypto order books are the application: the same pre-registered protocol is run
-on volatility-regime shifts in Bitcoin and Ether perpetual futures. The desktop app is product,
-not part of the paper's claim.
+Tipping Point asks whether a self-supervised world model can warn of regime shifts in a real
+market earlier and more reliably than the classic early-warning indicators. It trains a JEPA
+(joint-embedding predictive architecture) on the order books of Bitcoin and Ether perpetual
+futures, and tests warnings read from its latents against classic indicators on volatility-regime
+shifts labelled by a pre-registered rule. The models are frozen before they see the 2024-2026 test
+data.
 
-## Status as of 4 November 2026
+A market has no ground truth for what a model "should" learn, so the approach is first tested where
+the physics is exact: the 2D Ising model, whose critical temperature and exponents are known. A
+signal that claims to track its transition must change with lattice size as finite-size scaling
+predicts. The Ising experiments are the supporting evidence; the market experiment is the claim.
 
-- Built and tested: the Rust market-data engine, with live and archive venues, storage and replay,
-  and the engine API; the GPU Ising simulator, validated against exact results; the classic
-  early-warning scoring, with its pre-registration tooling; the JEPA world-model core; the
-  pre-registered confirmatory datasets at L = 16, 32 and 64, and the classic baseline scored on
-  them (below).
-- In progress: the latent experiment, pre-registered and frozen as `prereg/ising-latent-v1`
-  (extraction on Kaggle, then scoring).
-- Planned: an Ising-only preprint in December 2026 and a workshop submission in early 2027. The
-  market experiments and the desktop app follow, with the market results as a later version of the
-  paper.
+## Status as of 18 November 2026
+
+- Market, built: the Bybit order-book archive import in the Rust engine; 1-second book features for
+  the BTCUSDT and ETHUSDT perpetuals from 18 January 2023 to 30 September 2026; the volatility-regime
+  labels, pre-registered and frozen as `prereg/market-labels-v1`; the market warning test (event and
+  control segments, the GARCH floor and the same-input tier); the market JEPA, its CPU pilot and the
+  trained models, five primary seeds and two spares per asset. The models train and validate on
+  18 January to 30 September 2023, are explored on 2023-Q4 and are tested, frozen, on January 2024 to September 2026,
+  within each asset and across them in both directions.
+- Market, next: freeze the classic market test (`market-ews-v1`); extract the trained models' and
+  their untrained twins' latents; write and freeze the latent test (`market-latent-v1`); score both
+  on the confirmatory span.
+- Ising, done: the GPU simulator, validated against exact results; the confirmatory datasets at
+  L = 16, 32 and 64; the classic baseline (`ising-ews-v1`, all five hypotheses pass) and the latent
+  experiment (`ising-latent-v1`, four of five pass), both scored below.
+- Planned: a paper on the market result, with the Ising experiments as its supporting evidence, for
+  a workshop in early 2027.
 
 The plan lives on the issue tracker, starting from the map in [#1](https://github.com/GabrielEzerzer/tipping-point/issues/1).
-The pre-registration's design and the decisions behind it are in [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26).
+The market experiment's design is in [#30](https://github.com/GabrielEzerzer/tipping-point/issues/30),
+and the Ising pre-registration's in [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26).
 
 ## Results: the pre-registered classic baseline (ising-ews-v1)
 
@@ -76,6 +83,79 @@ To reproduce: with the 75 runs in the data dir, `uv run python -m tipping_point.
 The exploratory tables from the seeds 1-5 datasets at L = 16 and 32, on
 [#26](https://github.com/GabrielEzerzer/tipping-point/issues/26#issuecomment-6390788147), are
 superseded by this result.
+
+## Results: the pre-registered latent experiment (ising-latent-v1)
+
+The pre-registration `paper/prereg/ising-latent-v1.toml`, frozen as the tag
+`prereg/ising-latent-v1` (commit b19c2df), was scored at commit 25147a0 from a clean tree, from 16
+to 18 November 2026. It read the latents of five primary JEPA checkpoints (m1-m5), six ablation
+checkpoints and the untrained step-0 twin of each, extracted from the same 75 confirmatory runs.
+The result is run `20261116T163243Z-ising-latent-v1`, and it spent the whole budget of 3,132 trials.
+Cells are the headline cell on the matched cadence at L = 16, 32 and 64 and h = 0, 1 and 2, nine per
+checkpoint; intervals are 95% bootstrap percentiles.
+
+![The static scaling of L^2 Var at Tc for the first principal component of the latent and for the JEPA's surprise, trained and twin, against |m| and the slope 7/4](paper/figures/ising-latent-v1-scaling.png)
+
+The static scaling at Tc, each line relative to its value at L = 16: the twins' first principal
+component (pc_1) follows |m| and the slope 7/4, and the trained checkpoints' does not.
+
+Four of the five judged rows pass.
+
+1. **latent-pipeline-check: pass.** Every twin's exponent of L^2 Var(pc_1) lies within 0.15 of
+   7/4: 1.741 to 1.777, 11 of 11. The trained primaries' lie between -0.07 and +0.40, reported
+   without a verdict.
+2. **latent-variance-rises, trained: fail.** The rule asks every primary's AUC CI to lie above 0.5
+   at every L and h, for Var(pc_1) and AC1(pc_1). Var(pc_1) does so in 17 of 45 cells and lies
+   below 0.5 in 27. AC1(pc_1) does so in 42 of 45; m2 misses at L = 32, h = 1, and at L = 64,
+   h = 1 and 2. On the twins, read separately, both pass in all 45 cells (Var 0.998 to 1.000,
+   AC1 0.802 to 0.998).
+3. **latent-dynamic-fss: pass.** Every twin's 1/nu, fitted on where Var(pc_1) peaks, is 0.934 to
+   0.936, with CIs of about [0.79, 1.12], 11 of 11.
+4. **learned-beyond-random (a): pass.** The energy probe's R^2, trained minus twin, is +0.00249
+   [+0.00222, +0.00274] as the mean over L, and all 15 paired margins are positive.
+5. **learned-beyond-random (b): pass.** The same margin for the energy probe's selectivity is
+   +0.00043 [+0.00027, +0.00060], 15 of 15 positive.
+
+Both margins in (a) and (b) are small. The untrained twin already reads the energy almost
+perfectly: its R^2 is 0.99507, 0.99787 and 0.99908 at L = 16, 32 and 64, against 0.99965, 0.99989
+and 0.99996 trained, so the margin shrinks with L (+0.0046, +0.0020, +0.0009). The selectivity
+margin lies below the file's tolerance of 0.002, but its CI excludes 0, which the file counts as a
+pass.
+
+![Where Var(pc_1) and Var(surprise) peak at each L, trained and twin](paper/figures/ising-latent-v1-peaks.png)
+
+The scaled temperature eps_L at which each rolling variance peaks, per L: left Var(pc_1), right
+Var(surprise). The twins' peaks sit at about the same eps_L at every L, as finite-size scaling
+predicts. The trained checkpoints' positions near eps_L = -3.4 lie on or next to the search band's
+cold edge, where most replicas have no located peak (for Var(pc_1), 78-83% of them at L = 16 and
+55-73% at L = 32). At L = 64 the trained Var(pc_1) spreads out, and the trained Var(surprise) moves
+to about eps_L = +0.4 to +0.6.
+
+Reported without a verdict:
+
+- Beside the twin, the trained Var(pc_1) loses AUC: -0.592 [-0.730, -0.453] as the mean over L and
+  h, and from -0.39 to -0.85 by seed. AC1(pc_1) loses -0.051 [-0.149, +0.010]. Under ising-ews-v1,
+  |m| averages 0.9993 for its variance and 0.9264 for AC1.
+- Var(surprise) has its AUC CI above 0.5 in all 45 trained and all 45 twin cells. The trained
+  surprise's static exponent is 0.78 to 1.06 (twins 1.47 to 1.76), and its peaks give no 1/nu on
+  any primary.
+- The trained Var(pc_1)'s 1/nu, 1.04 to 1.91 across the primaries, is inconclusive under the
+  file's edge rule: at L = 16, 78-83% of each primary's replicas take their extremum on the band's
+  cold edge or within one window of it, so the fits rest on the few peaks that were located.
+- Other probes, trained minus twin, as the mean over L: L^2 Var R^2 +0.103 [+0.093, +0.112], its
+  selectivity +0.065 [+0.057, +0.073]; |m| R^2 -0.00019, with the twins at 0.99997 and above.
+- Ablations, three seeds each. EMA-only: energy R^2 margin +0.00248, selectivity +0.00003
+  [-0.00019, +0.00025], and on Var(pc_1) it reads like its twin (AUC margin +0.0005). Held-out band (trained
+  without the plateaus at T in [2.0, 2.5]): energy R^2 margin +0.00245, selectivity +0.00034, Var(pc_1) AUC margin -0.354.
+
+In short: through a random encoder, the pipeline reproduces the exact Ising scaling, so the method
+can find it. The trained encoders do not keep it in their leading direction: the variance of their
+pc_1 mostly does not rise before Tc, and what they gain over the random encoder on the energy
+probe is small. The variance of their surprise rises before Tc on every trained checkpoint, as it
+does through the random encoder. How the
+run took its 39 hours is under [The latent experiment](#the-latent-experiment).
+
+To reproduce: with the runs and their latents in the data dir, `uv run python harness/ising_experiment.py --prereg paper/prereg/ising-latent-v1.toml` scores them, and `--figures-only <result folder>` redraws the figures from the result.
 
 ## Quick start
 
