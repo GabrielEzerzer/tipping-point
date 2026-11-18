@@ -1,6 +1,6 @@
 //! Archive import (`store import`): the committed synthetic archives in `engine/tests/fixtures/archives/`, one
 //! per venue, imported into Parquet and checked row by row against the archive itself, and equal to the same
-//! records fed live. Real archive days in `<data dir>/archives/` are imported too when TP_ARCHIVE_DAYS is set.
+//! records fed live. Real archive days in `<data dir>/archives/` are imported too with `TP_ARCHIVE_DAYS` set.
 
 use std::collections::BTreeMap;
 use std::error::Error;
