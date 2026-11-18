@@ -132,7 +132,8 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 # a market-labels file (#29): tuples, so that membership never hashes whatever a file holds there
 MARKET_LABELS = "market-labels"
 MARKET_EWS = "market-ews"
-DOMAINS = ("ising", MARKET_LABELS, MARKET_EWS)
+MARKET_LATENT = "market-latent"
+DOMAINS = ("ising", MARKET_LABELS, MARKET_EWS, MARKET_LATENT)
 MARKET_SYMBOLS = ("BTCUSDT", "ETHUSDT")  # market.archive.SYMBOLS
 RV_ESTIMATORS = ("garman-klass",)  # what market.bars computes; Parkinson is a reported variant
 # what market.bars and market.msvol do with a bar they cannot use, word for word
@@ -229,6 +230,107 @@ PILOT_GARCH = {
 }
 GARCH_FIELDS = ("omega", "alpha", "beta", "nu")
 _LABELS_TAG = re.compile(r"prereg/market-labels-v[1-9][0-9]*")
+_EWS_TAG = re.compile(r"prereg/market-ews-v[1-9][0-9]*")
+_COMMIT = re.compile(r"[0-9a-f]{7,40}")
+LATENT_TRAINING = {"start": date(2023, 1, 18), "end": date(2023, 8, 31)}
+LATENT_VALIDATION = {"start": date(2023, 9, 1), "end": date(2023, 9, 30)}
+BOOK_FEATURES = (
+    "ret",
+    "rv100",
+    "moves",
+    "micro_dev",
+    "imb_1",
+    "imb_5",
+    "imb_20",
+    "ofi",
+    "depth_5",
+    "depth_20",
+    "depth_asym",
+    "slope_b",
+    "slope_a",
+    "wide",
+)
+BOOK_FORMAT = 4
+LATENT_SIZE, LATENT_DIM, LATENT_STEPS, LATENT_CONTEXT = "S", 64, 10_000, 96
+LATENT_PRIMARIES = (101, 102, 103, 104, 105)
+LATENT_SPARES = (106, 107)
+MARKET_LATENT_PAIRS = (
+    ("pc_1", "variance"),
+    ("pc_1", "ac"),
+    ("surprise", "variance"),
+    ("surprise", "level"),
+)
+MARKET_CHECKPOINT_ROLES = ("primary", "spare", "ema-only")
+MARKET_ABLATIONS = ("ema-only",)
+CLASSIC_AGAINST = ("variance", "ac", "each")
+JUDGED_CELLS = ("same-asset", "all")
+STATISTIC = "|AUC - 0.5|"
+LATENT_SERIES = (
+    "per UTC minute m of the read symbol and per checkpoint, trained and twin alike: surprise, the "
+    "error of the delta = 1 prediction of z_m from the context - 1 minutes before it, and pc_1 to "
+    "pc_8, z_m on the PCA basis saved with that checkpoint, z_m being the target encoder's latent "
+    "of minute m; read as one contiguous series over [seasonality]'s fit span and the labels' "
+    "confirmatory span, each value known when minute m closes, and deseasonalised as [seasonality] "
+    "says, with a slot profile fitted per column, checkpoint and read symbol over its fit span"
+)
+LATENT_MISSING = (
+    "a minute whose latent or surprise is not finite in any table read on that symbol (a feature "
+    "gap in the minute, or no valid minute in the predictor's context) has no value; a segment "
+    "holding such a minute, or one the baseline excludes on that symbol, is excluded for every "
+    "column, indicator and checkpoint, latent and classic alike, and counted, so that every "
+    "comparison is paired on the same segments"
+)
+LATENT_PCA = (
+    "each checkpoint's own basis, saved with it by the trainer (final.pt for the trained model, "
+    "the step-0 checkpoint for its twin): 8 components fitted on 4,096 valid minutes of its "
+    "training days drawn with replacement under the run's pca seed stream"
+)
+LATENT_SCALING = (
+    "each model's features are scaled by the record fitted on its own symbol's training days "
+    "(jepa.days); a model reading the other symbol takes that symbol's record, fitted on its "
+    "training days, never refitted on what is read"
+)
+LOADER_REFUSALS = (
+    "jepa.days refuses any day from 2024-01-01 as a training input, and any feature file whose "
+    "metadata names another symbol, day, feature format or feature list; a checkpoint is pinned "
+    "only from a complete training of the primaries' configuration whose every day read is its "
+    "data manifest's file"
+)
+TWIN_PAIRING = (
+    "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the "
+    "same bootstrap draws"
+)
+CLASSIC_PAIRING = (
+    "the latent pair's |AUC - 0.5| minus the classic indicator's on the baseline's price series, "
+    "on the same segments and the same bootstrap draws (a paired bootstrap)"
+)
+SAME_INPUT_REPORT = (
+    "the baseline's [same_input] tier, on the same segments, reported beside every latent cell; "
+    "read by no decision rule, and counting no trial"
+)
+INCREMENTAL_RV = (
+    "per pair, horizon and cell, the AUC of a two-variable logistic model (the latent score and "
+    "the realised variance of 1-minute returns over the rv_minutes minutes up to the segment end) "
+    "minus that of the realised variance alone, with its bootstrap CI; counting no trial"
+)
+BASELINE_CELLS = (
+    "data.symbols",
+    "data.labels",
+    "data.events",
+    "indicators.window",
+    "indicators.length",
+    "indicators.lag",
+    "indicators.detrend",
+    "indicators.bandwidth",
+    "seasonality",
+    "segments",
+    "scoring.ci_level",
+    "scoring.bootstrap",
+    "scoring.seed",
+    "scoring.shift",
+    "scoring.surrogates",
+    "reporting",
+)
 
 
 class PreregError(ValueError):
@@ -515,6 +617,91 @@ _MARKET_EWS_SCHEMA: dict[str, Any] = {
 }
 _MARKET_EWS_KEYS: dict[str, Any] = _MARKET_EWS_SCHEMA | {
     "indicators": _MARKET_EWS_SCHEMA["indicators"] | {"bandwidth": _NUMBER}
+}
+_MARKET_LATENT_SCHEMA: dict[str, Any] = {
+    "id": str,
+    "version": int,
+    "supersedes": str,
+    "reason": str,
+    "question": str,
+    "hypotheses": [
+        {
+            "name": str,
+            "column": str,
+            "indicator": str,
+            "statement": str,
+            "prediction": str,
+            "direction": str,
+        }
+    ],
+    "data": {
+        "domain": str,
+        "symbols": [str],
+        "missing": str,
+        "labels": {"tag": str, "sha256": str},
+        "events": {"primary": str, "stress": str},
+    },
+    "baseline": {"tag": str, "sha256": str},
+    "training": {
+        "span": {"start": date, "end": date},
+        "validation": {"start": date, "end": date},
+        "features": [str],
+        "feature_format": int,
+        "scaling": str,
+        "size": str,
+        "dim": int,
+        "steps": int,
+        "primaries": [int],
+        "spares": [int],
+        "replacement": str,
+        "refusals": str,
+    },
+    "latents": {
+        "columns": [str],
+        "context": int,
+        "series": str,
+        "pca": str,
+        "checkpoints": [
+            {
+                "symbol": str,
+                "seed": int,
+                "role": str,
+                "run_id": str,
+                "data_commit": str,
+                "trained_sha256": str,
+                "twin_sha256": str,
+                "pca_sha256": str,
+                "scaling_sha256": str,
+            }
+        ],
+    },
+    "indicators": {"pairs": [[str]], "window": int, "length": int, "lag": int, "detrend": str},
+    "seasonality": _MARKET_EWS_SCHEMA["seasonality"],
+    "segments": _MARKET_EWS_SCHEMA["segments"],
+    "cells": {"read": [[str]], "judged": str},
+    "scoring": {
+        "statistic": str,
+        "ci_level": _NUMBER,
+        "bootstrap": int,
+        "seed": int,
+        "shift": _MARKET_EWS_SCHEMA["scoring"]["shift"],
+        "surrogates": _MARKET_EWS_SCHEMA["scoring"]["surrogates"],
+        "twin": {"pairing": str, "seeds": str, "sign_test": bool, "tolerance": (*_NUMBER, str)},
+        "classic": {"pairing": str, "against": str},
+    },
+    "descriptive": {
+        "same_input": str,
+        "incremental_rv": str,
+        "rv_minutes": int,
+        "ablations": [str],
+    },
+    "reporting": _MARKET_EWS_SCHEMA["reporting"],
+    "trials": _MARKET_EWS_SCHEMA["trials"],
+    "disclosure": _SCHEMA["disclosure"] | {"confirmatory_contact": str},
+    "deviations": _SCHEMA["deviations"],
+}
+_MARKET_LATENT_KEYS: dict[str, Any] = _MARKET_LATENT_SCHEMA | {
+    "indicators": _MARKET_LATENT_SCHEMA["indicators"] | {"bandwidth": _NUMBER}
 }
 
 
@@ -1040,13 +1227,8 @@ def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]
     ]
     if found:
         return found
-    if not _SLUG.fullmatch(doc["id"]) and not _PLACEHOLDER.search(doc["id"]):
-        found.append(f"id: {doc['id']!r} is not a lowercase slug")
-    if doc["version"] < 1:
-        found.append("version: must be >= 1")
-    if doc["supersedes"] and not doc["reason"].strip():
-        found.append("reason: an amendment must say why it supersedes " + doc["supersedes"])
-    data, ind, seg = doc["data"], doc["indicators"], doc["segments"]
+    found += _header_problems(doc)
+    data, ind, horizons = doc["data"], doc["indicators"], doc["segments"]["horizons"]
     symbols = data["symbols"]
     if not symbols or len(set(symbols)) != len(symbols) or not set(symbols) <= set(MARKET_SYMBOLS):
         found.append(
@@ -1055,29 +1237,11 @@ def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]
     for key, rule in (("series", SERIES), ("missing", MISSING_MINUTE)):
         if data[key] != rule:
             found.append(f"data.{key}: {rule!r}, the rule the segment builder carries out")
-    if not _LABELS_TAG.fullmatch(data["labels"]["tag"]):
-        found.append("data.labels.tag: prereg/market-labels-v<k>, the frozen labels' tag")
-    if not _SHA256.fullmatch(data["labels"]["sha256"]):
-        found.append("data.labels.sha256: the frozen labels file's sha256 (64 hex digits)")
-    if data["events"] != EVENT_SETS:
-        found.append(f"data.events: {EVENT_SETS}, regime shifts primary, cascades a stress test")
+    found += _labels_problems(data)
     names = ind["names"]
     if not names or len(set(names)) != len(names) or not set(names) <= set(EWS_INDICATORS):
         found.append(f"indicators.names: distinct, a non-empty subset of {list(EWS_INDICATORS)}")
-    for key in ("window", "length"):
-        if ind[key] < 2:
-            found.append(f"indicators.{key}: at least 2")
-    if ind["lag"] != 1:
-        found.append("indicators.lag: 1, AC1's lag in minutes")
-    detrend, bandwidth = ind["detrend"], ind.get("bandwidth")
-    if detrend not in DETRENDS and not _placeholder(detrend):
-        found.append(f"indicators.detrend: one of {list(DETRENDS)}")
-    if detrend == "gaussian" and not (
-        isinstance(bandwidth, _NUMBER) and not isinstance(bandwidth, bool) and bandwidth > 0
-    ):
-        found.append("indicators.bandwidth: a positive number of minutes, with detrend 'gaussian'")
-    if detrend != "gaussian" and bandwidth is not None:
-        found.append("indicators.bandwidth: only with detrend 'gaussian'; nothing else reads it")
+    found += _pipeline_problems(ind)
     hyp = doc["hypotheses"]
     if sorted(h["indicator"] for h in hyp) != sorted(names):
         found.append("hypotheses: one per scored indicator, naming it in `indicator`")
@@ -1089,39 +1253,9 @@ def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]
                 f"hypotheses[{i}].direction: 'greater', a rising indicator; no scorer reads "
                 "another direction yet"
             )
-    season = doc["seasonality"]
-    method = season["method"]
-    if method not in DESEASON_METHODS and not _placeholder(method):
-        found.append(f"seasonality.method: one of {list(DESEASON_METHODS)}")
-    fit = season["fit"]
-    if any(isinstance(day, datetime) for day in fit.values()):
-        found.append("seasonality.fit: UTC days, with no time of day")
-    elif not fit["start"] <= fit["end"] < CONFIRMATORY:
-        found.append(
-            f"seasonality.fit: start on or before end, and end before {CONFIRMATORY.isoformat()}: "
-            "the slot profile is fitted on pilot days only"
-        )
-    if not set(season["strata"]) <= set(STRATA):
-        found.append(f"seasonality.strata: a subset of {list(STRATA)}")
-    horizons = seg["horizons"]
-    if not horizons or len(set(horizons)) != len(horizons) or min(horizons) < HORIZON_FLOOR:
-        found.append(
-            f"segments.horizons: distinct numbers of bars, each at least {HORIZON_FLOOR}, the "
-            "labels' p90 detection delay"
-        )
-    for key, rule in (("rule", SEGMENT), ("controls", CONTROLS)):
-        if seg[key] != rule:
-            found.append(f"segments.{key}: {rule!r}, the rule the segment builder carries out")
-    for key in ("subsample", "seed"):
-        if seg[key] < 0:
-            found.append(f"segments.{key}: at least 0")
+    found += _segment_problems(doc)
     sc = doc["scoring"]
-    if not 0 < sc["ci_level"] < 1:
-        found.append("scoring.ci_level: in (0, 1)")
-    if sc["bootstrap"] < 1:
-        found.append("scoring.bootstrap: at least 1 draw")
-    if sc["seed"] < 0:
-        found.append("scoring.seed: at least 0")
+    found += _scoring_problems(sc)
     floor = sc["floor"]
     for key, built in (("fit", FLOOR_FITS), ("noise", FLOOR_NOISE), ("empty", FLOOR_EMPTY)):
         if floor[key] not in built and not _placeholder(floor[key]):
@@ -1162,26 +1296,7 @@ def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]
                     f"indicators.{key}: {value!r} with the pilot floor, whose pipelines are "
                     "Pipeline(name, 60, 240) with no detrend"
                 )
-    shift = sc["shift"]
-    if shift["draws"] < 1:
-        found.append("scoring.shift.draws: at least 1")
-    if shift["min_offset_bars"] < DAY_BARS:
-        found.append(f"scoring.shift.min_offset_bars: at least {DAY_BARS}, a day")
-    if sc["surrogates"]["secondary"] != "phase":
-        found.append("scoring.surrogates.secondary: 'phase', the secondary null (#29 call 7)")
-    if sc["surrogates"]["n"] < 1:
-        found.append("scoring.surrogates.n: at least 1")
-    if doc["reporting"]["eth_only_bars"] != ETH_ONLY_BARS:
-        found.append(
-            f"reporting.eth_only_bars: {ETH_ONLY_BARS}, an hour, the window the eth-only filter "
-            "and the labels' coincidence report read"
-        )
-    groups = doc["reporting"]["groups"]
-    known = set(groups) <= set(REPORT_GROUPS) and len(set(groups)) == len(groups)
-    if not known or not {"pooled", "per-asset"} <= set(groups):
-        found.append("reporting.groups: pooled and per-asset, and may add eth-only")
-    if "eth-only" in groups and set(symbols) != set(MARKET_SYMBOLS):
-        found.append("reporting.groups: eth-only reads ETH onsets against BTC's: both symbols")
+    found += _reporting_problems(doc)
     alarms = doc["alarms"]
     if alarms["rule"] != ALARMS:
         found.append(f"alarms.rule: {ALARMS!r}, the rule the alarm table carries out")
@@ -1199,6 +1314,116 @@ def _market_ews_problems(doc: dict[str, Any], strict: bool = False) -> list[str]
         ]
         if not found and doc["trials"]["budget"] < market_ews_cells(doc):
             found.append(f"trials.budget: one scoring run evaluates {market_ews_cells(doc)} cells")
+    return found
+
+
+def _header_problems(doc: dict[str, Any]) -> list[str]:
+    found = []
+    if not _SLUG.fullmatch(doc["id"]) and not _PLACEHOLDER.search(doc["id"]):
+        found.append(f"id: {doc['id']!r} is not a lowercase slug")
+    if doc["version"] < 1:
+        found.append("version: must be >= 1")
+    if doc["supersedes"] and not doc["reason"].strip():
+        found.append("reason: an amendment must say why it supersedes " + doc["supersedes"])
+    return found
+
+
+def _labels_problems(data: dict[str, Any]) -> list[str]:
+    found = []
+    if not _LABELS_TAG.fullmatch(data["labels"]["tag"]):
+        found.append("data.labels.tag: prereg/market-labels-v<k>, the frozen labels' tag")
+    if not _SHA256.fullmatch(data["labels"]["sha256"]):
+        found.append("data.labels.sha256: the frozen labels file's sha256 (64 hex digits)")
+    if data["events"] != EVENT_SETS:
+        found.append(f"data.events: {EVENT_SETS}, regime shifts primary, cascades a stress test")
+    return found
+
+
+def _pipeline_problems(ind: dict[str, Any]) -> list[str]:
+    found = []
+    for key in ("window", "length"):
+        if ind[key] < 2:
+            found.append(f"indicators.{key}: at least 2")
+    if ind["lag"] != 1:
+        found.append("indicators.lag: 1, AC1's lag in minutes")
+    detrend, bandwidth = ind["detrend"], ind.get("bandwidth")
+    if detrend not in DETRENDS and not _placeholder(detrend):
+        found.append(f"indicators.detrend: one of {list(DETRENDS)}")
+    if detrend == "gaussian" and not (
+        isinstance(bandwidth, _NUMBER) and not isinstance(bandwidth, bool) and bandwidth > 0
+    ):
+        found.append("indicators.bandwidth: a positive number of minutes, with detrend 'gaussian'")
+    if detrend != "gaussian" and bandwidth is not None:
+        found.append("indicators.bandwidth: only with detrend 'gaussian'; nothing else reads it")
+    return found
+
+
+def _segment_problems(doc: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    seg = doc["segments"]
+    season = doc["seasonality"]
+    method = season["method"]
+    if method not in DESEASON_METHODS and not _placeholder(method):
+        found.append(f"seasonality.method: one of {list(DESEASON_METHODS)}")
+    fit = season["fit"]
+    if any(isinstance(day, datetime) for day in fit.values()):
+        found.append("seasonality.fit: UTC days, with no time of day")
+    elif not fit["start"] <= fit["end"] < CONFIRMATORY:
+        found.append(
+            f"seasonality.fit: start on or before end, and end before {CONFIRMATORY.isoformat()}: "
+            "the slot profile is fitted on pilot days only"
+        )
+    if not set(season["strata"]) <= set(STRATA):
+        found.append(f"seasonality.strata: a subset of {list(STRATA)}")
+    horizons = seg["horizons"]
+    if not horizons or len(set(horizons)) != len(horizons) or min(horizons) < HORIZON_FLOOR:
+        found.append(
+            f"segments.horizons: distinct numbers of bars, each at least {HORIZON_FLOOR}, the "
+            "labels' p90 detection delay"
+        )
+    for key, rule in (("rule", SEGMENT), ("controls", CONTROLS)):
+        if seg[key] != rule:
+            found.append(f"segments.{key}: {rule!r}, the rule the segment builder carries out")
+    for key in ("subsample", "seed"):
+        if seg[key] < 0:
+            found.append(f"segments.{key}: at least 0")
+    return found
+
+
+def _scoring_problems(sc: dict[str, Any]) -> list[str]:
+    found = []
+    if not 0 < sc["ci_level"] < 1:
+        found.append("scoring.ci_level: in (0, 1)")
+    if sc["bootstrap"] < 1:
+        found.append("scoring.bootstrap: at least 1 draw")
+    if sc["seed"] < 0:
+        found.append("scoring.seed: at least 0")
+    shift = sc["shift"]
+    if shift["draws"] < 1:
+        found.append("scoring.shift.draws: at least 1")
+    if shift["min_offset_bars"] < DAY_BARS:
+        found.append(f"scoring.shift.min_offset_bars: at least {DAY_BARS}, a day")
+    if sc["surrogates"]["secondary"] != "phase":
+        found.append("scoring.surrogates.secondary: 'phase', the secondary null (#29 call 7)")
+    if sc["surrogates"]["n"] < 1:
+        found.append("scoring.surrogates.n: at least 1")
+    return found
+
+
+def _reporting_problems(doc: dict[str, Any]) -> list[str]:
+    found = []
+    symbols = doc["data"]["symbols"]
+    if doc["reporting"]["eth_only_bars"] != ETH_ONLY_BARS:
+        found.append(
+            f"reporting.eth_only_bars: {ETH_ONLY_BARS}, an hour, the window the eth-only filter "
+            "and the labels' coincidence report read"
+        )
+    groups = doc["reporting"]["groups"]
+    known = set(groups) <= set(REPORT_GROUPS) and len(set(groups)) == len(groups)
+    if not known or not {"pooled", "per-asset"} <= set(groups):
+        found.append("reporting.groups: pooled and per-asset, and may add eth-only")
+    if "eth-only" in groups and set(symbols) != set(MARKET_SYMBOLS):
+        found.append("reporting.groups: eth-only reads ETH onsets against BTC's: both symbols")
     return found
 
 
@@ -1244,6 +1469,206 @@ def _same_input_problems(doc: dict[str, Any]) -> list[str]:
     return found
 
 
+def market_latent_cells(doc: dict[str, Any]) -> int:
+    groups = doc["reporting"]["groups"]
+    per = sum(len(doc["data"]["symbols"]) if g == "per-asset" else 1 for g in groups)
+    primaries = sum(entry["role"] == "primary" for entry in doc["latents"]["checkpoints"])
+    pairs, horizons = len(doc["indicators"]["pairs"]), len(doc["segments"]["horizons"])
+    return 2 * primaries * pairs * horizons * per
+
+
+def _hex_or_open(value: str, pattern: re.Pattern[str]) -> bool:
+    return pattern.fullmatch(value) is not None or _placeholder(value)
+
+
+def _training_problems(doc: dict[str, Any]) -> list[str]:
+    found, training = [], doc["training"]
+    for key, span in (("span", LATENT_TRAINING), ("validation", LATENT_VALIDATION)):
+        if any(isinstance(day, datetime) for day in training[key].values()):
+            found.append(f"training.{key}: UTC days, with no time of day")
+        elif training[key] != span:
+            said = f"{span['start'].isoformat()} to {span['end'].isoformat()}"
+            found.append(f"training.{key}: {said}, the days the primaries train on")
+    for key, value in (
+        ("features", list(BOOK_FEATURES)),
+        ("feature_format", BOOK_FORMAT),
+        ("size", LATENT_SIZE),
+        ("dim", LATENT_DIM),
+        ("steps", LATENT_STEPS),
+        ("primaries", list(LATENT_PRIMARIES)),
+        ("spares", list(LATENT_SPARES)),
+        ("scaling", LATENT_SCALING),
+        ("refusals", LOADER_REFUSALS),
+    ):
+        if training[key] != value:
+            found.append(f"training.{key}: {value!r}, what the primaries were trained with")
+    if not training["replacement"].strip():
+        found.append("training.replacement: when a spare takes a primary's place")
+    return found
+
+
+def _checkpoint_problems(doc: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    entries, training = doc["latents"]["checkpoints"], doc["training"]
+    ablations = doc["descriptive"]["ablations"]
+    for i, entry in enumerate(entries):
+        where = f"latents.checkpoints[{i}]"
+        if entry["symbol"] not in doc["data"]["symbols"]:
+            found.append(f"{where}.symbol: one of data.symbols")
+        if entry["role"] not in MARKET_CHECKPOINT_ROLES:
+            found.append(f"{where}.role: one of {list(MARKET_CHECKPOINT_ROLES)}")
+        elif entry["role"] in MARKET_ABLATIONS and entry["role"] not in ablations:
+            found.append(f"{where}.role: {entry['role']!r} only as one of descriptive.ablations")
+        for key in ("trained_sha256", "twin_sha256", "pca_sha256", "scaling_sha256"):
+            if not _hex_or_open(entry[key], _SHA256):
+                found.append(f"{where}.{key}: a sha256 (64 hex digits)")
+        if not _hex_or_open(entry["data_commit"], _COMMIT):
+            found.append(f"{where}.data_commit: a commit (7 to 40 hex digits)")
+        if not entry["run_id"].strip():
+            found.append(f"{where}.run_id: the training's run id")
+        same = entry["trained_sha256"] == entry["twin_sha256"]
+        if same and not _placeholder(entry["trained_sha256"]):
+            found.append(f"{where}: the trained model and its twin are the same file")
+    for symbol in doc["data"]["symbols"]:
+        mine = [e for e in entries if e["symbol"] == symbol]
+        for role, seeds in (("primary", training["primaries"]), ("spare", training["spares"])):
+            if sorted(e["seed"] for e in mine if e["role"] == role) != sorted(seeds):
+                found.append(f"latents.checkpoints: {symbol}'s {role} seeds are training's, once")
+        for role in ablations:
+            if not any(e["role"] == role for e in mine):
+                found.append(f"latents.checkpoints: {symbol} has no {role} checkpoint")
+        if len({e["seed"] for e in mine}) != len(mine):
+            found.append(f"latents.checkpoints: one entry per seed of {symbol}")
+    for key in ("run_id", "trained_sha256", "twin_sha256"):
+        named = [e[key] for e in entries if not _placeholder(e[key])]
+        if len(set(named)) != len(named):
+            found.append(f"latents.checkpoints: no two entries share a {key}")
+    return found
+
+
+def _market_latent_problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
+    found: list[str] = []
+    _check(doc, _MARKET_LATENT_SCHEMA, "", found)
+    if found:
+        return found
+    found += [
+        f"{key}: nothing reads this key in a market-latent file; take it out"
+        for key in _unread(doc, _MARKET_LATENT_KEYS)
+    ]
+    found += [
+        f"{where}: a finite number, not {value!r}"
+        for where, value in _numbers(doc)
+        if not math.isfinite(value)
+    ]
+    if found:
+        return found
+    found += _header_problems(doc)
+    data, ind, latents = doc["data"], doc["indicators"], doc["latents"]
+    symbols = data["symbols"]
+    if len(set(symbols)) != len(symbols) or sorted(symbols) != sorted(MARKET_SYMBOLS):
+        found.append(f"data.symbols: {list(MARKET_SYMBOLS)}, the four cells read both")
+    if data["missing"] != LATENT_MISSING:
+        found.append(f"data.missing: {LATENT_MISSING!r}, the rule the latent segments follow")
+    found += _labels_problems(data)
+    if not _EWS_TAG.fullmatch(doc["baseline"]["tag"]):
+        found.append("baseline.tag: prereg/market-ews-v<k>, the frozen classic test's tag")
+    if not _hex_or_open(doc["baseline"]["sha256"], _SHA256):
+        found.append("baseline.sha256: the frozen market-ews file's sha256 (64 hex digits)")
+    found += _training_problems(doc)
+    pairs = [tuple(pair) for pair in ind["pairs"]]
+    if len(set(pairs)) != len(pairs) or set(pairs) != set(MARKET_LATENT_PAIRS):
+        said = [list(pair) for pair in MARKET_LATENT_PAIRS]
+        found.append(f"indicators.pairs: {said}, each once, the four judged pairs")
+    columns = latents["columns"]
+    wanted = sorted({column for column, _ in MARKET_LATENT_PAIRS})
+    if len(set(columns)) != len(columns) or sorted(columns) != wanted:
+        found.append(f"latents.columns: {wanted}, exactly the columns indicators.pairs reads")
+    for key, value in (("context", LATENT_CONTEXT), ("series", LATENT_SERIES), ("pca", LATENT_PCA)):
+        if latents[key] != value:
+            found.append(f"latents.{key}: {value!r}, what the readout carries out")
+    found += _checkpoint_problems(doc)
+    found += _pipeline_problems(ind)
+    hyp = doc["hypotheses"]
+    if sorted((h["column"], h["indicator"]) for h in hyp) != sorted(MARKET_LATENT_PAIRS):
+        found.append("hypotheses: one per pair of indicators.pairs, naming it in column, indicator")
+    if len({h["name"] for h in hyp}) != len(hyp):
+        found.append("hypotheses: distinct names")
+    for i, h in enumerate(hyp):
+        if h["direction"] != "two-sided":
+            found.append(f"hypotheses[{i}].direction: 'two-sided', read as {STATISTIC}")
+    found += _segment_problems(doc)
+    cells = doc["cells"]
+    read = [tuple(cell) for cell in cells["read"]]
+    every = {(model, other) for model in MARKET_SYMBOLS for other in MARKET_SYMBOLS}
+    if len(set(read)) != len(read) or set(read) != every:
+        found.append("cells.read: every [model's symbol, read symbol] of data.symbols, once")
+    if cells["judged"] not in JUDGED_CELLS and not _placeholder(cells["judged"]):
+        found.append(f"cells.judged: one of {list(JUDGED_CELLS)}")
+    sc = doc["scoring"]
+    if sc["statistic"] != STATISTIC:
+        found.append(f"scoring.statistic: {STATISTIC!r}, every pair's test being two-sided")
+    found += _scoring_problems(sc)
+    twin, classic = sc["twin"], sc["classic"]
+    if twin["pairing"] != TWIN_PAIRING:
+        found.append(f"scoring.twin.pairing: {TWIN_PAIRING!r}")
+    if not twin["seeds"].strip():
+        found.append("scoring.twin.seeds: how the primaries' margins are combined")
+    tolerance = twin["tolerance"]
+    if not _placeholder(tolerance) and (isinstance(tolerance, str) or not tolerance > 0):
+        found.append(f"scoring.twin.tolerance: positive, a number in {STATISTIC}")
+    if classic["pairing"] != CLASSIC_PAIRING:
+        found.append(f"scoring.classic.pairing: {CLASSIC_PAIRING!r}")
+    if classic["against"] not in CLASSIC_AGAINST and not _placeholder(classic["against"]):
+        found.append(f"scoring.classic.against: one of {list(CLASSIC_AGAINST)}")
+    desc = doc["descriptive"]
+    if desc["same_input"] != SAME_INPUT_REPORT:
+        found.append(f"descriptive.same_input: {SAME_INPUT_REPORT!r}")
+    if desc["incremental_rv"] != INCREMENTAL_RV:
+        found.append(f"descriptive.incremental_rv: {INCREMENTAL_RV!r}")
+    if desc["rv_minutes"] < 1:
+        found.append("descriptive.rv_minutes: at least 1")
+    ablations = desc["ablations"]
+    if len(set(ablations)) != len(ablations) or not set(ablations) <= set(MARKET_ABLATIONS):
+        found.append(f"descriptive.ablations: distinct, a subset of {list(MARKET_ABLATIONS)}")
+    found += _reporting_problems(doc)
+    if doc["trials"]["budget"] < 1:
+        found.append("trials.budget: at least 1")
+    if not doc["disclosure"]["confirmatory_contact"].strip():
+        found.append("disclosure.confirmatory_contact: every contact with confirmatory data")
+    if strict:
+        found += [
+            f"{where}: placeholder {text!r}"
+            for where, text in _strings(doc)
+            if _PLACEHOLDER.search(text)
+        ]
+        if not found and doc["trials"]["budget"] < market_latent_cells(doc):
+            found.append(
+                f"trials.budget: one scoring run evaluates {market_latent_cells(doc)} cells"
+            )
+    return found
+
+
+def _at(doc: dict[str, Any], where: str) -> Any:
+    value: Any = doc
+    for part in where.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return value
+
+
+def baseline_problems(doc: dict[str, Any], baseline: dict[str, Any]) -> list[str]:
+    if _at(baseline, "data.domain") != MARKET_EWS:
+        return [f"baseline: not a {MARKET_EWS} file"]
+    found = [
+        f"{where}: {_at(baseline, where)!r}, as the baseline holds it"
+        for where in BASELINE_CELLS
+        if _at(doc, where) != _at(baseline, where)
+    ]
+    against = doc["scoring"]["classic"]["against"]
+    if against not in ("each", *baseline["indicators"]["names"]) and not _placeholder(against):
+        found.append("scoring.classic.against: 'each', or one of the baseline's indicators.names")
+    return found
+
+
 def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
     """Everything wrong with a pre-registration document, checked against the schema of its
     data.domain; strict also refuses placeholders. A file with no domain, or with one that is not
@@ -1256,6 +1681,8 @@ def problems(doc: dict[str, Any], strict: bool = False) -> list[str]:
         return _market_problems(doc, strict)
     if domain == MARKET_EWS:
         return _market_ews_problems(doc, strict)
+    if domain == MARKET_LATENT:
+        return _market_latent_problems(doc, strict)
     return [f"data.domain: {domain!r} is not one of {list(DOMAINS)}"]
 
 
@@ -1346,9 +1773,26 @@ def baseline_commit(prereg: Prereg) -> str | None:
     baseline = prereg.doc.get("baseline")
     if baseline is None:
         return None
+    if prereg.doc["data"]["domain"] == MARKET_LATENT:
+        return _ews_baseline(prereg)
     root, tag = repo_root(prereg.path), f"prereg/{baseline['prereg']}"
     if not _git(root, "tag", "--list", tag):
         raise PreregError(f"{prereg.name} reads the runs of {baseline['prereg']}: no tag {tag}")
+    return _git(root, "rev-parse", f"{tag}^{{commit}}")
+
+
+def _ews_baseline(prereg: Prereg) -> str:
+    root, baseline = repo_root(prereg.path), prereg.doc["baseline"]
+    tag = baseline["tag"]
+    if not _git(root, "tag", "--list", tag):
+        raise PreregError(f"{prereg.name} is scored on the segments of {tag}: no such tag")
+    relative = (PREREG_DIR / f"{tag.removeprefix('prereg/')}.toml").as_posix()
+    blob = _git(root, "cat-file", "blob", f"{tag}:{relative}", binary=True)
+    if hashlib.sha256(blob).hexdigest() != baseline["sha256"]:
+        raise PreregError(f"baseline.sha256: not the sha256 of {relative} at {tag}")
+    found = baseline_problems(prereg.doc, tomllib.loads(blob.decode("utf-8")))
+    if found:
+        raise PreregError(f"{prereg.name} differs from {tag}:\n  " + "\n  ".join(found))
     return _git(root, "rev-parse", f"{tag}^{{commit}}")
 
 
