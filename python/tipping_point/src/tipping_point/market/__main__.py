@@ -2,7 +2,7 @@
 
   fetch    download and verify Binance's USD-M 1-minute klines, 5-minute metrics and monthly
            funding of the UTC days --start..--end (inclusive) for --symbols, into --dest (default
-           <data dir>/archives/binance, under the engine's data dir below: archive_dir). A re-run
+           <data dir>/archives/binance, the data dir as for --data-dir). A re-run
            skips the files already verified. Exit 1 when a file is refused (checksum), failed
            (network: run it again) or unreadable (it matches its checksum but does not parse:
            kept, recorded, and refused by labels)
