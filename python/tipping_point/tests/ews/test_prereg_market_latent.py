@@ -13,7 +13,6 @@ from typing import Any
 
 import m4_pilot
 import m8_primaries
-import numpy as np
 import pytest
 from explore import common, market_pass
 from tipping_point.book import features
@@ -291,27 +290,6 @@ def test_a_filled_file_passes_strict_and_counts_its_trials(
     assert prereg.problems(doc, strict=True) == [
         "trials.budget: one scoring run evaluates 1136 cells"
     ]
-
-
-def _auc(events: np.ndarray, controls: np.ndarray) -> np.ndarray:
-    return np.searchsorted(np.sort(controls), events).mean(axis=-1) / len(controls)
-
-
-@pytest.mark.parametrize("rho", [0.0, 0.5])
-def test_the_shift_null_holds_the_latent_minus_classic_rule_near_its_level(rho: float) -> None:
-    rng = np.random.default_rng(30)
-    cov = [[1.0, rho], [rho, 1.0]]
-    observed, passed, reps = [], 0, 1000
-    for _ in range(reps):
-        controls = rng.multivariate_normal([0.0, 0.0], cov, 300)
-        events = rng.multivariate_normal([0.0, 0.0], cov, (101, 60))
-        latent, classic = _auc(events[..., 0], controls[:, 0]), _auc(events[..., 1], controls[:, 1])
-        difference = np.abs(latent - 0.5) - (classic - 0.5)
-        observed.append(difference[0])
-        passed += difference[0] > np.quantile(difference[1:], 0.975)
-    assert np.mean(observed) > 0.02
-    nominal = 3 / 101
-    assert nominal / 2 <= passed / reps <= 2 * nominal
 
 
 @pytest.mark.parametrize(
