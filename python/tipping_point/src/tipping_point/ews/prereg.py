@@ -262,16 +262,21 @@ MARKET_LATENT_PAIRS = (
 )
 MARKET_CHECKPOINT_ROLES = ("primary", "spare", "ema-only")
 MARKET_ABLATIONS = ("ema-only",)
-CLASSIC_AGAINST = ("variance", "ac", "each")
+CLASSIC_AGAINST = ("variance", "ac", "each", "matching")
+CLASSIC_MATCHING = {"variance": "variance", "ac": "ac", "level": "variance"}
 JUDGED_CELLS = ("same-asset", "all")
 STATISTIC = "|AUC - 0.5|"
 LATENT_SERIES = (
     "per UTC minute m of the read symbol and per checkpoint, trained and twin alike: surprise, the "
     "error of the delta = 1 prediction of z_m from the context - 1 minutes before it, and pc_1 to "
     "pc_8, z_m on the PCA basis saved with that checkpoint, z_m being the target encoder's latent "
-    "of minute m; read as one contiguous series over [seasonality]'s fit span and the labels' "
-    "confirmatory span, each value known when minute m closes, and deseasonalised as [seasonality] "
-    "says, with a slot profile fitted per column, checkpoint and read symbol over its fit span"
+    "of minute m; read as two contiguous series, one over [seasonality]'s fit span and one from "
+    "5 x the largest horizon + window + length - 1 + context - 1 minutes before 2024-01-01 (514 "
+    "minutes at horizons up to 24 bars, window 60, length 240 and context 96) to the end of the "
+    "labels' confirmatory span, so that the first minute of a segment ending at the earliest "
+    "confirmatory onset has its full context; each value known when minute m closes, and "
+    "deseasonalised as [seasonality] says, with a slot profile fitted per column, checkpoint and "
+    "read symbol over its fit span"
 )
 LATENT_MISSING = (
     "a minute whose latent or surprise is not finite in any table read on that symbol (a feature "
@@ -298,11 +303,23 @@ LOADER_REFUSALS = (
 )
 TWIN_PAIRING = (
     "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the "
-    "same bootstrap draws"
+    "same bootstrap draws; a judged cell passes only when every primary's trained AUC - 0.5 has "
+    "the same sign, so that seeds warning in opposite directions never pass on their margins"
 )
 CLASSIC_PAIRING = (
-    "the latent pair's |AUC - 0.5| minus the classic indicator's on the baseline's price series, "
-    "on the same segments and the same bootstrap draws (a paired bootstrap)"
+    "the latent pair's |AUC - 0.5| minus the classic indicator's AUC - 0.5 taken in the direction "
+    "the baseline's hypothesis on that indicator pre-registers (AUC - 0.5 for 'greater'), the "
+    "classic AUCs recomputed on the baseline's price series over the same segments, with the same "
+    "bootstrap draws (a paired bootstrap); 'matching' compares each variance and level pair with "
+    "the classic variance and the ac pair with the classic ac"
+)
+LATENT_GROUPS = (
+    "each primary checkpoint, trained and twin, is scored per [model's symbol, read symbol] cell "
+    "(per-asset) and, with eth-only, per cell reading ETHUSDT; with judged 'all' each model's "
+    "pooled group holds its two cells, and with judged 'same-asset' one pooled group per primary "
+    "seed holds only that seed's BTCUSDT on BTCUSDT and ETHUSDT on ETHUSDT cells; the hypotheses "
+    "read the judged cells and these pooled groups, and the other cells are reported; the classic "
+    "AUCs are taken pooled over both symbols, per read symbol and on the eth-only segments"
 )
 SAME_INPUT_REPORT = (
     "the baseline's [same_input] tier, on the same segments, reported beside every latent cell; "
@@ -310,8 +327,10 @@ SAME_INPUT_REPORT = (
 )
 INCREMENTAL_RV = (
     "per pair, horizon and cell, the AUC of a two-variable logistic model (the latent score and "
-    "the realised variance of 1-minute returns over the rv_minutes minutes up to the segment end) "
-    "minus that of the realised variance alone, with its bootstrap CI; counting no trial"
+    "the realised variance of the read symbol's 1-minute returns of the baseline's data.series, "
+    "before deseasonalising, over the rv_minutes minutes up to the segment end) minus that of the "
+    "realised variance alone, with its bootstrap CI; each model is fitted and scored on the same "
+    "segments, so the AUCs are in-sample and the report is descriptive only, counting no trial"
 )
 BASELINE_CELLS = (
     "data.symbols",
@@ -678,7 +697,7 @@ _MARKET_LATENT_SCHEMA: dict[str, Any] = {
     "indicators": {"pairs": [[str]], "window": int, "length": int, "lag": int, "detrend": str},
     "seasonality": _MARKET_EWS_SCHEMA["seasonality"],
     "segments": _MARKET_EWS_SCHEMA["segments"],
-    "cells": {"read": [[str]], "judged": str},
+    "cells": {"read": [[str]], "judged": str, "groups": str},
     "scoring": {
         "statistic": str,
         "ci_level": _NUMBER,
@@ -1471,10 +1490,24 @@ def _same_input_problems(doc: dict[str, Any]) -> list[str]:
 
 def market_latent_cells(doc: dict[str, Any]) -> int:
     groups = doc["reporting"]["groups"]
+    primaries = [e for e in doc["latents"]["checkpoints"] if e["role"] == "primary"]
+    read = [tuple(cell) for cell in doc["cells"]["read"]]
+    cells = 0
+    for entry in primaries:
+        mine = [other for model, other in read if model == entry["symbol"]]
+        cells += len(mine) * ("per-asset" in groups)
+        cells += sum(other == "ETHUSDT" for other in mine) * ("eth-only" in groups)
+    if "pooled" in groups:
+        same = doc["cells"]["judged"] == "same-asset"
+        cells += len({e["seed"] for e in primaries}) if same else len(primaries)
+    pairs, horizons = doc["indicators"]["pairs"], len(doc["segments"]["horizons"])
+    against = doc["scoring"]["classic"]["against"]
+    if against == "matching":
+        classic = len({CLASSIC_MATCHING.get(indicator) for _, indicator in pairs})
+    else:
+        classic = 1 if against in EWS_INDICATORS else len(EWS_INDICATORS)
     per = sum(len(doc["data"]["symbols"]) if g == "per-asset" else 1 for g in groups)
-    primaries = sum(entry["role"] == "primary" for entry in doc["latents"]["checkpoints"])
-    pairs, horizons = len(doc["indicators"]["pairs"]), len(doc["segments"]["horizons"])
-    return 2 * primaries * pairs * horizons * per
+    return 2 * len(pairs) * horizons * cells + classic * horizons * per
 
 
 def _hex_or_open(value: str, pattern: re.Pattern[str]) -> bool:
@@ -1526,9 +1559,7 @@ def _checkpoint_problems(doc: dict[str, Any]) -> list[str]:
             found.append(f"{where}.data_commit: a commit (7 to 40 hex digits)")
         if not entry["run_id"].strip():
             found.append(f"{where}.run_id: the training's run id")
-        same = entry["trained_sha256"] == entry["twin_sha256"]
-        if same and not _placeholder(entry["trained_sha256"]):
-            found.append(f"{where}: the trained model and its twin are the same file")
+    scalings = {}
     for symbol in doc["data"]["symbols"]:
         mine = [e for e in entries if e["symbol"] == symbol]
         for role, seeds in (("primary", training["primaries"]), ("spare", training["spares"])):
@@ -1539,10 +1570,29 @@ def _checkpoint_problems(doc: dict[str, Any]) -> list[str]:
                 found.append(f"latents.checkpoints: {symbol} has no {role} checkpoint")
         if len({e["seed"] for e in mine}) != len(mine):
             found.append(f"latents.checkpoints: one entry per seed of {symbol}")
-    for key in ("run_id", "trained_sha256", "twin_sha256"):
-        named = [e[key] for e in entries if not _placeholder(e[key])]
-        if len(set(named)) != len(named):
-            found.append(f"latents.checkpoints: no two entries share a {key}")
+        scaling = {e["scaling_sha256"] for e in mine if not _placeholder(e["scaling_sha256"])}
+        if len(scaling) > 1:
+            found.append(
+                f"latents.checkpoints: {symbol}'s entries share one scaling_sha256, the record of "
+                "its training days"
+            )
+        scalings[symbol] = scaling
+    if len(scalings) == 2 and set.intersection(*scalings.values()):
+        found.append("latents.checkpoints: each symbol's scaling_sha256 differs from the other's")
+    run_ids = [e["run_id"] for e in entries if not _placeholder(e["run_id"])]
+    if len(set(run_ids)) != len(run_ids):
+        found.append("latents.checkpoints: no two entries share a run_id")
+    files = [
+        e[key]
+        for e in entries
+        for key in ("trained_sha256", "twin_sha256", "pca_sha256")
+        if not _placeholder(e[key])
+    ]
+    if len(set(files)) != len(files):
+        found.append(
+            "latents.checkpoints: every trained_sha256, twin_sha256 and pca_sha256 names a "
+            "different file"
+        )
     return found
 
 
@@ -1604,6 +1654,8 @@ def _market_latent_problems(doc: dict[str, Any], strict: bool = False) -> list[s
         found.append("cells.read: every [model's symbol, read symbol] of data.symbols, once")
     if cells["judged"] not in JUDGED_CELLS and not _placeholder(cells["judged"]):
         found.append(f"cells.judged: one of {list(JUDGED_CELLS)}")
+    if cells["groups"] != LATENT_GROUPS:
+        found.append(f"cells.groups: {LATENT_GROUPS!r}")
     sc = doc["scoring"]
     if sc["statistic"] != STATISTIC:
         found.append(f"scoring.statistic: {STATISTIC!r}, every pair's test being two-sided")
@@ -1614,8 +1666,8 @@ def _market_latent_problems(doc: dict[str, Any], strict: bool = False) -> list[s
     if not twin["seeds"].strip():
         found.append("scoring.twin.seeds: how the primaries' margins are combined")
     tolerance = twin["tolerance"]
-    if not _placeholder(tolerance) and (isinstance(tolerance, str) or not tolerance > 0):
-        found.append(f"scoring.twin.tolerance: positive, a number in {STATISTIC}")
+    if not _placeholder(tolerance) and (isinstance(tolerance, str) or not 0 < tolerance < 0.5):
+        found.append(f"scoring.twin.tolerance: a number in (0, 0.5), in units of {STATISTIC}")
     if classic["pairing"] != CLASSIC_PAIRING:
         found.append(f"scoring.classic.pairing: {CLASSIC_PAIRING!r}")
     if classic["against"] not in CLASSIC_AGAINST and not _placeholder(classic["against"]):
@@ -1663,9 +1715,15 @@ def baseline_problems(doc: dict[str, Any], baseline: dict[str, Any]) -> list[str
         for where in BASELINE_CELLS
         if _at(doc, where) != _at(baseline, where)
     ]
-    against = doc["scoring"]["classic"]["against"]
-    if against not in ("each", *baseline["indicators"]["names"]) and not _placeholder(against):
-        found.append("scoring.classic.against: 'each', or one of the baseline's indicators.names")
+    against, names = doc["scoring"]["classic"]["against"], baseline["indicators"]["names"]
+    if against == "matching":
+        wanted = sorted({CLASSIC_MATCHING.get(i) for _, i in doc["indicators"]["pairs"]}, key=str)
+        if not set(wanted) <= set(names):
+            found.append(f"scoring.classic.against: 'matching' compares with {wanted}")
+    elif against not in ("each", *names) and not _placeholder(against):
+        found.append(
+            "scoring.classic.against: 'each', 'matching', or one of the baseline's indicators.names"
+        )
     return found
 
 

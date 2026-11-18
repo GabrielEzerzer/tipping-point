@@ -38,10 +38,15 @@ def filled_ews(text: str) -> str:
 
 
 def filled(text: str, baseline_sha256: str = "0" * 64) -> str:
-    count = itertools.count()
+    count, scaling = itertools.count(), itertools.count()
+    per_symbol = len(prereg.LATENT_PRIMARIES + prereg.LATENT_SPARES)
 
     def digest(match: re.Match[str]) -> str:
-        return f'{match[1]} = "{hashlib.sha256(f"{match[1]}{next(count)}".encode()).hexdigest()}"'
+        if match[1] == "scaling_sha256":
+            seed = f"scaling{next(scaling) // per_symbol}"
+        else:
+            seed = f"{match[1]}{next(count)}"
+        return f'{match[1]} = "{hashlib.sha256(seed.encode()).hexdigest()}"'
 
     text = text.replace('id = "<lowercase-slug>"', 'id = "market-latent"', 1)
     text = re.sub(r'^(\w+_sha256) = "<[^"]*>"', digest, text, flags=re.M)
@@ -157,7 +162,7 @@ def test_the_template_holds_what_the_primaries_were_trained_with() -> None:
     assert tuple(doc["segments"]["horizons"]) == market_pass.HORIZONS
     ind = doc["indicators"]
     assert (ind["window"], ind["length"]) == (market_pass.WINDOW, market_pass.LENGTH)
-    assert doc["trials"]["budget"] == prereg.market_latent_cells(doc) == 1280
+    assert doc["trials"]["budget"] == prereg.market_latent_cells(doc) == 1312
     labels = doc["data"]["labels"]
     assert labels["sha256"] == hashlib.sha256(LABELS_V1.read_bytes()).hexdigest()
 
@@ -205,7 +210,11 @@ def test_the_baseline_binds_the_bandwidth_and_the_classic_indicator(
     ews["indicators"]["names"] = ["variance"]
     doc["scoring"]["classic"]["against"] = "ac"
     assert prereg.baseline_problems(doc, ews) == [
-        "scoring.classic.against: 'each', or one of the baseline's indicators.names"
+        "scoring.classic.against: 'each', 'matching', or one of the baseline's indicators.names"
+    ]
+    doc["scoring"]["classic"]["against"] = "matching"
+    assert prereg.baseline_problems(doc, ews) == [
+        "scoring.classic.against: 'matching' compares with ['ac', 'variance']"
     ]
     doc["scoring"]["classic"]["against"] = "variance"
     assert prereg.baseline_problems(doc, ews) == []
@@ -232,6 +241,7 @@ def test_the_freeze_holds_the_file_to_its_frozen_baseline(tmp_path: Path) -> Non
     assert "segments: " in str(refused.value)
     assert _git(tmp_path, "tag", "--list") == "prereg/market-ews-v1"
 
+    _commit(tmp_path, "market-ews-v1.toml", ews_text.replace("seed = 30", "seed = 31", 1))
     _commit(tmp_path, "market-latent-v1.toml", text)
     assert prereg.freeze(tmp_path, "market-latent") == "prereg/market-latent-v1"
     pre = prereg.load(path)
@@ -251,11 +261,30 @@ def test_the_freeze_refuses_a_placeholder(tmp_path: Path) -> None:
 
 def test_a_filled_file_passes_strict_and_counts_its_trials(doc: dict[str, Any]) -> None:
     assert prereg.problems(doc, strict=True) == []
-    doc["trials"]["budget"] = 1279
+    doc["trials"]["budget"] = 1151
     assert prereg.problems(doc) == []
     assert prereg.problems(doc, strict=True) == [
-        "trials.budget: one scoring run evaluates 1280 cells"
+        "trials.budget: one scoring run evaluates 1152 cells"
     ]
+
+
+@pytest.mark.parametrize(
+    ("judged", "against", "groups", "cells"),
+    [
+        ("all", "each", ["pooled", "per-asset", "eth-only"], 2 * 4 * 4 * 40 + 2 * 4 * 4),
+        ("same-asset", "each", ["pooled", "per-asset", "eth-only"], 2 * 4 * 4 * 35 + 2 * 4 * 4),
+        ("same-asset", "matching", ["pooled", "per-asset", "eth-only"], 1120 + 2 * 4 * 4),
+        ("same-asset", "variance", ["pooled", "per-asset", "eth-only"], 1120 + 1 * 4 * 4),
+        ("all", "ac", ["pooled", "per-asset"], 2 * 4 * 4 * 30 + 1 * 4 * 3),
+        ("same-asset", "ac", ["pooled", "per-asset"], 2 * 4 * 4 * 25 + 1 * 4 * 3),
+    ],
+)
+def test_the_trial_count_follows_the_judged_cells_and_the_classic_side(
+    doc: dict[str, Any], judged: str, against: str, groups: list[str], cells: int
+) -> None:
+    doc["cells"]["judged"], doc["scoring"]["classic"]["against"] = judged, against
+    doc["reporting"]["groups"] = groups
+    assert prereg.market_latent_cells(doc) == cells
 
 
 @pytest.mark.parametrize(
@@ -317,11 +346,19 @@ def test_a_filled_file_passes_strict_and_counts_its_trials(doc: dict[str, Any]) 
         ("scoring.bootstrap", 0, "scoring.bootstrap: at least 1 draw"),
         ("scoring.shift.min_offset_bars", 287, "scoring.shift.min_offset_bars: at least 288"),
         ("scoring.surrogates.secondary", "ar1", "scoring.surrogates.secondary: 'phase'"),
+        ("cells.groups", "per model", "cells.groups"),
         ("scoring.twin.pairing", "trained minus twin", "scoring.twin.pairing"),
+        ("scoring.twin.pairing", prereg.TWIN_PAIRING.split(";")[0], "scoring.twin.pairing"),
         ("scoring.twin.seeds", " ", "scoring.twin.seeds"),
-        ("scoring.twin.tolerance", 0, "scoring.twin.tolerance: positive"),
-        ("scoring.twin.tolerance", "small", "scoring.twin.tolerance: positive"),
+        ("scoring.twin.tolerance", 0, "scoring.twin.tolerance: a number in (0, 0.5)"),
+        ("scoring.twin.tolerance", 0.5, "scoring.twin.tolerance: a number in (0, 0.5)"),
+        ("scoring.twin.tolerance", "small", "scoring.twin.tolerance: a number in (0, 0.5)"),
         ("scoring.classic.pairing", "latent minus classic", "scoring.classic.pairing"),
+        (
+            "scoring.classic.pairing",
+            prereg.CLASSIC_PAIRING.replace("AUC - 0.5 taken in the direction", "|AUC - 0.5|", 1),
+            "scoring.classic.pairing",
+        ),
         ("scoring.classic.against", "skewness", "scoring.classic.against: one of"),
         ("descriptive.same_input", "the tier", "descriptive.same_input"),
         ("descriptive.incremental_rv", "a logistic model", "descriptive.incremental_rv"),
@@ -381,19 +418,46 @@ def test_each_checkpoint_problem_is_named(doc: dict[str, Any]) -> None:
         f"{first}.run_id: the training's run id"
     ]
 
-    def same(d: dict[str, Any]) -> None:
-        entry = _entry(d, "BTCUSDT", 101)
-        entry["twin_sha256"] = entry["trained_sha256"]
+    files = (
+        "latents.checkpoints: every trained_sha256, twin_sha256 and pca_sha256 names a "
+        "different file"
+    )
 
-    assert found(same) == [f"{first}: the trained model and its twin are the same file"]
+    def copied(to: tuple[str, int, str], source: tuple[str, int, str]) -> Any:
+        return lambda d: _entry(d, *to[:2]).update({to[2]: _entry(d, *source[:2])[source[2]]})
 
-    def shared(d: dict[str, Any]) -> None:
-        _entry(d, "ETHUSDT", 101)["trained_sha256"] = _entry(d, "BTCUSDT", 101)["trained_sha256"]
-        _entry(d, "ETHUSDT", 102)["run_id"] = _entry(d, "BTCUSDT", 101)["run_id"]
+    for to, source in (
+        (("BTCUSDT", 101, "twin_sha256"), ("BTCUSDT", 101, "trained_sha256")),
+        (("ETHUSDT", 101, "trained_sha256"), ("BTCUSDT", 101, "trained_sha256")),
+        (("BTCUSDT", 102, "twin_sha256"), ("BTCUSDT", 101, "trained_sha256")),
+        (("BTCUSDT", 101, "pca_sha256"), ("BTCUSDT", 101, "trained_sha256")),
+        (("ETHUSDT", 105, "pca_sha256"), ("BTCUSDT", 101, "pca_sha256")),
+    ):
+        assert found(copied(to, source)) == [files], (to, source)
 
-    assert found(shared) == [
-        "latents.checkpoints: no two entries share a run_id",
-        "latents.checkpoints: no two entries share a trained_sha256",
+    def one_pca(d: dict[str, Any]) -> None:
+        for entry in d["latents"]["checkpoints"]:
+            entry["pca_sha256"] = d["latents"]["checkpoints"][0]["pca_sha256"]
+
+    assert found(one_pca) == [files]
+    assert found(copied(("ETHUSDT", 101, "run_id"), ("BTCUSDT", 101, "run_id"))) == [
+        "latents.checkpoints: no two entries share a run_id"
+    ]
+    assert found(
+        copied(("BTCUSDT", 103, "scaling_sha256"), ("ETHUSDT", 101, "scaling_sha256"))
+    ) == [
+        "latents.checkpoints: BTCUSDT's entries share one scaling_sha256, the record of its "
+        "training days",
+        "latents.checkpoints: each symbol's scaling_sha256 differs from the other's",
+    ]
+
+    def eth_takes_btc_scaling(d: dict[str, Any]) -> None:
+        btc = _entry(d, "BTCUSDT", 101)["scaling_sha256"]
+        for entry in d["latents"]["checkpoints"]:
+            entry["scaling_sha256"] = btc
+
+    assert found(eth_takes_btc_scaling) == [
+        "latents.checkpoints: each symbol's scaling_sha256 differs from the other's"
     ]
     moved = found(lambda d: _entry(d, "BTCUSDT", 101).update(symbol="SOLUSDT"))
     assert f"{first}.symbol: one of data.symbols" in moved
@@ -422,6 +486,7 @@ def test_ema_only_checkpoints_come_with_the_ablation(doc: dict[str, Any]) -> Non
             "run_id": f"ema-{symbol}",
             "trained_sha256": hashlib.sha256(f"t{symbol}".encode()).hexdigest(),
             "twin_sha256": hashlib.sha256(f"w{symbol}".encode()).hexdigest(),
+            "pca_sha256": hashlib.sha256(f"p{symbol}".encode()).hexdigest(),
         }
         for symbol in prereg.MARKET_SYMBOLS
     ]
@@ -433,7 +498,7 @@ def test_ema_only_checkpoints_come_with_the_ablation(doc: dict[str, Any]) -> Non
     assert prereg.problems(doc) == ["latents.checkpoints: ETHUSDT has no ema-only checkpoint"]
     doc["latents"]["checkpoints"].append(extra[1])
     assert prereg.problems(doc, strict=True) == []
-    assert prereg.market_latent_cells(doc) == 1280
+    assert prereg.market_latent_cells(doc) == 1152
 
 
 def test_a_number_that_is_not_finite_is_refused(doc: dict[str, Any]) -> None:

@@ -107,7 +107,7 @@ refusals = "jepa.days refuses any day from 2024-01-01 as a training input, and a
 [latents]
 columns = ["pc_1", "surprise"]
 context = 96             # minutes a predictor chunk holds: the readout sees the 95 before minute m
-series = "per UTC minute m of the read symbol and per checkpoint, trained and twin alike: surprise, the error of the delta = 1 prediction of z_m from the context - 1 minutes before it, and pc_1 to pc_8, z_m on the PCA basis saved with that checkpoint, z_m being the target encoder's latent of minute m; read as one contiguous series over [seasonality]'s fit span and the labels' confirmatory span, each value known when minute m closes, and deseasonalised as [seasonality] says, with a slot profile fitted per column, checkpoint and read symbol over its fit span"
+series = "per UTC minute m of the read symbol and per checkpoint, trained and twin alike: surprise, the error of the delta = 1 prediction of z_m from the context - 1 minutes before it, and pc_1 to pc_8, z_m on the PCA basis saved with that checkpoint, z_m being the target encoder's latent of minute m; read as two contiguous series, one over [seasonality]'s fit span and one from 5 x the largest horizon + window + length - 1 + context - 1 minutes before 2024-01-01 (514 minutes at horizons up to 24 bars, window 60, length 240 and context 96) to the end of the labels' confirmatory span, so that the first minute of a segment ending at the earliest confirmatory onset has its full context; each value known when minute m closes, and deseasonalised as [seasonality] says, with a slot profile fitted per column, checkpoint and read symbol over its fit span"
 pca = "each checkpoint's own basis, saved with it by the trainer (final.pt for the trained model, the step-0 checkpoint for its twin): 8 components fitted on 4,096 valid minutes of its training days drawn with replacement under the run's pca seed stream"
 
 [[latents.checkpoints]]
@@ -288,6 +288,7 @@ seed = 30
 [cells]
 read = [["BTCUSDT", "BTCUSDT"], ["BTCUSDT", "ETHUSDT"], ["ETHUSDT", "BTCUSDT"], ["ETHUSDT", "ETHUSDT"]]
 judged = "<same-asset or all, the cells the hypotheses judge; the others are reported>"
+groups = "each primary checkpoint, trained and twin, is scored per [model's symbol, read symbol] cell (per-asset) and, with eth-only, per cell reading ETHUSDT; with judged 'all' each model's pooled group holds its two cells, and with judged 'same-asset' one pooled group per primary seed holds only that seed's BTCUSDT on BTCUSDT and ETHUSDT on ETHUSDT cells; the hypotheses read the judged cells and these pooled groups, and the other cells are reported; the classic AUCs are taken pooled over both symbols, per read symbol and on the eth-only segments"
 
 [scoring]
 statistic = "|AUC - 0.5|"
@@ -304,18 +305,18 @@ secondary = "phase"
 n = 999
 
 [scoring.twin]           # did training matter
-pairing = "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the same bootstrap draws"
+pairing = "trained minus twin of |AUC - 0.5|, same model seed, same read symbol, same segments and the same bootstrap draws; a judged cell passes only when every primary's trained AUC - 0.5 has the same sign, so that seeds warning in opposite directions never pass on their margins"
 seeds = "<how the five primaries' margins combine, e.g. a percentile bootstrap over the 5 primary model seeds, 2000 draws, nested with each checkpoint's data draws>"
 sign_test = true         # every primary's margin must carry the sign of the combined margin
-tolerance = "<a positive number in units of the statistic, set before the freeze>"
+tolerance = "<a number in (0, 0.5), in units of the statistic, set before the freeze>"
 
 [scoring.classic]        # does it warn better than the classic test
-pairing = "the latent pair's |AUC - 0.5| minus the classic indicator's on the baseline's price series, on the same segments and the same bootstrap draws (a paired bootstrap)"
-against = "<variance, ac or each, the classic indicator each latent pair is compared with>"
+pairing = "the latent pair's |AUC - 0.5| minus the classic indicator's AUC - 0.5 taken in the direction the baseline's hypothesis on that indicator pre-registers (AUC - 0.5 for 'greater'), the classic AUCs recomputed on the baseline's price series over the same segments, with the same bootstrap draws (a paired bootstrap); 'matching' compares each variance and level pair with the classic variance and the ac pair with the classic ac"
+against = "<variance, ac, each or matching, the classic indicator each latent pair is compared with>"
 
 [descriptive]
 same_input = "the baseline's [same_input] tier, on the same segments, reported beside every latent cell; read by no decision rule, and counting no trial"
-incremental_rv = "per pair, horizon and cell, the AUC of a two-variable logistic model (the latent score and the realised variance of 1-minute returns over the rv_minutes minutes up to the segment end) minus that of the realised variance alone, with its bootstrap CI; counting no trial"
+incremental_rv = "per pair, horizon and cell, the AUC of a two-variable logistic model (the latent score and the realised variance of the read symbol's 1-minute returns of the baseline's data.series, before deseasonalising, over the rv_minutes minutes up to the segment end) minus that of the realised variance alone, with its bootstrap CI; each model is fitted and scored on the same segments, so the AUCs are in-sample and the report is descriptive only, counting no trial"
 rv_minutes = 60
 ablations = []           # "ema-only" adds EMA-only checkpoints per symbol; none is trained yet
 
@@ -324,8 +325,8 @@ groups = ["pooled", "per-asset", "eth-only"]
 eth_only_bars = 12
 
 [trials]
-budget = 1280            # 2 (trained, twin) x 10 primaries x 4 pairs x 4 horizons x (pooled + 2 read symbols + eth-only)
-counted = "One trial per AUC evaluation of a (checkpoint, trained or twin, pair, horizon, reporting group) cell, each primary's reporting groups taken over the symbols its model reads; every scoring run appends its cells to ews/trials.jsonl in the data dir. Margins and differences reuse those AUCs and count none; the spares unless they replace a primary, the onset-hour strata, the cascade stress test, the same-input tier, the incremental report and the ablations are not counted."
+budget = 1312            # 2 (trained, twin) x 4 pairs x 4 horizons x 40 latent groups + 2 classic indicators x 4 horizons x 4 groups; 1152 with judged = "same-asset"
+counted = "One trial per AUC evaluation: per primary checkpoint, trained and twin, pair and horizon, of each group cells.groups defines (each cell it reads, each cell reading ETHUSDT for eth-only, and the pooled groups, one per model with judged all or one per seed with judged same-asset); and per classic indicator compared and horizon, of the classic AUCs recomputed on the paired segments, pooled, per read symbol and eth-only, since data.missing drops segments for the classic side too. Every scoring run appends its cells to ews/trials.jsonl in the data dir. Margins and differences reuse those AUCs and count none; the spares unless they replace a primary, the onset-hour strata, the cascade stress test, the same-input tier, the incremental report and the ablations are not counted."
 
 [disclosure]
 exploratory = "<what was seen before the freeze, and when>"
