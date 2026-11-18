@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import re
-import subprocess
 import urllib.error
 import zipfile
 import zlib
@@ -19,8 +18,9 @@ from typing import Any
 import numpy as np
 import pytest
 from market_planted import checksum, funding_csv, kline_csv, metrics_csv, vision, zipped
+from tipping_point import engine
 from tipping_point.market import archive
-from tipping_point.market.__main__ import main
+from tipping_point.market.__main__ import _parser, archive_dir, main
 
 DAY = date(2023, 1, 2)
 REPO = Path(__file__).resolve().parents[4]
@@ -274,7 +274,14 @@ def test_requests_carry_a_plain_user_agent_and_404_means_unpublished(
     assert archive.http_get(f"{archive.BASE_URL}/absent.zip") is None
 
 
-def test_the_default_archive_folder_is_gitignored() -> None:
-    target = REPO / "harness/fixtures/archives/binance/klines/BTCUSDT/BTCUSDT-1m-2023-01-02.zip"
-    done = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-q", str(target)], check=False)
-    assert done.returncode == 0
+def test_the_default_archive_folder_is_under_the_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    per_user = {"LOCALAPPDATA": str(tmp_path / "local")}
+    assert archive_dir(per_user) == tmp_path / "local" / "tipping-point" / "archives" / "binance"
+    chosen = tmp_path / "data"
+    monkeypatch.setenv(engine.DATA_DIR_ENV, str(chosen))
+    day = ["--start", "2023-01-02", "--end", "2023-01-02"]
+    assert _parser().parse_args(["fetch", *day]).dest == chosen / "archives" / "binance"
+    for command in ("labels", "cascade"):
+        assert _parser().parse_args([command]).archive == chosen / "archives" / "binance"

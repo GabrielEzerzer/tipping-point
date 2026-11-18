@@ -283,7 +283,7 @@ and published carries that licence and the "Binance Vision" attribution.
 cargo run --release -p engine --bin store -- import <archive> [--data-dir DIR] [--tables T,...]
 ```
 
-Downloaded days stay local (`harness/fixtures/archives/`, gitignored); with `TP_ARCHIVE_DAYS`
+Downloaded days stay outside the repository, in `<data dir>/archives/`; with `TP_ARCHIVE_DAYS`
 set, the import tests import every day found there (`TP_ARCHIVE_DAYS=1 cargo test --release -p
 engine-harness --test archive_import local_archive_days`). The committed tests use tiny synthetic archives in each venue's format
 (`engine/tests/fixtures/archives/`, made by `harness/engine-harness/tests/make_archive_fixtures.py`).
@@ -319,7 +319,7 @@ set, `cargo test --release -p engine-harness --test rotate_soak -- --nocapture` 
 The market experiment's labels come from Binance's free USD-M archive and need no engine
 (`python/tipping_point/src/tipping_point/market/`, stdlib, numpy and pyarrow). `fetch` downloads a
 span's 1-minute klines, 5-minute metrics and monthly funding into
-`harness/fixtures/archives/binance/<kind>/<symbol>/` (gitignored), checks each file's SHA-256
+`<data dir>/archives/binance/<kind>/<symbol>/` (`--dest` for another folder), checks each file's SHA-256
 against the `.CHECKSUM` beside it, skips files already verified, and lists every file in that
 folder's `manifest.json` with its URL, size, sha256 and row checks: gaps in the minute or 5-minute
 grid, duplicate stamps, rows out of order. `labels` turns a fetched span into 5-minute bars

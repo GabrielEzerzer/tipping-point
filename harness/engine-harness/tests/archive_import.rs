@@ -1,14 +1,6 @@
-//! Archive import (`store import`): the committed synthetic archives, one in each venue's format
-//! (`engine/tests/fixtures/archives/`, made by `make_archive_fixtures.py`), through the import into
-//! Parquet. Every count is read back with `DuckDB` and checked against what this test reads from
-//! the archive itself, with its own zip reader: a frame per record, a `depth_updates` row per
-//! delta level, a `snapshots` row per snapshot level, a trade per CSV row, a book sample per
-//! 100 ms instant of the exchange clock. The manifest names the venue, the symbol, the clock and
-//! the archive with its SHA-256; `complete.json` holds the integrity checks. An import of a done
-//! run changes nothing; another archive or other tables for the same run are refused. The same
-//! records fed as a live stream through the venue's adapter raise the same events with the same
-//! books, input for input. Real archive days, kept locally in the gitignored
-//! `harness/fixtures/archives/`, are imported too when present and `TP_ARCHIVE_DAYS` is set.
+//! Archive import (`store import`): the committed synthetic archives in `engine/tests/fixtures/archives/`, one
+//! per venue, imported into Parquet and checked row by row against the archive itself, and equal to the same
+//! records fed live. Real archive days in `<data dir>/archives/` are imported too with `TP_ARCHIVE_DAYS` set.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -532,15 +524,9 @@ async fn an_archive_imports_exactly_as_its_records_fed_live() -> Outcome {
     Ok(())
 }
 
-/// Real archive days kept locally (gitignored, `harness/fixtures/archives/`): each imports with
-/// its rows matching its records, and passes its integrity checks. A day is hundreds of megabytes
-/// and minutes to import, so this runs only with `TP_ARCHIVE_DAYS` set, as `TP_CRASH_ROUNDS`
-/// lengthens the crash test: `TP_ARCHIVE_DAYS=1 cargo test --release -p engine-harness --test
-/// archive_import local_archive_days`. Otherwise, or with none there, it skips on a `SKIPPED:` line
-/// the gate counts, where a println was kept from it by libtest's capture (#103).
 #[test]
 fn local_archive_days_import_cleanly() -> Outcome {
-    let dir = repo().join("harness/fixtures/archives");
+    let dir = run::data_dir().join("archives");
     if std::env::var_os("TP_ARCHIVE_DAYS").is_none() {
         skipped(&format!(
             "local archive days not imported: set TP_ARCHIVE_DAYS to import those in {}",

@@ -206,7 +206,7 @@
       "description": "Downloads and verifies Binance's 1-minute klines, 5-minute metrics and monthly funding for a span of days.",
       "command": "uv run python -m tipping_point.market fetch --start 2023-01-01 --end 2023-01-31",
       "inputs": "a span of UTC days and symbols (network)",
-      "outputs": "verified files under harness/fixtures/archives/binance (gitignored) or --dest",
+      "outputs": "verified files under <data dir>/archives/binance or --dest",
       "test": "python/tipping_point/tests/market/test_archive.py"
     },
     {

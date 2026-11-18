@@ -33,7 +33,7 @@ import pyarrow as pa
 from scipy.optimize import minimize
 from scipy.signal import lfilter
 from tipping_point.market import archive, bars, nulls, reports
-from tipping_point.market.__main__ import ARCHIVE
+from tipping_point.market.__main__ import archive_dir
 
 PILOT = (date(2023, 1, 1), date(2023, 12, 31))
 NU_EDGE = 1e-3  # nu within this of 2 is the fit running into the shocks' infinite variance
@@ -201,7 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--run", type=Path, required=True, help="the labels run's folder")
-    parser.add_argument("--archive", type=Path, default=ARCHIVE)
+    parser.add_argument("--archive", type=Path, default=archive_dir())
     args = parser.parse_args(argv)
     folder = args.run / "reports" / "garch"
     if folder.exists():

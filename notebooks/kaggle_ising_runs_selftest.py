@@ -2687,8 +2687,8 @@ V1_GRID_PILOTS = {
 }
 V1_RESUME = (
     "uv run --no-sync python notebooks/kaggle_ising_runs.py --write-kernel "
-    "notebooks/plans/v1-confirmatory.json ../.wf/kaggle/kernel-v1-confirmatory-resume --resume; "
-    "kaggle kernels push -p ../.wf/kaggle/kernel-v1-confirmatory-resume"
+    "notebooks/plans/v1-confirmatory.json <staging dir>/kernel-v1-confirmatory-resume --resume; "
+    "kaggle kernels push -p <staging dir>/kernel-v1-confirmatory-resume"
 )
 V1_TAG_CLI = r'''
 """Each plan's runs through a copy of the tag's package: its own parser and schedules, with
@@ -3236,8 +3236,8 @@ ABLATIONS = {
 HELD_OUT_BAND = [2.0, 2.5]  # the research pass's band, written out: a slip in data.HELD_OUT is red
 ABLATIONS_RESUME = (
     "uv run --no-sync python notebooks/kaggle_ising_runs.py --write-kernel "
-    "notebooks/plans/ablations-28.json ../.wf/kaggle/kernel-ablations-28-resume --resume; "
-    "kaggle kernels push -p ../.wf/kaggle/kernel-ablations-28-resume"
+    "notebooks/plans/ablations-28.json <staging dir>/kernel-ablations-28-resume --resume; "
+    "kaggle kernels push -p <staging dir>/kernel-ablations-28-resume"
 )
 ABLATIONS_WHEEL_CLI = r'''
 """Each training's command through a copy of the wheel commit's package: its own parser and
@@ -3767,8 +3767,8 @@ EXTRACT_SOURCES = [
 ]
 EXTRACT_RESUME = (
     "uv run --no-sync python notebooks/kaggle_ising_runs.py --write-kernel "
-    "notebooks/plans/extract-s{seed}.json ../.wf/kaggle/kernel-extract-s{seed}-resume --resume; "
-    "kaggle kernels push -p ../.wf/kaggle/kernel-extract-s{seed}-resume"
+    "notebooks/plans/extract-s{seed}.json <staging dir>/kernel-extract-s{seed}-resume --resume; "
+    "kaggle kernels push -p <staging dir>/kernel-extract-s{seed}-resume"
 )
 # Each run tp-ising-v1-confirmatory made, by its name in v1-confirmatory.json: the 75 seed 6 to 10
 # runs that extract-s6 to s10 read. Written out here as well as in those plans (#139), from that

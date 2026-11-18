@@ -47,7 +47,7 @@ from tipping_point.ews import market_segments as ms
 from tipping_point.ews import prereg, same_input, scoring
 from tipping_point.ews.trend import Pipeline
 from tipping_point.market import archive
-from tipping_point.market.__main__ import ARCHIVE
+from tipping_point.market.__main__ import archive_dir
 
 READ = (date(2022, 12, 31), date(2023, 12, 31))  # a day early: a 24-bar segment starts 419 min out
 SCORED = date(2023, 1, 1)  # READ's first day is history only: no onset or control from it
@@ -313,7 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--run", type=Path, required=True, help="the 2023 pilot labels run")
     parser.add_argument("--labels", type=Path, default=LABELS, help="the frozen labels file")
-    parser.add_argument("--archive", type=Path, default=ARCHIVE)
+    parser.add_argument("--archive", type=Path, default=archive_dir())
     parser.add_argument("--book", type=Path, help="a bybit-book data folder: the same-input tier")
     parser.add_argument("--out", type=Path, default=OUT)
     parser.add_argument("--draws", type=int, default=2000)

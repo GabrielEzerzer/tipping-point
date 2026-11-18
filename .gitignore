@@ -11,7 +11,7 @@ dist/
 
 # raw Binance recordings stay local: the repo goes public and republishing book data is a licensing risk (#4)
 harness/fixtures/recorded/
-# so do downloaded archive days (#23): the import tests read any found here
+# the old default folder of downloaded archive days (#23), which now live in <data dir>/archives/
 harness/fixtures/archives/
 
 # credentials never enter the repo: it is public from 2026-10-25

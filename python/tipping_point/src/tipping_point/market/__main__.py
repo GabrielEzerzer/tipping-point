@@ -1,11 +1,33 @@
-"""Command line: python -m tipping_point.market <command> [options]
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import os
+import shlex
+import sys
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pyarrow as pa
+
+from .. import engine
+from ..ews import prereg
+from . import archive, bars, book, cascade, msvol, reports
+
+DESCRIPTION = """\
+Command line: python -m tipping_point.market <command> [options]
 
   fetch    download and verify Binance's USD-M 1-minute klines, 5-minute metrics and monthly
            funding of the UTC days --start..--end (inclusive) for --symbols, into --dest (default
-           harness/fixtures/archives/binance, gitignored; relative to the current folder, so run
-           it from the repository root). A re-run skips the files already verified. Exit 1 when
-           a file is refused (checksum), failed (network: run it again) or unreadable (it matches
-           its checksum but does not parse: kept, recorded, and refused by labels)
+           <data dir>/archives/binance, the data dir as for --data-dir). A re-run
+           skips the files already verified. Exit 1 when a file is refused (checksum), failed
+           (network: run it again) or unreadable (it matches its checksum but does not parse:
+           kept, recorded, and refused by labels)
   labels   the regime labels of --start..--end from the fetched files (--archive, same default),
            as a run in <data dir>/labels/<run_id>/. Every labeller parameter is an option
            (--d-min, --enter, ...) whose default is the research pass's start value (#29).
@@ -56,27 +78,6 @@ harness/market_floor.py runs it. The data dir is --data-dir, else the engine's o
 or a per-user folder outside the repository: tipping_point.engine.data_dir).
 """
 
-from __future__ import annotations
-
-import argparse
-import dataclasses
-import json
-import shlex
-import sys
-from collections import Counter
-from collections.abc import Sequence
-from datetime import date, timedelta
-from pathlib import Path
-from typing import Any
-
-import numpy as np
-import pyarrow as pa
-
-from .. import engine
-from ..ews import prereg
-from . import archive, bars, book, cascade, msvol, reports
-
-ARCHIVE = Path("harness") / "fixtures" / "archives" / "binance"
 CONFIRMATORY = date(2024, 1, 1)  # no label from here on but through the frozen market-labels-v1
 SRC = Path(__file__).resolve().parents[1]  # tipping_point/, whose files --prereg checks
 # Held to their blobs at the frozen tag's commit: every module of market/ that _labels and _cascade
@@ -102,8 +103,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
+def archive_dir(environ: Mapping[str, str] = os.environ) -> Path:
+    return engine.data_dir(environ) / "archives" / "binance"
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m tipping_point.market", description=__doc__)
+    parser = argparse.ArgumentParser(prog="python -m tipping_point.market", description=DESCRIPTION)
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
     sub = parser.add_subparsers(required=True)
 
@@ -115,7 +120,7 @@ def _parser() -> argparse.ArgumentParser:
 
     def labelling(p: argparse.ArgumentParser, params: type, tag: str) -> None:
         span(p, required=False)
-        p.add_argument("--archive", type=Path, default=ARCHIVE)
+        p.add_argument("--archive", type=Path, default=archive_dir())
         p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
         p.add_argument("--tag", help=f"the run id's tag (default {tag}-<start>-<end>)")
         p.add_argument(
@@ -129,7 +134,7 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("fetch", help="download and verify a span's archive files")
     span(p)
-    p.add_argument("--dest", type=Path, default=ARCHIVE)
+    p.add_argument("--dest", type=Path, default=archive_dir())
     p.set_defaults(command=_fetch)
 
     p = sub.add_parser("labels", help="the regime labels of a span, as a labels run")
@@ -143,7 +148,7 @@ def _parser() -> argparse.ArgumentParser:
     p = sub.add_parser("reports", help="the label-count and stability reports of a labels run")
     p.add_argument("--run", type=Path, required=True, help="the labels run's folder")
     p.add_argument("--cascades", type=Path, help="a cascade run's folder (default: not supplied)")
-    p.add_argument("--archive", type=Path, default=ARCHIVE)
+    p.add_argument("--archive", type=Path, default=archive_dir())
     p.add_argument("--seed", type=int, default=29, help="the delay simulation's draws")
     p.set_defaults(command=_reports)
 
