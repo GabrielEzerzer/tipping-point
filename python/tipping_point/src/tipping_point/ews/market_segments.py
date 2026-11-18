@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import math
+import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -16,6 +18,7 @@ import numpy as np
 from .. import engine
 from ..market import archive, msvol, nulls
 from . import prereg
+from .scoring import auc
 
 MINUTE_MS = 60_000
 BAR_MINUTES = 5
@@ -181,14 +184,59 @@ def check_scoring(scoring: prereg.Prereg) -> None:
             f"{prereg.MARKET_LATENT} is frozen too"
         )
     for tag in tags:
-        path = root / prereg.PREREG_DIR / f"{tag.removeprefix('prereg/')}.toml"
         try:
-            prereg.frozen(prereg.load(path))
-        except (OSError, prereg.PreregError) as exc:
+            _latent_frozen(root, tag)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, prereg.PreregError) as exc:
             raise SegmentError(
                 f"{tag}: {exc}; the confirmatory span opens only when "
                 f"{prereg.MARKET_LATENT} is frozen too"
             ) from exc
+
+
+def _latent_frozen(root: Path, tag: str) -> None:
+    name = tag.removeprefix("prereg/")
+    relative = (prereg.PREREG_DIR / f"{name}.toml").as_posix()
+    blob = prereg._git(root, "cat-file", "blob", f"{tag}:{relative}", binary=True)
+    doc = tomllib.loads(blob.decode("utf-8"))
+    data = doc.get("data")
+    if not isinstance(data, dict) or data.get("domain") != prereg.MARKET_LATENT:
+        raise prereg.PreregError(f"{relative} at {tag} is not a {prereg.MARKET_LATENT} file")
+    held = f"{doc.get('id')}-v{doc.get('version')}"
+    if held != name:
+        raise prereg.PreregError(f"{relative} at {tag} holds {held}")
+    path = root / relative
+    if path.exists() and path.read_bytes() != blob:
+        raise prereg.PreregError(f"{relative} differs from the version frozen at {tag}")
+
+
+def shifted_rows(
+    segments: Segments,
+    series: Minutes,
+    symbol: str,
+    horizon: int,
+    *,
+    draws: int,
+    min_offset_bars: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    block = segments.events[symbol, horizon]
+    rng = np.random.default_rng([seed, horizon, *symbol.encode()])
+    moved, kept = nulls.shift_onsets(
+        block.anchor_ns, segments.eligible[symbol], min_offset_bars * msvol.BAR_NS, draws, rng
+    )
+    first = moved // 1_000_000 - (BAR_MINUTES * horizon + segments.span) * MINUTE_MS
+    start = (first - series.start_ms) // MINUTE_MS
+    inside = (start >= 0) & (start + segments.span <= len(series.values))
+    rows = np.full((*first.shape, segments.span), np.nan)
+    rows[inside] = series.values[start[inside, None] + np.arange(segments.span)]
+    return rows, kept
+
+
+def shift_threshold(positives: np.ndarray, negatives: np.ndarray) -> float:
+    aucs = np.array([auc(row, negatives) for row in np.atleast_2d(positives)])
+    if not aucs.size or np.isnan(aucs).any():
+        return math.nan
+    return float(np.nanquantile(aucs, 0.975))
 
 
 def _closed(what: str) -> str:

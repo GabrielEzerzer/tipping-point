@@ -15,7 +15,7 @@ import pyarrow as pa
 import pytest
 from latent_prereg import on_baseline
 from tipping_point.ews import market_segments as ms
-from tipping_point.ews import prereg
+from tipping_point.ews import prereg, scoring
 from tipping_point.market import archive, msvol, nulls
 
 REPO = Path(__file__).resolve().parents[4]
@@ -299,6 +299,58 @@ def test_the_confirmatory_span_needs_market_latent_frozen_too(tmp_path: Path) ->
     (folder / "market-latent-v1.toml").write_bytes(b"edited after the freeze")
     with pytest.raises(ms.SegmentError, match="opens only when market-latent is frozen too"):
         ms.check_scoring(scoring)
+
+    git("checkout", "-q", "-f", "prereg/market-ews-v1")
+    assert not (folder / "market-latent-v1.toml").exists()
+    ms.check_scoring(prereg.load(folder / "market-ews-v1.toml"))
+
+
+def _shift_case() -> tuple[ms.Segments, ms.Minutes]:
+    start_ms = archive.day_ms(date(2023, 3, 1))
+    values = np.arange(4 * 1440, dtype=np.float64)
+    values[2000] = np.nan
+    bar_ns = (start_ms + ms.BAR_MS * np.arange(4 * 288, dtype=np.int64)) * 1_000_000
+    onsets = bar_ns[[700, 900]]
+    block = ms.Block(np.zeros((2, 10)), np.zeros(2, np.int64), onsets, np.zeros(2))
+    eligible = bar_ns[[2, 380, 406, 420, 1000, 1100]]
+    segments = ms.Segments(10, {("BTCUSDT", 5): block}, {}, {}, [], {"BTCUSDT": eligible})
+    return segments, ms.Minutes(start_ms, values)
+
+
+def test_the_shift_moves_the_horizons_kept_onsets_to_eligible_bars_a_day_away() -> None:
+    segments, series = _shift_case()
+    rows, kept = ms.shifted_rows(
+        segments, series, "BTCUSDT", 5, draws=400, min_offset_bars=288, seed=30
+    )
+    assert rows.shape == (400, 2, 10) and kept.tolist() == [True, True]
+    again, _ = ms.shifted_rows(
+        segments, series, "BTCUSDT", 5, draws=400, min_offset_bars=288, seed=30
+    )
+    np.testing.assert_array_equal(rows, again)
+    last = rows[:, :, -1]
+    end_minute = np.where(np.isnan(last), -1, last + 1)
+    onset_bar = (end_minute + 5 * 5) // 5
+    complete = ~np.isnan(rows).any(axis=2)
+    assert set(onset_bar[:, 0][complete[:, 0]].tolist()) == {380, 1000, 1100}
+    assert set(onset_bar[:, 1][complete[:, 1]].tolist()) == {380, 420}
+    first = rows[complete][:, 0]
+    np.testing.assert_array_equal(rows[complete], first[:, None] + np.arange(10, dtype=np.float64))
+    dropped = ~complete
+    assert dropped[:, 0].any() and dropped[:, 1].any()
+    all_nan = np.isnan(rows[dropped]).all(axis=1)
+    assert all_nan.any() and not all_nan.all()
+
+
+def test_a_shift_cell_with_a_draw_and_no_auc_is_inconclusive() -> None:
+    rng = np.random.default_rng(0)
+    negatives = rng.normal(size=50)
+    positives = rng.normal(0.3, 1.0, size=(100, 20))
+    positives[3, :5] = np.nan
+    aucs = [scoring.auc(row, negatives) for row in positives]
+    assert ms.shift_threshold(positives, negatives) == np.nanquantile(aucs, 0.975)
+    positives[7] = np.nan
+    assert np.isnan(ms.shift_threshold(positives, negatives))
+    assert np.isnan(ms.shift_threshold(np.empty((100, 0)), negatives))
 
 
 def test_returns_and_the_slot_profile() -> None:

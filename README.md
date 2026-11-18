@@ -977,8 +977,11 @@ command's `--prereg` opens it for labels: `build` refuses a series, onset or con
 reaching it unless `scoring` is a market-ews file frozen at its tag that names this labels file,
 and a run labelling those days must carry the frozen labels' stamp in its manifest. The span also
 stays closed until a market-latent file is frozen in the same repository: at least one
-`prereg/market-latent-v<k>` tag, each tagged file still the blob frozen at its tag, so neither
-test is scored on those days before both are pre-registered. An environment
+`prereg/market-latent-v<k>` tag, each holding `paper/prereg/market-latent-v<k>.toml`, a
+market-latent file of that id and version, read from the tag itself, so a checkout of the
+market-ews tag's commit is admitted once the latent tag is fetched; where the working tree also
+holds that file, it must be the tagged blob. Neither test is scored on those days before both are
+pre-registered. An environment
 switch, as `cascade.recall` takes, would open those days to any caller; the frozen file ties them
 to the pre-registered test. With it, `build` also takes nothing the file fixes from its caller: the
 horizons, the span (window + length - 1), the subsample and the seed must be the file's. And it
@@ -987,6 +990,11 @@ control segment starting before it, is not cut, so a labels run reaching back in
 puts none of those events into a confirmatory cell, while their minutes still serve as history.
 `build` also returns each symbol's `eligible` bars (`market.nulls.eligible_onsets` on its labels),
 the bars the event-time shift may move its onsets to, restricted to the scored span the same way.
+`shifted_rows` moves the onsets kept in one horizon's event block to those bars, at least
+`min_offset_bars` away, through `market.nulls.shift_onsets`, and cuts their segments: one that
+holds a minute with no value or reaches outside the series has NaN there, so it drops out of that
+draw's AUC and is never redrawn. `shift_threshold` takes the 97.5th percentile of the draws' AUCs
+against the controls, and NaN, an inconclusive cell, when any draw has no AUC.
 The module reads labels and is fed the series; the labels package (`market/`) imports none of it.
 
 The same-input tier, `ews/same_input.py` (#30; research pass 6.4 item 2, choice 8), scores the
