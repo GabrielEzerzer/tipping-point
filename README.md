@@ -330,7 +330,7 @@ episodes, events, flickers and null stretches. A run lands in `<data dir>/labels
 `manifest.json` with every source file and parameter, Parquet tables `bars`, `labels`, `refits`,
 `episodes` and `nulls` keyed by `ts_ns`, then `complete.json`. Every labeller parameter is an
 option at the research pass's start value until the 2023 pilot sets it; days from 2024-01-01 are
-refused until `market-labels-v1` is frozen. The clean window C and the refractory Q stay at their
+refused without `--prereg` and the frozen `market-labels-v1` (below). The clean window C and the refractory Q stay at their
 start values, for which #29 declares no range: a labels file with another value is refused, and a
 shorter Q, which the S5 pilot's read suggests, needs an amendment.
 
@@ -360,6 +360,23 @@ medians, so this span lists 2023 alone:
 
 ```sh
 uv run python -m tipping_point.market cascade --start 2022-12-04 --end 2023-12-31
+```
+
+The confirmatory span opens only through the frozen file. With `--prereg`, `labels` and `cascade`
+take the span, the symbols and every parameter from it, and refuse to start unless the file is the
+one frozen at its tag, the modules that make labels and cascades are byte for byte the tag's
+commit's, the command line and `ews/prereg.py` have no change beyond HEAD, and the checkout has no
+uncommitted change or untracked file (the manifest's `producer.dirty` is false). The manifest
+records the sha256 of `uv.lock`, which pins the locked libraries but not the installed environment,
+so pre-registered runs use `uv run --locked`: `uv run` syncs the environment to the lock first, and
+`--locked` refuses a lock that is out of date with `pyproject.toml` instead of rewriting it. A
+cascade run lists the windows that close from the confirmatory day's 00:00 on, as `cascade.recall`
+reads, so a candidate whose window closes in the first half hour can have its onset (`ts_ns`) up to
+30 minutes before midnight.
+
+```sh
+uv run --locked python -m tipping_point.market labels --prereg paper/prereg/market-labels-v1.toml
+uv run --locked python -m tipping_point.market cascade --prereg paper/prereg/market-labels-v1.toml
 ```
 
 `market/documented_cascades.toml` lists documented cascades with their sources. With
