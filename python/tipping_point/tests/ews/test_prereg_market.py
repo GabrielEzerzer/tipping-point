@@ -210,7 +210,8 @@ def _set(doc: dict[str, Any], where: str, value: Any) -> dict[str, Any]:
         (
             "data.domain",
             "market",
-            "data.domain: 'market' is not one of ['ising', 'market-labels', 'market-ews']",
+            "data.domain: 'market' is not one of "
+            "['ising', 'market-labels', 'market-ews', 'market-latent']",
         ),
     ],
 )
