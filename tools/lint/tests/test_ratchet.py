@@ -598,7 +598,7 @@ class AstGrepIgnore(unittest.TestCase):
 class SelfCheck(unittest.TestCase):
     def test_pack_passes_its_own_ratchet(self):
         repo = make_repo(self)
-        copy = Path(repo, "setup", "lint")
+        copy = Path(repo, "tools", "lint")
         shutil.copytree(PACK, copy, ignore=shutil.ignore_patterns("__pycache__"))
         proc = run_ratchet(repo, "--init", ratchet=copy / "ratchet")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
