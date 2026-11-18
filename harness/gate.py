@@ -1,27 +1,3 @@
-"""Local gate: run every leg independently and judge each from its own evidence.
-
-Run as `uv run python harness/gate.py [--leg NAME ...]`.
-
-A leg is GREEN only when its exit code is 0 AND its own summary evidence is positive.
-Every leg always runs; the gate exits nonzero if any leg is RED. Stdlib only.
-
-A leg still running at its limit is hung: it is killed with its whole process tree and judged RED,
-and the gate goes on, so that a hang in a background shell still ends in a last line and a record.
-
-The cargo legs cover only the root workspace's members; test_gate fails engine/ or any crate
-under harness/ that is outside it, so app/src-tauri must join members and that check when it lands.
-
-On a shared laptop (#61): the gate kills strays (strays.py) as it starts and ends, cargo builds
-on half the logical cores unless CARGO_BUILD_JOBS is set, every leg starts at BelowNormal priority
-on Windows, and the record says how busy the CPU was at the start.
-
-TP_GATE_PRIORITY=normal starts the legs at Normal instead (belownormal, the default, is the other
-value; anything else is refused; the classes are Windows', so elsewhere it changes nothing). Use it
-for a dedicated gate run on a machine you control: at BelowNormal, a data job or another session
-running at Normal can starve the gate's timing tests (api_load) red, while at Normal the gate
-takes its share from whatever else is running.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -43,6 +19,31 @@ from pathlib import Path
 from typing import Any
 
 import strays
+
+DESCRIPTION = """\
+Local gate: run every leg independently and judge each from its own evidence.
+
+Run as `uv run python harness/gate.py [--leg NAME ...]`.
+
+A leg is GREEN only when its exit code is 0 AND its own summary evidence is positive.
+Every leg always runs; the gate exits nonzero if any leg is RED. Stdlib only.
+
+A leg still running at its limit is hung: it is killed with its whole process tree and judged RED,
+and the gate goes on, so that a hang in a background shell still ends in a last line and a record.
+
+The cargo legs cover only the root workspace's members; test_gate fails engine/ or any crate
+under harness/ that is outside it.
+
+On a shared laptop (#61): the gate kills strays (strays.py) as it starts and ends, cargo builds
+on half the logical cores unless CARGO_BUILD_JOBS is set, every leg starts at BelowNormal priority
+on Windows, and the record says how busy the CPU was at the start.
+
+TP_GATE_PRIORITY=normal starts the legs at Normal instead (belownormal, the default, is the other
+value; anything else is refused; the classes are Windows', so elsewhere it changes nothing). Use it
+for a dedicated gate run on a machine you control: at BelowNormal, a data job or another session
+running at Normal can starve the gate's timing tests (api_load) red, while at Normal the gate
+takes its share from whatever else is running.
+"""
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "harness" / "out"
@@ -527,7 +528,7 @@ def run_leg(leg: Leg, priority: str = DEFAULT_PRIORITY) -> LegResult:
 
 def main(argv: list[str] | None = None) -> int:
     names = [leg.name for leg in LEGS]
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
     parser.add_argument("--leg", action="append", choices=names, help="run only this leg")
     args = parser.parse_args(argv)
     selected = [leg for leg in LEGS if not args.leg or leg.name in args.leg]
