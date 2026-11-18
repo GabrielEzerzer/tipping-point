@@ -4,7 +4,7 @@ GPUs. A Kaggle script kernel.
 A plan is plain JSON: an ordered list of runs, each an `ising` or `jepa` subcommand with its
 arguments. --write-kernel embeds a plan in a copy of this file and writes kernel-metadata.json
 beside it (private, on GPU T4 x2), and `kaggle kernels push -p <dir>` runs it. The machinery is
-tp-tauc-l64-l128's (the kernel that ran on Kaggle's T4 x2, kept under .wf/kaggle/): the pinned
+tp-tauc-l64-l128's (the kernel that ran on Kaggle's T4 x2): the pinned
 environment from a wheel dataset with its COMMIT.txt check, the preflight benchmark, a queue per
 GPU through CUDA_VISIBLE_DEVICES, the stop at 8 h 15 min, checkpoints and resume across sessions,
 STATUS, and the exit-code policy.

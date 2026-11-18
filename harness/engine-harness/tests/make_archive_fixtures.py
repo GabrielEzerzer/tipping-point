@@ -1,6 +1,6 @@
 """Writes the tiny synthetic archives the engine's import tests read, in each venue's own format,
 to `engine/tests/fixtures/archives/`. Real archive days are never committed (republishing them is
-a licensing risk); they stay local, gitignored, in `harness/fixtures/archives/`.
+a licensing risk); they stay local, in `<data dir>/archives/` outside the repository.
 
 - `2026-10-20_BTCUSDT_ob200.data.zip`: Bybit's order-book archive. One member of CRLF-ended
   lines, each a message of the stream (`topic`, `type`, `ts`, `data` with `s`, `b`, `a`, `u`,

@@ -7,8 +7,8 @@
 //! the archive with its SHA-256; `complete.json` holds the integrity checks. An import of a done
 //! run changes nothing; another archive or other tables for the same run are refused. The same
 //! records fed as a live stream through the venue's adapter raise the same events with the same
-//! books, input for input. Real archive days, kept locally in the gitignored
-//! `harness/fixtures/archives/`, are imported too when present and `TP_ARCHIVE_DAYS` is set.
+//! books, input for input. Real archive days, kept in `<data dir>/archives/` outside the
+//! repository, are imported too when present and `TP_ARCHIVE_DAYS` is set.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -532,7 +532,7 @@ async fn an_archive_imports_exactly_as_its_records_fed_live() -> Outcome {
     Ok(())
 }
 
-/// Real archive days kept locally (gitignored, `harness/fixtures/archives/`): each imports with
+/// Real archive days kept in `<data dir>/archives/` (`run::data_dir`): each imports with
 /// its rows matching its records, and passes its integrity checks. A day is hundreds of megabytes
 /// and minutes to import, so this runs only with `TP_ARCHIVE_DAYS` set, as `TP_CRASH_ROUNDS`
 /// lengthens the crash test: `TP_ARCHIVE_DAYS=1 cargo test --release -p engine-harness --test
@@ -540,7 +540,7 @@ async fn an_archive_imports_exactly_as_its_records_fed_live() -> Outcome {
 /// the gate counts, where a println was kept from it by libtest's capture (#103).
 #[test]
 fn local_archive_days_import_cleanly() -> Outcome {
-    let dir = repo().join("harness/fixtures/archives");
+    let dir = run::data_dir().join("archives");
     if std::env::var_os("TP_ARCHIVE_DAYS").is_none() {
         skipped(&format!(
             "local archive days not imported: set TP_ARCHIVE_DAYS to import those in {}",

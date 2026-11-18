@@ -20,7 +20,8 @@ import numpy as np
 import pytest
 from market_planted import checksum, funding_csv, kline_csv, metrics_csv, vision, zipped
 from tipping_point.market import archive
-from tipping_point.market.__main__ import main
+from tipping_point import engine
+from tipping_point.market.__main__ import archive_dir, main
 
 DAY = date(2023, 1, 2)
 REPO = Path(__file__).resolve().parents[4]
@@ -274,7 +275,9 @@ def test_requests_carry_a_plain_user_agent_and_404_means_unpublished(
     assert archive.http_get(f"{archive.BASE_URL}/absent.zip") is None
 
 
-def test_the_default_archive_folder_is_gitignored() -> None:
-    target = REPO / "harness/fixtures/archives/binance/klines/BTCUSDT/BTCUSDT-1m-2023-01-02.zip"
-    done = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-q", str(target)], check=False)
-    assert done.returncode == 0
+def test_the_default_archive_folder_is_under_the_data_dir(tmp_path: Path) -> None:
+    chosen = tmp_path / "data"
+    assert archive_dir({"TP_DATA_DIR": str(chosen)}) == chosen / "archives" / "binance"
+    per_user = {"LOCALAPPDATA": str(tmp_path / "local")}
+    assert archive_dir(per_user) == engine.data_dir(per_user) / "archives" / "binance"
+    assert not archive_dir().resolve().is_relative_to(REPO)

@@ -22,12 +22,11 @@ import pytest
 from market_planted import KLINES_HEADER, METRICS_HEADER, Vision, funding_csv
 from tipping_point import engine
 from tipping_point.market import archive, bars, cascade, msvol
-from tipping_point.market.__main__ import ARCHIVE, CONFIRMATORY, main
+from tipping_point.market.__main__ import CONFIRMATORY, archive_dir, main
 from tipping_point.market.cascade import LONG, SHORT, Params
 
 Series = dict[str, np.ndarray]
 
-ROOT = Path(__file__).resolve().parents[4]
 FIRST = date(2023, 1, 2)
 T0 = archive.day_ms(FIRST) * 1_000_000
 BAR = msvol.BAR_NS
@@ -976,7 +975,7 @@ def _real_columns(symbol: str, first: date, last: date) -> dict[str, dict[str, n
     keep to 2023: nothing confirmatory is read."""
     assert last < CONFIRMATORY
     try:
-        span = archive.collect([symbol], first, last, ROOT / ARCHIVE)
+        span = archive.collect([symbol], first, last, archive_dir())
     except archive.ArchiveError as error:
         pytest.skip(f"real days not here: {error}")
     return {kind: span.columns[(symbol, kind)] for kind in archive.KINDS}
@@ -1013,7 +1012,7 @@ def _taker_ratios(symbol: str, first: date, last: date) -> tuple[np.ndarray, np.
     stamps, ratios = [], []
     for d in range((last - first).days + 1):
         source = archive.Source("metrics", symbol, f"{first + timedelta(days=d):%Y-%m-%d}")
-        with zipfile.ZipFile(ROOT / ARCHIVE / source.path) as bundle:
+        with zipfile.ZipFile(archive_dir() / source.path) as bundle:
             table = pacsv.read_csv(pa.py_buffer(bundle.read(bundle.namelist()[0])))
         stamps.append(table["create_time"].to_numpy().astype("datetime64[ms]").astype(np.int64))
         ratios.append(table["sum_taker_long_short_vol_ratio"].to_numpy().astype(np.float64))
@@ -1082,7 +1081,7 @@ def test_a_metrics_stamp_marks_the_end_of_its_step_on_real_days(
 
 
 def test_documented_cascades_on_real_days(capsys: pytest.CaptureFixture[str]) -> None:
-    """The recall check on real days kept locally (gitignored, harness/fixtures/archives/binance).
+    """The recall check on real days kept locally (<data dir>/archives/binance, archive_dir).
 
     It reads confirmatory dates: five of the six events lie from 2024-01-01 on, and that span stays
     closed until market-labels-v1 is frozen (#29 S5). So it runs only with TP_CASCADE_RECALL set
@@ -1096,7 +1095,7 @@ def test_documented_cascades_on_real_days(capsys: pytest.CaptureFixture[str]) ->
     `TP_CASCADE_RECALL=1 uv run pytest python/tipping_point/tests/market/test_cascade.py -k
     documented_cascades_on_real_days`, after fetching each event's days and the 29 before them.
     """
-    root = ROOT / ARCHIVE
+    root = archive_dir()
     if not os.environ.get(cascade.SWITCH):
         pytest.skip(f"documented-event recall not run: set {cascade.SWITCH} to read {root}")
     rows = cascade.recall(root)
