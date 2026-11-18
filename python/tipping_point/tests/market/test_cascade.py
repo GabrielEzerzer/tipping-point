@@ -1081,20 +1081,6 @@ def test_a_metrics_stamp_marks_the_end_of_its_step_on_real_days(
 
 
 def test_documented_cascades_on_real_days(capsys: pytest.CaptureFixture[str]) -> None:
-    """The recall check on real days kept locally (<data dir>/archives/binance, archive_dir).
-
-    It reads confirmatory dates: five of the six events lie from 2024-01-01 on, and that span stays
-    closed until market-labels-v1 is frozen (#29 S5). So it runs only with TP_CASCADE_RECALL set
-    and otherwise skips, and it reads no rule output but each documented event's own days.
-
-    It is a report, and nothing is to be tuned on it. It asserts that the check ran and printed,
-    and no recall floor: a floor would invite moving a, b, c or v until it passes, and thresholds
-    chosen so would have seen the confirmatory span, which is what the split exists to prevent.
-    The pilot sets them on 2023 alone; a documented event they miss is a finding for the paper.
-
-    `TP_CASCADE_RECALL=1 uv run pytest python/tipping_point/tests/market/test_cascade.py -k
-    documented_cascades_on_real_days`, after fetching each event's days and the 29 before them.
-    """
     root = archive_dir()
     if not os.environ.get(cascade.SWITCH):
         pytest.skip(f"documented-event recall not run: set {cascade.SWITCH} to read {root}")

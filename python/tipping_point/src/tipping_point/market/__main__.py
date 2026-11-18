@@ -1,4 +1,26 @@
-"""Command line: python -m tipping_point.market <command> [options]
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import os
+import shlex
+import sys
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pyarrow as pa
+
+from .. import engine
+from ..ews import prereg
+from . import archive, bars, book, cascade, msvol, reports
+
+DESCRIPTION = """\
+Command line: python -m tipping_point.market <command> [options]
 
   fetch    download and verify Binance's USD-M 1-minute klines, 5-minute metrics and monthly
            funding of the UTC days --start..--end (inclusive) for --symbols, into --dest (default
@@ -56,27 +78,6 @@ harness/market_floor.py runs it. The data dir is --data-dir, else the engine's o
 or a per-user folder outside the repository: tipping_point.engine.data_dir).
 """
 
-from __future__ import annotations
-
-import argparse
-import dataclasses
-import json
-import os
-import shlex
-import sys
-from collections import Counter
-from collections.abc import Mapping, Sequence
-from datetime import date, timedelta
-from pathlib import Path
-from typing import Any
-
-import numpy as np
-import pyarrow as pa
-
-from .. import engine
-from ..ews import prereg
-from . import archive, bars, book, cascade, msvol, reports
-
 CONFIRMATORY = date(2024, 1, 1)  # no label from here on but through the frozen market-labels-v1
 SRC = Path(__file__).resolve().parents[1]  # tipping_point/, whose files --prereg checks
 # Held to their blobs at the frozen tag's commit: every module of market/ that _labels and _cascade
@@ -103,14 +104,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def archive_dir(environ: Mapping[str, str] = os.environ) -> Path:
-    """Where fetch puts Binance's archive files and the commands that read them look by default:
-    <data dir>/archives/binance, under the engine's data dir (engine.data_dir), outside any
-    checkout."""
     return engine.data_dir(environ) / "archives" / "binance"
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m tipping_point.market", description=__doc__)
+    parser = argparse.ArgumentParser(prog="python -m tipping_point.market", description=DESCRIPTION)
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
     sub = parser.add_subparsers(required=True)
 

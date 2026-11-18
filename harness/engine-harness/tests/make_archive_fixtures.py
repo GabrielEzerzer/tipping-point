@@ -1,19 +1,7 @@
-"""Writes the tiny synthetic archives the engine's import tests read, in each venue's own format,
-to `engine/tests/fixtures/archives/`. Real archive days are never committed (republishing them is
-a licensing risk); they stay local, in `<data dir>/archives/` outside the repository.
+# Writes the tiny synthetic archives the engine's import tests read, each in its venue's format,
+# to engine/tests/fixtures/archives/. Real archive days are never committed (a licensing risk):
+# they stay in the data dir's archives/ folder. Run it from the repository root.
 
-- `2026-10-20_BTCUSDT_ob200.data.zip`: Bybit's order-book archive. One member of CRLF-ended
-  lines, each a message of the stream (`topic`, `type`, `ts`, `data` with `s`, `b`, `a`, `u`,
-  `seq`, then `cts`), written with a data descriptor as Bybit's own zips are. A snapshot, deltas
-  whose `u` runs on by one every 100 ms, one `u` skipped (a gap), deltas after it, Bybit's
-  snapshot sent again, more deltas. Prices are written with two decimals and quantities with
-  three, as Bybit writes BTCUSDT's; a quantity of "0" deletes.
-- `BTCUSDT-aggTrades-2026-10-20.zip`: Binance's aggregated trades, with its header line, one
-  aggregate id missing (and the trade ids it covered), and the `.CHECKSUM` Binance publishes
-  beside each file.
-
-Run from the repo root: `uv run python harness/engine-harness/tests/make_archive_fixtures.py`.
-"""
 
 from __future__ import annotations
 

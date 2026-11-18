@@ -1,4 +1,30 @@
-"""Tipping Point: an explicit plan of simulator runs and JEPA trainings and extractions on Kaggle's
+from __future__ import annotations
+
+import argparse
+import collections
+import contextlib
+import datetime
+import hashlib
+import itertools
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import zipfile
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+DESCRIPTION = """\
+Tipping Point: an explicit plan of simulator runs and JEPA trainings and extractions on Kaggle's
 GPUs. A Kaggle script kernel.
 
 A plan is plain JSON: an ordered list of runs, each an `ising` or `jepa` subcommand with its
@@ -102,31 +128,6 @@ and microseconds per extracted frame, by checkpoint and L. out/kaggle-ising-runs
 run's state, the rates, the plan, the environment and the preflight. The kernel exits non-zero only
 when its output holds no run folder, since a failed version may not keep its output.
 """
-
-from __future__ import annotations
-
-import argparse
-import collections
-import contextlib
-import datetime
-import hashlib
-import itertools
-import json
-import math
-import os
-import re
-import shutil
-import subprocess
-import sys
-import tempfile
-import threading
-import time
-import traceback
-import zipfile
-from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
-from pathlib import Path, PurePosixPath
-from typing import Any
 
 PLAN_JSON: str | None = None  # --write-kernel writes the plan here
 
@@ -2293,7 +2294,7 @@ def self_test() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n\n")[0],
+        description=DESCRIPTION.split("\n\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     mode = parser.add_mutually_exclusive_group()
