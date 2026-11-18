@@ -322,10 +322,33 @@ def test_eth_only_needs_both_symbols(doc: dict[str, Any]) -> None:
     assert found == ["reporting.groups: eth-only reads ETH onsets against BTC's: both symbols"]
 
 
-def test_a_number_that_is_not_finite_is_refused(doc: dict[str, Any]) -> None:
-    """#147: TOML allows nan, and every comparison with nan is false."""
-    doc["scoring"]["ci_level"] = float("nan")
-    assert prereg.problems(doc) == ["scoring.ci_level: a finite number, not nan"]
+@pytest.mark.parametrize(
+    ("line", "bad", "named"),
+    [
+        ("ci_level = 0.95", "ci_level = nan", "scoring.ci_level: a finite number, not nan"),
+        (
+            "alpha = 0.07110265726317705",
+            "alpha = inf",
+            "scoring.floor.garch.BTCUSDT.alpha: a finite number, not inf",
+        ),
+        ("far_per_day = 1.0", "far_per_day = -inf", "alarms.far_per_day: a finite number"),
+        (
+            'detrend = "none"',
+            'detrend = "gaussian"\nbandwidth = nan',
+            "indicators.bandwidth: a finite number, not nan",
+        ),
+    ],
+)
+def test_the_freeze_refuses_a_number_that_is_not_finite(
+    tmp_path: Path, line: str, bad: str, named: str
+) -> None:
+    text = filled(TEMPLATE.read_text("utf-8"))
+    path = _repo(tmp_path, text.replace(line, bad, 1))
+    doc = tomllib.loads(path.read_text("utf-8"))
+    assert named in prereg.problems(doc, strict=True)[0]
+    with pytest.raises(prereg.PreregError, match=re.escape(named)):
+        prereg.freeze(tmp_path, "market-ews")
+    assert _git(tmp_path, "tag", "--list") == ""
 
 
 def test_the_domain_picks_the_schema(doc: dict[str, Any]) -> None:
