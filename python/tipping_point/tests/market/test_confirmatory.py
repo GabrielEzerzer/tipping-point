@@ -26,6 +26,7 @@ import pytest
 from market_planted import Vision, vision
 from tipping_point import engine
 from tipping_point.ews import prereg
+from tipping_point.ising import io as ising_io
 from tipping_point.market import __main__ as market_cli
 from tipping_point.market import archive, bars, cascade
 
@@ -151,6 +152,7 @@ def frozen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _git(root, "commit", "-q", "-m", "market-labels-v1")
     assert prereg.freeze(root, "market-labels") == "prereg/market-labels-v1"
     monkeypatch.setattr(market_cli, "SRC", root / SRC)
+    monkeypatch.setattr(ising_io, "code_version", lambda: {"git_sha": None, "dirty": False})
     return path
 
 
@@ -434,3 +436,42 @@ def test_code_outside_the_files_repository_is_refused(
     monkeypatch.setattr(market_cli, "SRC", tmp_path / "elsewhere")
     assert _run("labels", frozen, fetched, tmp_path / "data") == 1
     assert "where market-labels-v1 is frozen" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dirty", [True, None])
+def test_a_dirty_checkout_is_refused(
+    frozen: Path,
+    fetched: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dirty: bool | None,
+) -> None:
+    monkeypatch.setattr(ising_io, "code_version", lambda: {"git_sha": None, "dirty": dirty})
+    for command in ("labels", "cascade"):
+        data = tmp_path / command
+        assert _run(command, frozen, fetched, data) == 1
+        assert "uncommitted changes or untracked files" in capsys.readouterr().err
+        assert not data.exists()
+
+
+def test_a_missing_uv_lock_is_refused(
+    frozen: Path, fetched: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (frozen.parents[2] / "uv.lock").unlink()
+    data = tmp_path / "data"
+    assert _run("labels", frozen, fetched, data) == 1
+    assert "no uv.lock in" in capsys.readouterr().err and not data.exists()
+
+
+@pytest.mark.parametrize(
+    "other", ["ising-ews-v1.toml", "TEMPLATE-market-ews.toml"], ids=["ising", "market-ews"]
+)
+def test_a_file_of_another_domain_is_refused(
+    frozen: Path, fetched: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], other: str
+) -> None:
+    path = REPO / "paper" / "prereg" / other
+    data = tmp_path / "data"
+    assert _run("labels", path, fetched, data) == 1
+    assert f"is not a {prereg.MARKET_LABELS} file" in capsys.readouterr().err
+    assert not data.exists()
