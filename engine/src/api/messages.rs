@@ -31,8 +31,6 @@ pub mod close {
     pub const BAD_REQUEST: u16 = 4000;
     /// A hello with another protocol version.
     pub const VERSION_MISMATCH: u16 = 4001;
-    /// The client stopped reading: its socket took nothing for the stall timeout, or it fell
-    /// behind on `jev`, which is never dropped.
     pub const TOO_SLOW: u16 = 4002;
 }
 
@@ -48,8 +46,6 @@ pub enum Topic {
     Status,
     /// Warning meters from the model; the latest per symbol wins.
     Meters,
-    /// Jev labels; every one, never dropped.
-    Jev,
     /// Paper P&L; the latest per symbol wins.
     Pnl,
     /// Ising lattices, binary; the latest wins.
@@ -60,12 +56,11 @@ pub enum Topic {
 
 impl Topic {
     /// Every topic, in the order `welcome` lists them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Book,
         Self::Trades,
         Self::Status,
         Self::Meters,
-        Self::Jev,
         Self::Pnl,
         Self::Lattice,
         Self::Ising,
@@ -76,7 +71,6 @@ impl Topic {
     pub fn relayed(name: &str) -> Option<Self> {
         match name {
             "meters" => Some(Self::Meters),
-            "jev" => Some(Self::Jev),
             "pnl" => Some(Self::Pnl),
             "ising" => Some(Self::Ising),
             _ => None,
@@ -333,9 +327,6 @@ pub enum ServerMessage<'a> {
     Meters {
         data: &'a Value,
     },
-    Jev {
-        data: &'a Value,
-    },
     Pnl {
         data: &'a Value,
     },
@@ -358,7 +349,6 @@ impl ServerMessage<'_> {
     #[must_use]
     pub fn relay(topic: Topic, data: &Value) -> ServerMessage<'_> {
         match topic {
-            Topic::Jev => ServerMessage::Jev { data },
             Topic::Pnl => ServerMessage::Pnl { data },
             Topic::Ising => ServerMessage::Ising { data },
             _ => ServerMessage::Meters { data },
