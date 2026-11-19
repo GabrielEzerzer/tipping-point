@@ -25,6 +25,7 @@ TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE-market-latent.toml"
 EWS_TEMPLATE = REPO / "paper" / "prereg" / "TEMPLATE-market-ews.toml"
 LABELS_V1 = REPO / "paper" / "prereg" / "market-labels-v1.toml"
 ISING_LATENT = REPO / "paper" / "prereg" / "ising-latent-v1.toml"
+V1 = REPO / "paper" / "prereg" / "market-latent-v1.toml"
 DELETE = object()
 EWS_CHOICES = {"detrend": "none", "method": "mean", "fit": "pilot", "noise": "bootstrap"}
 SIGN_IN_CELLS_ONLY = (
@@ -532,3 +533,13 @@ def test_the_domain_picks_the_schema(ews: dict[str, Any]) -> None:
     found = prereg.problems(ews)
     assert "training: missing" in found and "baseline: missing" in found
     assert "market-latent" in prereg.DOMAINS
+
+
+def test_v1_may_be_frozen() -> None:
+    pre = prereg.load(V1)
+    assert pre.name == V1.stem
+    assert prereg.problems(pre.doc, strict=True) == []
+    entries = pre.doc["latents"]["checkpoints"]
+    planned = [(m4_pilot.ASSETS[asset], seed) for asset, seed in m8_primaries.PLAN]
+    assert [(e["symbol"], e["seed"]) for e in entries] == planned
+    assert [e["role"] for e in entries] == [m8_primaries.role(seed) for _, seed in planned]
