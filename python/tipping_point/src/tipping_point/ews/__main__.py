@@ -17,10 +17,7 @@
                        the scoring until it is deleted or the file amended (prereg.charge), unless
                        --resume carries it on from the passes it saved, which it does only for a
                        scoring of the same file, seed, inputs and libraries, from a clean checkout
-                       of the commit that began it (prereg.begin_result). A market-ews file
-                       is scored with --run, --cascades and --book; a market-latent file also
-                       with --latents, --gate and --pins (ews.market_latent_score). With
-                       --exploratory either is a dry run on days before 2024 that logs no trial
+                       of the commit that began it (prereg.begin_result)
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside
