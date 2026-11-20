@@ -17,7 +17,10 @@
                        the scoring until it is deleted or the file amended (prereg.charge), unless
                        --resume carries it on from the passes it saved, which it does only for a
                        scoring of the same file, seed, inputs and libraries, from a clean checkout
-                       of the commit that began it (prereg.begin_result)
+                       of the commit that began it (prereg.begin_result). A market-ews file
+                       is scored with --run, --cascades and --book; a market-latent file also
+                       with --latents, --gate and --pins (ews.market_latent_score). With
+                       --exploratory either is a dry run on days before 2024 that logs no trial
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside
@@ -37,7 +40,7 @@ import numpy as np
 import pyarrow as pa
 
 from .. import engine
-from . import ising, market_score, prereg, scoring, surrogates
+from . import ising, market_latent_score, market_score, prereg, scoring, surrogates
 from .market_segments import SegmentError
 from .trend import Pipeline
 
@@ -149,7 +152,10 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--cascades", type=Path, help="market-ews: the cascade run's folder")
     p.add_argument("--book", type=Path, help="market-ews: the bybit-book data folder")
     p.add_argument("--archive", type=Path, help="market-ews: default <data dir>/archives/binance")
-    p.add_argument("--exploratory", action="store_true", help="market-ews: a dry run, no trial")
+    p.add_argument("--latents", type=Path, help="market-latent: the merged latents' folder")
+    p.add_argument("--gate", type=Path, help="market-latent: the extraction's gate record")
+    p.add_argument("--pins", type=Path, help="market-latent: the trainings' pins.json")
+    p.add_argument("--exploratory", action="store_true", help="market-*: a dry run, no trial")
     p.add_argument("--out", type=Path, help="--exploratory: default <data dir>/ews-exploratory/")
     p.set_defaults(command=_score)
 
@@ -291,7 +297,7 @@ def score(
 
 def _score(args: argparse.Namespace) -> int:
     pre = prereg.load(args.prereg)
-    if pre.doc["data"]["domain"] == prereg.MARKET_EWS:
+    if pre.doc["data"]["domain"] in (prereg.MARKET_EWS, prereg.MARKET_LATENT):
         return _score_market(args, pre)
     if pre.doc["data"]["domain"] != "ising":  # before cells, which reads Ising keys
         raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
@@ -338,6 +344,8 @@ def _score(args: argparse.Namespace) -> int:
 
 
 def _score_market(args: argparse.Namespace, pre: prereg.Prereg) -> int:
+    domain = pre.doc["data"]["domain"]
+    latent = domain == prereg.MARKET_LATENT
     for flag, given in (
         ("--seed", args.seed is not None),
         ("--allow-stale-pilot", args.allow_stale_pilot),
@@ -345,18 +353,40 @@ def _score_market(args: argparse.Namespace, pre: prereg.Prereg) -> int:
         ("--resume", args.resume),
     ):
         if given:
-            raise prereg.PreregError(f"{flag}: not for a market-ews file, which fixes its draws")
-    missing = [f"--{k}" for k in ("run", "cascades", "book") if getattr(args, k) is None]
+            raise prereg.PreregError(f"{flag}: not for a {domain} file, which fixes its draws")
+    needed = ("run", "cascades", "book", *(("latents", "gate", "pins") if latent else ()))
+    missing = [f"--{k}" for k in needed if getattr(args, k) is None]
     if missing:
-        raise prereg.PreregError(f"a market-ews file is scored with {', '.join(missing)}")
+        raise prereg.PreregError(f"a {domain} file is scored with {', '.join(missing)}")
+    if not latent and (args.latents or args.gate or args.pins):
+        raise prereg.PreregError("--latents, --gate and --pins are for a market-latent file")
     if args.out is not None and not args.exploratory:
         raise prereg.PreregError("--out is for --exploratory; a result goes to <data dir>/ews")
+    archive = args.archive or args.data_dir / "archives" / "binance"
+    if latent:
+        run_dir, found, confirmatory = market_latent_score.run(
+            pre,
+            args.run,
+            args.cascades,
+            args.book,
+            archive,
+            args.latents,
+            args.gate,
+            args.pins,
+            args.data_dir,
+            exploratory=args.exploratory,
+            out=args.out,
+        )
+        note = None if confirmatory else market_latent_score.EXPLORATORY
+        print(market_latent_score.markdown(found, run_dir.name, note))
+        print(run_dir)
+        return 0
     run_dir, evaluation, confirmatory = market_score.run(
         pre,
         args.run,
         args.cascades,
         args.book,
-        args.archive or args.data_dir / "archives" / "binance",
+        archive,
         args.data_dir,
         exploratory=args.exploratory,
         out=args.out,
