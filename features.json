@@ -180,7 +180,7 @@
     {
       "name": "Probe a training",
       "description": "Fits ridge probes of |m|, energy and L^2 Var(|m|) from frozen embeddings, trained beside the untrained twin.",
-      "command": "uv run python -m tipping_point.jepa probe --fit <run dir> <training dir>",
+      "command": "uv run python -m tipping_point.jepa probe <training dir> --fit <run dir>",
       "inputs": "a training folder and simulator runs to fit and test on",
       "outputs": "probe scores with their controls on stdout, or as JSON with --json",
       "test": "python/tipping_point/tests/jepa/test_probes.py"

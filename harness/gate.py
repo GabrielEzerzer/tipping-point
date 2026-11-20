@@ -34,7 +34,7 @@ and the gate goes on, so that a hang in a background shell still ends in a last 
 The cargo legs cover only the root workspace's members; test_gate fails engine/ or any crate
 under harness/ that is outside it.
 
-On a shared laptop (#61): the gate kills strays (strays.py) as it starts and ends, cargo builds
+On a shared laptop: the gate kills strays (strays.py) as it starts and ends, cargo builds
 on half the logical cores unless CARGO_BUILD_JOBS is set, every leg starts at BelowNormal priority
 on Windows, and the record says how busy the CPU was at the start.
 

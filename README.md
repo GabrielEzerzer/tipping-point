@@ -154,7 +154,7 @@ with `engine/`, `harness/` or `notebooks/`.
 | train a model | Market JEPA primaries | `uv run python harness/m8_primaries.py train --asset btc --seed 101 --data <dir> --out <dir>` | `harness/m8_primaries.py` |
 | extract latents | Extract latents | `uv run python -m tipping_point.jepa extract <checkpoint> <run dir>` | `jepa/extract.py` |
 | extract latents | Extract market latents | `uv run python -m tipping_point.jepa.market_extract run --pins <pins.json> --primaries <dir> --data <dir> --span exploratory --out <dir>` | `jepa/market_extract.py` |
-| extract latents | Probe a training | `uv run python -m tipping_point.jepa probe --fit <run dir> <training dir>` | `jepa/probes.py` |
+| extract latents | Probe a training | `uv run python -m tipping_point.jepa probe <training dir> --fit <run dir>` | `jepa/probes.py` |
 | label events | Regime labels | `uv run python -m tipping_point.market labels --start <day> --end <day>` | `market/` |
 | label events | Cascade candidates | `uv run python -m tipping_point.market cascade --start <day> --end <day>` | `market/cascade.py` |
 | label events | Labels reports and GARCH floor | `uv run python -m tipping_point.market reports --run <labels run>` | `market/reports.py`, `harness/market_floor.py` |
@@ -169,8 +169,8 @@ with `engine/`, `harness/` or `notebooks/`.
 ## Data and licences
 
 The raw Binance and Bybit data are not redistributed. The repository publishes the code, the frozen
-pre-registrations, the result figures and numbers, and small test fixtures, one of which holds a
-handful of book samples imported from a Bybit archive day. Simulator runs, trained models and
+pre-registrations, the result figures and numbers, and small test fixtures, one of which holds
+book samples imported from a tiny synthetic archive in Bybit's format (`engine/tests/fixtures/archives/`). Simulator runs, trained models and
 latents are not committed; the commands above regenerate them.
 
 `tipping_point.market fetch` downloads Binance's USD-M archives from Binance Vision and checks each
