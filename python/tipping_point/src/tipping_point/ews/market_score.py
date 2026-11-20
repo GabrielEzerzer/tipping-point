@@ -309,6 +309,7 @@ def floor_auc(found: Mapping[str, nulls.Floor], group: str, name: str, horizon: 
 class Shift:
     scores: dict[tuple[str, str, int], np.ndarray]
     kept: dict[tuple[str, int], np.ndarray]
+    moved_alone: dict[int, np.ndarray]
 
 
 def shift_scores(
@@ -334,14 +335,40 @@ def shift_scores(
             flat = rows.reshape(-1, segs.span)
             for name, pipe in pipes.items():
                 scores[name, s, h] = _scores(pipe, flat).reshape(rows.shape[:2])
-    return Shift(scores, kept)
+    moved_alone = {
+        h: moved_eth_alone(segs, symbols, h, kept[ETH, h], doc) for h in doc["segments"]["horizons"]
+    }
+    return Shift(scores, kept, moved_alone)
+
+
+def moved_eth_alone(
+    segs: ms.Segments, symbols: Sequence[str], h: int, kept: np.ndarray, doc: Mapping[str, Any]
+) -> np.ndarray:
+    sc = doc["scoring"]
+    rng = np.random.default_rng([sc["seed"], ms.SHIFT_STREAM, h, ms.group_code(symbols, ETH)])
+    moved, again = nulls.shift_onsets(
+        segs.events[ETH, h].anchor_ns,
+        segs.eligible[ETH],
+        sc["shift"]["min_offset_bars"] * msvol.BAR_NS,
+        sc["shift"]["draws"],
+        rng,
+    )
+    if not np.array_equal(again, kept):
+        raise ms.SegmentError(f"the ETH shift at h = {h} drew other onsets than shifted_rows")
+    bars = doc["reporting"]["eth_only_bars"]
+    return ms.eth_only(moved.ravel(), segs.onsets[BTC], bars).reshape(moved.shape)
+
+
+def eth_only_columns(shift: Shift, scored: Scored, h: int) -> np.ndarray:
+    return scored.alone[h][shift.kept[ETH, h]]
 
 
 def shift_positives(
     shift: Shift, scored: Scored, symbols: Sequence[str], name: str, h: int, group: str
 ) -> np.ndarray:
     if group == "eth-only":
-        return shift.scores[name, ETH, h][:, scored.alone[h][shift.kept[ETH, h]]]
+        cols = eth_only_columns(shift, scored, h)
+        return np.where(shift.moved_alone[h][:, cols], shift.scores[name, ETH, h][:, cols], np.nan)
     chosen = list(symbols) if group == "pooled" else [group]
     return np.concatenate([shift.scores[name, s, h] for s in chosen], axis=1)
 
@@ -370,8 +397,10 @@ def counted_cells(
                 {"indicator": name, "horizon_bars": h, "group": group, "draw": k}
                 | {"auc": scoring.auc(moved, negatives), "n_pos": int(np.isfinite(moved).sum())}
             )
+        dropped = 0
         if group == "eth-only":
             unshifted = int((~shift.kept[ETH, h])[scored.alone[h]].sum())
+            dropped = int((~shift.moved_alone[h][:, eth_only_columns(shift, scored, h)]).sum())
         else:
             chosen = list(symbols) if group == "pooled" else [group]
             unshifted = sum(int((~shift.kept[s, h]).sum()) for s in chosen)
@@ -386,6 +415,7 @@ def counted_cells(
                 "shift_draws": len(positives),
                 "shifted_onsets": positives.shape[1],
                 "unshifted_onsets": unshifted,
+                "shift_dropped_near_btc": dropped,
                 "above_chance": bool(lo > CHANCE),
                 "above_floor": bool(lo > floor),
                 "above_shift": bool(lo > threshold),
@@ -638,11 +668,25 @@ def tier_series(
     out: dict[str, dict[str, ms.Minutes]] = {}
     for symbol, features in book.items():
         raw = {"price": price[symbol], **features}
-        keep = np.logical_and.reduce([np.isfinite(m.values) for m in raw.values()])
-        for name, minutes in raw.items():
-            x = ms.deseasonalise(minutes, ms.slot_profile(minutes, fit, method), method)
+        seasonless = {
+            name: ms.deseasonalise(minutes, ms.slot_profile(minutes, fit, method), method)
+            for name, minutes in raw.items()
+        }
+        keep = np.logical_and.reduce([np.isfinite(m.values) for m in seasonless.values()])
+        for name, x in seasonless.items():
             out.setdefault(name, {})[symbol] = masked(x, keep)
     return out
+
+
+def high_shares(segs: ms.Segments, doc: Mapping[str, Any]) -> list[Row]:
+    return [
+        {"symbol": s, "horizon_bars": h, "onset_ns": int(onset), "high_share": float(share)}
+        for s in doc["data"]["symbols"]
+        for h in doc["segments"]["horizons"]
+        for onset, share in zip(
+            segs.events[s, h].anchor_ns, segs.events[s, h].high_share, strict=True
+        )
+    ]
 
 
 def _shares(segs: ms.Segments, doc: Mapping[str, Any]) -> list[Row]:
@@ -727,7 +771,8 @@ def evaluate(
         "floor": floor_rows,
         "segments": counts + year_counts + cascade_counts,
         "same_input_segments": tier_counts,
-        "high_share": _shares(segs, doc),
+        "high_share": high_shares(segs, doc),
+        "high_share_mean": _shares(segs, doc),
     }
     return Evaluation(tables, segs, series, verdicts)
 
@@ -811,6 +856,33 @@ def dry_run(
     return out, evaluation
 
 
+def check_sources(
+    manifest: Mapping[str, Any], symbols: Sequence[str], first: date, last: date, root: Path
+) -> None:
+    recorded = {s["url"]: s["sha256"] for s in manifest.get("sources", [])}
+    missing = set(manifest.get("missing_sources", []))
+    run = manifest["run_id"]
+    for source in archive.sources(symbols, first, last):
+        path = Path(root) / source.path
+        if source.url in missing:
+            if path.exists():
+                raise ms.SegmentError(
+                    f"{source.url}: missing when {run} was labelled, in {root} now"
+                )
+            continue
+        if source.url not in recorded:
+            raise ms.SegmentError(f"{source.url}: not among the sources {run} was labelled from")
+        try:
+            sha256 = archive.verify(path)
+        except archive.ArchiveError as exc:
+            raise ms.SegmentError(f"{source.url}: {exc}") from exc
+        if sha256 != recorded[source.url]:
+            raise ms.SegmentError(
+                f"{source.url}: sha256 {sha256} in {root}, {recorded[source.url]} when {run} was "
+                "labelled"
+            )
+
+
 def _run_input(kind: str, run: Path) -> Row:
     complete = hashlib.sha256((Path(run) / "complete.json").read_bytes()).hexdigest()
     return {"domain": kind, "run_id": Path(run).name, "complete_sha256": complete}
@@ -849,10 +921,11 @@ def run(
                 "must name what ran"
             )
         prereg.charge(data_dir, pre, prereg.market_ews_cells(doc))
-    ms.check_labels(labels_run, labels, pre if confirmatory else None)
-    onsets, _ = cascade_onsets(cascade_run, labels, symbols, confirmatory)
     first = ALARM_SPAN[0] - timedelta(days=1)
     last = date.fromisoformat(manifest["params"]["end"])
+    check_sources(manifest, symbols, first, last, archive_root)
+    ms.check_labels(labels_run, labels, pre if confirmatory else None)
+    onsets, _ = cascade_onsets(cascade_run, labels, symbols, confirmatory)
     span = archive.collect(symbols, first, last, archive_root)
     start, minutes = archive.day_ms(first), ((last - first).days + 1) * 1440
     prices = {s: ms.close_returns(span.columns[(s, "klines")], start, minutes) for s in symbols}

@@ -2,6 +2,7 @@
 # random streams, the trial budget through a crash and a race, the confirmatory gates before any
 # read, and a dry run that reads no day from 2024-01-01 and logs no trial.
 
+import hashlib
 import json
 import shutil
 from dataclasses import replace
@@ -459,3 +460,134 @@ def test_a_dry_run_refuses_any_day_from_2024(
     code = main([*args, "--data-dir", str(tmp_path / "data")])
     assert code == 1
     assert not prereg.trials_path(tmp_path / "data").exists()
+
+
+def test_each_event_segment_reports_its_own_high_share(planted: msc.Evaluation) -> None:
+    rows = planted.tables["high_share"]
+    segs = planted.segments
+    for s in (BTC, ETH):
+        for h in (5, 6, 12, 24):
+            mine = [r for r in rows if (r["symbol"], r["horizon_bars"]) == (s, h)]
+            assert [r["onset_ns"] for r in mine] == segs.events[s, h].anchor_ns.tolist()
+            assert [r["high_share"] for r in mine] == segs.events[s, h].high_share.tolist()
+    assert len(rows) == 2 * 4 * len(EVENTS)
+    assert len(planted.tables["high_share_mean"]) == 2 * 4
+
+
+def test_the_eth_only_shift_counts_moved_onsets_near_btc_as_dropped(
+    planted: msc.Evaluation,
+) -> None:
+    by_cell: dict[tuple[str, int], int] = {}
+    for d in planted.tables["shift_draws"]:
+        if d["group"] == "eth-only":
+            key = (d["indicator"], d["horizon_bars"])
+            by_cell[key] = by_cell.get(key, 0) + len(EVENTS) - d["n_pos"]
+    cells = [c for c in planted.tables["cells"] if c["group"] == "eth-only"]
+    dropped = {(c["indicator"], c["horizon_bars"]): c["shift_dropped_near_btc"] for c in cells}
+    assert dropped == by_cell
+    assert sum(by_cell.values()) > 0
+    others = [c for c in planted.tables["cells"] if c["group"] != "eth-only"]
+    assert all(c["shift_dropped_near_btc"] == 0 for c in others)
+
+
+def _shift_segments(btc_bar: int) -> ms.Segments:
+    bar = msvol.BAR_NS
+    eth = ms.Block(np.zeros((1, 3)), np.zeros(1, np.int64), np.array([0]), np.zeros(1))
+    return ms.Segments(
+        span=3,
+        events={(ETH, 5): eth},
+        controls={},
+        onsets={BTC: np.array([btc_bar * bar]), ETH: np.array([0])},
+        counts=[],
+        eligible={ETH: bar * np.arange(1000, 1011)},
+    )
+
+
+@pytest.mark.parametrize(("btc_bar", "alone"), [(1005, False), (5000, True)])
+def test_a_moved_eth_onset_is_eth_only_only_away_from_btc(btc_bar: int, alone: bool) -> None:
+    doc = {
+        "scoring": {"seed": 30, "shift": {"draws": 7, "min_offset_bars": 288}},
+        "reporting": {"eth_only_bars": 12},
+    }
+    got = msc.moved_eth_alone(_shift_segments(btc_bar), [BTC, ETH], 5, np.array([True]), doc)
+    assert got.shape == (7, 1)
+    assert (got == alone).all()
+    kept = {(ETH, 5): np.array([True])}
+    shift = msc.Shift({("variance", ETH, 5): np.ones((7, 1))}, kept, {5: got})
+    scored = msc.Scored({}, {}, {5: np.array([True])})
+    positives = msc.shift_positives(shift, scored, [BTC, ETH], "variance", 5, "eth-only")
+    assert np.isfinite(positives).all() == alone
+    assert np.isnan(ms.shift_threshold(positives, np.zeros(4))) != alone
+
+
+def test_the_book_tier_keeps_the_same_minutes_for_price_and_every_feature() -> None:
+    first, fit = date(2023, 2, 6), (date(2023, 2, 6), date(2023, 2, 8))
+    n = 4 * 1440
+    rng = np.random.default_rng(8)
+    price = ms.Minutes(archive.day_ms(first), rng.standard_normal(n))
+    feature = rng.standard_normal(n)
+    for day in range(3):
+        feature[day * 1440 : day * 1440 + 5] = np.nan
+    book = {BTC: {"ofi": ms.Minutes(price.start_ms, feature)}}
+    got = msc.tier_series({BTC: price}, book, fit, "mean")
+    kept = np.isfinite(got["price"][BTC].values)
+    assert np.array_equal(kept, np.isfinite(got["ofi"][BTC].values))
+    assert not kept[3 * 1440 : 3 * 1440 + 5].any()
+    assert kept[3 * 1440 + 5 :].all()
+
+
+SOURCE_SPAN = (date(2022, 12, 31), date(2023, 1, 1))
+
+
+def _archive(root: Path) -> list[dict[str, Any]]:
+    recorded = []
+    for source in archive.sources([BTC, ETH], *SOURCE_SPAN):
+        path = root / source.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(source.url.encode())
+        sha256 = hashlib.sha256(source.url.encode()).hexdigest()
+        path.with_name(path.name + ".CHECKSUM").write_text(f"{sha256}  {path.name}\n")
+        recorded.append({"url": source.url, "bytes": path.stat().st_size, "sha256": sha256})
+    return recorded
+
+
+def _changed(root: Path, source: archive.Source) -> None:
+    path = root / source.path
+    path.write_bytes(b"changed")
+    sha256 = hashlib.sha256(b"changed").hexdigest()
+    path.with_name(path.name + ".CHECKSUM").write_text(f"{sha256}  {path.name}\n")
+
+
+def test_the_archive_must_be_the_one_the_labels_were_made_from(tmp_path: Path) -> None:
+    recorded = _archive(tmp_path)
+    klines = archive.sources([BTC, ETH], *SOURCE_SPAN)[0]
+    manifest = {"run_id": "r", "sources": recorded, "missing_sources": []}
+    msc.check_sources(manifest, [BTC, ETH], *SOURCE_SPAN, tmp_path)
+    unrecorded = manifest | {"sources": [r for r in recorded if r["url"] != klines.url]}
+    gone = manifest | {"sources": unrecorded["sources"], "missing_sources": [klines.url]}
+    for refused in (unrecorded, gone):
+        with pytest.raises(ms.SegmentError):
+            msc.check_sources(refused, [BTC, ETH], *SOURCE_SPAN, tmp_path)
+    _changed(tmp_path, klines)
+    with pytest.raises(ms.SegmentError, match="sha256"):
+        msc.check_sources(manifest, [BTC, ETH], *SOURCE_SPAN, tmp_path)
+    (tmp_path / klines.path).unlink()
+    with pytest.raises(ms.SegmentError):
+        msc.check_sources(manifest, [BTC, ETH], *SOURCE_SPAN, tmp_path)
+    msc.check_sources(gone, [BTC, ETH], *SOURCE_SPAN, tmp_path)
+
+
+def test_a_dry_run_refuses_a_changed_archive_before_reading(
+    tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    labels, pre = frozen
+    root = tmp_path / "archive"
+    recorded = _archive(root)
+    _changed(root, archive.sources([BTC, ETH], *SOURCE_SPAN)[3])
+    run = _unread(tmp_path, labels, monkeypatch)
+    params = {"start": "2022-07-01", "end": SOURCE_SPAN[1].isoformat()}
+    manifest = {"run_id": run.name, "params": params, "sources": recorded, "missing_sources": []}
+    (run / "manifest.json").write_text(json.dumps(manifest))
+    none = tmp_path / "none"
+    with pytest.raises(ms.SegmentError, match="sha256"):
+        msc.run(pre, run, none, none, root, tmp_path / "data", exploratory=True)
