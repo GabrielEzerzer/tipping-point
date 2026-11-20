@@ -344,6 +344,23 @@ def test_the_random_streams_are_the_stated_keys(planted: mls.Evaluation, real: F
         lo, hi = np.quantile(boot[cp.seed, cp.kind], [0.025, 0.975])
         assert (cell["auc_lo"], cell["auc_hi"]) == pytest.approx((lo, hi), abs=0, rel=1e-12)
 
+    one = next(c for c in eth_models if (c.seed, c.kind) == (101, "trained"))
+    both_ev = [ev, segs.events[ETH, 6].first_ms[kept["events"][ETH, 6]]]
+    both_ct = [ct, segs.controls[ETH].first_ms[kept["controls"][ETH]]]
+    pooled = _hand_draws(
+        [_scores(tables, doc, one, s, 0, f) for s, f in zip((BTC, ETH), both_ev, strict=True)],
+        [_scores(tables, doc, one, s, 0, f) for s, f in zip((BTC, ETH), both_ct, strict=True)],
+        [30, 4, 0, 6, 1, 0],
+    )
+    cell = next(
+        c
+        for c in planted.tables["cells"]
+        if (c["pair"], c["horizon_bars"], c["model"], c["group"], c["seed"], c["checkpoint"])
+        == ("pc1-variance", 6, ETH, "pooled", 101, "trained")
+    )
+    lo, hi = np.quantile(pooled, [0.025, 0.975])
+    assert (cell["auc_lo"], cell["auc_hi"]) == pytest.approx((lo, hi), abs=0, rel=1e-12)
+
     seeds = sorted({cp.seed for cp in eth_models})
     d = np.stack([np.abs(boot[s, "trained"] - 0.5) - np.abs(boot[s, "twin"] - 0.5) for s in seeds])
     rng = np.random.default_rng([30, 7, 0, 6, 1, 1])
