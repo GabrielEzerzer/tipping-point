@@ -279,12 +279,14 @@ The scorer settles the points the file leaves open as follows:
 ### Scoring a market-latent file
 
 `ews/market_latent_score.py` applies a market-latent file as written, on the segments of the
-market-ews file its `[baseline]` names, reusing `ews/market_score.py` for the segment cutting, the
-archive check, the event-time shift, the same-input tier and the trial budget. The confirmatory
-scoring is `python -m tipping_point.ews score --prereg paper/prereg/market-latent-v1.toml --run
-<labels run> --cascades <cascade run> --book <bybit-book root> --archive <binance archive>
---latents <merged latents root> --gate <extraction gate.json> --pins <pins.json>`. Before it reads
-any latent table, kline or book feature, it refuses in these cases:
+market-ews file its `[baseline]` names. Its segments come from `market_segments.build`, and it
+builds its own event-time shift on `market.nulls.shift_onsets`. It reuses `ews/market_score.py`
+for the archive, labels and cascade checks and the same-input tier's series, and `ews/prereg.py`
+for the trial budget. The confirmatory scoring is `python -m tipping_point.ews score --prereg
+paper/prereg/market-latent-v1.toml --run <labels run> --cascades <cascade run> --book <bybit-book
+root> --archive <binance archive> --latents <merged latents root> --gate <extraction gate.json>
+--pins <pins.json>`. Before it reads any latent table, kline or book feature, it refuses in these
+cases:
 
 - the file is not frozen, fails the strict validator, has a prediction other than the decision rule
   it carries out (`PREDICTION`), or a `[scoring.twin]` or `[scoring.classic]` rule other than the
@@ -313,8 +315,9 @@ Each checkpoint's latents are read as two series, the fit span and the confirmat
 lead-in minutes, and each column is deseasonalised on a slot profile fitted per column, checkpoint
 and read symbol over the fit span. Every random draw comes from a stream the file states:
 bootstrap `[seed, 4, pair, horizon, model, group]`, shared by a unit's ten checkpoints and its
-classic indicator; shift `[seed, 5, horizon, draw]`; phase surrogates `[seed, 6, pair, horizon,
-model, primary seed, checkpoint, read symbol, control, row]` (horizon 0 for a control segment);
+classic indicator; shift `[seed, 5, horizon, read symbol]`; phase surrogates `[seed, 6, pair,
+horizon, model, primary seed, checkpoint, read symbol, control, row]` (horizon 0 for a control
+segment);
 twin margins `[seed, 7, pair, horizon, model, group]`. A classic cell's own CI keeps the market-ews
 stream `[seed, 1, indicator, horizon, group]`.
 
