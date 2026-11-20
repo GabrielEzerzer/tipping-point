@@ -83,9 +83,6 @@ EXPLORATORY = (
 
 @dataclass(frozen=True)
 class Evaluation:
-    """Every table of one scoring, the segments and per-symbol series of seasonality.method, and
-    the verdict per hypothesis name."""
-
     tables: dict[str, list[Row]]
     segments: ms.Segments
     series: dict[str, ms.Minutes]
@@ -93,8 +90,6 @@ class Evaluation:
 
 
 def check_file(pre: prereg.Prereg) -> None:
-    """Refuse a file this scorer would not apply exactly as written: not a market-ews file, one
-    the strict validator refuses, or one whose decision rule is not PREDICTION."""
     doc = pre.doc
     if doc["data"]["domain"] != prereg.MARKET_EWS:
         raise prereg.PreregError(f"{pre.path} is not a {prereg.MARKET_EWS} file")
@@ -114,7 +109,6 @@ def check_file(pre: prereg.Prereg) -> None:
 
 
 def labels_file(pre: prereg.Prereg) -> prereg.Prereg:
-    """The labels file data.labels names, frozen at that tag with that sha256."""
     named = pre.doc["data"]["labels"]
     name = named["tag"].removeprefix("prereg/")
     path = prereg.repo_root(pre.path) / prereg.PREREG_DIR / f"{name}.toml"
@@ -129,8 +123,6 @@ def labels_file(pre: prereg.Prereg) -> prereg.Prereg:
 
 
 def scored_from(manifest: Mapping[str, Any], confirmatory: bool) -> date:
-    """The first scored day: the confirmatory day, or, on pilot days, the run's first labelled day
-    (its start plus the labeller's warm-up)."""
     if confirmatory:
         return prereg.CONFIRMATORY
     params = manifest["params"]
@@ -138,8 +130,6 @@ def scored_from(manifest: Mapping[str, Any], confirmatory: bool) -> date:
 
 
 def check_span(manifest: Mapping[str, Any], labels: prereg.Prereg, confirmatory: bool) -> None:
-    """A confirmatory run labels the labels file's whole span; a dry run ends before 2024-01-01.
-    Read from the manifest alone, before any table or kline."""
     params = manifest["params"]
     end = date.fromisoformat(params["end"])
     if confirmatory:
@@ -166,7 +156,6 @@ def pipelines(doc: Mapping[str, Any], names: Sequence[str] | None = None) -> dic
 
 
 def report_groups(doc: Mapping[str, Any]) -> list[str]:
-    """reporting.groups with per-asset as each symbol: pooled, BTCUSDT, ETHUSDT, eth-only."""
     out: list[str] = []
     for group in doc["reporting"]["groups"]:
         out += list(doc["data"]["symbols"]) if group == "per-asset" else [group]
@@ -180,8 +169,6 @@ def sides(
     controls: Mapping[str, np.ndarray],
     alone: np.ndarray,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """A group's events and controls, symbol by symbol in data.symbols order; eth-only takes the
-    ETH events `alone` marks, against the ETH controls."""
     if group == "eth-only":
         return [events[ETH][alone]], [controls[ETH]]
     chosen = list(symbols) if group == "pooled" else [group]
@@ -196,8 +183,6 @@ def auc_cell(
     horizon: int,
     group: int,
 ) -> Row:
-    """The AUC of the joined events against the joined controls and its percentile bootstrap CI,
-    drawn by ms.bootstrap_aucs from the cell's own stream."""
     sc = doc["scoring"]
     p, n = np.concatenate(events), np.concatenate(controls)
     draws = ms.bootstrap_aucs(
@@ -220,16 +205,12 @@ def auc_cell(
 
 
 def cell_verdict(lo: float, floor: float, shift: float) -> str:
-    """pass when the CI's lower end is above chance, the floor and the shift's 97.5th percentile;
-    inconclusive when any of the three is missing (an empty side, an empty floor cell, a shift draw
-    with no AUC); fail otherwise."""
     if any(math.isnan(v) for v in (lo, floor, shift)):
         return "inconclusive"
     return "pass" if lo > CHANCE and lo > floor and lo > shift else "fail"
 
 
 def hypothesis_verdict(cells: Sequence[str]) -> str:
-    """pass when every decisive cell passes; fail when one fails; inconclusive otherwise."""
     if cells and all(v == "pass" for v in cells):
         return "pass"
     return "fail" if "fail" in cells else "inconclusive"
@@ -238,7 +219,6 @@ def hypothesis_verdict(cells: Sequence[str]) -> str:
 def deseasoned(
     raw: ms.Minutes, fit: tuple[date, date], methods: Sequence[str]
 ) -> dict[str, ms.Minutes]:
-    """The series raw and deseasonalised by each method, each by its own slot profile over fit."""
     out = {"raw": raw}
     for method in methods:
         out[method] = ms.deseasonalise(raw, ms.slot_profile(raw, fit, method), method)
@@ -255,9 +235,6 @@ def _scores(pipe: Pipeline, x: np.ndarray) -> np.ndarray:
 
 @dataclass(frozen=True)
 class Scored:
-    """Each kept segment's score: events by (indicator, symbol, horizon), controls by (indicator,
-    symbol), and per horizon which ETH events are eth-only."""
-
     events: dict[tuple[str, str, int], np.ndarray]
     controls: dict[tuple[str, str], np.ndarray]
     alone: dict[int, np.ndarray]
@@ -286,7 +263,6 @@ def score_segments(
 
 
 def auc_table(scored: Scored, doc: Mapping[str, Any], head: Row | None = None) -> list[Row]:
-    """Every (indicator, horizon, reporting group) cell's AUC and CI, keyed by `head`."""
     symbols = doc["data"]["symbols"]
     rows = []
     for i, name in enumerate(doc["indicators"]["names"]):
@@ -302,9 +278,6 @@ def auc_table(scored: Scored, doc: Mapping[str, Any], head: Row | None = None) -
 
 
 def floors(doc: Mapping[str, Any], params: msvol.Params) -> dict[str, nulls.Floor]:
-    """[scoring.floor]: per symbol, the GARCH(1,1)-t paths of its pilot fit through the labels'
-    own labeller, scored by the file's pipelines at its horizons (harness/market_floor.py's
-    floor)."""
     f = doc["scoring"]["floor"]
     return {
         symbol: nulls.circularity_floor(
@@ -322,8 +295,6 @@ def floors(doc: Mapping[str, Any], params: msvol.Params) -> dict[str, nulls.Floo
 
 
 def floor_auc(found: Mapping[str, nulls.Floor], group: str, name: str, horizon: int) -> float:
-    """The floor a cell's CI is held against: its symbol's floor AUC, the larger of the two for
-    pooled, ETH's for eth-only; NaN (an empty floor cell, marked) when one it reads has none."""
     chosen = list(found) if group == "pooled" else [ETH if group == "eth-only" else group]
     values = [
         next(
@@ -336,9 +307,6 @@ def floor_auc(found: Mapping[str, nulls.Floor], group: str, name: str, horizon: 
 
 @dataclass(frozen=True)
 class Shift:
-    """Per (indicator, symbol, horizon): the moved segments' scores (draws, kept onsets) and which
-    onsets of the event block had an eligible bar far enough away."""
-
     scores: dict[tuple[str, str, int], np.ndarray]
     kept: dict[tuple[str, int], np.ndarray]
 
@@ -372,8 +340,6 @@ def shift_scores(
 def shift_positives(
     shift: Shift, scored: Scored, symbols: Sequence[str], name: str, h: int, group: str
 ) -> np.ndarray:
-    """(draws, onsets) moved scores of a group: pooled joins both symbols' draw k, eth-only keeps
-    the moved ETH onsets that are eth-only."""
     if group == "eth-only":
         return shift.scores[name, ETH, h][:, scored.alone[h][shift.kept[ETH, h]]]
     chosen = list(symbols) if group == "pooled" else [group]
@@ -390,8 +356,6 @@ def counted_cells(
     found: Mapping[str, nulls.Floor],
     doc: Mapping[str, Any],
 ) -> tuple[list[Row], list[Row]]:
-    """The counted cells, each with its floor, shift threshold, comparisons and verdict, and every
-    shift draw's AUC."""
     symbols = doc["data"]["symbols"]
     rows, draws = [], []
     for row in auc_table(scored, doc):
@@ -452,8 +416,6 @@ def hypotheses(cells: Sequence[Row], doc: Mapping[str, Any]) -> tuple[list[Row],
 
 
 def strata_table(scored: Scored, segs: ms.Segments, doc: Mapping[str, Any]) -> list[Row]:
-    """seasonality.strata onset-hour: per UTC hour of the onset, that hour's events against the
-    group's controls, descriptively (no CI)."""
     symbols = doc["data"]["symbols"]
     rows = []
     for name in doc["indicators"]["names"]:
@@ -480,9 +442,6 @@ def strata_table(scored: Scored, segs: ms.Segments, doc: Mapping[str, Any]) -> l
 def surrogate_table(
     segs: ms.Segments, scored: Scored, pipes: Mapping[str, Pipeline], doc: Mapping[str, Any]
 ) -> list[Row]:
-    """[scoring.surrogates]: each kept segment's one-sided phase-surrogate p from its own stream
-    (ms.surrogate_pvalues), and per indicator, horizon and group the share of event and of control
-    segments with p <= 0.05."""
     symbols, sc = doc["data"]["symbols"], doc["scoring"]
     n = sc["surrogates"]["n"]
     rows = []
@@ -536,9 +495,6 @@ def surrogate_table(
 def year_controls(
     run: Path, series: Mapping[str, ms.Minutes], span: int
 ) -> tuple[dict[str, np.ndarray], list[Row]]:
-    """alarms.rule's 2023 control segments per symbol: cut from the labels run's null stretches by
-    the builder's control rule, those lying wholly in 2023, a segment holding a minute with no
-    value excluded and counted."""
     stretches = engine.read(run.parent.parent, run.parent.name, run.name, "nulls").to_pydict()
     first_ms, end_ms = (archive.day_ms(d) for d in ALARM_SPAN)
     out, counts = {}, []
@@ -569,10 +525,6 @@ def alarm_table(
     pipes: Mapping[str, Pipeline],
     doc: Mapping[str, Any],
 ) -> list[Row]:
-    """[alarms]: a segment's score is one alarm when it is above theta. Per indicator, horizon and
-    symbol, theta is the lowest whose 2023 control segments alarm at most far_per_day times per
-    day of their minutes (scoring.threshold_at_far); under it, the scored controls' false alarms
-    per day, and the share of events alarmed h bars (5h minutes) before their onset."""
     far = doc["alarms"]["far_per_day"]
     rows = []
     for name, pipe in pipes.items():
@@ -621,9 +573,6 @@ def alarm_table(
 def cascade_onsets(
     run: Path, labels: prereg.Prereg, symbols: Sequence[str], confirmatory: bool
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """The stress test's onsets per symbol from a cascade run of the labels file's [cascade]: in a
-    confirmatory scoring stamped with the frozen file and ending at its span's end, in a dry run
-    ending before 2024-01-01, which the manifest says before the table is opened."""
     manifest = json.loads((Path(run) / "manifest.json").read_text(encoding="utf-8"))
     params = manifest["params"]
     if params.get("cascade") != labels.doc["cascade"]:
@@ -661,9 +610,6 @@ def cascade_scores(
     span: int,
     first_ms: int,
 ) -> tuple[Scored, list[Row]]:
-    """The cascades cut as event segments are, from their onsets on the first scored day on, a
-    segment with a missing minute or outside the series excluded and counted; eth-only: the ETH
-    cascades with no BTC cascade onset within eth_only_bars."""
     symbols, horizons = doc["data"]["symbols"], doc["segments"]["horizons"]
     events, counts, kept_ns = {}, [], {}
     for s in symbols:
@@ -689,9 +635,6 @@ def tier_series(
     fit: tuple[date, date],
     method: str,
 ) -> dict[str, dict[str, ms.Minutes]]:
-    """[same_input]: per series ("price", then each feature) and symbol, the minutes deseasonalised
-    by [seasonality]'s method on their own slot profile, then emptied wherever the return or any
-    feature has no value, so that every series of the tier keeps the same segments."""
     out: dict[str, dict[str, ms.Minutes]] = {}
     for symbol, features in book.items():
         raw = {"price": price[symbol], **features}
@@ -726,11 +669,6 @@ def evaluate(
     *,
     confirmatory: bool,
 ) -> Evaluation:
-    """Every table of one scoring from the raw returns, the cascade onsets, the book features'
-    minutes and the floor, each number as the file says: the counted cells on the series
-    deseasonalised by seasonality.method, with their verdicts, and every descriptive table. With
-    confirmatory, the segments are cut through the frozen file (ms.build's scoring); without, on
-    pilot days from the run's first labelled day, and ms.build refuses anything from 2024-01-01."""
     doc = pre.doc
     manifest = ms.check_labels(run, labels, pre if confirmatory else None)
     first_day = scored_from(manifest, confirmatory)
@@ -821,10 +759,6 @@ def score(
     inputs: list[Row],
     params: Row,
 ) -> tuple[Path, Evaluation]:
-    """The confirmatory scoring: refused past the trial budget before anything is cut, its folder
-    begun and the budget charged again against it (so that a concurrent scoring's torn folder
-    refuses it), evaluated, its counted cells logged as trials before anything readable is
-    written, so that a crash leaves them spent, then its tables and report written."""
     planned = prereg.market_ews_cells(pre.doc)
     prereg.charge(data_dir, pre, planned)
     run_dir = prereg.begin_result(data_dir, pre, ref, {})
@@ -853,8 +787,6 @@ def dry_run(
     inputs: list[Row],
     params: Row,
 ) -> tuple[Path, Evaluation]:
-    """The same evaluation on pilot days, written to `out` (never inside <data dir>/ews, where
-    results count) and marked exploratory, with no trial logged."""
     counted = (Path(data_dir) / "ews").resolve()
     if counted == out.resolve() or counted in out.resolve().parents:
         raise prereg.PreregError(f"{out} is inside {counted}, where scored results live")
@@ -895,13 +827,6 @@ def run(
     exploratory: bool = False,
     out: Path | None = None,
 ) -> tuple[Path, Evaluation, bool]:
-    """One scoring of a market-ews file from its inputs on disk. Every check that reads no table,
-    kline or book feature comes first: the file and its labels file, the runs' spans from their
-    manifests, and for a confirmatory scoring both market files frozen, the code (HELD at the
-    tag's commit, CLEAN at HEAD, the checkout clean) and the trial budget. Then the archive's
-    klines and the book features from a day before the 2023 control segments to the run's end,
-    the floor, and score or dry_run. Returns the result's folder, the evaluation and whether it
-    was confirmatory."""
     confirmatory = not exploratory
     check_file(pre)
     labels = labels_file(pre)

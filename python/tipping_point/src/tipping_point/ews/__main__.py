@@ -17,13 +17,7 @@
                        the scoring until it is deleted or the file amended (prereg.charge), unless
                        --resume carries it on from the passes it saved, which it does only for a
                        scoring of the same file, seed, inputs and libraries, from a clean checkout
-                       of the commit that began it (prereg.begin_result). A market-ews file is
-                       scored by ews.market_score from --run (a labels run of the frozen labels
-                       file), --cascades (a cascade run of it), --book (a bybit-book data folder)
-                       and --archive (the Binance archive): the confirmatory span, refused unless
-                       both market files are frozen, the code the file names is its tag's
-                       commit's and the checkout is clean; or, with --exploratory, the same code
-                       on a run ending before 2024-01-01, written to --out, logging no trial
+                       of the commit that began it (prereg.begin_result)
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside

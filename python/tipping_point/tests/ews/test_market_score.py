@@ -1,7 +1,6 @@
-"""The market-ews scorer (#30 M5) on synthetic two-symbol labels runs: a planted variance ramp
-passes and a null fails, verdict edges, the stated random streams, 32 trials then a refusal (a
-crash included), the confirmatory gates before any read, and a dry run that reads no day from
-2024-01-01 and logs no trial."""
+# The market-ews scorer on synthetic runs: planted signal and null, verdict edges, the stated
+# random streams, the trial budget through a crash and a race, the confirmatory gates before any
+# read, and a dry run that reads no day from 2024-01-01 and logs no trial.
 
 import json
 import shutil
@@ -76,8 +75,6 @@ def _labels_run(
 
 
 def _series(start: date, first: date, planted: bool, seed: int) -> dict[str, ms.Minutes]:
-    """1-minute returns from `start` to DAYS days after `first`; with `planted`, their volatility
-    rises from 1 to 4 over the RAMP minutes before each onset."""
     rng = np.random.default_rng(seed)
     offset = (first - start).days * 1440
     n = offset + DAYS * 1440
@@ -196,9 +193,6 @@ def _hand_ci(pos: list[np.ndarray], neg: list[np.ndarray], key: list[int]) -> tu
 def test_the_random_streams_are_the_stated_keys(
     planted: msc.Evaluation, frozen: tuple[prereg.Prereg, prereg.Prereg]
 ) -> None:
-    """Bootstrap default_rng([30, 1, i, h, g]), shift [30, 2, h, g] and surrogates
-    [30, 3, i, h or 0, g, control, j], i the indicator's place in indicators.names and g the
-    group code (pooled 0, BTCUSDT 1, ETHUSDT 2)."""
     pre = _small(frozen[1])
     pipes = msc.pipelines(pre.doc)
     segs = planted.segments
@@ -248,9 +242,6 @@ CONFIRMATORY = prereg.CONFIRMATORY
 def test_a_scoring_logs_its_32_cells_and_a_second_is_refused(
     tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Synthetic minutes dated from 2024-01-01 run the confirmatory path; no real day is read. The
-    gate on market-latent is held against the file as frozen, since its baseline check refuses the
-    shrunk draws."""
     pre, ref, given = _confirmatory(tmp_path, frozen, monkeypatch)
     data = tmp_path / "data"
     run_dir, evaluation = msc.score(pre, ref, *given, data, [], {})
@@ -339,8 +330,6 @@ def test_a_concurrent_scoring_refuses_before_evaluating(
 
 
 def _unread(tmp: Path, labels: prereg.Prereg, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A labels run of the labels file's span holding only its manifest; reading anything past
-    the confirmatory gate fails the test."""
     span = labels.doc["data"]["span"]
     run = tmp / "run"
     run.mkdir()
