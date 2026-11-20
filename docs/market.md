@@ -215,6 +215,12 @@ these cases:
   or the scorer itself is uncommitted, or the checkout is dirty;
 - the trial budget would be passed.
 
+Before it reads any table, the scorer checks every archive file it will read (klines, metrics and
+funding from the day before the first alarm day to the labels run's end) against the labels run's
+manifest: each must be recorded there with the same URL, pass its `.CHECKSUM` and carry the
+recorded sha256, and a file the labels run recorded as missing must still be missing. It refuses on
+any difference, in both modes.
+
 The cascade run must carry the frozen labels' stamp and end at the same day. Once its folder is
 begun, the scoring charges the budget again, so a concurrent scoring's torn folder refuses it. It
 appends its 32 cells to `ews/trials.jsonl` before it writes any table or the report, so a crash
@@ -231,7 +237,8 @@ The result folder holds `manifest.json`, `report.md` and `complete.json`, plus o
 per folder:
 
 - `cells`: the 32 counted cells, each with its AUC and CI, floor, shift threshold, the three
-  comparisons and a verdict;
+  comparisons, a verdict and `shift_dropped_near_btc`, the moved eth-only onsets the shift dropped
+  because they fell near a BTC onset (0 outside the eth-only group);
 - `hypotheses`: each hypothesis's verdict and how many decisive cells passed, failed or were
   inconclusive;
 - `shift_draws`: every draw's AUC;
@@ -244,7 +251,9 @@ per folder:
 - `same_input`: the book tier's cells, with `price` the returns on the tier's segments;
 - `floor`: the floor's cells;
 - `segments` and `same_input_segments`: cut, kept and excluded counts;
-- `high_share`: each event segment's mean share of minutes in bars with H = 1.
+- `high_share`: each kept event segment's share of minutes in bars with H = 1, keyed by symbol,
+  horizon and onset;
+- `high_share_mean`: the mean of those shares per symbol and horizon.
 
 A cell passes when its CI's lower end is above 0.5, above its floor AUC and above the shift's
 97.5th percentile. It is inconclusive when any of the three is NaN, and fails otherwise. A
@@ -253,15 +262,18 @@ otherwise.
 
 The scorer settles the points the file leaves open as follows:
 
-- Eth-only cells take ETH's floor and the moved ETH onsets that are eth-only.
+- Eth-only cells take ETH's floor. In each shift draw the eth-only rule is applied again to the
+  moved ETH onsets: a moved onset with a real BTC onset within `eth_only_bars` either side is
+  dropped from that draw and counted in `shift_dropped_near_btc`.
 - Descriptive CIs reuse the counted cell's bootstrap stream.
 - The 2023 alarm controls are cut from the labels run's null stretches by the builder's control
   rule, keeping those wholly in 2023. A control segment carries one score, so it alarms when that
   score is above the threshold, and its days are its minutes / 1440.
 - The cascade segments are cut as event segments are, from the first scored day. Eth-only
   cascades are the ETH cascades with no BTC cascade onset within `eth_only_bars`.
-- The book tier deseasonalises each series on its own profile and then empties every minute where
-  the return or any feature has none.
+- The book tier deseasonalises each series on its own profile and then applies one common mask:
+  every minute where the deseasonalised return or any deseasonalised feature is not finite is
+  emptied in all of them.
 
 ## The same-input tier
 
