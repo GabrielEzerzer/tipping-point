@@ -215,8 +215,10 @@ these cases:
   or the scorer itself is uncommitted, or the checkout is dirty;
 - the trial budget would be passed.
 
-The cascade run must carry the frozen labels' stamp and end at the same day. The scoring then
-appends its 32 cells to `ews/trials.jsonl`, and a second scoring is refused.
+The cascade run must carry the frozen labels' stamp and end at the same day. Once its folder is
+begun, the scoring charges the budget again, so a concurrent scoring's torn folder refuses it. It
+appends its 32 cells to `ews/trials.jsonl` before it writes any table or the report, so a crash
+leaves them spent, and a second scoring is refused.
 
 `--exploratory` runs the same evaluation on pilot days as a dry run. It needs a labels run ending
 before 2024-01-01 and scores from the run's first labelled day (start plus the labeller's warm-up).
