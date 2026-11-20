@@ -1,8 +1,10 @@
 """The market-ews scorer (#30 M5) on synthetic two-symbol labels runs: a planted variance ramp
-passes and a null fails, verdict edges, the stated random streams, 32 trials then a refusal, and a
-dry run that reads no day from 2024-01-01 and logs no trial."""
+passes and a null fails, verdict edges, the stated random streams, 32 trials then a refusal (a
+crash included), the confirmatory gates before any read, and a dry run that reads no day from
+2024-01-01 and logs no trial."""
 
 import json
+import shutil
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -249,14 +251,7 @@ def test_a_scoring_logs_its_32_cells_and_a_second_is_refused(
     """Synthetic minutes dated from 2024-01-01 run the confirmatory path; no real day is read. The
     gate on market-latent is held against the file as frozen, since its baseline check refuses the
     shrunk draws."""
-    labels, frozen_pre = frozen
-    gate = ms.check_scoring
-    monkeypatch.setattr(ms, "check_scoring", lambda _: gate(frozen_pre))
-    pre = _small(frozen_pre)
-    ref = prereg.frozen(pre)
-    run = _labels_run(tmp_path / "labels", labels, CONFIRMATORY, stamp=True)
-    prices = _series(date(2023, 9, 24), CONFIRMATORY, planted=True, seed=3)
-    given = (labels, run, prices, _cascades(CONFIRMATORY), _book(prices, 4), _floor(pre))
+    pre, ref, given = _confirmatory(tmp_path, frozen, monkeypatch)
     data = tmp_path / "data"
     run_dir, evaluation = msc.score(pre, ref, *given, data, [], {})
     assert prereg.trials(data, pre) == 32
@@ -271,6 +266,146 @@ def test_a_scoring_logs_its_32_cells_and_a_second_is_refused(
     with pytest.raises(prereg.PreregError):
         msc.score(pre, ref, *given, data, [], {})
     assert prereg.trials(data, pre) == 32
+
+
+Given = tuple[
+    prereg.Prereg,
+    Path,
+    dict[str, ms.Minutes],
+    dict[str, np.ndarray],
+    dict[str, dict[str, ms.Minutes]],
+    dict[str, nulls.Floor],
+]
+
+
+def _confirmatory(
+    tmp: Path, frozen: tuple[prereg.Prereg, prereg.Prereg], monkeypatch: pytest.MonkeyPatch
+) -> tuple[prereg.Prereg, prereg.Frozen, Given]:
+    labels, frozen_pre = frozen
+    gate = ms.check_scoring
+    monkeypatch.setattr(ms, "check_scoring", lambda _: gate(frozen_pre))
+    pre = _small(frozen_pre)
+    run = _labels_run(tmp / "labels", labels, CONFIRMATORY, stamp=True)
+    prices = _series(date(2023, 9, 24), CONFIRMATORY, planted=True, seed=3)
+    given = (labels, run, prices, _cascades(CONFIRMATORY), _book(prices, 4), _floor(pre))
+    return pre, prereg.frozen(pre), given
+
+
+def test_a_crash_before_the_tables_leaves_the_trials_spent(
+    tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pre, ref, given = _confirmatory(tmp_path, frozen, monkeypatch)
+    data = tmp_path / "data"
+    real = prereg.finish_result
+
+    def killed(*args: Any, **kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(prereg, "finish_result", killed)
+    with pytest.raises(KeyboardInterrupt):
+        msc.score(pre, ref, *given, data, [], {})
+    (torn,) = [p for p in (data / "ews").iterdir() if p.is_dir()]
+    assert not (torn / "report.md").exists()
+    assert prereg.trials(data, pre) == 32
+    with pytest.raises(prereg.PreregError):
+        msc.score(pre, ref, *given, data, [], {})
+    shutil.rmtree(torn)
+    monkeypatch.setattr(prereg, "finish_result", real)
+    with pytest.raises(prereg.PreregError, match="budget"):
+        msc.score(pre, ref, *given, data, [], {})
+    assert prereg.trials(data, pre) == 32
+
+
+def test_a_concurrent_scoring_refuses_before_evaluating(
+    tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pre, ref, given = _confirmatory(tmp_path, frozen, monkeypatch)
+    data = tmp_path / "data"
+    begin = prereg.begin_result
+
+    def raced(*args: Any, **kwargs: Any) -> Path:
+        mine = begin(*args, **kwargs)
+        shutil.copytree(mine, mine.with_name(f"{mine.name}-other"))
+        return mine
+
+    def evaluated(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("evaluated")
+
+    monkeypatch.setattr(prereg, "begin_result", raced)
+    monkeypatch.setattr(msc, "evaluate", evaluated)
+    with pytest.raises(prereg.PreregError, match=r"no complete\.json"):
+        msc.score(pre, ref, *given, data, [], {})
+    assert prereg.trials(data, pre) == 0
+
+
+def _unread(tmp: Path, labels: prereg.Prereg, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A labels run of the labels file's span holding only its manifest; reading anything past
+    the confirmatory gate fails the test."""
+    span = labels.doc["data"]["span"]
+    run = tmp / "run"
+    run.mkdir()
+    params = {"start": span["start"].isoformat(), "end": span["end"].isoformat()}
+    (run / "manifest.json").write_text(json.dumps({"run_id": run.name, "params": params}))
+
+    def read(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("read past the gate")
+
+    for module, name in ((ms, "check_labels"), (msc, "cascade_onsets"), (archive, "collect")):
+        monkeypatch.setattr(module, name, read)
+    return run
+
+
+CLEAN_CODE = {"changed": [], "uncommitted": []}
+
+
+@pytest.mark.parametrize(
+    ("code", "dirty", "spent", "refusal"),
+    [
+        ({"changed": ["ews/market_segments.py"], "uncommitted": []}, False, False, "not at"),
+        ({"changed": [], "uncommitted": ["ews/market_score.py"]}, False, False, "not committed"),
+        (CLEAN_CODE, True, False, "uncommitted changes"),
+        (CLEAN_CODE, False, True, "budget"),
+    ],
+)
+def test_a_confirmatory_run_refuses_before_reading(
+    tmp_path: Path,
+    frozen: tuple[prereg.Prereg, prereg.Prereg],
+    monkeypatch: pytest.MonkeyPatch,
+    code: dict[str, list[str]],
+    dirty: bool,
+    spent: bool,
+    refusal: str,
+) -> None:
+    labels, pre = frozen
+    run = _unread(tmp_path, labels, monkeypatch)
+    monkeypatch.setattr(prereg, "code_check", lambda *_: code)
+    monkeypatch.setattr(msc.io, "code_version", lambda: {"git_sha": "0" * 40, "dirty": dirty})
+    data = tmp_path / "data"
+    if spent:
+        stamp = {"id": pre.id, "version": pre.version}
+        prereg.log_trials(data, [{"prereg": stamp}] * pre.doc["trials"]["budget"])
+    none = tmp_path / "none"
+    with pytest.raises(prereg.PreregError, match=refusal):
+        msc.run(pre, run, none, none, none, data)
+
+
+def test_a_confirmatory_run_refuses_while_the_span_is_closed(
+    tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    labels, pre = frozen
+    run = _unread(tmp_path, labels, monkeypatch)
+
+    def closed(_: prereg.Prereg) -> None:
+        raise ms.SegmentError("closed")
+
+    def checked(*args: Any) -> None:
+        raise AssertionError("code checked")
+
+    monkeypatch.setattr(ms, "check_scoring", closed)
+    monkeypatch.setattr(prereg, "code_check", checked)
+    none = tmp_path / "none"
+    with pytest.raises(ms.SegmentError, match="closed"):
+        msc.run(pre, run, none, none, none, tmp_path / "data")
 
 
 def test_a_null_fails_and_its_dry_run_logs_no_trial(
