@@ -419,7 +419,7 @@ def test_the_draft_and_the_readme_say_how_late_a_position_is_read(draft: dict[st
     near a true steepest change of +0.2 eps_L. The figure follows from its window and ramp rate."""
     window = draft["sensitivity"]["headline"]["window"]
     assert window * draft["data"]["ramps"]["x"] / 2 == pytest.approx(0.2)
-    for path in (DRAFT, REPO / "README.md"):
+    for path in (DRAFT, REPO / "docs" / "preregistration.md"):
         text = " ".join(path.read_text("utf-8").replace("#", " ").split())
         assert "read half the headline window late (0.2 eps_L)" in text, path
         assert "a read position within noise of 0" in text, path

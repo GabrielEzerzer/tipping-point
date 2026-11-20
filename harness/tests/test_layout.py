@@ -5,11 +5,22 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-FOLDERS = {".cargo", ".github", "app", "engine", "harness", "notebooks", "paper", "python", "setup"}
+FOLDERS = {
+    ".cargo",
+    ".github",
+    "docs",
+    "engine",
+    "harness",
+    "notebooks",
+    "paper",
+    "python",
+    "tools",
+}
 FILES = {
     ".gitattributes",
     ".gitignore",
     ".lint-baseline.json",
+    "CITATION.cff",
     "Cargo.lock",
     "Cargo.toml",
     "LICENSE",
@@ -42,8 +53,8 @@ def test_every_tracked_file_sits_in_a_known_place() -> None:
 
 
 def test_a_file_outside_the_layout_is_reported() -> None:
-    assert stray(["engine/src/lib.rs", "README.md", "docs/notes.md", "notes.txt", "harness"]) == [
-        "docs/notes.md",
+    assert stray(["engine/src/lib.rs", "README.md", "notes/todo.md", "notes.txt", "harness"]) == [
         "harness",
         "notes.txt",
+        "notes/todo.md",
     ]

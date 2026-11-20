@@ -30,9 +30,9 @@ jobs:
           git fetch --no-tags --depth=1 origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
           python3 -m venv "$RUNNER_TEMP/lint"
           "$RUNNER_TEMP/lint/bin/pip" install --quiet ast-grep-cli==0.51.1
-          PATH="$RUNNER_TEMP/lint/bin:$PATH" python3 setup/lint/ratchet --base "origin/$BASE"
+          PATH="$RUNNER_TEMP/lint/bin:$PATH" python3 tools/lint/ratchet --base "origin/$BASE"
       - name: Lint pack tests
-        run: PATH="$RUNNER_TEMP/lint/bin:$PATH" python3 -m unittest discover -s setup/lint/tests
+        run: PATH="$RUNNER_TEMP/lint/bin:$PATH" python3 -m unittest discover -s tools/lint/tests
 
   python:
     runs-on: windows-latest

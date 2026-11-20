@@ -25,13 +25,13 @@ dev = ["ruff", "pytest", "pyright", "scipy", "hypothesis"]
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-extend-exclude = ["harness/tests/fixtures", "setup/lint"]
+extend-exclude = ["harness/tests/fixtures", "tools/lint"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.pyright]
-include = ["python", "harness", "notebooks", "setup/lint"]
+include = ["python", "harness", "notebooks", "tools/lint"]
 exclude = ["**/.venv", "harness/out", "harness/tests/fixtures"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
