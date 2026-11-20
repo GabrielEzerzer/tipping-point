@@ -198,6 +198,69 @@ segment at horizon 0; `group_code` numbers the groups (pooled 0, each symbol its
 eth-only last). The second entry keeps the streams apart, since numpy pads a seed list with zeros.
 The module reads labels and is fed the series; the labels package (`market/`) imports none of it.
 
+### Scoring a market-ews file
+
+`ews/market_score.py` applies a market-ews file as written. The confirmatory scoring is
+`python -m tipping_point.ews score --prereg paper/prereg/market-ews-v1.toml --run <labels run>
+--cascades <cascade run> --book <bybit-book root>`, with `--archive` defaulting to
+`<data dir>/archives/binance`. Before it reads any table, kline or book feature, it refuses in
+these cases:
+
+- the file is not frozen, fails the strict validator, or has a prediction other than the decision
+  rule it carries out (`PREDICTION`);
+- the labels file `data.labels` names is not frozen at that tag with that sha256;
+- the labels run does not span the labels file's whole span;
+- the market-latent gate is closed;
+- the segment, shift, same-input and floor code (`HELD`) differs from the market-ews tag's commit,
+  or the scorer itself is uncommitted, or the checkout is dirty;
+- the trial budget would be passed.
+
+The cascade run must carry the frozen labels' stamp and end at the same day. The scoring then
+appends its 32 cells to `ews/trials.jsonl`, and a second scoring is refused.
+
+`--exploratory` runs the same evaluation on pilot days as a dry run. It needs a labels run ending
+before 2024-01-01 and scores from the run's first labelled day (start plus the labeller's warm-up).
+Its folder goes to `--out`, by default under `<data dir>/ews-exploratory`, never inside
+`<data dir>/ews`. Its manifest and report are marked exploratory, and it logs no trial. It refuses
+a labels or cascade run reaching 2024-01-01 from the manifest alone, and `build` refuses any series,
+onset or control segment reaching it.
+
+The result folder holds `manifest.json`, `report.md` and `complete.json`, plus one parquet table
+per folder:
+
+- `cells`: the 32 counted cells, each with its AUC and CI, floor, shift threshold, the three
+  comparisons and a verdict;
+- `hypotheses`: each hypothesis's verdict and how many decisive cells passed, failed or were
+  inconclusive;
+- `shift_draws`: every draw's AUC;
+- `seasonality`: the raw and scale series' cells, descriptive;
+- `strata`: AUCs per UTC onset hour, no CI;
+- `cascades`: the cascade stress test;
+- `surrogates`: the share of event and of control segments with phase-surrogate p <= 0.05;
+- `alarms`: the threshold from the 2023 control segments, then the false alarms per day and the
+  share of events alarmed 5h minutes ahead;
+- `same_input`: the book tier's cells, with `price` the returns on the tier's segments;
+- `floor`: the floor's cells;
+- `segments` and `same_input_segments`: cut, kept and excluded counts;
+- `high_share`: each event segment's mean share of minutes in bars with H = 1.
+
+A cell passes when its CI's lower end is above 0.5, above its floor AUC and above the shift's
+97.5th percentile. It is inconclusive when any of the three is NaN, and fails otherwise. A
+hypothesis passes when all six decisive cells pass, fails when one fails, and is inconclusive
+otherwise.
+
+The scorer settles the points the file leaves open as follows:
+
+- Eth-only cells take ETH's floor and the moved ETH onsets that are eth-only.
+- Descriptive CIs reuse the counted cell's bootstrap stream.
+- The 2023 alarm controls are cut from the labels run's null stretches by the builder's control
+  rule, keeping those wholly in 2023. A control segment carries one score, so it alarms when that
+  score is above the threshold, and its days are its minutes / 1440.
+- The cascade segments are cut as event segments are, from the first scored day. Eth-only
+  cascades are the ETH cascades with no BTC cascade onset within `eth_only_bars`.
+- The book tier deseasonalises each series on its own profile and then empties every minute where
+  the return or any feature has none.
+
 ## The same-input tier
 
 The same-input tier, `ews/same_input.py`, scores the Bybit book features themselves as classic
