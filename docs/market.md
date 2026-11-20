@@ -276,6 +276,105 @@ The scorer settles the points the file leaves open as follows:
   every minute where the deseasonalised return or any deseasonalised feature is not finite is
   emptied in all of them.
 
+### Scoring a market-latent file
+
+`ews/market_latent_score.py` applies a market-latent file as written, on the segments of the
+market-ews file its `[baseline]` names, reusing `ews/market_score.py` for the segment cutting, the
+archive check, the event-time shift, the same-input tier and the trial budget. The confirmatory
+scoring is `python -m tipping_point.ews score --prereg paper/prereg/market-latent-v1.toml --run
+<labels run> --cascades <cascade run> --book <bybit-book root> --archive <binance archive>
+--latents <merged latents root> --gate <extraction gate.json> --pins <pins.json>`. Before it reads
+any latent table, kline or book feature, it refuses in these cases:
+
+- the file is not frozen, fails the strict validator, has a prediction other than the decision rule
+  it carries out (`PREDICTION`), or a `[scoring.twin]` or `[scoring.classic]` rule other than the
+  one it carries out (seeds combined by the nested seed bootstrap, every pair judged, each against
+  its matching classic indicator, no ablation);
+- the baseline is not frozen at its tag with its sha256, or fails the market-ews checks above;
+- the labels run does not span the labels file's whole span;
+- the code (`HELD`: the market-ews scorer's held code plus `margins`, `fss` and `ising`) differs
+  from the tag's commit, the scorer is uncommitted, or the checkout is dirty;
+- the trial budget would be passed;
+- the extraction gate record is not format 2, its prereg stamp (id, version, sha256, tag, commit,
+  tag object and text) is not the frozen file's, it was made from changed or uncommitted code, its
+  pins sha256 is not that of the pins file given, or its checkpoints are not the file's rows;
+- any `[[latents.checkpoints]]` row differs from pins.json, value for value;
+- a merged table's manifest names another gate record, another checkpoint, PCA or scaling sha256,
+  symbol, span or minute count, or the parquet it names does not carry its sha256; a table whose
+  `ts` column is not the expected minute grid is refused when read.
+
+The archive check, the labels check and the cascade run's stamp are the market-ews scorer's. The
+scoring charges the budget again once its folder is begun, and appends its 1312 cells (1280 latent
+cells, one per pair, horizon, primary, trained or twin checkpoint and group, and the 32 classic
+cells) to `ews/trials.jsonl` before it writes any table or the report, so a crash leaves them spent
+and a second scoring is refused.
+
+Each checkpoint's latents are read as two series, the fit span and the confirmatory span with its
+lead-in minutes, and each column is deseasonalised on a slot profile fitted per column, checkpoint
+and read symbol over the fit span. Every random draw comes from a stream the file states:
+bootstrap `[seed, 4, pair, horizon, model, group]`, shared by a unit's ten checkpoints and its
+classic indicator; shift `[seed, 5, horizon, draw]`; phase surrogates `[seed, 6, pair, horizon,
+model, primary seed, checkpoint, read symbol, control, row]` (horizon 0 for a control segment);
+twin margins `[seed, 7, pair, horizon, model, group]`. A classic cell's own CI keeps the market-ews
+stream `[seed, 1, indicator, horizon, group]`.
+
+A unit is a pair, a horizon, a model and a group; the decisive units are h = 5 and 6 in the pooled
+and per-symbol groups, twelve per pair. A unit warns when all five trained AUCs' CIs exclude 0.5
+on the same side and each |AUC - 0.5| is above the 95th percentile of the shift draws' |AUC -
+0.5|. It is learned when the combined trained-minus-twin margin's CI is above 0.02 and every
+primary's margin has its sign; it fails when the CI is below 0.02 or a sign differs, and is
+inconclusive otherwise. It is beyond classic when every primary's |AUC - 0.5| minus the classic
+indicator's AUC - 0.5 is above 0 and above the 97.5th percentile of the same difference over the
+shift draws, both sides moved together. Any NaN makes the unit inconclusive. A pair warns when every
+decisive unit warns; learned and beyond classic are read only for a pair that warns, each passing
+when every decisive unit passes. A hypothesis passes when it warns, is learned and is beyond
+classic; it fails when any of the three fails and is inconclusive otherwise.
+
+The result folder holds `manifest.json`, `report.md` and `complete.json`, plus one parquet table
+per folder:
+
+- `cells`: the 1280 latent cells, each with its AUC, CI, counts and shift threshold;
+- `classic_cells`: the 32 classic cells on the same segments, with no verdict of their own;
+- `units`: each unit's warns, learned and beyond-classic outcomes;
+- `margins`: each unit's per-seed and combined trained-minus-twin margins and the combined CI;
+- `beyond_classic`: each primary's latent-minus-classic difference, its shift threshold and the
+  paired bootstrap CI, which is reported and decides nothing;
+- `hypotheses`: each hypothesis's verdict and its three parts;
+- `shift_draws` and `classic_shift_draws`: every draw's AUC;
+- `segments`: cut, kept and excluded counts, with `excluded_finite` for the finite-score mask;
+- `surrogates`: the share of event and control segments with two-sided phase-surrogate p <= 0.05;
+- `strata`: AUCs per UTC onset hour, no CI;
+- `cascades` and `classic_cascades`: the cascade stress test on the same checkpoints;
+- `same_input` and `same_input_segments`: the book tier on the latents' segments;
+- `incremental_rv`: whether each latent score adds to realised volatility;
+- `high_share` and `high_share_mean`: as the market-ews scorer writes them.
+
+The scorer settles the points the file leaves open as follows:
+
+- A minute has no latent value when its table marks it not valid or a column is not finite after
+  deseasonalising, in any of the 20 primary tables read on that symbol; the slot profile is fitted
+  on valid minutes only.
+- A combined margin of exactly 0 fails the sign test. The rule that all five trained AUCs sit on
+  one side of 0.5 is also a condition of learned, so a unit whose AUCs straddle 0.5 fails it.
+- The eth-only shift drops a moved ETH onset near a real BTC onset, as the market-ews scorer does.
+- The classic side's direction is taken from the baseline's hypothesis ("greater": AUC - 0.5 as it
+  stands).
+- The same-input tier keeps the paired segments whose book rows are finite, with stream-1 CIs.
+- Incremental RV is the sum of squared raw returns over the segment's last 60 minutes. Logistic fits
+  on standardised RV alone and on RV plus the latent score, with a small ridge, give two AUCs whose
+  difference takes its CI from the unit's stream-4 draws.
+- Cascades are paired and finite-masked as events are, with stream-4 CIs on the unit's key.
+- Learned and beyond classic carry no verdict for a pair that does not warn.
+- No floor: the file names none for latents.
+
+`--exploratory` runs the same evaluation on the latents' fit span, 2023-01-18 to 2023-09-30, the
+days the models were trained and validated on, with a labels and cascade run ending before
+2024-01-01. Its numbers check the code and are no evidence for or against any hypothesis; the
+manifest and report say so. It reads only the fit series, scores the fit span with eligible onsets
+inside it, writes to `--out`, by default under `<data dir>/ews-exploratory`, never inside
+`<data dir>/ews`, and logs no trial. It refuses a labels run, cascade run, latent table, kline or
+book series reaching 2024-01-01.
+
 ## The same-input tier
 
 The same-input tier, `ews/same_input.py`, scores the Bybit book features themselves as classic
