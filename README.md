@@ -16,8 +16,8 @@ market experiment is the claim; the Ising experiments are the supporting evidenc
 |---|---|---|---|
 | ising-ews-v1 | Classic indicators of the magnetisation \|m\| on a slow cooling ramp: do they warn of the transition and obey finite-size scaling? | All five hypotheses pass. | [results](docs/results.md#ising-ews-v1-the-classic-baseline) |
 | ising-latent-v1 | The same indicators read from a JEPA's latents, and whether the trained model beats its untrained twin. | Four of five judged rows pass. The one that fails: the variance of the trained models' leading latent component mostly does not rise before the transition. | [results](docs/results.md#ising-latent-v1-the-latent-experiment) |
-| market-ews-v1 | Classic indicators of 1-minute returns before volatility-regime shifts in BTC and ETH perpetuals. | Pre-registered; frozen before scoring; not yet scored. | [paper/prereg/](paper/prereg/) |
-| market-latent-v1 | Warnings read from the market JEPA's latents, against the classic indicators and the untrained twins. | Pre-registered; frozen before scoring; not yet scored. | [paper/prereg/](paper/prereg/) |
+| market-ews-v1 | Classic indicators of 1-minute returns before volatility-regime shifts in BTC and ETH perpetuals. | Pre-registered; frozen before scoring; not yet scored. | [market-ews-v1.toml](paper/prereg/market-ews-v1.toml), tag `prereg/market-ews-v1` |
+| market-latent-v1 | Warnings read from the market JEPA's latents, against the classic indicators and the untrained twins. | Pre-registered; frozen before scoring; not yet scored. | [market-latent-v1.toml](paper/prereg/market-latent-v1.toml), tag `prereg/market-latent-v1` |
 
 ![The five judged exponents against their exact values, and the eps_L at which the rolling variance of |m| peaks at each L](paper/figures/ising-ews-v1.png)
 
@@ -62,7 +62,7 @@ surprise (its prediction error) and to the leading principal components of its l
 **Scoring.** A warning is scored by the AUC of an indicator's trend before events against the same
 trend on null or control segments, with bootstrap confidence intervals and surrogate tests. On
 Ising the indicators must also obey finite-size scaling: static exponents at Tc against the exact
-ones, and a peak position that scales as 1/nu = 1. The market template adds a floor from a
+ones, and a peak position that scales as 1/nu = 1. The market tests add a floor from a
 volatility-clustering (GARCH) process with no critical dynamics. The scorer logs every evaluated
 cell and counts it against the trial budget the pre-registration fixes. See
 [docs/preregistration.md](docs/preregistration.md).
@@ -84,10 +84,12 @@ declared beforehand.
 | [ising-ews-v1.toml](paper/prereg/ising-ews-v1.toml) | `prereg/ising-ews-v1` | the classic Ising baseline: five hypotheses on \|m\| |
 | [ising-latent-v1.toml](paper/prereg/ising-latent-v1.toml) | `prereg/ising-latent-v1` | the Ising latent experiment: the pinned checkpoints and their twins |
 | [market-labels-v1.toml](paper/prereg/market-labels-v1.toml) | `prereg/market-labels-v1` | the market regime, event, control and cascade labels |
+| [market-ews-v1.toml](paper/prereg/market-ews-v1.toml) | `prereg/market-ews-v1` | the classic market test: two hypotheses on 1-minute returns |
+| [market-latent-v1.toml](paper/prereg/market-latent-v1.toml) | `prereg/market-latent-v1` | the market latent test: the pinned checkpoints, their twins and four latent pairs |
 
-The two market warning tests are frozen the same way, as `prereg/market-ews-v1` and
-`prereg/market-latent-v1`, before any day of the confirmatory span is scored. The templates the
-files start from sit beside them.
+Both market tests are frozen and neither is scored yet. The scorer refuses to score either on a
+day of the confirmatory span unless both are frozen. The templates the files start from sit beside
+them.
 
 ## Reproduce
 
@@ -128,7 +130,7 @@ scored.
 
 ```sh
 uv run python -m tipping_point.market fetch --start 2022-07-01 --end 2026-09-30
-uv run python -m tipping_point.market labels --prereg paper/prereg/market-labels-v1.toml   # span and parameters from the file
+uv run --locked --exact python -m tipping_point.market labels --prereg paper/prereg/market-labels-v1.toml   # span and parameters from the file
 uv run python -m tipping_point.market book --range training
 ```
 
@@ -151,6 +153,7 @@ with `engine/`, `harness/` or `notebooks/`.
 | train a model | Market JEPA pilot | `uv run python harness/m4_pilot.py train --asset btc --size S --data <dir> --out <dir>` | `harness/m4_pilot.py`, `jepa/minutes.py` |
 | train a model | Market JEPA primaries | `uv run python harness/m8_primaries.py train --asset btc --seed 101 --data <dir> --out <dir>` | `harness/m8_primaries.py` |
 | extract latents | Extract latents | `uv run python -m tipping_point.jepa extract <checkpoint> <run dir>` | `jepa/extract.py` |
+| extract latents | Extract market latents | `uv run python -m tipping_point.jepa.market_extract run --pins <pins.json> --primaries <dir> --data <dir> --span exploratory --out <dir>` | `jepa/market_extract.py` |
 | extract latents | Probe a training | `uv run python -m tipping_point.jepa probe --fit <run dir> <training dir>` | `jepa/probes.py` |
 | label events | Regime labels | `uv run python -m tipping_point.market labels --start <day> --end <day>` | `market/` |
 | label events | Cascade candidates | `uv run python -m tipping_point.market cascade --start <day> --end <day>` | `market/cascade.py` |
@@ -178,11 +181,11 @@ Vision". Bybit's archive is used under Bybit's terms.
 
 ## Status
 
-As of 18 November 2026:
+As of 20 November 2026:
 
-- Done: both Ising experiments, scored; the market labels, frozen; the market JEPAs, trained.
-- In progress: freezing the two market warning tests.
-- Next: extract the market latents and score both tests on January 2024 to September 2026.
+- Done: both Ising experiments, scored; the market labels and both market warning tests, frozen;
+  the market JEPAs, trained, and their latents extracted.
+- Next: score both market tests on January 2024 to September 2026.
 
 The target is a workshop paper in early 2027. Design discussions are on the
 [issue tracker](https://github.com/GabrielEzerzer/tipping-point/issues).
