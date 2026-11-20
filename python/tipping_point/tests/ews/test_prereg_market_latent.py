@@ -521,9 +521,11 @@ def test_a_draft_may_leave_a_pin_open_and_strict_refuses_it(doc: dict[str, Any])
     ]
 
 
-def test_score_refuses_a_market_latent_file(capsys: pytest.CaptureFixture[str]) -> None:
+def test_score_refuses_a_market_latent_file_without_its_inputs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     assert ews_cli.main(["score", "--prereg", str(TEMPLATE)]) == 1
-    assert "no scorer for domain 'market-latent' yet" in capsys.readouterr().err
+    assert "--latents, --gate, --pins" in capsys.readouterr().err
 
 
 def test_the_domain_picks_the_schema(ews: dict[str, Any]) -> None:
