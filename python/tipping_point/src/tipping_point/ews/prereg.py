@@ -2010,8 +2010,8 @@ def charge(data_dir: Path, prereg: Prereg, planned: int, own: str | None = None)
     none, as a crash after the log or before it leaves them; some alone is a torn log's repair,
     which spends the folder, so it is refused. A torn log speaks first: its folder's trials are part
     charged, and deleting the folder is not its repair."""
-    logged, budget = trials(data_dir, prereg), prereg.doc["trials"]["budget"]
     every = _torn_results(data_dir, prereg)
+    logged, budget = trials(data_dir, prereg), prereg.doc["trials"]["budget"]
     torn = [name for name in every if name != own]
     if torn:
         one = len(every) == 1  # resumable carries on a torn result only when it is the one
