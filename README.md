@@ -91,6 +91,10 @@ Both market tests are frozen and neither is scored yet. The scorer refuses to sc
 day of the confirmatory span unless both are frozen. The templates the files start from sit beside
 them.
 
+Some frozen files point to a README section by name, such as "README: Which stream a run draws".
+Those sections now live in [`docs/`](docs/): that one is in
+[docs/ising.md](docs/ising.md#which-stream-a-run-draws).
+
 ## Reproduce
 
 With [uv](https://docs.astral.sh/uv/) installed, from the repository root:
