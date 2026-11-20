@@ -219,7 +219,8 @@ Before it reads any table, the scorer checks every archive file it will read (kl
 funding from the day before the first alarm day to the labels run's end) against the labels run's
 manifest: each must be recorded there with the same URL, pass its `.CHECKSUM` and carry the
 recorded sha256, and a file the labels run recorded as missing must still be missing. It refuses on
-any difference, in both modes.
+any difference, in both modes. Once the archive is read, it runs the same check again before
+evaluating, so a file replaced during the read refuses the run before any trial is logged.
 
 The cascade run must carry the frozen labels' stamp and end at the same day. Once its folder is
 begun, the scoring charges the budget again, so a concurrent scoring's torn folder refuses it. It

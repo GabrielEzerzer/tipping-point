@@ -927,6 +927,10 @@ def run(
     ms.check_labels(labels_run, labels, pre if confirmatory else None)
     onsets, _ = cascade_onsets(cascade_run, labels, symbols, confirmatory)
     span = archive.collect(symbols, first, last, archive_root)
+    try:
+        check_sources(manifest, symbols, first, last, archive_root)
+    except ms.SegmentError as exc:
+        raise prereg.PreregError(f"the archive changed while it was read: {exc}") from exc
     start, minutes = archive.day_ms(first), ((last - first).days + 1) * 1440
     prices = {s: ms.close_returns(span.columns[(s, "klines")], start, minutes) for s in symbols}
     aggregation = doc["same_input"]["aggregation"]

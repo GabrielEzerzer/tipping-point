@@ -591,3 +591,48 @@ def test_a_dry_run_refuses_a_changed_archive_before_reading(
     none = tmp_path / "none"
     with pytest.raises(ms.SegmentError, match="sha256"):
         msc.run(pre, run, none, none, root, tmp_path / "data", exploratory=True)
+
+
+@pytest.mark.parametrize("swap", ["bytes", "missing"])
+def test_a_confirmatory_run_refuses_an_archive_changed_while_it_was_read(
+    tmp_path: Path,
+    frozen: tuple[prereg.Prereg, prereg.Prereg],
+    monkeypatch: pytest.MonkeyPatch,
+    swap: str,
+) -> None:
+    labels, pre = frozen
+    root = tmp_path / "archive"
+    recorded = _archive(root)
+    sources = archive.sources([BTC, ETH], *SOURCE_SPAN)
+    gone = sources[-1]
+    (root / gone.path).unlink()
+    run = _unread(tmp_path, labels, monkeypatch)
+    manifest = json.loads((run / "manifest.json").read_text())
+    kept = [r for r in recorded if r["url"] != gone.url]
+    manifest |= {"sources": kept, "missing_sources": [gone.url]}
+    (run / "manifest.json").write_text(json.dumps(manifest))
+    real = archive.sources
+    monkeypatch.setattr(archive, "sources", lambda symbols, *_: real(symbols, *SOURCE_SPAN))
+    monkeypatch.setattr(prereg, "code_check", lambda *_: CLEAN_CODE)
+    monkeypatch.setattr(msc.io, "code_version", lambda: {"git_sha": "0" * 40, "dirty": False})
+    monkeypatch.setattr(ms, "check_labels", lambda *_: None)
+    monkeypatch.setattr(msc, "cascade_onsets", lambda *_: ({}, None))
+
+    def collect(*args: Any) -> None:
+        if swap == "bytes":
+            _changed(root, sources[0])
+        else:
+            (root / gone.path).write_bytes(b"late")
+
+    def scored(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("scored a changed archive")
+
+    monkeypatch.setattr(archive, "collect", collect)
+    monkeypatch.setattr(msc, "score", scored)
+    monkeypatch.setattr(msc, "evaluate", scored)
+    data = tmp_path / "data"
+    none = tmp_path / "none"
+    with pytest.raises(prereg.PreregError, match="changed while it was read"):
+        msc.run(pre, run, none, none, root, data)
+    assert prereg.trials(data, pre) == 0
+    assert not [p for p in (data / "ews").glob("*") if p.is_dir()]
