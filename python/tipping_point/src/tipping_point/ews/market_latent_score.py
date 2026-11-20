@@ -1118,7 +1118,14 @@ def evaluate(
         ],
     }
     kept = {"events": ev_keep, "controls": ct_keep}
-    return Evaluation(tables_out, verdicts, segs, masked, kept)
+    return Evaluation(
+        {name: same_keys(rows) for name, rows in tables_out.items()}, verdicts, segs, masked, kept
+    )
+
+
+def same_keys(rows: list[Row]) -> list[Row]:
+    keys = list(dict.fromkeys(k for row in rows for k in row))
+    return [{k: row.get(k) for k in keys} for row in rows]
 
 
 def rv_of(

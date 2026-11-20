@@ -463,9 +463,10 @@ def test_a_scoring_logs_its_1312_cells_and_a_second_is_refused(
         mls.score(pre, ref, *given, data, [], {})
     assert prereg.trials(data, pre) == BUDGET
 
+    written = pq.read_table(next((run_dir / "segments").glob("*.parquet"))).to_pylist()
     counts = {
         (r["symbol"], r["horizon_bars"]): r
-        for r in evaluation.tables["segments"]
+        for r in written
         if r["series"] == "paired" and r["kind"] == "event"
     }
     assert all(counts[BTC, h]["excluded_finite"] >= 1 for h in (5, 6, 12, 24))
