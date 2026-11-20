@@ -13,8 +13,12 @@ import m8_primaries
 import market_toy
 import pytest
 from tipping_point.book.features import FORMAT
+from tipping_point.ews import prereg
 from tipping_point.ising import io
 from tipping_point.jepa import days, train
+
+TEMPLATE = Path(__file__).resolve().parents[2] / "paper" / "prereg" / "TEMPLATE-market-latent.toml"
+V1 = TEMPLATE.with_name("market-latent-v1.toml")
 
 
 def test_train_refuses_any_seed_but_a_primary_or_a_spare(tmp_path: Path) -> None:
@@ -154,6 +158,9 @@ def test_pins_refuse_an_incomplete_run_and_pin_it_once_resumed(
     assert first["trained_sha256"] != first["twin_sha256"]
     assert first["pca_sha256"] != second["pca_sha256"]  # each run's own basis
     assert first["scaling_sha256"] == second["scaling_sha256"]  # the same training days
+    for path in (TEMPLATE, V1):
+        entry = prereg.load(path).doc["latents"]["checkpoints"][0]
+        assert first.keys() - {"asset", "feature_format"} == entry.keys()
 
 
 def test_pins_refuse_a_plan_missing_one_run(toy: Path, tmp_path: Path) -> None:

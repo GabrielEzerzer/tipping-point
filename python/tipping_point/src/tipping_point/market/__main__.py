@@ -17,6 +17,7 @@ import pyarrow as pa
 
 from .. import engine
 from ..ews import prereg
+from ..ising import io
 from . import archive, bars, book, cascade, msvol, reports
 
 DESCRIPTION = """\
@@ -267,6 +268,12 @@ def _settings(args: argparse.Namespace, section: str, kind: type) -> dict[str, A
             "changes not committed in "
             + ", ".join(code["uncommitted"])
             + ": commit them, so that the manifest's code.head pins what ran"
+        )
+    if io.code_version()["dirty"] is not False:
+        raise prereg.PreregError(
+            "the checkout has uncommitted changes or untracked files: commit or remove them, so "
+            "that the manifest's producer.dirty is false and nothing beside the checked files "
+            "runs unpinned"
         )
     params = kind(**pre.doc[section])
     span = pre.doc["data"]["span"]

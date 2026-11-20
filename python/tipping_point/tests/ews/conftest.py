@@ -1,6 +1,7 @@
 """The planted Ising dataset (harness/ews_planted.py) as a session fixture: written once, read by
 the adapter and scorer tests, never modified by them."""
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,10 @@ from ews_planted import (
     staircase,
     write_run,
 )
+from latent_prereg import on_baseline
+from tipping_point.ews import prereg
+
+PREREG = Path(__file__).resolve().parents[4] / "paper" / "prereg"
 
 
 @dataclass(frozen=True)
@@ -43,3 +48,27 @@ def planted(tmp_path_factory: pytest.TempPathFactory) -> Planted:
                 runs[tag] = write_run(root, tag, schedule, L, seed, values, pilot=stamps.get(tag))
     pilot(root)
     return Planted(root, runs, stamps)
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True)
+
+
+@pytest.fixture(scope="session")
+def frozen(tmp_path_factory: pytest.TempPathFactory) -> tuple[prereg.Prereg, prereg.Prereg]:
+    root = tmp_path_factory.mktemp("repo")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "core.autocrlf", "false")
+    folder = root / "paper" / "prereg"
+    folder.mkdir(parents=True)
+    for name in ("market-labels-v1.toml", "market-ews-v1.toml"):
+        (folder / name).write_bytes((PREREG / name).read_bytes())
+    latent = on_baseline((PREREG / "market-ews-v1.toml").read_bytes())
+    (folder / "market-latent-v1.toml").write_bytes(latent.encode())
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "preregs")
+    for prereg_id in ("market-labels", "market-ews", "market-latent"):
+        prereg.freeze(root, prereg_id)
+    return prereg.load(folder / "market-labels-v1.toml"), prereg.load(folder / "market-ews-v1.toml")

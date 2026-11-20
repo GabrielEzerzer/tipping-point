@@ -45,6 +45,7 @@ def _day() -> pa.Table:
 
 def _write(root: Path, symbol: str, day: date, fmt: int = features.FORMAT) -> None:
     rng = "exploratory" if day >= date(2023, 10, 1) else "training"
+    rng = "confirmatory" if day >= prereg.CONFIRMATORY else rng
     path = root / rng / "features" / symbol / f"{day}.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     meta = {"symbol": symbol, "day": day.isoformat(), "format": fmt}
@@ -135,6 +136,24 @@ def test_the_confirmatory_span_is_never_opened(tmp_path: Path) -> None:
     _write(tmp_path, "BTCUSDT", date(2023, 12, 31))
     got = same_input.read(tmp_path, "BTCUSDT", date(2023, 12, 31), date(2023, 12, 31), AGG)
     assert got.missing_days == []
+
+
+def test_a_frozen_market_ews_file_opens_the_confirmatory_span(
+    tmp_path: Path, frozen: tuple[prereg.Prereg, prereg.Prereg]
+) -> None:
+    labels, scoring = frozen
+    for day in (date(2023, 12, 31), date(2024, 1, 1)):
+        _write(tmp_path, "BTCUSDT", day)
+    span = (date(2023, 12, 31), date(2024, 1, 1))
+    got = same_input.read(tmp_path, "BTCUSDT", *span, AGG, scoring=scoring)
+    assert got.missing_days == []
+    assert np.isfinite(got.series["ret"].values).sum() == 2 * (1440 - 2)
+    with pytest.raises(ms.SegmentError, match="fixes aggregation"):
+        same_input.read(tmp_path, "BTCUSDT", *span, AGG | {"ofi": "mean"}, scoring=scoring)
+    with pytest.raises(ms.SegmentError, match="is not a market-ews file"):
+        same_input.read(tmp_path, "BTCUSDT", *span, AGG, scoring=labels)
+    with pytest.raises(ms.SegmentError, match="confirmatory span"):
+        same_input.read(tmp_path, "BTCUSDT", *span, AGG)
 
 
 def test_another_feature_format_or_day_is_refused(tmp_path: Path) -> None:
