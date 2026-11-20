@@ -25,8 +25,6 @@ from .trend import Pipeline
 
 Row = dict[str, Any]
 BTC, ETH = "BTCUSDT", "ETHUSDT"
-# The decision rule this scorer carries out, word for word each hypothesis's prediction in
-# market-ews-v1; a file whose prediction says anything else is refused (check_file)
 PREDICTION = (
     "Pooled and per asset at h = 5 and 6: the AUC's 95 % CI above 0.5, above the GARCH floor's "
     "AUC at that horizon, and above the event-time shift's 97.5th percentile; h = 12 and 24 are "
@@ -57,12 +55,9 @@ PREDICTION = (
 DECISIVE_HORIZONS = (5, 6)
 DECISIVE_GROUPS = ("pooled", BTC, ETH)
 CHANCE = 0.5
-ALARM_SPAN = (date(2023, 1, 1), prereg.CONFIRMATORY)  # alarms.rule's "2023 control segments"
-SURROGATE_ALPHA = 0.05  # [scoring.surrogates]: the share with p <= 0.05
-SRC = Path(__file__).resolve().parents[1]  # tipping_point/, whose files a confirmatory run checks
-# Held to their blobs at the frozen tag's commit: the segment, shift and same-input code the file
-# names, and the modules that compute its numbers. Held to HEAD: this scorer, written after the
-# freeze, its command line and the module that runs the checks
+ALARM_SPAN = (date(2023, 1, 1), prereg.CONFIRMATORY)
+SURROGATE_ALPHA = 0.05
+SRC = Path(__file__).resolve().parents[1]
 HELD = (
     "ews/__init__.py",
     "ews/market_segments.py",
@@ -88,10 +83,13 @@ EXPLORATORY = (
 
 @dataclass(frozen=True)
 class Evaluation:
+    """Every table of one scoring, the segments and per-symbol series of seasonality.method, and
+    the verdict per hypothesis name."""
+
     tables: dict[str, list[Row]]
-    segments: ms.Segments  # the scored series' (seasonality.method)
-    series: dict[str, ms.Minutes]  # that series, per symbol
-    verdicts: dict[str, str]  # per hypothesis name
+    segments: ms.Segments
+    series: dict[str, ms.Minutes]
+    verdicts: dict[str, str]
 
 
 def check_file(pre: prereg.Prereg) -> None:
@@ -824,18 +822,21 @@ def score(
     params: Row,
 ) -> tuple[Path, Evaluation]:
     """The confirmatory scoring: refused past the trial budget before anything is cut, its folder
-    begun (so that a crash leaves a torn result that blocks another scoring), evaluated, then
-    written with its counted cells logged as trials (prereg.finish_result)."""
+    begun and the budget charged again against it (so that a concurrent scoring's torn folder
+    refuses it), evaluated, its counted cells logged as trials before anything readable is
+    written, so that a crash leaves them spent, then its tables and report written."""
     planned = prereg.market_ews_cells(pre.doc)
     prereg.charge(data_dir, pre, planned)
     run_dir = prereg.begin_result(data_dir, pre, ref, {})
+    prereg.charge(data_dir, pre, planned, own=run_dir.name)
     evaluation = evaluate(pre, labels, run, prices, cascades, book, found, confirmatory=True)
     cells = evaluation.tables["cells"]
-    if len(cells) != planned:  # the budget is only as good as this count
+    if len(cells) != planned:
         raise prereg.PreregError(f"{pre.name}: {len(cells)} AUC cells evaluated, {planned} counted")
     trials = trial_records(prereg.stamp(pre, ref), cells)
-    (run_dir / "report.md").write_text(markdown(evaluation, run_dir.name, None), encoding="utf-8")
+    prereg.log_trials(data_dir, [t | {"result": run_dir.name} for t in trials])
     prereg.finish_result(data_dir, pre, run_dir, evaluation.tables, inputs, params, trials)
+    (run_dir / "report.md").write_text(markdown(evaluation, run_dir.name, None), encoding="utf-8")
     return run_dir, evaluation
 
 
@@ -925,7 +926,7 @@ def run(
         prereg.charge(data_dir, pre, prereg.market_ews_cells(doc))
     ms.check_labels(labels_run, labels, pre if confirmatory else None)
     onsets, _ = cascade_onsets(cascade_run, labels, symbols, confirmatory)
-    first = ALARM_SPAN[0] - timedelta(days=1)  # history for the first 2023 segments
+    first = ALARM_SPAN[0] - timedelta(days=1)
     last = date.fromisoformat(manifest["params"]["end"])
     span = archive.collect(symbols, first, last, archive_root)
     start, minutes = archive.day_ms(first), ((last - first).days + 1) * 1440
