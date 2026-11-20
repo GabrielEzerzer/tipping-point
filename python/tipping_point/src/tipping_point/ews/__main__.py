@@ -17,7 +17,13 @@
                        the scoring until it is deleted or the file amended (prereg.charge), unless
                        --resume carries it on from the passes it saved, which it does only for a
                        scoring of the same file, seed, inputs and libraries, from a clean checkout
-                       of the commit that began it (prereg.begin_result)
+                       of the commit that began it (prereg.begin_result). A market-ews file is
+                       scored by ews.market_score from --run (a labels run of the frozen labels
+                       file), --cascades (a cascade run of it), --book (a bybit-book data folder)
+                       and --archive (the Binance archive): the confirmatory span, refused unless
+                       both market files are frozen, the code the file names is its tag's
+                       commit's and the checkout is clean; or, with --exploratory, the same code
+                       on a run ending before 2024-01-01, written to --out, logging no trial
   prereg freeze ID     tag the commit holding paper/prereg/ID-v<k>.toml as prereg/ID-v<k>
 
 The data dir is --data-dir, else the engine's own ($TP_DATA_DIR, or a per-user folder outside
@@ -37,7 +43,8 @@ import numpy as np
 import pyarrow as pa
 
 from .. import engine
-from . import ising, prereg, scoring, surrogates
+from . import ising, market_score, prereg, scoring, surrogates
+from .market_segments import SegmentError
 from .trend import Pipeline
 
 NULLS = ("ar1", "fast_slow")
@@ -108,7 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.command(args)
-    except (prereg.PreregError, ising.IsingDataError) as exc:
+    except (prereg.PreregError, ising.IsingDataError, SegmentError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -127,7 +134,7 @@ def _parser() -> argparse.ArgumentParser:
     p = sub.add_parser("score", help="score a frozen pre-registration")
     p.add_argument("--prereg", type=Path, required=True)
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
-    p.add_argument("--seed", type=int, default=26, help="bootstrap and surrogate draws")
+    p.add_argument("--seed", type=int, help="bootstrap and surrogate draws (default 26)")
     p.add_argument(
         "--allow-stale-pilot",
         action="store_true",
@@ -144,6 +151,12 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="carry on the result of this file a crash left, from the passes it saved",
     )
+    p.add_argument("--run", type=Path, help="market-ews: the labels run's folder")
+    p.add_argument("--cascades", type=Path, help="market-ews: the cascade run's folder")
+    p.add_argument("--book", type=Path, help="market-ews: the bybit-book data folder")
+    p.add_argument("--archive", type=Path, help="market-ews: default <data dir>/archives/binance")
+    p.add_argument("--exploratory", action="store_true", help="market-ews: a dry run, no trial")
+    p.add_argument("--out", type=Path, help="--exploratory: default <data dir>/ews-exploratory/")
     p.set_defaults(command=_score)
 
     p = sub.add_parser("prereg", help="pre-registration files")
@@ -284,6 +297,8 @@ def score(
 
 def _score(args: argparse.Namespace) -> int:
     pre = prereg.load(args.prereg)
+    if pre.doc["data"]["domain"] == prereg.MARKET_EWS:
+        return _score_market(args, pre)
     if pre.doc["data"]["domain"] != "ising":  # before cells, which reads Ising keys
         raise prereg.PreregError(f"no scorer for domain {pre.doc['data']['domain']!r} yet")
     ref = prereg.frozen(pre)
@@ -306,9 +321,10 @@ def _score(args: argparse.Namespace) -> int:
         commit=ref.commit,
         runs_commit=prereg.baseline_commit(pre),
     )
-    run_dir = begin(pre, ref, args.data_dir, args.seed, admitted, own)
+    seed = 26 if args.seed is None else args.seed
+    run_dir = begin(pre, ref, args.data_dir, seed, admitted, own)
     run_dir, evaluation, logged = score(
-        pre, ref, args.data_dir, args.seed, args.allow_stale_pilot, run_dir=run_dir
+        pre, ref, args.data_dir, seed, args.allow_stale_pilot, run_dir=run_dir
     )
     for row in evaluation.tables["auc"]:
         if row["headline"]:
@@ -324,6 +340,36 @@ def _score(args: argparse.Namespace) -> int:
         )
     budget = pre.doc["trials"]["budget"]
     print(f"{run_dir}  ({logged + planned} of {budget} trials logged)")
+    return 0
+
+
+def _score_market(args: argparse.Namespace, pre: prereg.Prereg) -> int:
+    for flag, given in (
+        ("--seed", args.seed is not None),
+        ("--allow-stale-pilot", args.allow_stale_pilot),
+        ("--cells-only", args.cells_only),
+        ("--resume", args.resume),
+    ):
+        if given:
+            raise prereg.PreregError(f"{flag}: not for a market-ews file, which fixes its draws")
+    missing = [f"--{k}" for k in ("run", "cascades", "book") if getattr(args, k) is None]
+    if missing:
+        raise prereg.PreregError(f"a market-ews file is scored with {', '.join(missing)}")
+    if args.out is not None and not args.exploratory:
+        raise prereg.PreregError("--out is for --exploratory; a result goes to <data dir>/ews")
+    run_dir, evaluation, confirmatory = market_score.run(
+        pre,
+        args.run,
+        args.cascades,
+        args.book,
+        args.archive or args.data_dir / "archives" / "binance",
+        args.data_dir,
+        exploratory=args.exploratory,
+        out=args.out,
+    )
+    note = None if confirmatory else market_score.EXPLORATORY
+    print(market_score.markdown(evaluation, run_dir.name, note))
+    print(run_dir)
     return 0
 
 
