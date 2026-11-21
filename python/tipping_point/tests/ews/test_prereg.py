@@ -494,6 +494,40 @@ def test_a_blank_line_is_no_torn_line(tmp_path: Path, edit: Any) -> None:
     assert prereg.charge(tmp_path, v1, 1) == 4
 
 
+def test_a_scoring_that_ends_between_the_count_and_the_scan_still_refuses_the_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    v1 = prereg.load(V1)
+    budget = v1.doc["trials"]["budget"]
+    stamp = {"id": v1.id, "version": v1.version}
+    for name in ("a", "b"):
+        (tmp_path / "ews" / name).mkdir(parents=True)
+        io.write_json(tmp_path / "ews" / name / "manifest.json", {"params": {"prereg": stamp}})
+    count, scan, finished = prereg.trials, prereg._torn_results, []
+
+    def a_finishes() -> None:
+        if not finished:
+            finished.append(True)
+            prereg.log_trials(tmp_path, [{"prereg": stamp, "result": "a"}] * budget)
+            io.write_json(tmp_path / "ews" / "a" / "complete.json", {})
+
+    def counted(*args: Any) -> int:
+        out = count(*args)
+        a_finishes()
+        return out
+
+    def scanned(*args: Any) -> list[str]:
+        out = scan(*args)
+        a_finishes()
+        return out
+
+    monkeypatch.setattr(prereg, "trials", counted)
+    monkeypatch.setattr(prereg, "_torn_results", scanned)
+    with pytest.raises(prereg.PreregError, match=r"a in .* has no complete\.json"):
+        prereg.charge(tmp_path, v1, budget, own="b")
+    assert finished and count(tmp_path, v1) == budget
+
+
 def test_a_log_with_nothing_torn_counts_as_it_did(tmp_path: Path) -> None:
     """Refusing a torn line refuses nothing else: a whole last record short of its newline alone, a
     log with CRLF line ends, as an editor on Windows leaves it, and an empty log all still count."""
