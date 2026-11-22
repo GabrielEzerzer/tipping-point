@@ -234,6 +234,30 @@
       "test": "python/tipping_point/tests/market/test_cli.py"
     },
     {
+      "name": "Panel coins",
+      "description": "Derives the 30-coin panel of Binance USDT perpetuals from Binance Vision and checks it against the committed list.",
+      "command": "uv run python -m tipping_point.panel coins",
+      "inputs": "Binance Vision's bucket listing and monthly 1-day klines (network)",
+      "outputs": "the ranking on stdout; exit 1 when it differs from panel/coins.txt",
+      "test": "python/tipping_point/tests/panel/test_coins.py"
+    },
+    {
+      "name": "Panel fetch",
+      "description": "Downloads and verifies the panel's 1-minute klines, 5-minute metrics and monthly funding in parallel.",
+      "command": "uv run python -m tipping_point.panel fetch",
+      "inputs": "the committed panel and a span of UTC days before 2024 (network)",
+      "outputs": "verified files under <data dir>/archives/binance or --dest",
+      "test": "python/tipping_point/tests/panel/test_fetch.py"
+    },
+    {
+      "name": "Panel labels",
+      "description": "Writes the panel's per-coin cascade thresholds, its cascades and an hourly label grid from the fetched files.",
+      "command": "uv run python -m tipping_point.panel labels",
+      "inputs": "fetched Binance files of the panel",
+      "outputs": "<data dir>/labels/<run_id>/ holding the thresholds, cascades and grid tables",
+      "test": "python/tipping_point/tests/panel/test_labels.py"
+    },
+    {
       "name": "Book feature range",
       "description": "Imports and reduces the Bybit order-book days of a range into per-day feature files.",
       "command": "uv run python -m tipping_point.market book --range training",

@@ -4,7 +4,8 @@ The market experiment asks whether warnings read from a JEPA trained on order bo
 or more reliably than the classic indicators, before volatility-regime shifts in the BTCUSDT and
 ETHUSDT perpetual futures. This page covers the regime labels and the cascade proxy, the reports
 and the GARCH floor, how the warning test cuts its segments, the same-input tier, and the market
-JEPA: its pilot, its primary trainings and the latent extraction.
+JEPA: its pilot, its primary trainings and the latent extraction. The last section covers the
+coin panel, a separate study on 30 perpetuals.
 
 The three market pre-registrations are frozen at their git tags. The labels file is in use; the
 two warning tests are not yet scored:
@@ -513,3 +514,58 @@ a time, resuming after a kill. `merge` checks every unit of a span, from one mac
 and joins them into one series per checkpoint and symbol. `verify` checks units or series against
 the sha256 their records name and exits 1 on any problem. `python -m tipping_point.jepa.market_extract
 --help` gives the full rules.
+
+## Coin panel
+
+The panel study asks whether leverage and positioning data warn of liquidation cascades on 30
+Binance USDT perpetuals. Its data and label layer is `python/tipping_point/src/tipping_point/panel/`,
+which reuses the archive reader, the bars and the cascade rule above unchanged. Bars start on
+2021-10-01 (three months of trailing history only); thresholds, cascades and labels cover the
+development span 2022-01-01 to 2023-12-31. Every day from 2024-01-01 is held back as the test span:
+every command refuses one, and every request is checked for one before it is sent.
+
+**Coins.** A symbol enters the ranking when it is a USD-M symbol matching `[A-Z0-9]+USDT`, is not
+one of the index and stablecoin products `BTCDOMUSDT`, `DEFIUSDT` and `USDCUSDT`, publishes a
+monthly 1-day kline file for every month of 2023, and publishes a daily metrics file on both
+2021-12-01 and 2023-12-31. The ranking is by 2023 quote volume summed from those 1-day klines,
+each file checked against its `.CHECKSUM`. The panel is BTCUSDT, ETHUSDT and the top 28 others,
+committed in `panel/coins.txt`, which every other command reads: BTCUSDT ETHUSDT SOLUSDT XRPUSDT
+DOGEUSDT BNBUSDT LTCUSDT MATICUSDT BCHUSDT LINKUSDT AVAXUSDT ADAUSDT TRBUSDT FILUSDT 1000SHIBUSDT
+DYDXUSDT MASKUSDT FTMUSDT GALAUSDT ETCUSDT LINAUSDT DOTUSDT NEARUSDT EOSUSDT CRVUSDT SANDUSDT
+ATOMUSDT AXSUSDT STORJUSDT MKRUSDT.
+
+```sh
+uv run python -m tipping_point.panel coins
+uv run python -m tipping_point.panel fetch
+uv run python -m tipping_point.panel labels
+```
+
+`coins` derives the ranking again from Binance Vision (its bucket listing of
+`data/futures/um/monthly/klines/` names every symbol), prints it, and exits 1 when the panel it
+gives differs from the committed list. `fetch` downloads the panel's klines, metrics and funding
+for 2021-10-01 to 2023-12-31 into the same folder as `market fetch`, `--workers` files at a time
+(default 16), through `market fetch`'s own per-file step: each file is checked against its
+`.CHECKSUM`, a file that fails is refused and never written, a 404 is recorded as missing, a re-run
+skips verified files, and `manifest.json` keeps the same form. `labels` writes one run to
+`<data dir>/labels/<run_id>/` with the tables `thresholds`, `cascades` and `grid`; its manifest
+records the coin list, the span, the constants, HEAD and the sha256 of `uv.lock`.
+
+**Thresholds.** Per coin, over the windows that close in the development span and that the cascade
+rule could evaluate, `sd_ret` is the standard deviation (n - 1) of the rule's `price_change` and
+`sd_oi` that of its `oi_change`. The coin's rule is `cascade.Params(a = 3.7 sd_oi, b = 5.0 sd_ret,
+c = 0.15, v = 3.0)`, every other field at its default; the two multiples are constants in
+`panel/labels.py`. Each coin's candidates come from its own rule and are merged and pooled across
+coins as `market cascade` does.
+
+**Tables.** `thresholds` has one row per coin: `symbol`, `windows` (the evaluated windows used),
+`sd_ret`, `sd_oi`, `a` and `b`, with `ts_ns` the development span's start. `cascades` has the
+`market cascade` schema. `grid` has one row per coin per UTC hour t of the development span, with,
+for H = 1, 6 and 24 hours and onset a cascade's `ts_ns` (a bar's start):
+
+- `long_H`, `short_H`: the coin has a cascade of that kind with t <= onset < t + H.
+- `censored_H`: t + H runs past the end of the span or past the coin's last complete bar, or a
+  window closing in (t, t + H] could not be evaluated or does not exist.
+- `skip`: onset < t <= last firing + 24 hours for one of the coin's cascades.
+
+The grid holds labels only: a feature at hour t may read only bars that start before t and metrics
+rows stamped at or before t.
