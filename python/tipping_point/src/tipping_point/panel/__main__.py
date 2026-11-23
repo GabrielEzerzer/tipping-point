@@ -10,7 +10,7 @@ from pathlib import Path
 from .. import engine
 from ..market import archive
 from ..market.__main__ import BAD, DATA_DIR_HELP, archive_dir
-from . import coins, fetch, labels, span
+from . import coins, fetch, inputs, labels, ladder, span
 
 DESCRIPTION = f"""\
 Command line: python -m tipping_point.panel <command> [options]
@@ -29,6 +29,13 @@ Command line: python -m tipping_point.panel <command> [options]
           <data dir>/labels/<run_id>/ with the tables thresholds, cascades and grid: bars from
           --start, thresholds, cascades and the hourly grid from --dev-start (default
           {span.DEV_START}) to the end of --end
+  inputs  the model inputs of every coin and hour of a labels run's grid (--labels, a run id or
+          folder), as a run in <data dir>/panel-inputs/<run_id>/ with the tables inputs and
+          constants (each coin's development-span mean squared return and threshold b)
+  ladder  fit and score the rungs of a plan file (--plan, default panel/ladder.toml) on an inputs
+          run (--inputs) and its labels run, out of fold by calendar quarter, with a joint block
+          bootstrap for each comparison, as a run in <data dir>/panel-ladder/<run_id>/ with the
+          tables oof, scores, folds, comparisons and rows, and report.md
 
 Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
 data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
@@ -71,7 +78,26 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--tag", help="the run id's tag (default panel-<dev start>-<end>)")
     p.set_defaults(command=_labels)
+
+    p = sub.add_parser("inputs", help="the model inputs of every coin and hour of a labels run")
+    p.add_argument("--labels", required=True, help="a labels run id, or its folder")
+    p.add_argument("--archive", type=Path, default=archive_dir())
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    p.add_argument("--tag", default="inputs", help="the run id's tag (default inputs)")
+    p.set_defaults(command=_inputs)
+
+    p = sub.add_parser("ladder", help="score a plan's rungs out of fold on an inputs run")
+    p.add_argument("--inputs", required=True, help="an inputs run id, or its folder")
+    p.add_argument("--plan", type=Path, default=ladder.PLAN)
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    p.add_argument("--tag", default="ladder", help="the run id's tag (default ladder)")
+    p.set_defaults(command=_ladder)
     return parser
+
+
+def _run_dir(data_dir: Path, domain: str, name: str) -> Path:
+    path = Path(name)
+    return path if path.is_dir() else data_dir / domain / name
 
 
 def _coins(args: argparse.Namespace) -> int:
@@ -143,6 +169,32 @@ def _labels(args: argparse.Namespace) -> int:
             f"short {grid[f'short_{h}']:.4f}), censored {grid[f'censored_{h}']:.4f}"
         )
     print(f"skip {grid['skip']:.4f}")
+    print(run_dir)
+    return 0
+
+
+def _inputs(args: argparse.Namespace) -> int:
+    run_dir, checks = inputs.run(
+        _run_dir(args.data_dir, "labels", args.labels),
+        args.archive,
+        args.data_dir,
+        args.tag,
+        log=lambda line: print(line, flush=True),
+    )
+    print(f"{checks['rows']} rows")
+    print(run_dir)
+    return 0
+
+
+def _ladder(args: argparse.Namespace) -> int:
+    run_dir, out = ladder.run(
+        _run_dir(args.data_dir, "panel-inputs", args.inputs),
+        args.data_dir,
+        args.plan,
+        args.tag,
+        log=lambda line: print(line, flush=True),
+    )
+    print(f"{out['seconds'] / 60:.1f} minutes")
     print(run_dir)
     return 0
 

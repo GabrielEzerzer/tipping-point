@@ -1,0 +1,648 @@
+# The ladder: nested sets of panel inputs fitted out of fold by calendar quarter and scored on one
+# common row set, all from a plan file (ladder.toml is the development plan). Comparisons carry a
+# joint block bootstrap whose AUCs come from per-block pair counts (docs/market.md, "Coin panel").
+
+from __future__ import annotations
+
+import time
+import tomllib
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from ..ews.scoring import auc
+from ..ising import io
+from . import inputs, labels, span, store
+
+PLAN = Path(__file__).with_name("ladder.toml")
+SIDES = ("long", "short", "any")
+DAY_NS = 24 * labels.HOUR_NS
+QUANTILES = (0.025, 0.05, 0.975)
+NEWTON_STEPS = 100
+NEWTON_TOL = 1e-9
+
+
+@dataclass(frozen=True)
+class Rung:
+    name: str
+    groups: tuple[str, ...]
+    own_only: tuple[str, ...] = ()
+
+    @property
+    def columns(self) -> tuple[str, ...]:
+        out: list[str] = []
+        for group in self.groups:
+            out += inputs.GROUPS[group]
+            if group not in self.own_only:
+                out += [f"m_{name}" for name in inputs.GROUPS[group]]
+        return tuple(out)
+
+
+@dataclass(frozen=True)
+class Plan:
+    start: date
+    end: date
+    horizons: tuple[int, ...]
+    sides: tuple[str, ...]
+    without: tuple[str, ...]
+    c: float
+    clip: float
+    gap_days: int
+    block_days: int
+    draws: int
+    seed: int
+    rungs: tuple[Rung, ...]
+    comparisons: tuple[tuple[str, str], ...]
+    external: tuple[str, Path] | None = None
+
+    @property
+    def columns(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(c for rung in self.rungs for c in rung.columns))
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        extra = (self.external[0],) if self.external else ()
+        return (*(rung.name for rung in self.rungs), *extra)
+
+
+def load(path: Path = PLAN) -> Plan:
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    external = raw.get("external")
+    plan = Plan(
+        start=raw["start"],
+        end=raw["end"],
+        horizons=tuple(raw["horizons"]),
+        sides=tuple(raw["sides"]),
+        without=tuple(raw.get("without", ())),
+        c=float(raw["model"]["c"]),
+        clip=float(raw["model"]["clip"]),
+        gap_days=int(raw["folds"]["gap_days"]),
+        block_days=int(raw["bootstrap"]["block_days"]),
+        draws=int(raw["bootstrap"]["draws"]),
+        seed=int(raw["bootstrap"]["seed"]),
+        rungs=tuple(
+            Rung(r["name"], tuple(r["groups"]), tuple(r.get("own_only", ()))) for r in raw["rungs"]
+        ),
+        comparisons=tuple((c["first"], c["second"]) for c in raw.get("comparisons", ())),
+        external=None
+        if external is None
+        else (external["name"], (path.parent / external["path"]).resolve()),
+    )
+    span.refuse(plan.start, plan.end)
+    problems = [f"group {g}" for r in plan.rungs for g in r.groups if g not in inputs.GROUPS]
+    problems += [
+        f"own-only {g} of {r.name}" for r in plan.rungs for g in r.own_only if g not in r.groups
+    ]
+    problems += [f"side {s}" for s in plan.sides if s not in SIDES]
+    problems += [f"horizon {h}" for h in plan.horizons if h not in labels.HORIZONS]
+    problems += [f"comparison name {n}" for c in plan.comparisons for n in c if n not in plan.names]
+    if len(set(plan.names)) != len(plan.names) or not plan.start <= plan.end:
+        problems.append("names must be unique and the span must not end before it starts")
+    if problems:
+        raise ValueError(f"{path}: unknown or invalid: {', '.join(problems)}")
+    return plan
+
+
+def bounds(plan: Plan) -> np.ndarray:
+    edges = [plan.start]
+    q = date(plan.start.year, 3 * ((plan.start.month - 1) // 3) + 1, 1)
+    while True:
+        q = date(q.year + (q.month == 10), (q.month + 2) % 12 + 1, 1)
+        if q > plan.end:
+            break
+        edges.append(q)
+    edges.append(plan.end + timedelta(days=1))
+    return np.array([labels.ns(d) for d in edges], np.int64)
+
+
+def folds(ts: np.ndarray, edges: np.ndarray, block_days: int) -> tuple[np.ndarray, np.ndarray]:
+    fold = np.searchsorted(edges, ts, "right") - 1
+    block = (ts - edges[fold]) // (block_days * DAY_NS)
+    return fold, block
+
+
+def blocks_per_fold(edges: np.ndarray, block_days: int) -> np.ndarray:
+    return -(-np.diff(edges) // (block_days * DAY_NS))
+
+
+def training(
+    ts: np.ndarray, fold: np.ndarray, f: int, edges: np.ndarray, gap_days: int
+) -> np.ndarray:
+    gap = gap_days * DAY_NS
+    return (fold != f) & ((ts < edges[f] - gap) | (ts >= edges[f + 1] + gap))
+
+
+def _probability(z: np.ndarray) -> np.ndarray:
+    with np.errstate(over="ignore"):
+        return 1.0 / (1.0 + np.exp(-z))
+
+
+def fit(x: np.ndarray, y: np.ndarray, c: float) -> np.ndarray:
+    n, d = x.shape
+    design = np.hstack([x, np.ones((n, 1))])
+    ridge = np.full(d + 1, 1.0 / c)
+    ridge[-1] = 0.0
+    beta = np.zeros(d + 1)
+    share = float(np.mean(y))
+    if share in (0.0, 1.0):
+        beta[-1] = -np.inf if share == 0.0 else np.inf
+        return beta
+    beta[-1] = np.log(share / (1 - share))
+
+    def loss(b: np.ndarray) -> float:
+        z = design @ b
+        return float(np.sum(np.logaddexp(0.0, z) - y * z) + 0.5 * np.sum(ridge * b * b))
+
+    current = loss(beta)
+    for _ in range(NEWTON_STEPS):
+        p = _probability(design @ beta)
+        grad = design.T @ (p - y) + ridge * beta
+        hessian = (design * (p * (1 - p))[:, None]).T @ design + np.diag(ridge)
+        step = np.linalg.solve(hessian, grad)
+        decrement = float(grad @ step)
+        if decrement / 2 <= NEWTON_TOL:
+            break
+        t = 1.0
+        while True:
+            trial = beta - t * step
+            value = loss(trial)
+            if value <= current - 1e-4 * t * decrement or t < 1e-10:
+                break
+            t /= 2
+        beta, current = trial, value
+    return beta
+
+
+def predict(x: np.ndarray, beta: np.ndarray) -> np.ndarray:
+    return _probability(x @ beta[:-1] + beta[-1])
+
+
+def standardise(train: np.ndarray, test: np.ndarray, clip: float) -> tuple[np.ndarray, np.ndarray]:
+    mu, sd = train.mean(axis=0), train.std(axis=0)
+    sd = np.where(sd > 0, sd, 1.0)
+    return np.clip((train - mu) / sd, -clip, clip), np.clip((test - mu) / sd, -clip, clip)
+
+
+def pair_counts(
+    score: np.ndarray, label: np.ndarray, block: np.ndarray, nblocks: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    positive, negative = label, ~label
+    p = np.bincount(block[positive], minlength=nblocks).astype(np.float64)
+    n = np.bincount(block[negative], minlength=nblocks).astype(np.float64)
+    counts = np.zeros((nblocks, nblocks))
+    sp, bp = score[positive], block[positive]
+    for b in range(nblocks):
+        neg = np.sort(score[negative & (block == b)])
+        below = np.searchsorted(neg, sp, "left")
+        tied = np.searchsorted(neg, sp, "right") - below
+        counts[:, b] = np.bincount(bp, weights=below + 0.5 * tied, minlength=nblocks)
+    return counts, p, n
+
+
+def block_auc(
+    counts: np.ndarray, p: np.ndarray, n: np.ndarray, weights: np.ndarray | None = None
+) -> np.ndarray:
+    w = np.ones((1, len(p))) if weights is None else weights
+    pairs = np.einsum("da,ab,db->d", w, counts, w)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where((w @ p) * (w @ n) > 0, pairs / ((w @ p) * (w @ n)), np.nan)
+
+
+def draws(nblocks: np.ndarray, count: int, seed: int, horizon: int) -> list[np.ndarray]:
+    out = []
+    for f, k in enumerate(nblocks):
+        rng = np.random.default_rng([seed, horizon, f])
+        out.append(rng.multinomial(int(k), np.full(int(k), 1.0 / k), size=count).astype(np.float64))
+    return out
+
+
+def within_coin(score: np.ndarray, label: np.ndarray, symbol: np.ndarray) -> float:
+    total = weight = 0.0
+    for s in np.unique(symbol):
+        mine = symbol == s
+        positives = int(label[mine].sum())
+        if positives and positives < mine.sum():
+            total += positives * auc(score[mine & label], score[mine & ~label])
+            weight += positives
+    return total / weight if weight else float("nan")
+
+
+@dataclass
+class Horizon:
+    accounting: list[dict[str, Any]]
+    ts: np.ndarray
+    symbol: np.ndarray
+    labels: dict[str, np.ndarray]
+    fold: np.ndarray
+    block: np.ndarray
+    scores: dict[str, dict[str, np.ndarray]]
+
+
+def select(
+    values: Mapping[str, np.ndarray], grid: Mapping[str, np.ndarray], plan: Plan, horizon: int
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    ts = grid["ts_ns"]
+    long, short = grid[f"long_{horizon}"], grid[f"short_{horizon}"]
+    missing = np.zeros(len(ts), bool)
+    for name in plan.columns:
+        missing |= np.isnan(values[name])
+    edges = (labels.ns(plan.start), labels.ns(plan.end + timedelta(days=1)))
+    steps = [
+        ("outside the plan's span", (ts < edges[0]) | (ts >= edges[1])),
+        ("skipped", grid["skip"]),
+        (f"censored at {horizon} h", grid[f"censored_{horizon}"]),
+        ("missing an input", missing),
+    ]
+    keep = np.ones(len(ts), bool)
+    out = [_count("grid", keep, long, short)]
+    for name, removed in steps:
+        out.append(_count(name, keep & removed, long, short))
+        keep &= ~removed
+    out.append(_count("scored", keep, long, short))
+    return keep, out
+
+
+def _count(name: str, mask: np.ndarray, long: np.ndarray, short: np.ndarray) -> dict[str, Any]:
+    return {
+        "condition": name,
+        "rows": int(mask.sum()),
+        "long": int((mask & long).sum()),
+        "short": int((mask & short).sum()),
+        "positives": int((mask & (long | short)).sum()),
+    }
+
+
+def out_of_fold(
+    x: np.ndarray,
+    y: Mapping[str, np.ndarray],
+    ts: np.ndarray,
+    fold: np.ndarray,
+    edges: np.ndarray,
+    plan: Plan,
+    log: Callable[[str], None],
+) -> dict[str, dict[str, np.ndarray]]:
+    index = {name: i for i, name in enumerate(plan.columns)}
+    out = {r.name: {s: np.full(len(ts), np.nan) for s in ("long", "short")} for r in plan.rungs}
+    for f in range(len(edges) - 1):
+        test = fold == f
+        train = training(ts, fold, f, edges, plan.gap_days)
+        if not test.any() or not train.any():
+            continue
+        z_train, z_test = standardise(x[train], x[test], plan.clip)
+        for rung in plan.rungs:
+            cols = [index[c] for c in rung.columns]
+            for side in ("long", "short"):
+                beta = fit(z_train[:, cols], y[side][train].astype(np.float64), plan.c)
+                out[rung.name][side][test] = predict(z_test[:, cols], beta)
+        log(f"  fold {f + 1}: {int(train.sum())} training rows, {int(test.sum())} scored")
+    for sides in out.values():
+        sides["any"] = 1 - (1 - sides["long"]) * (1 - sides["short"])
+    return out
+
+
+def external_scores(
+    table: pa.Table, ts: np.ndarray, symbol: np.ndarray, horizon: int, sides: Sequence[str]
+) -> dict[str, np.ndarray]:
+    hours = table["hour"]
+    if pa.types.is_timestamp(hours.type):
+        hours = hours.cast(pa.timestamp("ns")).cast(pa.int64())
+    found = pa.table(
+        {
+            "coin": table["coin"],
+            "hour": hours,
+            "horizon": table["horizon"].cast(pa.int64()),
+            "side": table["side"],
+            "score": table["score"].cast(pa.float64()),
+        }
+    )
+    rows = pa.table({"coin": symbol.astype(str), "hour": ts, "row": np.arange(len(ts))})
+    at_horizon = found["horizon"].to_numpy() == horizon
+    named = found["side"].to_numpy(zero_copy_only=False)
+    out = {}
+    for side in sides:
+        mine = found.filter(pa.array(at_horizon & (named == side)))
+        mine = mine.select(["coin", "hour", "score"])
+        joined = rows.join(mine, keys=["coin", "hour"], join_type="left outer")
+        if joined.num_rows != len(ts):
+            raise ValueError(f"the external scores give a row twice ({horizon} h, {side})")
+        joined = joined.sort_by("row")
+        score = joined["score"].to_numpy(zero_copy_only=False).astype(np.float64)
+        if np.isnan(score).any():
+            raise ValueError(
+                f"the external scores miss {int(np.isnan(score).sum())} scored rows "
+                f"({horizon} h, {side})"
+            )
+        out[side] = score
+    return out
+
+
+def horizon_rows(
+    values: Mapping[str, np.ndarray],
+    grid: Mapping[str, np.ndarray],
+    plan: Plan,
+    horizon: int,
+    external: pa.Table | None,
+    log: Callable[[str], None],
+) -> Horizon:
+    keep, accounting = select(values, grid, plan, horizon)
+    ts, symbol = grid["ts_ns"][keep], grid["symbol"][keep]
+    y = {"long": grid[f"long_{horizon}"][keep], "short": grid[f"short_{horizon}"][keep]}
+    y["any"] = y["long"] | y["short"]
+    edges = bounds(plan)
+    fold, block = folds(ts, edges, plan.block_days)
+    x = np.column_stack([values[name][keep] for name in plan.columns])
+    scores = out_of_fold(x, y, ts, fold, edges, plan, log)
+    if external is not None and plan.external is not None:
+        scores[plan.external[0]] = external_scores(external, ts, symbol, horizon, plan.sides)
+    return Horizon(accounting, ts, symbol, y, fold, block, scores)
+
+
+def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dict], list[dict]]:
+    edges = bounds(plan)
+    nblocks = blocks_per_fold(edges, plan.block_days)
+    weights = draws(nblocks, plan.draws, plan.seed, horizon)
+    nfolds = len(nblocks)
+    subsets = {"all": np.ones(len(h.ts), bool), "without": ~np.isin(h.symbol, plan.without)}
+    score_rows, fold_rows, primary, boot = [], [], {}, {}
+    for name in plan.names:
+        for side in plan.sides:
+            s, label = h.scores[name][side], h.labels[side]
+            for subset, mask in subsets.items():
+                per_fold, booted = np.full(nfolds, np.nan), np.zeros((plan.draws, nfolds))
+                for f in range(nfolds):
+                    inside = mask & (h.fold == f)
+                    counts = pair_counts(s[inside], label[inside], h.block[inside], int(nblocks[f]))
+                    per_fold[f] = block_auc(*counts)[0]
+                    if subset == "all":
+                        booted[:, f] = block_auc(*counts, weights[f])
+                    fold_rows.append(
+                        {
+                            "horizon": horizon,
+                            "side": side,
+                            "name": name,
+                            "coins": subset,
+                            "fold": f,
+                            "auc": float(per_fold[f]),
+                            "rows": int(inside.sum()),
+                            "positives": int(label[inside].sum()),
+                        }
+                    )
+                if subset == "all":
+                    primary[(name, side)] = per_fold
+                    with np.errstate(invalid="ignore"):
+                        boot[(name, side)] = _nanmean_rows(booted)
+                score_rows.append(
+                    {
+                        "horizon": horizon,
+                        "side": side,
+                        "name": name,
+                        "coins": subset,
+                        "fold_mean": float(np.nanmean(per_fold))
+                        if np.isfinite(per_fold).any()
+                        else float("nan"),
+                        "folds": int(np.isfinite(per_fold).sum()),
+                        "pooled": auc(s[mask & label], s[mask & ~label]),
+                        "within_coin": within_coin(s[mask], label[mask], h.symbol[mask]),
+                        "rows": int(mask.sum()),
+                        "positives": int(label[mask].sum()),
+                    }
+                )
+    comparisons = []
+    for first, second in plan.comparisons:
+        for side in plan.sides:
+            a, b = primary[(first, side)], primary[(second, side)]
+            difference = boot[(first, side)] - boot[(second, side)]
+            difference = difference[np.isfinite(difference)]
+            both = np.isfinite(a) & np.isfinite(b)
+            per_fold = a - b
+            estimate = float(np.nanmean(a) - np.nanmean(b))
+            q = np.quantile(difference, QUANTILES) if difference.size else [np.nan] * 3
+            comparisons.append(
+                {
+                    "horizon": horizon,
+                    "side": side,
+                    "first": first,
+                    "second": second,
+                    "estimate": estimate,
+                    "se": float(np.std(difference, ddof=1))
+                    if difference.size > 1
+                    else float("nan"),
+                    "q025": float(q[0]),
+                    "q05": float(q[1]),
+                    "q975": float(q[2]),
+                    "above_zero": float(np.mean(difference > 0))
+                    if difference.size
+                    else float("nan"),
+                    "draws": int(difference.size),
+                    "fold_differences": [float(v) for v in per_fold],
+                    "folds_above_zero": int(np.sum(per_fold[both] > 0)),
+                    "folds": int(both.sum()),
+                }
+            )
+    return score_rows, fold_rows, comparisons
+
+
+def _nanmean_rows(values: np.ndarray) -> np.ndarray:
+    count = np.isfinite(values).sum(axis=1)
+    total = np.where(np.isfinite(values), values, 0.0).sum(axis=1)
+    return np.where(count > 0, total / np.maximum(count, 1), np.nan)
+
+
+def ladder(
+    values: Mapping[str, np.ndarray],
+    grid: Mapping[str, np.ndarray],
+    plan: Plan,
+    external: pa.Table | None = None,
+    log: Callable[[str], None] = lambda line: None,
+) -> dict[str, Any]:
+    if plan.external is not None and external is None:
+        raise ValueError("the plan names external scores but none were given")
+    out: dict[str, Any] = {
+        "accounting": {},
+        "scores": [],
+        "folds": [],
+        "comparisons": [],
+        "oof": [],
+    }
+    for horizon in plan.horizons:
+        log(f"{horizon} h")
+        h = horizon_rows(values, grid, plan, horizon, external, log)
+        out["accounting"][horizon] = h.accounting
+        scores, fold_rows, comparisons = evaluate(h, plan, horizon)
+        out["scores"] += scores
+        out["folds"] += fold_rows
+        out["comparisons"] += comparisons
+        oof = {
+            "ts_ns": h.ts,
+            "symbol": h.symbol.astype(str),
+            "horizon": np.full(len(h.ts), horizon),
+            "fold": h.fold,
+            "long": h.labels["long"],
+            "short": h.labels["short"],
+        }
+        for name in plan.names:
+            for side in plan.sides:
+                oof[f"{name}:{side}"] = h.scores[name][side]
+        out["oof"].append(pa.table(oof))
+    return out
+
+
+def run(
+    inputs_dir: Path,
+    data_dir: Path,
+    plan_path: Path,
+    tag: str,
+    log: Callable[[str], None] = lambda line: None,
+) -> tuple[Path, dict[str, Any]]:
+    began = time.perf_counter()
+    plan = load(plan_path)
+    manifest = io.read_json(inputs_dir / "manifest.json")
+    params = manifest["params"]
+    span.refuse(*(date.fromisoformat(params[k]) for k in ("start", "dev_start", "end")))
+    labels_dir = data_dir / "labels" / params["labels_run"]
+    grid_path = labels_dir / params["labels_grid"]["file"]
+    if store.sha256(grid_path) != params["labels_grid"]["sha256"]:
+        raise ValueError(f"{grid_path}: not the grid the inputs run was made from")
+    grid_table = pq.read_table(grid_path)
+    held = labels.ns(span.HELD_BACK)
+    if grid_table.num_rows and max(grid_table["ts_ns"].to_numpy()) >= held:
+        raise span.HeldBackError("the grid holds an hour in the held-back test span")
+    table = store.read(inputs_dir, "inputs").select(["ts_ns", "symbol", *plan.columns])
+    if not (
+        table["ts_ns"].equals(grid_table["ts_ns"]) and table["symbol"].equals(grid_table["symbol"])
+    ):
+        raise ValueError("the inputs' rows are not the grid's rows")
+    external = None
+    if plan.external is not None:
+        external = pq.read_table(plan.external[1])
+        hours = external["hour"]
+        if pa.types.is_timestamp(hours.type):
+            hours = hours.cast(pa.timestamp("ns")).cast(pa.int64())
+        if external.num_rows and max(hours.to_numpy()) >= held:
+            raise span.HeldBackError("the external scores hold an hour in the held-back test span")
+    values = {n: table[n].to_numpy() for n in plan.columns}
+    grid = {n: grid_table[n].to_numpy(zero_copy_only=False) for n in grid_table.column_names}
+    out = ladder(values, grid, plan, external, log)
+    seconds = time.perf_counter() - began
+    plan_text = plan_path.read_text(encoding="utf-8")
+    run_params = {
+        "inputs_run": manifest["run_id"],
+        "labels_run": params["labels_run"],
+        "plan": {"file": plan_path.name, "sha256": store.sha256(plan_path)},
+        "external": None
+        if plan.external is None
+        else {
+            "name": plan.external[0],
+            "file": plan.external[1].name,
+            "sha256": store.sha256(plan.external[1]),
+        },
+        "code": {"uv_lock_sha256": labels.uv_lock()},
+    }
+    tables = {
+        "oof": pa.concat_tables(out["oof"]),
+        "scores": pa.Table.from_pylist(out["scores"]),
+        "folds": pa.Table.from_pylist(out["folds"]),
+        "comparisons": pa.Table.from_pylist(out["comparisons"]),
+        "rows": pa.Table.from_pylist(
+            [{"horizon": h, **row} for h, rows in out["accounting"].items() for row in rows]
+        ),
+    }
+    checks = {
+        "seconds": round(seconds, 1),
+        "accounting": {str(k): v for k, v in out["accounting"].items()},
+    }
+    text = report(out, plan, manifest["run_id"], params["labels_run"], plan_path.name, seconds)
+    texts = {"report.md": text, "plan.toml": plan_text}
+    run_dir = store.write(data_dir, "panel-ladder", tag, tables, run_params, checks, texts)
+    return run_dir, out | {"seconds": seconds}
+
+
+def _f(value: float) -> str:
+    return "-" if not np.isfinite(value) else f"{value:.3f}"
+
+
+def report(
+    out: Mapping[str, Any],
+    plan: Plan,
+    inputs_run: str,
+    labels_run: str,
+    plan_name: str,
+    seconds: float,
+) -> str:
+    lines = [
+        "# Panel ladder",
+        "",
+        f"Inputs run `{inputs_run}`, labels run `{labels_run}`, plan `{plan_name}`; "
+        f"{plan.start} to {plan.end}. Each rung is two L2 logistic regressions (C = {plan.c}), one "
+        f"for long_H and one for short_H, on inputs standardised by the training fold and clipped "
+        f"to +-{plan.clip:g}; the any score is 1 - (1 - p_long)(1 - p_short). Folds are the "
+        f"calendar quarters of the span, each left out in turn, with training rows within "
+        f"{plan.gap_days} days of the left-out quarter dropped. Every rung of a horizon is scored "
+        f"on the same rows.",
+        "",
+        "Scores are AUCs: fold mean is the mean over folds of the AUC inside each left-out "
+        "quarter (the primary score), pooled is the AUC of all out-of-fold scores together, and "
+        "within coin is each coin's own AUC weighted by its positives. The second value of each "
+        "pair leaves "
+        f"out {', '.join(plan.without)}.",
+        "",
+        f"Comparisons are first minus second in the primary score. The interval comes from a joint "
+        f"block bootstrap: within each quarter, {plan.block_days}-day blocks of calendar time are "
+        f"drawn with replacement, every coin's rows of a drawn block taken together, "
+        f"{plan.draws} draws, seed {plan.seed}. q2.5, q5 and q97.5 are percentiles of the "
+        f"bootstrap differences; > 0 is the share of draws above zero; folds > 0 counts quarters "
+        f"where the first beats the second.",
+        "",
+        f"Wall time {seconds / 60:.1f} minutes.",
+    ]
+    rungs = {r.name: r for r in plan.rungs}
+    lines += ["", "## Rungs", "", "| rung | groups | inputs |", "|---|---|---|"]
+    for name in plan.names:
+        if name in rungs:
+            r = rungs[name]
+            groups = ", ".join(g + (" (own only)" if g in r.own_only else "") for g in r.groups)
+            lines.append(f"| {name} | {groups} | {len(r.columns)} |")
+        else:
+            lines.append(f"| {name} | external out-of-fold scores | - |")
+    for horizon in plan.horizons:
+        lines += ["", f"## {horizon} h", "", "Rows removed, in order:", ""]
+        lines += ["| condition | rows | long | short | positives |", "|---|---|---|---|---|"]
+        for row in out["accounting"][horizon]:
+            lines.append(
+                f"| {row['condition']} | {row['rows']} | {row['long']} | {row['short']} | "
+                f"{row['positives']} |"
+            )
+        scores = [s for s in out["scores"] if s["horizon"] == horizon]
+        lines += [
+            "",
+            "| rung | side | fold mean | pooled | within coin | folds |",
+            "|---|---|---|---|---|---|",
+        ]
+        for side in plan.sides:
+            for name in plan.names:
+                pair = {s["coins"]: s for s in scores if s["side"] == side and s["name"] == name}
+                a, w = pair["all"], pair["without"]
+                lines.append(
+                    f"| {name} | {side} | {_f(a['fold_mean'])} / {_f(w['fold_mean'])} | "
+                    f"{_f(a['pooled'])} / {_f(w['pooled'])} | {_f(a['within_coin'])} / "
+                    f"{_f(w['within_coin'])} | {a['folds']} |"
+                )
+        lines += [
+            "",
+            "| comparison | side | estimate | se | q2.5 | q5 | q97.5 | > 0 | folds > 0 |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+        for c in out["comparisons"]:
+            if c["horizon"] == horizon:
+                lines.append(
+                    f"| {c['first']} - {c['second']} | {c['side']} | {c['estimate']:+.3f} | "
+                    f"{_f(c['se'])} | {c['q025']:+.3f} | {c['q05']:+.3f} | {c['q975']:+.3f} | "
+                    f"{_f(c['above_zero'])} | {c['folds_above_zero']} of {c['folds']} |"
+                )
+    return "\n".join(lines) + "\n"

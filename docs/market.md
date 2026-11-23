@@ -575,3 +575,104 @@ event lies before t. For H = 1, 6 and 24 hours:
 
 The grid holds labels only: a feature at hour t may read only bars that start before t and metrics
 rows stamped at or before t.
+
+**Inputs.** `panel inputs --labels <run id>` writes one run to `<data dir>/panel-inputs/<run_id>/`
+with the table `inputs`, one row per coin per hour t of the labels run's grid in the grid's order,
+and the table `constants`, each coin's development-span mean squared 5-minute return and its
+threshold `b`, so a later run on other days can reuse them unchanged. Its manifest names the labels
+run and the sha256 of its grid.
+
+```sh
+uv run python -m tipping_point.panel inputs --labels <labels run id>
+```
+
+Timing rule: an input at hour t reads only 5-minute bars that start before t and metrics or funding
+rows stamped at or before t (open interest, the long/short ratio and the funding rate of the bar
+that starts at t are allowed; its close is not). The tests change every later bar and row and check
+that no input at t moves. Windows are counted in 5-minute bars (1 h = 12, 6 h = 72, 24 h = 288,
+7 d = 2016, 28 d = 8064) and end just before t, or at t for metrics and funding. A rolling value
+needs at least 5/6 of its window present, else it is missing; so does every 28-day mean or median.
+r is the 5-minute log return of close.
+
+- `vol`: `vol_1h`, `vol_6h`, `vol_24h`, `vol_7d`, `vol_28d` = log(mean r^2 over the window / the
+  coin's mean r^2 over the development span); `near_24h` = the largest |30-minute log return| of the
+  last 24 h over the coin's `b`; `vsurge_1h` = log(mean volume over 1 h / median 5-minute volume over
+  28 d); `volume_24h` = log(mean volume over 24 h / mean volume over 28 d).
+- `price`: `ret_1h`, `ret_6h`, `ret_24h`, `ret_7d`, `ret_28d`, the log return over the window, from
+  the close just before it to the last close before t (missing when either close is); `aret_24h`
+  and `aret_7d`, their absolute values; `dd_7d` and `dd_28d`, the log of the last close over the
+  window's highest close; `ru_28d`, over its lowest.
+- `flow`: `flow_1h`, `flow_24h` = (2 x taker-buy volume - volume) / volume with both volumes summed
+  over the window's complete bars, as `market cascade` reads flow.
+- `classic`: `var_tau_24h` and `ac1_tau_24h`, Kendall's tau against time of the rolling variance and
+  of the rolling lag-1 autocorrelation of r (72-bar windows, each needing 5/6 of its values or
+  pairs) over the last 288 bars; `var_tau_7d` and `ac1_tau_7d`, the same on hourly log returns
+  (84-hour windows) over the last 168 hours. Kendall's tau is `ews.trend.kendall_tau`, over the
+  values present when at least 5/6 are.
+- `lev`: `oi_24h`, `oi_7d`, the log change in open interest; `oi_vs_28d`, the log of open interest
+  over its 28-day median; `funding`, the last settled rate; `funding_rel`, funding minus its 28-day
+  time-weighted mean; `ls`, the log of Binance's long/short account ratio (`count_long_short_ratio`
+  of the metrics files, read from the same verified files); `ls_rel`, `ls` minus its 28-day mean.
+  Open interest and the ratio are carried forward at most 12 bars (1 hour) across gaps, and zero or
+  negative values count as missing. Binance's metrics files leave the ratio empty from 2021-12-30 to
+  2022-01-19 on every panel coin, so `ls` is missing there and `ls_rel` until its 28-day window
+  holds 5/6 of its values again, on 2022-02-12.
+
+For every own-coin input x, the market input `m_x` is the mean of x at hour t over the coins that
+have a value, missing when fewer than 15 do.
+
+**Ladder.** `panel ladder --inputs <run id>` scores nested sets of inputs against each other and
+writes one run to `<data dir>/panel-ladder/<run_id>/`: the tables `oof` (each row's out-of-fold
+scores, one column per rung and side), `scores`, `folds` (each rung's AUC in each left-out quarter),
+`comparisons` and `rows` (the row accounting), `report.md`, and a copy of the plan.
+
+```sh
+uv run python -m tipping_point.panel ladder --inputs <inputs run id>
+```
+
+Everything it does comes from a plan file; `panel/ladder.toml` is the development plan, over
+2022-01-01 to 2023-12-31:
+
+- Horizons 24 h (primary), 6 h and 1 h; sides long, short and any.
+- Rungs, each a list of input groups, every group meaning its own-coin inputs and their market
+  means unless marked own-only: `vol` (vol); `vol+price` (vol, price); `vol+price+flow` (vol, price,
+  flow); `full` (vol, price, flow, lev with lev own-only); `full+mlev` (vol, price, flow, lev, own
+  and market); `classic` (vol, classic).
+- Comparisons, first minus second: full - vol; vol+price - vol; vol+price+flow - vol+price;
+  full - vol+price+flow; full+mlev - full; classic - vol.
+- Model: two L2 logistic regressions per rung and horizon, one for long_H and one for short_H,
+  C = 0.01 (the penalty is |w|^2 / 2C, the intercept unpenalised), fitted by Newton's method on
+  inputs standardised with the training fold's mean and standard deviation and clipped to +-5.
+  Scores: long = p_long, short = p_short, any = 1 - (1 - p_long)(1 - p_short); labels are the
+  side's own, and any is long or short.
+- Rows: the grid rows that are not skipped, not censored at that horizon and have every input of
+  every rung in the plan, one common row set per horizon. The run reports how many rows and
+  positives each condition removes, in that order.
+- Folds: the eight calendar quarters, each left out in turn; training rows within 28 days of the
+  left-out quarter, on either side, are dropped.
+- Scores per rung, side and horizon: the mean over folds of the AUC inside each fold (the primary
+  score), the pooled out-of-fold AUC, and the within-coin AUC weighted by each coin's positives;
+  each also without BTCUSDT and ETHUSDT (the same fits, scored on the other coins' rows).
+- Comparisons: the difference of the primary score with a joint block bootstrap. Each quarter is
+  cut into 14-day blocks of calendar time from its first day (7 per quarter, the last shorter);
+  each draw takes, in every quarter, as many blocks as it has, with replacement, and every coin's
+  rows of a drawn block come together. 2000 draws with the plan's seed, the same draws for every
+  rung, so each difference is paired. The run gives the estimate, the bootstrap standard error, the
+  2.5%, 5% and 97.5% points, the share of draws above zero, the per-fold differences and how many
+  folds are above zero.
+
+The bootstrap does not recompute AUCs from rows. An AUC is a sum over (positive, negative) pairs, so
+for each fold, rung and side the run counts once, for every pair of blocks (a, b), the pairs C_ab
+with the positive in a and the negative in b that the score orders correctly (ties count one half).
+A draw that takes block a w_a times has AUC = sum w_a w_b C_ab / ((sum w_a P_a)(sum w_b N_b)), with
+P and N the blocks' positives and negatives: exactly the AUC of the rows the draw takes, from a
+7 x 7 matrix per fold. All 2000 draws then cost a few matrix products, and the whole plan's
+bootstrap runs in seconds.
+
+An optional `[external]` entry (`name`, and `path` to a Parquet file relative to the plan) brings in
+out-of-fold scores fitted elsewhere, such as a sequence model's, with columns `coin`, `hour` (the
+grid's `ts_ns`), `horizon`, `side` and `score`. They are scored and compared like a rung on the same
+common rows, and the run refuses a file that misses one of them.
+
+Both commands refuse any day from 2024-01-01 on: `inputs` refuses a labels run whose span reaches
+it, and `ladder` a plan, an inputs run, a grid or an external file that does.
