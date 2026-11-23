@@ -98,7 +98,7 @@ def windows(
     no_oi = touching(np.isnan(oi))[k - w]
     no_bar = touching(np.isnan(close) | np.isnan(volume) | np.isnan(taker))[b - w]
     absent = np.concatenate([[0], np.cumsum(np.isnan(close) | np.isnan(volume))])
-    history_gap = absent[b - w + 1] > absent[np.maximum(low - w, 0)]
+    history_gap = absent[b - w + 1] > absent[np.maximum(low - w + 1, 0)]
     return {
         "ts_ns": ts[k],
         "oi_change": oi_change,

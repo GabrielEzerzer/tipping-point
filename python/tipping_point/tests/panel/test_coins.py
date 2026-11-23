@@ -147,6 +147,13 @@ def test_a_file_that_fails_its_checksum_is_refused(bucket: Bucket) -> None:
         coins.derive(bucket.get, workers=2)
 
 
+def test_a_bad_month_stops_the_ranking(bucket: Bucket) -> None:
+    key = f"{coins.KLINES}AAAUSDT/1d/AAAUSDT-1d-2023-05.zip"
+    bucket.put(key, kline_file("AAAUSDT", "2023-05", 300.0, days=[*range(31), 9]))
+    with pytest.raises(archive.ArchiveError, match=r"AAAUSDT-1d-2023-05\.csv: the row at"):
+        coins.derive(bucket.get, workers=2)
+
+
 def test_a_row_outside_its_month_is_refused() -> None:
     data = kline_file("AAAUSDT", "2023-02", 1.0)
     with pytest.raises(archive.ArchiveError, match="outside 2023-03"):
@@ -193,6 +200,17 @@ def test_each_request_is_refused_on_a_held_back_day_past_the_span_check(
                 coins.derive(bucket.get, workers=4)
             assert bucket.requests, name
             assert not any("2024" in url for url in bucket.requests), name
+
+
+def test_a_bad_month_is_refused_whichever_side_of_a_short_month_it_lies(bucket: Bucket) -> None:
+    for short, twice in (("2023-03", "2023-07"), ("2023-07", "2023-03")):
+        for month, days in ((short, [0, 30]), (twice, [*range(31), 4])):
+            key = f"{coins.KLINES}AAAUSDT/1d/AAAUSDT-1d-{month}.zip"
+            bucket.put(key, kline_file("AAAUSDT", month, 1.0, days=days))
+        with pytest.raises(archive.ArchiveError, match=f"AAAUSDT-1d-{twice}"):
+            coins.quote_volume(bucket.get, "AAAUSDT")
+        publish(bucket, "AAAUSDT", 300.0)
+    assert coins.quote_volume(bucket.get, "AAAUSDT") == 300.0 * YEAR_DAYS
 
 
 def test_the_committed_panel_follows_the_rule() -> None:

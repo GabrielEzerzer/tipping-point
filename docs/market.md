@@ -564,11 +564,11 @@ not refuse on it; funding files get no period check at all.
 deviations (n - 1) of the cascade rule's `price_change` and `oi_change` over the windows the rule
 could evaluate that close in [d - 90 days, d). The coin's rule on day d is `cascade.Params(a = 3.7
 sd_oi, b = 5.0 sd_ret, c = 0.15, v = 3.0)`, every other field at its default, for every window
-closing on d. A day with fewer than 28 x 288 x 0.8 such windows has no threshold, and its windows
-count as not evaluated. A day's threshold reads nothing from that day on, so the span being scored
-never sets its own labels, and a coin whose typical move shrinks or grows is held to the same
-multiple of its recent moves throughout. The multiples, the 90 days and the minimum are constants
-in `panel/labels.py`.
+closing on d. A day with fewer than 28 x 288 x 0.8 such windows has no threshold: its windows are
+left out of the run's window counts and are censored in the grid. A day's threshold reads nothing
+from that day on, so the span being scored never sets its own labels, and a coin whose typical
+move shrinks or grows is held to the same multiple of its recent moves throughout. The multiples,
+the 90 days and the minimum are constants in `panel/labels.py`.
 
 **Detection.** Each day's windows go through `cascade.candidates` unchanged, with that day's rule,
 on a slice of bars that holds all the history the rule reads before the day, keeping only the
@@ -582,25 +582,30 @@ start, `symbol`, `windows` (the evaluated windows in its 90 days), and `sd_ret`,
 `b`, null on a day without a threshold. `cascades` has the `market cascade` schema, whose `ts_ns` is
 the onset, and `in_span`, true when the instance begins (below) at or after the grid's first hour;
 the instances that begin earlier are kept so that their skip and merges can be seen, and the run's
-counts of instances and market events take only `in_span` rows. `grid` has one row per coin per
-UTC hour t of the development span. It dates each instance by begin, the start of its first firing
-window (`fired_ts_ns` - 30 minutes), not by its onset. The onset is the first extreme bar inside
-that window and can sit up to 25 minutes after it opens, so an hour between the two would see part
-of the event's price move and open-interest drop before t. Dated by begin, nothing of a labelled
-event lies before t. For H = 1, 6 and 24 hours:
+counts of instances and market events take only `in_span` rows. A market event that pools
+instances from before the grid's first hour is counted with only its `in_span` instances. `grid`
+has one row per coin per UTC hour t of the development span. It dates each instance by begin, the
+start of its first firing window (`fired_ts_ns` - 30 minutes), not by its onset. The onset is the
+first extreme bar inside that window and can sit up to 25 minutes after it opens, so an hour
+between the two would see part of the event's price move and open-interest drop before t. Dated by
+begin, nothing of a labelled event lies before t. For H = 1, 6 and 24 hours:
 
 - `long_H`, `short_H`: an instance of that kind begins in [t, t + H).
 - `skip`: an instance has its first firing at or before t and its last firing no more than 24
   hours before t, so an episode known at t is under way or just ended. An hour between an
   instance's begin and its first firing is not skipped, since that firing is not known at t: it is
-  an ordinary row, positive only if another instance begins in [t, t + H).
+  an ordinary row, positive only if another instance begins in [t, t + H). In the run there are 398
+  such coin-hours, 395 of them kept as ordinary rows (the other 3 are skipped for an earlier
+  episode), and at most one of those is positive at any horizon. Since they are a few hundred rows
+  among roughly half a million negatives, scoring them as negatives or leaving them out moves an
+  AUC by less than 0.001.
 - `censored_H`: a window closing in [t - 24 hours, t + H + 30 minutes) is not clean, or does not
   exist yet because it closes past the span's end or the coin's last complete bar. The forward part
   holds exactly the windows that begin in [t, t + H), the last of them closing at t + H + 25
   minutes. The backward 24 hours are there because a missing stretch of open interest can hide an
   earlier firing, after which a later firing would look like a new event rather than a skipped
   follow-up. A window is clean when the rule could evaluate it, its day has a threshold, and no
-  kline bar is missing in the 28 days and 30 minutes before it opens, the history its volume median
+  kline bar is missing in the 28 days and 25 minutes before it opens, the history its volume median
   and onset read; that last condition censors only and never changes detection.
 
 Censoring is symmetric: a row with a gap in its horizon is censored even when an instance was found

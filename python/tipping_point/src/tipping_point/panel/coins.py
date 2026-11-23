@@ -137,10 +137,13 @@ def month_volume(data: bytes, month: str) -> float:
 
 
 def quote_volume(get: archive.Get, symbol: str) -> float | None:
-    try:
-        return sum(month_volume(verified(get, kline_url(symbol, m)), m) for m in MONTHS)
-    except ShortMonth:
-        return None
+    total, short = 0.0, False
+    for month in MONTHS:
+        try:
+            total += month_volume(verified(get, kline_url(symbol, month)), month)
+        except ShortMonth:
+            short = True
+    return None if short else total
 
 
 def derive(get: archive.Get, workers: int = fetch.WORKERS) -> dict[str, float]:

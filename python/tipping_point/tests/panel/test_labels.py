@@ -35,8 +35,10 @@ def planted(days: int = 40, seed: int = 3) -> dict[str, np.ndarray]:
     }
 
 
-def plant(columns: dict[str, np.ndarray], day: int, hour: int, side: int = -1) -> None:
-    first = day * DAY + hour * 12
+def plant(
+    columns: dict[str, np.ndarray], day: int, hour: int, side: int = -1, minute: int = 0
+) -> None:
+    first = day * DAY + hour * 12 + minute // 5
     for i in range(first, first + 6):
         columns["close"][i:] *= np.exp(side * 0.01)
         columns["oi"][i:] *= np.exp(-0.005)
@@ -61,6 +63,10 @@ def test_the_windows_are_the_ones_cascade_reads() -> None:
     with np.errstate(invalid="ignore"):
         expected = np.log(columns["close"][k - 1] / columns["close"][k - 7])
     assert np.array_equal(win["price_change"], expected, equal_nan=True)
+    oi = np.where(columns["oi"] > 0, columns["oi"], np.nan)
+    with np.errstate(invalid="ignore"):
+        expected = np.log(oi[k] / oi[k - 6])
+    assert np.array_equal(win["oi_change"], expected, equal_nan=True)
     for since in (0, 29 * DAY, 35 * DAY):
         _, counts = cascade.candidates(columns, cascade.Params(), since)
         assert counts["windows_evaluated"] == int(win["evaluated"][k >= since].sum())
@@ -114,6 +120,23 @@ def test_a_days_threshold_reads_the_evaluated_windows_of_its_90_days() -> None:
     assert rows[99]["windows"] < 90 * DAY - DAY
 
 
+def test_a_days_threshold_forgets_the_windows_closing_before_its_90_days() -> None:
+    columns = planted(days=130)
+    win = labels.windows(columns)
+    d = 125
+    edge = int(np.searchsorted(win["ts_ns"], T0 + (d - 90) * DAY_NS))
+    assert (
+        win["ts_ns"][edge] == T0 + (d - 90) * DAY_NS and win["evaluated"][edge - 1 : edge + 1].all()
+    )
+    row = labels.daily(win, T0, 130)[d]
+    assert row["windows"] == 90 * DAY
+    assert row["sd_ret"] == float(np.std(win["price_change"][edge : edge + 90 * DAY], ddof=1))
+    for i, windows in ((edge, 90 * DAY - 1), (edge - 1, 90 * DAY)):
+        off = {**win, "evaluated": win["evaluated"].copy()}
+        off["evaluated"][i] = False
+        assert labels.daily(off, T0, 130)[d]["windows"] == windows
+
+
 def test_a_days_threshold_does_not_change_when_that_day_or_later_changes() -> None:
     columns = planted(days=70)
     base = labels.daily(labels.windows(columns), T0, 70)
@@ -143,6 +166,40 @@ def test_day_by_day_detection_equals_one_call_when_the_threshold_is_constant() -
     assert per_day.sum() == whole_counts["windows_evaluated"] and not per_day[:since].any()
 
 
+def fired_day(row: dict[str, Any]) -> int:
+    return (row["fired_ts_ns"] - T0) // DAY_NS
+
+
+def test_each_day_finds_only_what_its_own_rule_admits() -> None:
+    columns = planted()
+    for day in range(30, 38):
+        plant(columns, day, 12)
+    strict = cascade.Params(a=0.01, b=1.0, c=0.15, v=3.0)
+    loose = cascade.Params(a=0.01, b=0.02, c=0.15, v=3.0)
+    rules = [None] * 29 + [[strict, loose][d % 2] for d in range(29, 40)]
+    found, _, _ = labels.by_day(columns, rules)
+    whole, _ = cascade.candidates(columns, loose, 29 * DAY)
+    assert {fired_day(r) for r in whole} == set(range(30, 38))
+    assert found == [r for r in whole if fired_day(r) % 2]
+
+
+def test_a_window_across_midnight_takes_its_closing_days_rule_and_merges_across_it() -> None:
+    columns = planted()
+    plant(columns, 34, 23, minute=40)
+    midnight = T0 + 35 * DAY_NS
+    strict = cascade.Params(a=0.01, b=1.0, c=0.15, v=3.0)
+    loose = cascade.Params(a=0.01, b=0.02, c=0.15, v=3.0)
+    whole, _ = cascade.candidates(columns, loose, 29 * DAY)
+    after = [r for r in whole if r["fired_ts_ns"] >= midnight]
+    assert any(r["fired_ts_ns"] - labels.LEAD_NS < midnight < r["fired_ts_ns"] for r in after)
+    assert len(after) < len(whole)
+    for day_34, day_35, kept in ((strict, loose, after), (loose, strict, whole[: -len(after)])):
+        rules = [None] * 29 + [loose] * 5 + [day_34, day_35] + [loose] * 4
+        assert labels.by_day(columns, rules)[0] == kept
+    (row,) = cascade.pool({"X": labels.by_day(columns, [None] * 29 + [loose] * 11)[0]})
+    assert row["fired_ts_ns"] < midnight < row["last_fired_ts_ns"] and row["candidates"] >= 2
+
+
 def thresholded(days: int = 60) -> dict[str, np.ndarray]:
     columns = planted(days=days)
     rows = labels.daily(labels.windows(columns), T0, days)
@@ -166,6 +223,33 @@ def test_detection_starts_before_the_grid_so_an_earlier_episode_is_known() -> No
     assert not any(table["long_24"].to_pylist())
 
 
+def test_a_burst_raises_the_next_days_threshold_and_not_its_own() -> None:
+    columns = planted(days=70)
+    steps = np.zeros(70 * DAY)
+    steps[60 * DAY : 60 * DAY + 144] = np.random.default_rng(7).normal(0, 0.06, 144)
+    columns["close"] *= np.exp(np.cumsum(steps))
+    plant(columns, 60, 18)
+    plant(columns, 61, 12)
+    thresholds, found, _, _ = labels.coin(columns, T0 + 70 * DAY_NS)
+    assert thresholds[60]["b"] < 0.03 and thresholds[61]["b"] > 0.09
+    assert {fired_day(r) for r in found} == {60}
+    lax, _ = cascade.candidates(columns, labels.params(thresholds[60]), 61 * DAY)
+    assert {fired_day(r) for r in lax} == {61}
+
+
+def test_windows_before_the_first_day_with_a_threshold_are_not_clean() -> None:
+    columns = thresholded()
+    thresholds, _, _, coin = labels.coin(columns, T0 + 60 * DAY_NS)
+    first = next(d for d, r in enumerate(thresholds) if r["b"] is not None)
+    start = T0 + first * DAY_NS
+    win = labels.windows(columns)
+    before = win["ts_ns"] < start
+    assert win["evaluated"][before].sum() > DAY
+    assert not coin.clean[before].any() and coin.clean[~before].all()
+    got = labels.grid(start + HOUR * np.arange(-1, 30, dtype=np.int64), coin, [])
+    assert all(hours_where(got[f"censored_{h}"]) == list(range(25)) for h in labels.HORIZONS)
+
+
 def test_a_short_squeeze_within_a_day_of_a_long_cascade_is_part_of_it() -> None:
     columns = thresholded()
     plant(columns, 55, 10)
@@ -178,6 +262,24 @@ def test_a_short_squeeze_within_a_day_of_a_long_cascade_is_part_of_it() -> None:
     assert row["kind"] == cascade.LONG and row["in_span"] and row["candidates"] >= 2
     assert any(table["long_1"].to_pylist())
     assert not any(any(table[f"short_{h}"].to_pylist()) for h in labels.HORIZONS)
+
+
+def test_days_between_losing_and_regaining_a_threshold_detect_nothing_and_censor() -> None:
+    columns = planted(days=160)
+    columns["oi"][52 * DAY : 125 * DAY] = np.nan
+    plant(columns, 135, 12)
+    plant(columns, 155, 12)
+    thresholds, found, _, coin = labels.coin(columns, T0 + 160 * DAY_NS)
+    has = np.array([r["b"] is not None for r in thresholds])
+    assert has[51:120].all() and not has[120:148].any() and has[148:].all()
+    assert {fired_day(r) for r in found} == {155}
+    win = labels.windows(columns)
+    without = (win["ts_ns"] > T0 + 125 * DAY_NS + HOUR) & (win["ts_ns"] < T0 + 148 * DAY_NS)
+    assert win["evaluated"][without].all() and not coin.clean[without].any()
+    hours = T0 + HOUR * np.arange(135 * 24, 153 * 24, dtype=np.int64)
+    got = labels.grid(hours, coin, [])
+    for h in labels.HORIZONS:
+        assert got[f"censored_{h}"][: 13 * 24].all() and not got[f"censored_{h}"][-24:].any()
 
 
 def test_the_coin_reads_and_counts_nothing_from_the_end_on() -> None:
@@ -194,17 +296,22 @@ def test_the_coin_reads_and_counts_nothing_from_the_end_on() -> None:
 
 
 def test_a_missing_bar_in_the_trailing_history_censors_without_changing_detection() -> None:
-    columns = planted(days=90)
-    columns["close"][60 * DAY + 144] = np.nan
+    whole = planted(days=90)
+    plant(whole, 75, 12)
+    columns = {name: values.copy() for name, values in whole.items()}
+    m = 60 * DAY + 144
+    columns["close"][m] = np.nan
     end = T0 + 90 * DAY_NS
     win = labels.windows(columns)
-    _, _, _, coin = labels.coin(columns, end)
-    later, clear = T0 + 70 * DAY_NS, T0 + 89 * DAY_NS + 12 * HOUR
-    i, j = np.searchsorted(coin.windows_ts, [later, clear])
+    _, found, _, coin = labels.coin(columns, end)
+    i, j = np.searchsorted(coin.windows_ts, columns["ts_ns"][[m + 8075, m + 8076]])
     assert win["evaluated"][i] and win["history_gap"][i] and not coin.clean[i]
     assert coin.clean[j] and not win["history_gap"][j]
-    got = labels.grid(np.array([later], np.int64), coin, [])
-    assert all(got[f"censored_{h}"][0] for h in labels.HORIZONS)
+    at = T0 + 75 * DAY_NS + 12 * HOUR
+    assert found == labels.coin(whole, end)[1]
+    assert {(r["fired_ts_ns"] - at) // HOUR for r in found} == {0}
+    got = labels.grid(np.array([at - HOUR, at], np.int64), coin, cascade.pool({"X": found}))
+    assert got["long_1"].any() and all(got[f"censored_{h}"].all() for h in labels.HORIZONS)
 
 
 def cascade_row(kind: str, begin: int, last_fired: int, onset: int | None = None) -> dict[str, Any]:
@@ -254,6 +361,12 @@ def test_an_hour_between_a_window_start_and_its_firing_is_an_ordinary_row() -> N
     assert got["skip"][21]
     on_the_hour = [cascade_row(cascade.LONG, T0 + 19 * HOUR + 30 * MINUTE, 0)]
     assert labels.grid(HOURS, windows_from(), on_the_hour)["skip"][20]
+
+
+def test_an_instance_is_dated_by_its_first_window_not_by_its_onset() -> None:
+    begin, onset = T0 + 19 * HOUR + 45 * MINUTE, T0 + 20 * HOUR + 5 * MINUTE
+    got = labels.grid(HOURS, windows_from(), [cascade_row(cascade.LONG, begin, 0, onset)])
+    assert got["long_1"][19] and not got["long_1"][20]
 
 
 def test_skip_runs_from_the_first_firing_to_a_day_after_the_last() -> None:
