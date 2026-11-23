@@ -40,6 +40,10 @@ def rank(volumes: Mapping[str, float]) -> list[str]:
     absent = [s for s in ALWAYS if s not in volumes]
     if absent:
         raise archive.ArchiveError(f"not eligible: {', '.join(absent)}")
+    if len(volumes) < len(ALWAYS) + OTHERS:
+        raise archive.ArchiveError(
+            f"{len(volumes)} eligible symbols: the panel needs {len(ALWAYS) + OTHERS}"
+        )
     others = sorted((s for s in volumes if s not in ALWAYS), key=lambda s: (-volumes[s], s))
     return [*ALWAYS, *others[:OTHERS]]
 
@@ -111,12 +115,22 @@ def month_volume(data: bytes, month: str) -> float:
     year, number = map(int, month.split("-"))
     after = archive.day_ms(date(year + number // 12, number % 12 + 1, 1))
     total = 0.0
+    seen: set[int] = set()
     for row in csv.reader(io.StringIO(text)):
         if not row or row[0] == "open_time":
             continue
-        if not first <= int(row[0]) < after:
+        stamp = int(row[0])
+        if not first <= stamp < after:
             raise archive.ArchiveError(f"{member}: a row at {row[0]} lies outside {month}")
+        if (stamp - first) % archive.DAY_MS or stamp in seen:
+            raise archive.ArchiveError(f"{member}: the row at {row[0]} is not a new day's start")
+        seen.add(stamp)
         total += float(row[7])
+    days = (after - first) // archive.DAY_MS
+    if len(seen) != days:
+        raise archive.ArchiveError(
+            f"{member}: {len(seen)} daily rows for the {days} days of {month}"
+        )
     return total
 
 

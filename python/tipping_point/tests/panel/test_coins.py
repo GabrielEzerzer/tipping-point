@@ -56,10 +56,18 @@ class Bucket:
         ).encode()
 
 
-def kline_file(symbol: str, month: str, daily: float, header: bool = True) -> bytes:
+def month_days(month: str) -> list[int]:
+    first = date.fromisoformat(month + "-01")
+    after = date(first.year + first.month // 12, first.month % 12 + 1, 1)
+    return list(range((after - first).days))
+
+
+def kline_file(
+    symbol: str, month: str, daily: float, header: bool = True, days: list[int] | None = None
+) -> bytes:
     first = date.fromisoformat(month + "-01")
     rows = ["open_time,open,high,low,close,volume,close_time,quote_volume,count"] if header else []
-    for d in range(28):
+    for d in month_days(month) if days is None else days:
         start = archive.day_ms(first) + d * 86_400_000
         rows.append(f"{start},1,1,1,1,10,{start + 86_399_999},{daily},5,5,{daily / 2},0")
     return zipped(f"{symbol}-1d-{month}.csv", ("\n".join(rows) + "\n").encode())
@@ -79,8 +87,12 @@ def publish(
         bucket.put(f"{coins.METRICS}{symbol}/{symbol}-metrics-{day}.zip", zipped("m.csv", b"x\n"))
 
 
+YEAR_DAYS = sum(len(month_days(m)) for m in coins.MONTHS)
+
+
 @pytest.fixture
-def bucket() -> Bucket:
+def bucket(monkeypatch: pytest.MonkeyPatch) -> Bucket:
+    monkeypatch.setattr(coins, "OTHERS", 2)
     out = Bucket()
     publish(out, "BTCUSDT", 900.0)
     publish(out, "ETHUSDT", 50.0)
@@ -95,21 +107,27 @@ def bucket() -> Bucket:
 
 
 def test_the_rule_keeps_named_symbols_with_every_month_and_both_metrics_days(
-    bucket: Bucket,
+    bucket: Bucket, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     volumes = coins.derive(bucket.get, workers=4)
     assert volumes == {
-        "AAAUSDT": 300.0 * 28 * 12,
-        "BTCUSDT": 900.0 * 28 * 12,
-        "ETHUSDT": 50.0 * 28 * 12,
-        "1000EEEUSDT": 80.0 * 28 * 12,
+        "AAAUSDT": 300.0 * YEAR_DAYS,
+        "BTCUSDT": 900.0 * YEAR_DAYS,
+        "ETHUSDT": 50.0 * YEAR_DAYS,
+        "1000EEEUSDT": 80.0 * YEAR_DAYS,
     }
     assert coins.rank(volumes) == ["BTCUSDT", "ETHUSDT", "AAAUSDT", "1000EEEUSDT"]
+    with monkeypatch.context() as patch:
+        patch.setattr(coins, "OTHERS", 3)
+        with pytest.raises(archive.ArchiveError, match="needs 5"):
+            coins.rank(volumes)
     assert any("marker=" in url for url in bucket.requests), "the listing never paged"
 
 
 def test_rank_puts_btc_and_eth_first_then_the_top_others_by_volume() -> None:
     volumes = {f"C{i:02d}USDT": float(i) for i in range(40)} | {"BTCUSDT": 0.0, "ETHUSDT": 1.0}
+    with pytest.raises(archive.ArchiveError, match="27 eligible symbols: the panel needs 30"):
+        coins.rank({s: volumes[s] for s in ["BTCUSDT", "ETHUSDT", *list(volumes)[:25]]})
     volumes["TIEAUSDT"] = volumes["TIEBUSDT"] = 39.0
     panel = coins.rank(volumes)
     assert panel[:4] == ["BTCUSDT", "ETHUSDT", "C39USDT", "TIEAUSDT"]
@@ -130,6 +148,15 @@ def test_a_row_outside_its_month_is_refused() -> None:
     data = kline_file("AAAUSDT", "2023-02", 1.0)
     with pytest.raises(archive.ArchiveError, match="outside 2023-03"):
         coins.month_volume(data, "2023-03")
+
+
+def test_a_month_needs_one_row_for_each_of_its_days() -> None:
+    assert coins.month_volume(kline_file("A", "2023-02", 2.0), "2023-02") == 2.0 * 28
+    with pytest.raises(archive.ArchiveError, match="27 daily rows for the 28 days"):
+        coins.month_volume(kline_file("A", "2023-02", 1.0, days=list(range(27))), "2023-02")
+    twice = [*range(28), 5]
+    with pytest.raises(archive.ArchiveError, match="not a new day's start"):
+        coins.month_volume(kline_file("A", "2023-02", 1.0, days=twice), "2023-02")
 
 
 def test_no_request_names_a_held_back_day(bucket: Bucket, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,6 +1,6 @@
-# Per-coin cascade thresholds, the pooled cascades and an hourly label grid, as one labels run.
+# Per-coin trailing cascade thresholds, the pooled cascades and an hourly label grid, as one run.
 # Time convention: at hour t a feature reads only bars that start before t and metrics rows stamped
-# at or before t. The grid dates a cascade by its first window's start, so none of it lies before t.
+# at or before t. Thresholds, detection, skip and censoring read nothing at or after their own time.
 
 from __future__ import annotations
 
@@ -25,11 +25,14 @@ SD_OI_MULTIPLE = 3.7
 SD_RET_MULTIPLE = 5.0
 FLOW = 0.15
 VOLUME = 3.0
+TRAILING_DAYS = 90
+MIN_WINDOWS = 28 * bars.DAY_BARS * 0.8
 HORIZONS = (1, 6, 24)
 SKIP_HOURS = 24
+PAST_HOURS = 24
 HOUR_NS = cascade.HOUR_NS
+DAY_NS = bars.DAY_BARS * msvol.BAR_NS
 LEAD_NS = cascade.Params().window * msvol.BAR_NS
-MIN_WINDOWS = 2
 THRESHOLDS = pa.schema(
     [
         ("ts_ns", pa.int64()),
@@ -41,6 +44,7 @@ THRESHOLDS = pa.schema(
         ("b", pa.float64()),
     ]
 )
+CASCADES = cascade.SCHEMA.append(pa.field("in_span", pa.bool_()))
 GRID = pa.schema(
     [
         ("ts_ns", pa.int64()),
@@ -57,8 +61,11 @@ def constants() -> dict[str, Any]:
         "sd_ret_multiple": SD_RET_MULTIPLE,
         "c": FLOW,
         "v": VOLUME,
+        "trailing_days": TRAILING_DAYS,
+        "min_windows": MIN_WINDOWS,
         "horizons_hours": list(HORIZONS),
         "skip_hours": SKIP_HOURS,
+        "past_hours": PAST_HOURS,
     }
 
 
@@ -69,6 +76,9 @@ def windows(
     ts, close, volume = columns["ts_ns"], columns["close"], columns["volume"]
     if np.any(np.diff(ts) != msvol.BAR_NS):
         raise ValueError("bars must lie on a gapless 5-minute grid")
+    if np.any(close <= 0):
+        first = int(ts[np.flatnonzero(close <= 0)[0]])
+        raise ValueError(f"the bar starting at {first} ns closes at zero or below: no log return")
     w, trailing, n = p.window, p.trailing_days * bars.DAY_BARS, len(ts)
     oi = np.where(columns["oi"] > 0, columns["oi"], np.nan)
     taker = np.where(volume == 0, 0.0, columns["taker_buy_share"] * volume)
@@ -87,61 +97,97 @@ def windows(
     no_history = (low < w - 1) | (observed[b - w + 1] == observed[np.maximum(low, 0)])
     no_oi = touching(np.isnan(oi))[k - w]
     no_bar = touching(np.isnan(close) | np.isnan(volume) | np.isnan(taker))[b - w]
+    absent = np.concatenate([[0], np.cumsum(np.isnan(close) | np.isnan(volume))])
+    history_gap = absent[b - w + 1] > absent[np.maximum(low - w, 0)]
     return {
         "ts_ns": ts[k],
         "oi_change": oi_change,
         "price_change": price_change,
         "evaluated": ~no_oi & ~no_bar & ~no_history,
+        "history_gap": history_gap,
     }
 
 
-def thresholds(win: Mapping[str, np.ndarray], first_ns: int, end_ns: int) -> dict[str, Any]:
-    inside = win["evaluated"] & (win["ts_ns"] >= first_ns) & (win["ts_ns"] < end_ns)
-    count = int(inside.sum())
-    if count < MIN_WINDOWS:
-        raise ValueError(f"{count} evaluated windows in the span: too few for a threshold")
-    sd_ret = float(np.std(win["price_change"][inside], ddof=1))
-    sd_oi = float(np.std(win["oi_change"][inside], ddof=1))
-    return {
-        "windows": count,
-        "sd_ret": sd_ret,
-        "sd_oi": sd_oi,
-        "a": SD_OI_MULTIPLE * sd_oi,
-        "b": SD_RET_MULTIPLE * sd_ret,
-    }
+def daily(win: Mapping[str, np.ndarray], first_ns: int, days: int) -> list[dict[str, Any]]:
+    ok = win["evaluated"]
+    ts, ret, oi = win["ts_ns"][ok], win["price_change"][ok], win["oi_change"][ok]
+    out = []
+    for d in range(days):
+        day = first_ns + d * DAY_NS
+        lo, hi = (int(i) for i in np.searchsorted(ts, [day - TRAILING_DAYS * DAY_NS, day]))
+        row: dict[str, Any] = {"ts_ns": day, "windows": hi - lo}
+        if hi - lo < MIN_WINDOWS:
+            row |= {"sd_ret": None, "sd_oi": None, "a": None, "b": None}
+        else:
+            sd_ret = float(np.std(ret[lo:hi], ddof=1))
+            sd_oi = float(np.std(oi[lo:hi], ddof=1))
+            row |= {
+                "sd_ret": sd_ret,
+                "sd_oi": sd_oi,
+                "a": SD_OI_MULTIPLE * sd_oi,
+                "b": SD_RET_MULTIPLE * sd_ret,
+            }
+        out.append(row)
+    return out
 
 
-def params(threshold: Mapping[str, float]) -> cascade.Params:
+def params(threshold: Mapping[str, Any]) -> cascade.Params | None:
+    if threshold["a"] is None:
+        return None
     return cascade.Params(a=threshold["a"], b=threshold["b"], c=FLOW, v=VOLUME)
+
+
+def by_day(
+    columns: Mapping[str, np.ndarray], day_params: Sequence[cascade.Params | None]
+) -> tuple[list[dict[str, Any]], dict[str, int], np.ndarray]:
+    ts = columns["ts_ns"]
+    if len(ts) and int(ts[0]) % DAY_NS:
+        raise ValueError("the bars must start at a UTC midnight")
+    found: list[dict[str, Any]] = []
+    counts: Counter[str] = Counter()
+    evaluated = np.zeros(len(day_params), np.int64)
+    for d, p in enumerate(day_params):
+        first, stop = d * bars.DAY_BARS, min((d + 1) * bars.DAY_BARS, len(ts))
+        if p is None or first >= stop:
+            continue
+        lo = max(first - p.trailing_days * bars.DAY_BARS - 4 * p.window, 0)
+        part = {name: values[lo:stop] for name, values in columns.items()}
+        got, n = cascade.candidates(part, p, first - lo)
+        found += got
+        counts.update(n)
+        evaluated[d] = n["windows_evaluated"]
+    return found, dict(counts), evaluated
 
 
 @dataclass(frozen=True)
 class Coin:
     windows_ts: np.ndarray
-    evaluated: np.ndarray
-    last_end_ns: int
+    clean: np.ndarray
 
 
 def coin(
-    columns: Mapping[str, np.ndarray], first_ns: int, end_ns: int
-) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int], Coin]:
-    win = windows(columns)
-    threshold = thresholds(win, first_ns, end_ns)
-    since = int(np.searchsorted(columns["ts_ns"], first_ns))
-    found, counts = cascade.candidates(columns, params(threshold), since)
-    asked = win["ts_ns"] >= first_ns
-    if counts["windows_evaluated"] != int((win["evaluated"] & asked).sum()):
-        raise RuntimeError("the panel's windows and cascade.candidates' disagree")
+    columns: Mapping[str, np.ndarray], end_ns: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int], Coin]:
+    kept = columns["ts_ns"] < end_ns
+    columns = {name: values[kept] for name, values in columns.items()}
     ts = columns["ts_ns"]
-    complete = np.flatnonzero(~np.isnan(columns["close"]) & (ts < end_ns))
-    last_end = int(ts[complete[-1]]) + msvol.BAR_NS if complete.size else int(first_ns)
-    return threshold, found, counts, Coin(win["ts_ns"], win["evaluated"], last_end)
+    if not len(ts):
+        raise ValueError("no bars before the end of the span")
+    win = windows(columns)
+    days = -(-len(ts) // bars.DAY_BARS)
+    thresholds = daily(win, int(ts[0]), days)
+    day_params = [params(row) for row in thresholds]
+    found, counts, per_day = by_day(columns, day_params)
+    day = (win["ts_ns"] - ts[0]) // DAY_NS
+    has = np.array([p is not None for p in day_params])[day]
+    evaluated = win["evaluated"] & has
+    if not np.array_equal(np.bincount(day[evaluated], minlength=days), per_day):
+        raise RuntimeError("the panel's windows and cascade.candidates' disagree")
+    return thresholds, found, counts, Coin(win["ts_ns"], evaluated & ~win["history_gap"])
 
 
-def grid(
-    hours: np.ndarray, coin: Coin, end_ns: int, rows: Sequence[Mapping[str, Any]]
-) -> dict[str, np.ndarray]:
-    unevaluated = np.concatenate([[0], np.cumsum(~coin.evaluated)])
+def grid(hours: np.ndarray, coin: Coin, rows: Sequence[Mapping[str, Any]]) -> dict[str, np.ndarray]:
+    unclean = np.concatenate([[0], np.cumsum(~coin.clean)])
     begins = {
         kind: np.sort(
             np.array([r["fired_ts_ns"] - LEAD_NS for r in rows if r["kind"] == kind], np.int64)
@@ -149,25 +195,63 @@ def grid(
         for kind in (cascade.LONG, cascade.SHORT)
     }
     out: dict[str, np.ndarray] = {}
+    lo = np.searchsorted(coin.windows_ts, hours - PAST_HOURS * HOUR_NS, "left")
     for h in HORIZONS:
         stop = hours + h * HOUR_NS
-        lo = np.searchsorted(coin.windows_ts, hours + LEAD_NS, "left")
         hi = np.searchsorted(coin.windows_ts, stop + LEAD_NS, "left")
-        gaps = (unevaluated[hi] > unevaluated[lo]) | (hi - lo < h * HOUR_NS // msvol.BAR_NS)
+        need = ((PAST_HOURS + h) * HOUR_NS + LEAD_NS) // msvol.BAR_NS
         for name, kind in (("long", cascade.LONG), ("short", cascade.SHORT)):
             found = np.searchsorted(begins[kind], stop, "left") - np.searchsorted(
                 begins[kind], hours, "left"
             )
             out[f"{name}_{h}"] = found > 0
-        last = stop + LEAD_NS
-        out[f"censored_{h}"] = (last > end_ns) | (last > coin.last_end_ns) | gaps
+        out[f"censored_{h}"] = (unclean[hi] > unclean[lo]) | (hi - lo < need)
     skip = np.zeros(len(hours), bool)
     for r in rows:
-        first = np.searchsorted(hours, r["fired_ts_ns"] - LEAD_NS, "right")
+        first = np.searchsorted(hours, r["fired_ts_ns"], "left")
         last = r["last_fired_ts_ns"] + SKIP_HOURS * HOUR_NS
         skip[first : np.searchsorted(hours, last, "right")] = True
     out["skip"] = skip
     return out
+
+
+def label(
+    found: Mapping[str, Sequence[dict[str, Any]]],
+    coins: Mapping[str, Coin],
+    first_ns: int,
+    end_ns: int,
+) -> tuple[list[dict[str, Any]], pa.Table]:
+    rows = cascade.pool(found)
+    for row in rows:
+        row["in_span"] = row["fired_ts_ns"] - LEAD_NS >= first_ns
+    hours = np.arange(first_ns, end_ns, HOUR_NS, dtype=np.int64)
+    parts = []
+    for symbol in found:
+        mine = [r for r in rows if r["symbol"] == symbol]
+        labels = grid(hours, coins[symbol], mine)
+        parts.append(
+            pa.table({"ts_ns": hours, "symbol": [symbol] * len(hours), **labels}, schema=GRID)
+        )
+    table = pa.concat_tables(parts).sort_by([("ts_ns", "ascending"), ("symbol", "ascending")])
+    return rows, table
+
+
+def row_checks(files: Mapping[str, Any], symbol: str, start: date, end: date) -> dict[str, Any]:
+    out: dict[str, Counter[str]] = {kind: Counter() for kind in archive.KINDS}
+    for source in archive.sources([symbol], start, end):
+        checks = files.get(source.path, {}).get("checks")
+        if not checks:
+            continue
+        total = out[source.kind]
+        total["files"] += 1
+        total["rows"] += checks["rows"]
+        total["files_with_header"] += bool(checks["header"])
+        total["unsorted"] += checks["unsorted"]
+        if "off_grid" in checks:
+            total["off_grid"] += checks["off_grid"]
+            total["duplicate_slots"] += len(checks["duplicates"])
+            total["gap_runs"] += len(checks["gaps"])
+    return {kind: dict(total) for kind, total in out.items()}
 
 
 def uv_lock() -> str:
@@ -195,9 +279,12 @@ def run(
     span.refuse(start, dev_start, end)
     if not start < dev_start <= end:
         raise ValueError(f"the span must run {start} < {dev_start} <= {end}")
+    symbols = list(dict.fromkeys(symbols))
     lock = uv_lock()
     first_ns, end_ns = ns(dev_start), ns(end + timedelta(days=1))
     days = (end - start).days + 1
+    manifest_path = root / "manifest.json"
+    files = io.read_json(manifest_path)["files"] if manifest_path.exists() else {}
     found: dict[str, list[dict[str, Any]]] = {}
     coins: dict[str, Coin] = {}
     rows_thresholds: list[dict[str, Any]] = []
@@ -213,39 +300,39 @@ def run(
             days,
             *(got.columns[(symbol, kind)] for kind in archive.KINDS),
         )
-        threshold, found[symbol], counts, coins[symbol] = coin(columns, first_ns, end_ns)
-        rows_thresholds.append({"ts_ns": first_ns, "symbol": symbol, **threshold})
+        thresholds, found[symbol], counts, coins[symbol] = coin(columns, end_ns)
+        rows_thresholds += [{"symbol": symbol, **row} for row in thresholds]
+        set_days = [row for row in thresholds if row["b"] is not None]
         checks[symbol] = {
             **bar_checks,
             **counts,
             "candidates": len(found[symbol]),
             "files_missing": len(got.missing),
+            "days_with_threshold": len(set_days),
+            "first_threshold_ns": set_days[0]["ts_ns"] if set_days else None,
+            "row_checks": row_checks(files, symbol, start, end),
         }
+        b = [row["b"] for row in set_days]
         log(
-            f"{symbol:<13} sd_ret {threshold['sd_ret']:.5f} sd_oi {threshold['sd_oi']:.5f} "
-            f"a {threshold['a']:.4f} b {threshold['b']:.4f}; {counts['windows_evaluated']} of "
-            f"{counts['windows']} windows evaluated, {len(found[symbol])} candidates"
+            f"{symbol:<13} {len(set_days)} of {len(thresholds)} days with a threshold, "
+            + (f"b {min(b):.4f}..{max(b):.4f}, " if b else "")
+            + f"{counts.get('windows_evaluated', 0)} windows evaluated, "
+            f"{len(found[symbol])} candidates"
         )
-    rows = cascade.pool(found)
-    hours = np.arange(first_ns, end_ns, HOUR_NS, dtype=np.int64)
-    parts = []
-    for symbol in symbols:
-        mine = [r for r in rows if r["symbol"] == symbol]
-        labels = grid(hours, coins[symbol], end_ns, mine)
-        parts.append(
-            pa.table({"ts_ns": hours, "symbol": [symbol] * len(hours), **labels}, schema=GRID)
-        )
-    table_grid = pa.concat_tables(parts).sort_by([("ts_ns", "ascending"), ("symbol", "ascending")])
-    coins_per_event = Counter(r["market_event"] for r in rows)
+    rows, table_grid = label(found, coins, first_ns, end_ns)
+    inside = [r for r in rows if r["in_span"]]
+    coins_per_event = Counter(r["market_event"] for r in inside)
     checks |= {
-        "asset_instances": len(rows),
-        "by_kind": dict(Counter(r["kind"] for r in rows)),
+        "asset_instances": len(inside),
+        "instances_before_span": len(rows) - len(inside),
+        "by_kind": dict(Counter(r["kind"] for r in inside)),
+        "by_symbol": {s: sum(r["symbol"] == s for r in inside) for s in symbols},
         "market_events": len(coins_per_event),
         "market_events_5_or_more": sum(n >= 5 for n in coins_per_event.values()),
         "grid": shares(table_grid),
     }
     run_params = {
-        "symbols": list(symbols),
+        "symbols": symbols,
         "start": start.isoformat(),
         "dev_start": dev_start.isoformat(),
         "end": end.isoformat(),
@@ -253,9 +340,10 @@ def run(
         "cascade": dataclasses.asdict(cascade.Params(c=FLOW, v=VOLUME)) | {"a": None, "b": None},
         "code": {"head": io.code_version()["git_sha"], "uv_lock_sha256": lock},
     }
+    rows_thresholds.sort(key=lambda r: (r["ts_ns"], r["symbol"]))
     tables = {
         "thresholds": pa.Table.from_pylist(rows_thresholds, schema=THRESHOLDS),
-        "cascades": pa.Table.from_pylist(rows, schema=cascade.SCHEMA),
+        "cascades": pa.Table.from_pylist(rows, schema=CASCADES),
         "grid": table_grid,
     }
     run_dir = msvol.write_run(data_dir, tag, tables, run_params, sources, missing, checks)
