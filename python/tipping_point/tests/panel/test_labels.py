@@ -52,6 +52,30 @@ def test_the_windows_are_the_ones_cascade_reads() -> None:
         assert counts["windows"] == int((k >= since).sum())
 
 
+def test_the_evaluated_mask_matches_cascade_window_by_window_at_the_gaps() -> None:
+    columns = planted()
+    columns["oi"][31 * DAY + 5] = np.nan
+    columns["oi"][33 * DAY] = -1.0
+    columns["close"][34 * DAY + 100 : 34 * DAY + 103] = np.nan
+    columns["volume"][2 * DAY : 3 * DAY] = np.nan
+    mask = labels.windows(columns)["evaluated"]
+    first = cascade.Params().window + 1
+    flips = np.flatnonzero(np.diff(mask)) + first
+    assert flips.size >= 7
+    near = np.unique(np.concatenate([flips + d for d in range(-3, 5)]))
+    near = near[(near >= first) & (near < len(columns["ts_ns"]) - 1)]
+
+    def evaluated(since: int) -> int:
+        return cascade.candidates(columns, cascade.Params(), int(since))[1]["windows_evaluated"]
+
+    counts = {s: evaluated(s) for s in np.unique(np.concatenate([near, near + 1]))}
+    expected = np.array([counts[s] - counts[s + 1] for s in near], bool)
+    assert expected.any() and not expected.all()
+    assert np.array_equal(mask[near - first], expected)
+    assert not np.array_equal(np.roll(mask, 1)[near - first], expected)
+    assert not np.array_equal(np.roll(mask, -1)[near - first], expected)
+
+
 def test_thresholds_read_only_the_windows_closing_in_their_span() -> None:
     columns = planted()
     first, end = T0 + 32 * DAY * BAR, T0 + 38 * DAY * BAR

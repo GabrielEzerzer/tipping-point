@@ -33,7 +33,7 @@ def fetch(
     span.refuse(start, end)
     manifest_path = dest / "manifest.json"
     files = io.read_json(manifest_path)["files"] if manifest_path.exists() else {}
-    todo = archive.sources(symbols, start, end)
+    todo = archive.sources(list(dict.fromkeys(symbols)), start, end)
     safe = guarded(get)
     done: dict[str, Any] = {}
     with ThreadPoolExecutor(workers) as pool:

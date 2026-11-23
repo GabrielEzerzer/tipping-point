@@ -150,6 +150,21 @@ def test_no_request_names_a_held_back_day(bucket: Bucket, monkeypatch: pytest.Mo
             assert not any("2024" in url for url in bucket.requests)
 
 
+def test_each_request_is_refused_on_a_held_back_day_past_the_span_check(
+    bucket: Bucket, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(span, "refuse", lambda *days: None)
+    patches = (("YEAR", 2024), ("METRIC_DAYS", (coins.METRIC_DAYS[0], date(2024, 1, 1))))
+    for name, value in patches:
+        with monkeypatch.context() as patch:
+            patch.setattr(coins, name, value)
+            bucket.requests.clear()
+            with pytest.raises(span.HeldBackError):
+                coins.derive(bucket.get, workers=4)
+            assert bucket.requests, name
+            assert not any("2024" in url for url in bucket.requests), name
+
+
 def test_the_committed_panel_follows_the_rule() -> None:
     panel = coins.committed()
     assert len(panel) == len(set(panel)) == 2 + coins.OTHERS

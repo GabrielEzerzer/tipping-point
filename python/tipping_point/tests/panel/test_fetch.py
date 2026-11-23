@@ -97,6 +97,24 @@ def test_a_held_back_day_is_refused_before_any_request(fake: Counted, tmp_path: 
     assert not (tmp_path / "manifest.json").exists()
 
 
+def test_each_request_is_refused_on_a_held_back_day_past_the_span_check(
+    fake: Counted, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(span, "refuse", lambda *days: None)
+    with pytest.raises(span.HeldBackError):
+        fetch.fetch(SYMBOLS, date(2024, 1, 1), date(2024, 1, 1), tmp_path, fake.get, workers=4)
+    assert fake.requests == []
+    assert not (tmp_path / "manifest.json").exists()
+
+
+def test_a_repeated_symbol_is_fetched_once(fake: Counted, tmp_path: Path) -> None:
+    done = fetch.fetch(["ETHUSDT", "BTCUSDT", "ETHUSDT"], FIRST, LAST, tmp_path / "a", fake.get)
+    assert len(fake.requests) == len(set(fake.requests))
+    once = archive.fetch(["ETHUSDT", "BTCUSDT"], FIRST, LAST, tmp_path / "b", fake.get)
+    assert done == once
+    assert next(iter(done)).split("/")[1] == "ETHUSDT"
+
+
 def test_the_command_fetches_and_refuses_the_held_back_span(
     fake: Counted, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
