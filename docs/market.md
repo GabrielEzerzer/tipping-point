@@ -615,8 +615,8 @@ r is the 5-minute log return of close.
   of the metrics files, read from the same verified files); `ls_rel`, `ls` minus its 28-day mean.
   Open interest and the ratio are carried forward at most 12 bars (1 hour) across gaps, and zero or
   negative values count as missing. Binance's metrics files leave the ratio empty from 2021-12-30 to
-  2022-01-19 on every panel coin, so `ls` is missing there and `ls_rel` until its 28-day window
-  holds 5/6 of its values again, on 2022-02-12.
+  2022-01-19 on every panel coin, so `ls` is missing until 2022-01-19 14:00 UTC and `ls_rel` until
+  its 28-day window holds 5/6 of its values again, at 2022-02-11 22:00 UTC.
 
 For every own-coin input x, the market input `m_x` is the mean of x at hour t over the coins that
 have a value, missing when fewer than 15 do.
@@ -659,7 +659,12 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   rows of a drawn block come together. 2000 draws with the plan's seed, the same draws for every
   rung, so each difference is paired. The run gives the estimate, the bootstrap standard error, the
   2.5%, 5% and 97.5% points, the share of draws above zero, the per-fold differences and how many
-  folds are above zero.
+  folds are above zero. A draw that takes no positive or no negative in a quarter cannot score that
+  quarter, and its fold mean averages over the quarters it does score; the column
+  `complete_draws` gives the share of draws that score every quarter, per horizon and side. On
+  the development span it is below 1 on every side, because the first quarter of 2022 has no rows
+  before `ls_rel` returns on 2022-02-11, so a draw can take only its empty blocks, and lowest on
+  the short side, whose last quarters hold few positives.
 
 The bootstrap does not recompute AUCs from rows. An AUC is a sum over (positive, negative) pairs, so
 for each fold, rung and side the run counts once, for every pair of blocks (a, b), the pairs C_ab

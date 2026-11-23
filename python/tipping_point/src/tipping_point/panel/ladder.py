@@ -370,6 +370,7 @@ def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dic
     nfolds = len(nblocks)
     subsets = {"all": np.ones(len(h.ts), bool), "without": ~np.isin(h.symbol, plan.without)}
     score_rows, fold_rows, primary, boot = [], [], {}, {}
+    complete: dict[str, float] = {}
     for name in plan.names:
         for side in plan.sides:
             s, label = h.scores[name][side], h.labels[side]
@@ -397,6 +398,9 @@ def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dic
                     primary[(name, side)] = per_fold
                     with np.errstate(invalid="ignore"):
                         boot[(name, side)] = _nanmean_rows(booted)
+                    if name == plan.names[0]:
+                        scored = np.isfinite(booted[:, np.isfinite(per_fold)])
+                        complete[side] = float(scored.all(axis=1).mean())
                 score_rows.append(
                     {
                         "horizon": horizon,
@@ -440,6 +444,7 @@ def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dic
                     if difference.size
                     else float("nan"),
                     "draws": int(difference.size),
+                    "complete_draws": complete[side],
                     "fold_differences": [float(v) for v in per_fold],
                     "folds_above_zero": int(np.sum(per_fold[both] > 0)),
                     "folds": int(both.sum()),
@@ -520,12 +525,12 @@ def run(
         raise ValueError("the inputs' rows are not the grid's rows")
     external = None
     if plan.external is not None:
-        external = pq.read_table(plan.external[1])
-        hours = external["hour"]
+        hours = pq.read_table(plan.external[1], columns=["hour"])["hour"]
         if pa.types.is_timestamp(hours.type):
             hours = hours.cast(pa.timestamp("ns")).cast(pa.int64())
-        if external.num_rows and max(hours.to_numpy()) >= held:
+        if len(hours) and max(hours.to_numpy()) >= held:
             raise span.HeldBackError("the external scores hold an hour in the held-back test span")
+        external = pq.read_table(plan.external[1])
     values = {n: table[n].to_numpy() for n in plan.columns}
     grid = {n: grid_table[n].to_numpy(zero_copy_only=False) for n in grid_table.column_names}
     out = ladder(values, grid, plan, external, log)
@@ -597,7 +602,10 @@ def report(
         f"drawn with replacement, every coin's rows of a drawn block taken together, "
         f"{plan.draws} draws, seed {plan.seed}. q2.5, q5 and q97.5 are percentiles of the "
         f"bootstrap differences; > 0 is the share of draws above zero; folds > 0 counts quarters "
-        f"where the first beats the second.",
+        f"where the first beats the second. A draw that takes no positive or no negative in a "
+        f"quarter cannot score that quarter, so its fold mean averages over the quarters it does "
+        f"score; complete is the share of draws that score every quarter, the same for every "
+        f"comparison of a side.",
         "",
         f"Wall time {seconds / 60:.1f} minutes.",
     ]
@@ -635,14 +643,16 @@ def report(
                 )
         lines += [
             "",
-            "| comparison | side | estimate | se | q2.5 | q5 | q97.5 | > 0 | folds > 0 |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "| comparison | side | estimate | se | q2.5 | q5 | q97.5 | > 0 | complete "
+            "| folds > 0 |",
+            "|---|---|---|---|---|---|---|---|---|---|",
         ]
         for c in out["comparisons"]:
             if c["horizon"] == horizon:
                 lines.append(
                     f"| {c['first']} - {c['second']} | {c['side']} | {c['estimate']:+.3f} | "
                     f"{_f(c['se'])} | {c['q025']:+.3f} | {c['q05']:+.3f} | {c['q975']:+.3f} | "
-                    f"{_f(c['above_zero'])} | {c['folds_above_zero']} of {c['folds']} |"
+                    f"{_f(c['above_zero'])} | {_f(c['complete_draws'])} | "
+                    f"{c['folds_above_zero']} of {c['folds']} |"
                 )
     return "\n".join(lines) + "\n"

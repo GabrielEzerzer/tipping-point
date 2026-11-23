@@ -123,7 +123,7 @@ def _trailing_sums(window: int, *columns: np.ndarray) -> list[np.ndarray]:
 
 def rolling_variance(x: np.ndarray, window: int) -> np.ndarray:
     valid = np.isfinite(x)
-    y = np.where(valid, x - np.mean(x[valid]) if valid.any() else 0.0, 0.0)
+    y = np.where(valid, x, 0.0)
     n, s1, s2 = _trailing_sums(window, valid.astype(np.float64), y, y * y)
     with np.errstate(divide="ignore", invalid="ignore"):
         var = (s2 - s1 * s1 / n) / (n - 1)
@@ -132,7 +132,7 @@ def rolling_variance(x: np.ndarray, window: int) -> np.ndarray:
 
 def rolling_autocorrelation(x: np.ndarray, window: int) -> np.ndarray:
     valid = np.isfinite(x)
-    y = np.where(valid, x - np.mean(x[valid]) if valid.any() else 0.0, 0.0)
+    y = np.where(valid, x, 0.0)
     pair = np.zeros(len(x), bool)
     pair[1:] = valid[1:] & valid[:-1]
     a, b = np.zeros(len(x)), np.zeros(len(x))

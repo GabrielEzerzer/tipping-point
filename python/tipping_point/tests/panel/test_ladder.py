@@ -129,6 +129,34 @@ def test_folds_are_calendar_quarters_and_training_keeps_28_days_away() -> None:
     assert ladder.blocks_per_fold(edges, 14).tolist() == [7] * 8
 
 
+def test_the_left_out_quarter_is_fitted_without_its_rows_or_its_gap(tmp_path: Path) -> None:
+    plan = ladder.load(plan_file(tmp_path))
+    edges = ladder.bounds(plan)
+    rng = np.random.default_rng(3)
+    ts = labels.ns(date(2022, 1, 1)) + HOUR * np.arange(365 * 24, dtype=np.int64)
+    x = rng.normal(size=(len(ts), len(plan.columns)))
+    lift = 1.5 * x[:, 0]
+    y = {
+        "long": rng.random(len(ts)) < 1 / (1 + np.exp(2.0 - lift)),
+        "short": rng.random(len(ts)) < 1 / (1 + np.exp(2.0 + lift)),
+    }
+    fold, _ = ladder.folds(ts, edges, plan.block_days)
+    base = ladder.out_of_fold(x, y, ts, fold, edges, plan, lambda _: None)
+    gap = plan.gap_days * DAY
+    left_out = fold == 1
+    near = (ts >= edges[1] - gap) & (ts < edges[2] + gap) & ~left_out
+    planted = near | (left_out & (np.arange(len(ts)) % 2 == 0))
+    moved = x.copy()
+    moved[planted] = 50.0 * np.sign(rng.normal(size=(int(planted.sum()), x.shape[1])))
+    flipped = {side: np.where(near | left_out, ~v, v) for side, v in y.items()}
+    got = ladder.out_of_fold(moved, flipped, ts, fold, edges, plan, lambda _: None)
+    kept = left_out & ~planted
+    assert near.sum() > 0 and kept.sum() > 1000
+    for rung in plan.names:
+        for side in ("long", "short"):
+            assert np.array_equal(got[rung][side][kept], base[rung][side][kept]), (rung, side)
+
+
 def test_every_rung_is_scored_on_one_common_row_set() -> None:
     plan = ladder.load()
     values, grid = world(days=3)
@@ -238,6 +266,15 @@ def test_a_planted_signal_one_rung_sees_and_a_null(tmp_path: Path) -> None:
     assert oof.num_rows == out["accounting"][24][-1]["rows"]
     p = {s: oof[f"vol+price:{s}"].to_numpy() for s in ("long", "short", "any")}
     assert np.allclose(p["any"], 1 - (1 - p["long"]) * (1 - p["short"]))
+    assert seen["complete_draws"] == compared(out, "vol+price", "short")["complete_draws"] == 1.0
+    q4 = np.flatnonzero(grid["short_24"] & (grid["ts_ns"] >= labels.ns(date(2022, 10, 1))))
+    rare = grid["short_24"].copy()
+    rare[q4[2:]] = False
+    out = ladder.ladder(values, dict(grid, short_24=rare), ladder.load(plan_file(tmp_path)))
+    complete = compared(out, "vol+price", "short")["complete_draws"]
+    assert 0.0 < complete < 1.0
+    assert compared(out, "classic", "short")["complete_draws"] == complete
+    assert compared(out, "vol+price", "long")["complete_draws"] == 1.0
 
 
 def external_table(values: dict, grid: dict, sides: list[str], drop: int = 0) -> pa.Table:
@@ -339,6 +376,11 @@ def test_the_ladder_refuses_the_held_back_span(tmp_path: Path) -> None:
     shifted = write_runs(tmp_path / "c", values, grid)
     with pytest.raises(span.HeldBackError):
         ladder.run(shifted, tmp_path / "c", plan, "x")
+    hours = np.array([labels.ns(date(2022, 1, 1)), labels.ns(date(2024, 1, 1))], np.int64)
+    pq.write_table(pa.table({"hour": hours}), tmp_path / "late.parquet")
+    extra = '\n[external]\nname = "late"\npath = "late.parquet"\n'
+    with pytest.raises(span.HeldBackError):
+        ladder.run(early, tmp_path / "a", plan_file(tmp_path, extra), "x")
     for folder in ("a", "b", "c"):
         assert not (tmp_path / folder / "panel-ladder").exists()
 

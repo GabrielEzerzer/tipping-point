@@ -3,6 +3,7 @@
 # command on a fake archive with its held-back refusal.
 
 import json
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
@@ -49,6 +50,14 @@ def gapped(seed: int = 5) -> tuple[dict[str, np.ndarray], np.ndarray]:
     return columns, ratio
 
 
+def ticked(seed: int = 5) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    columns, ratio = gapped(seed)
+    rng = np.random.default_rng(seed + 2)
+    path = 100 * np.exp(np.cumsum(rng.normal(0, 0.0005, len(ratio))))
+    columns["close"] = np.where(np.isfinite(columns["close"]), 0.1 * np.round(path / 0.1), np.nan)
+    return columns, ratio
+
+
 STOPS = 12 * np.arange(30 * 24, 40 * 24, 5)
 
 
@@ -56,8 +65,14 @@ def same(a: float, b: float) -> bool:
     return bool(np.isnan(a) and np.isnan(b)) or a == b
 
 
-def test_no_input_reads_a_bar_starting_at_or_after_t_or_a_row_stamped_after_t() -> None:
-    columns, ratio = gapped()
+@pytest.mark.parametrize("series", [gapped, ticked])
+def test_no_input_reads_a_bar_starting_at_or_after_t_or_a_row_stamped_after_t(
+    series: Callable[[], tuple[dict[str, np.ndarray], np.ndarray]],
+) -> None:
+    columns, ratio = series()
+    if series is ticked:
+        returns = np.diff(np.log(columns["close"]))
+        assert (returns == 0).mean() > 0.3
     base = inputs.coin(columns, ratio, STOPS, M, B)
     assert all(np.isfinite(base[name]).mean() > 0.5 for name in inputs.OWN)
     rng = np.random.default_rng(7)
