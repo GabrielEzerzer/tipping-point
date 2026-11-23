@@ -274,6 +274,14 @@
       "test": "python/tipping_point/tests/panel/test_ladder.py"
     },
     {
+      "name": "Panel sequence models",
+      "description": "Trains a JEPA, its untrained twin and a supervised model on the last 336 hours of a ladder rung's panel inputs inside each quarter fold, probes the representations and scores them on the ladder's common rows, from a plan file.",
+      "command": "uv run python -m tipping_point.panel sequence --inputs <run id>",
+      "inputs": "a panel inputs run, its labels run and a plan file (default panel/sequence.toml, which names its ladder plan)",
+      "outputs": "<data dir>/panel-sequence/<run_id>/ holding scores, diagnostics, loss curves, per-fold AUCs, row accounting and report.md",
+      "test": "python/tipping_point/tests/panel/test_sequence.py"
+    },
+    {
       "name": "Book feature range",
       "description": "Imports and reduces the Bybit order-book days of a range into per-day feature files.",
       "command": "uv run python -m tipping_point.market book --range training",

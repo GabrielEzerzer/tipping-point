@@ -1,0 +1,50 @@
+ladder = "ladder-sequence.toml"
+variants = ["full", "vol"]
+models = ["jepa", "twin", "supervised"]
+seeds = [1, 2, 3]
+folds = []
+target = "future"
+threads = 4
+
+[window]
+length = 336
+future = 24
+shifts = [6, 24]
+
+[encoder]
+patch = 4
+width = 32
+conv_blocks = 2
+attention_blocks = 2
+heads = 4
+kernel = 7
+expansion = 4
+
+[predictor]
+hidden = 64
+
+[jepa]
+steps = 3000
+batch = 256
+lr = 1e-3
+final_lr = 1e-5
+warmup = 200
+weight_decay = 0.05
+curve_every = 50
+momentum_start = 0.996
+momentum_end = 1.0
+prediction = 1.0
+variance = 1.0
+covariance = 0.04
+
+[supervised]
+steps = 3000
+batch = 256
+lr = 1e-3
+final_lr = 1e-5
+warmup = 200
+weight_decay = 0.05
+curve_every = 50
+
+[probe]
+batch = 2048

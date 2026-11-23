@@ -36,6 +36,12 @@ Command line: python -m tipping_point.panel <command> [options]
           run (--inputs) and its labels run, out of fold by calendar quarter, with a joint block
           bootstrap for each comparison, as a run in <data dir>/panel-ladder/<run_id>/ with the
           tables oof, scores, folds, comparisons and rows, and report.md
+  sequence
+          train the sequence models of a plan file (--plan, default panel/sequence.toml) on an
+          inputs run (--inputs): a JEPA, its untrained twin and a supervised model on the last
+          336 hours of a ladder rung's inputs, inside each quarter fold, with logistic probes on
+          the JEPA's and twin's representations, as a run in <data dir>/panel-sequence/<run_id>/
+          with the tables scores, diagnostics, curves, folds and rows, and report.md
 
 Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
 data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
@@ -92,6 +98,13 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--tag", default="ladder", help="the run id's tag (default ladder)")
     p.set_defaults(command=_ladder)
+
+    p = sub.add_parser("sequence", help="train and score a plan's sequence models on an inputs run")
+    p.add_argument("--inputs", required=True, help="an inputs run id, or its folder")
+    p.add_argument("--plan", type=Path, default=None, help="default panel/sequence.toml")
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    p.add_argument("--tag", default="sequence", help="the run id's tag (default sequence)")
+    p.set_defaults(command=_sequence)
     return parser
 
 
@@ -191,6 +204,21 @@ def _ladder(args: argparse.Namespace) -> int:
         _run_dir(args.data_dir, "panel-inputs", args.inputs),
         args.data_dir,
         args.plan,
+        args.tag,
+        log=lambda line: print(line, flush=True),
+    )
+    print(f"{out['seconds'] / 60:.1f} minutes")
+    print(run_dir)
+    return 0
+
+
+def _sequence(args: argparse.Namespace) -> int:
+    from . import sequence
+
+    run_dir, out = sequence.run(
+        _run_dir(args.data_dir, "panel-inputs", args.inputs),
+        args.data_dir,
+        args.plan or sequence.PLAN,
         args.tag,
         log=lambda line: print(line, flush=True),
     )
