@@ -1,10 +1,11 @@
 # Model inputs per coin and UTC hour t of a labels grid (docs/market.md, "Coin panel"). Timing rule:
-# an input at t reads only 5-minute bars that start before t and metrics or funding rows stamped at
-# or before t. tests/panel/test_inputs.py changes every later value and checks each row stays put.
+# at t an input reads bars starting before t, open interest stamped at or before t, and the ratio
+# and funding of bar t - 5 min. tests/panel/test_inputs.py checks that no later data is read.
 
 from __future__ import annotations
 
 import zipfile
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
+from numpy.lib.stride_tricks import sliding_window_view
 
 from ..ews.trend import kendall_tau
 from ..ising import io
@@ -24,6 +26,8 @@ BAR_NS = labels.HOUR_NS // 12
 HOUR_BARS = 12
 WINDOWS = {"1h": 12, "6h": 72, "24h": 288, "7d": 2016, "28d": 8064}
 CARRY_BARS = 12
+LOOKBACK_BARS = WINDOWS["28d"] + 1 + CARRY_BARS
+LOOKBACK_NS = LOOKBACK_BARS * BAR_NS
 MARKET_MIN = 15
 TAU_BARS = (72, 288)
 TAU_HOURS = (84, 168)
@@ -70,28 +74,43 @@ def enough(count: np.ndarray, window: int) -> np.ndarray:
     return 6 * count >= 5 * window
 
 
-def mean(x: np.ndarray, stop: np.ndarray, window: int) -> np.ndarray:
+def _running(x: np.ndarray) -> np.ndarray:
+    return np.concatenate([[0], np.cumsum(x)])
+
+
+def mean(
+    x: np.ndarray, stop: np.ndarray, window: int, observed: np.ndarray | None = None
+) -> np.ndarray:
     finite = np.isfinite(x)
-    sums = np.concatenate([[0.0], np.cumsum(np.where(finite, x, 0.0))])
-    counts = np.concatenate([[0], np.cumsum(finite)])
+    sums, counts = _running(np.where(finite, x, 0.0)), _running(finite)
+    seen = counts if observed is None else _running(observed & finite)
     out = np.full(len(stop), np.nan)
     ok = stop >= window
     lo, hi = stop[ok] - window, stop[ok]
-    n = counts[hi] - counts[lo]
+    n, present = counts[hi] - counts[lo], seen[hi] - seen[lo]
     with np.errstate(divide="ignore", invalid="ignore"):
-        out[ok] = np.where(enough(n, window), (sums[hi] - sums[lo]) / n, np.nan)
+        out[ok] = np.where(enough(present, window), (sums[hi] - sums[lo]) / n, np.nan)
     return out
 
 
-def windowed(x: np.ndarray, stop: np.ndarray, window: int, reduce: Reduce) -> np.ndarray:
+def windowed(
+    x: np.ndarray,
+    stop: np.ndarray,
+    window: int,
+    reduce: Reduce,
+    observed: np.ndarray | None = None,
+) -> np.ndarray:
     out = np.full(len(stop), np.nan)
     ok = np.flatnonzero(stop >= window)
     step, offsets = max(1, CHUNK // window), np.arange(window)
     for i in range(0, len(ok), step):
         rows = ok[i : i + step]
-        block = x[(stop[rows] - window)[:, None] + offsets]
-        count = np.isfinite(block).sum(axis=1)
-        good = enough(count, window)
+        where = (stop[rows] - window)[:, None] + offsets
+        block = x[where]
+        finite = np.isfinite(block)
+        count = finite.sum(axis=1)
+        present = count if observed is None else (observed[where] & finite).sum(axis=1)
+        good = enough(present, window)
         if good.any():
             out[rows[good]] = reduce(block[good], count[good])
     return out
@@ -111,41 +130,54 @@ def median(block: np.ndarray, count: np.ndarray) -> np.ndarray:
     return 0.5 * (ordered[rows, (count - 1) // 2] + ordered[rows, count // 2])
 
 
-def _trailing_sums(window: int, *columns: np.ndarray) -> list[np.ndarray]:
-    out = []
-    for column in columns:
-        c = np.concatenate([[0.0], np.cumsum(column)])
-        sums = np.full(len(column), np.nan)
-        sums[window - 1 :] = c[window:] - c[:-window]
-        out.append(sums)
+def _sorted_sum(values: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    ordered = np.sort(np.where(keep, values, np.inf), axis=1)
+    return np.where(np.isfinite(ordered), ordered, 0.0).sum(axis=1)
+
+
+def _spread(values: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    high = np.where(keep, values, -np.inf).max(axis=1)
+    return high > np.where(keep, values, np.inf).min(axis=1)
+
+
+def _per_window(x: np.ndarray, window: int, stat: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
+    out = np.full(len(x), np.nan)
+    if len(x) < window:
+        return out
+    view = sliding_window_view(x, window)
+    step = max(1, CHUNK // window)
+    for lo in range(0, len(view), step):
+        block = view[lo : lo + step]
+        out[lo + window - 1 : lo + window - 1 + len(block)] = stat(block)
     return out
 
 
 def rolling_variance(x: np.ndarray, window: int) -> np.ndarray:
-    valid = np.isfinite(x)
-    y = np.where(valid, x, 0.0)
-    n, s1, s2 = _trailing_sums(window, valid.astype(np.float64), y, y * y)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        var = (s2 - s1 * s1 / n) / (n - 1)
-    return np.where(enough(n, window), np.maximum(var, 0.0), np.nan)
+    def stat(block: np.ndarray) -> np.ndarray:
+        keep = np.isfinite(block)
+        n = keep.sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            m = _sorted_sum(block, keep) / n
+            var = _sorted_sum((block - m[:, None]) ** 2, keep) / (n - 1)
+        return np.where(enough(n, window) & _spread(block, keep), var, np.nan)
+
+    return _per_window(x, window, stat)
 
 
 def rolling_autocorrelation(x: np.ndarray, window: int) -> np.ndarray:
-    valid = np.isfinite(x)
-    y = np.where(valid, x, 0.0)
-    pair = np.zeros(len(x), bool)
-    pair[1:] = valid[1:] & valid[:-1]
-    a, b = np.zeros(len(x)), np.zeros(len(x))
-    a[1:], b[1:] = np.where(pair[1:], y[:-1], 0.0), np.where(pair[1:], y[1:], 0.0)
-    pairs = window - 1
-    n, sa, sb, saa, sbb, sab = _trailing_sums(
-        pairs, pair.astype(np.float64), a, b, a * a, b * b, a * b
-    )
-    with np.errstate(divide="ignore", invalid="ignore"):
-        va, vb = saa - sa * sa / n, sbb - sb * sb / n
-        r = (sab - sa * sb / n) / np.sqrt(va * vb)
-    r[: window - 1] = np.nan
-    return np.where(enough(n, pairs) & (va > 0) & (vb > 0), r, np.nan)
+    def stat(block: np.ndarray) -> np.ndarray:
+        a, b = block[:, :-1], block[:, 1:]
+        keep = np.isfinite(a) & np.isfinite(b)
+        n = keep.sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            da = a - (_sorted_sum(a, keep) / n)[:, None]
+            db = b - (_sorted_sum(b, keep) / n)[:, None]
+            va, vb = _sorted_sum(da * da, keep), _sorted_sum(db * db, keep)
+            r = _sorted_sum(da * db, keep) / np.sqrt(va * vb)
+        ok = enough(n, window - 1) & _spread(a, keep) & _spread(b, keep) & (va > 0) & (vb > 0)
+        return np.where(ok, r, np.nan)
+
+    return _per_window(x, window, stat)
 
 
 def trailing_tau(v: np.ndarray, stop: np.ndarray, window: int) -> np.ndarray:
@@ -229,17 +261,22 @@ def coin(
         out["var_tau_7d"] = trailing_tau(rolling_variance(hr, roll), hour, span_hours)
         out["ac1_tau_7d"] = trailing_tau(rolling_autocorrelation(hr, roll), hour, span_hours)
 
-        oi = carried(columns["oi"])
+        raw = columns["oi"]
+        oi = carried(raw)
         now = oi[stop]
         out["oi_24h"] = np.log(now / at(oi, stop - 288))
         out["oi_7d"] = np.log(now / at(oi, stop - 2016))
-        out["oi_vs_28d"] = np.log(now / windowed(oi, stop + 1, 8064, median))
+        seen = np.isfinite(raw) & (raw > 0)
+        out["oi_vs_28d"] = np.log(now / windowed(oi, stop + 1, 8064, median, seen))
         funding = columns["funding_rate"]
-        out["funding"] = funding[stop]
-        out["funding_rel"] = funding[stop] - mean(funding, stop + 1, 8064)
+        out["funding"] = funding[stop - 1]
+        hourly = funding[HOUR_BARS - 1 :: HOUR_BARS]
+        out["funding_rel"] = funding[stop - 1] - mean(
+            hourly, stop // HOUR_BARS, WINDOWS["28d"] // HOUR_BARS
+        )
         ls = np.log(carried(ratio))
-        out["ls"] = ls[stop]
-        out["ls_rel"] = ls[stop] - mean(ls, stop + 1, 8064)
+        out["ls"] = ls[stop - 1]
+        out["ls_rel"] = ls[stop - 1] - mean(ls, stop, 8064, np.isfinite(ratio) & (ratio > 0))
     return {name: np.where(np.isfinite(out[name]), out[name], np.nan) for name in OWN}
 
 
@@ -282,8 +319,11 @@ def read_ratio(path: Path) -> dict[str, np.ndarray]:
                 timestamp_parsers=["%Y-%m-%d %H:%M:%S"],
             ),
         )
-    except (zipfile.BadZipFile, pa.ArrowInvalid, KeyError) as error:
+    except (zipfile.BadZipFile, zlib.error, EOFError, pa.ArrowInvalid, KeyError) as error:
         raise archive.ArchiveError(f"{path}: {error}") from error
+    nulls = table["create_time"].null_count
+    if nulls:
+        raise archive.ArchiveError(f"{path}: {nulls} rows have no create_time")
     stamps = table["create_time"].to_numpy().astype("datetime64[ms]").astype(np.int64)
     ratio = table["count_long_short_ratio"].to_numpy(zero_copy_only=False).astype(np.float64)
     return {"create_time": stamps, "count_long_short_ratio": ratio}
@@ -321,6 +361,7 @@ def labels_run(path: Path) -> dict[str, Any]:
     manifest = io.read_json(path / "manifest.json")
     complete = io.read_json(path / "complete.json")
     grid_file = next(f for f in complete["files"] if f.startswith("grid/"))
+    thresholds_file = next(f for f in complete["files"] if f.startswith("thresholds/"))
     return {
         "run_id": manifest["run_id"],
         "params": params,
@@ -329,7 +370,9 @@ def labels_run(path: Path) -> dict[str, Any]:
         "end": days[2],
         "grid_file": grid_file,
         "grid_sha256": complete["files"][grid_file],
-        "thresholds_file": next(f for f in complete["files"] if f.startswith("thresholds/")),
+        "thresholds_file": thresholds_file,
+        "thresholds_sha256": complete["files"][thresholds_file],
+        "clean": complete.get("clean") is True,
     }
 
 
@@ -341,11 +384,17 @@ def run(
     log: Callable[[str], None] = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
     source = labels_run(labels_dir)
+    if not source["clean"]:
+        raise archive.ArchiveError(f"{labels_dir}: complete.json does not mark the run clean")
     grid_path = labels_dir / source["grid_file"]
-    if store.sha256(grid_path) != source["grid_sha256"]:
-        raise archive.ArchiveError(f"{grid_path}: its sha256 differs from complete.json's")
+    thresholds_path = labels_dir / source["thresholds_file"]
+    for path in (grid_path, thresholds_path):
+        store.refuse_held_back(path)
+    for path, key in ((grid_path, "grid_sha256"), (thresholds_path, "thresholds_sha256")):
+        if store.sha256(path) != source[key]:
+            raise archive.ArchiveError(f"{path}: its sha256 differs from complete.json's")
     grid = pq.read_table(grid_path, columns=["ts_ns", "symbol"])
-    thresholds = pq.read_table(labels_dir / source["thresholds_file"]).to_pylist()
+    thresholds = pq.read_table(thresholds_path).to_pylist()
     b = {row["symbol"]: row["b"] for row in thresholds}
     symbols = list(source["params"]["symbols"])
     start, end = source["start"], source["end"]
@@ -354,6 +403,8 @@ def run(
     if hours.size and hours[-1] >= labels.ns(span.HELD_BACK):
         raise span.HeldBackError("the grid holds an hour in the held-back test span")
     start_ns = labels.ns(start)
+    if np.any((hours - start_ns) % BAR_NS) or np.any(hours <= start_ns):
+        raise ValueError("every grid hour must lie on the bar grid after the span starts")
     stop = (hours - start_ns) // BAR_NS
     days = (end - start).days + 1
     own: list[dict[str, np.ndarray]] = []
@@ -361,10 +412,15 @@ def run(
     sources: list[dict[str, Any]] = []
     for symbol in symbols:
         got = archive.collect([symbol], start, end, root)
+        unfunded = [url for url in got.missing if "/fundingRate/" in url]
+        if unfunded:
+            raise archive.ArchiveError(f"{symbol}: funding files missing in the span: {unfunded}")
         sources += got.sources
         columns, _ = bars.bars(
             archive.day_ms(start), days, *(got.columns[(symbol, k)] for k in archive.KINDS)
         )
+        if stop.size and stop[-1] >= len(columns["close"]):
+            raise ValueError("the grid holds an hour after the span's last bar")
         ratio = on_grid(
             ratios(root, symbol, start, end), archive.day_ms(start), len(columns["ts_ns"])
         )
@@ -394,6 +450,10 @@ def run(
     run_params = {
         "labels_run": source["run_id"],
         "labels_grid": {"file": source["grid_file"], "sha256": source["grid_sha256"]},
+        "labels_thresholds": {
+            "file": source["thresholds_file"],
+            "sha256": source["thresholds_sha256"],
+        },
         "symbols": symbols,
         "start": start.isoformat(),
         "dev_start": source["dev_start"].isoformat(),

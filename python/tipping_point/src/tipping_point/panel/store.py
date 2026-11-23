@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 
 from .. import __version__, engine
 from ..ising import io
+from . import labels, span
 
 
 def sha256(path: Path) -> str:
@@ -61,6 +62,21 @@ def write(
     }
     io.write_json(run_dir / "complete.json", record)
     return run_dir
+
+
+def refuse_held_back(path: Path) -> None:
+    meta = pq.ParquetFile(path).metadata
+    index = meta.schema.names.index("ts_ns")
+    held = labels.ns(span.HELD_BACK)
+    for g in range(meta.num_row_groups):
+        group = meta.row_group(g)
+        if group.num_rows == 0:
+            continue
+        stats = group.column(index).statistics
+        if stats is None or not stats.has_min_max or not isinstance(stats.max, int):
+            raise span.HeldBackError(f"{path}: its metadata gives no bounds for ts_ns")
+        if stats.max >= held:
+            raise span.HeldBackError(f"{path}: ts_ns reaches the held-back test span")
 
 
 def read(run_dir: Path, name: str) -> pa.Table:

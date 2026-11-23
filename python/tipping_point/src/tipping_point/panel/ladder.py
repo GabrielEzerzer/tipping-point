@@ -1,6 +1,6 @@
-# The ladder: nested sets of panel inputs fitted out of fold by calendar quarter and scored on one
-# common row set, all from a plan file (ladder.toml is the development plan). Comparisons carry a
-# joint block bootstrap whose AUCs come from per-block pair counts (docs/market.md, "Coin panel").
+# The ladder: nested sets of panel inputs fitted out of fold by calendar quarter, each quarter left
+# out and forward only, scored on one common row set from a plan file (ladder.toml). Comparisons
+# carry a joint block bootstrap whose AUCs come from per-block pair counts (docs/market.md).
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from . import inputs, labels, span, store
 
 PLAN = Path(__file__).with_name("ladder.toml")
 SIDES = ("long", "short", "any")
+SCHEMES = ("loqo", "forward")
 DAY_NS = 24 * labels.HOUR_NS
 QUANTILES = (0.025, 0.05, 0.975)
 NEWTON_STEPS = 100
@@ -54,12 +55,13 @@ class Plan:
     c: float
     clip: float
     gap_days: int
+    forward_first: int
     block_days: int
     draws: int
     seed: int
     rungs: tuple[Rung, ...]
     comparisons: tuple[tuple[str, str], ...]
-    external: tuple[str, Path] | None = None
+    external: tuple[str, Path, str] | None = None
 
     @property
     def columns(self) -> tuple[str, ...]:
@@ -69,6 +71,18 @@ class Plan:
     def names(self) -> tuple[str, ...]:
         extra = (self.external[0],) if self.external else ()
         return (*(rung.name for rung in self.rungs), *extra)
+
+    def scored_names(self, scheme: str) -> tuple[str, ...]:
+        extra = (self.external[0],) if self.external and self.external[2] == scheme else ()
+        return (*(rung.name for rung in self.rungs), *extra)
+
+    def first_fold(self, scheme: str) -> int:
+        return self.forward_first if scheme == "forward" else 0
+
+
+def needed_gap_ns(horizons: Sequence[int]) -> int:
+    longest = max(horizons, default=0) * labels.HOUR_NS
+    return inputs.LOOKBACK_NS + longest + labels.LEAD_NS + labels.SKIP_HOURS * labels.HOUR_NS
 
 
 def load(path: Path = PLAN) -> Plan:
@@ -83,27 +97,54 @@ def load(path: Path = PLAN) -> Plan:
         c=float(raw["model"]["c"]),
         clip=float(raw["model"]["clip"]),
         gap_days=int(raw["folds"]["gap_days"]),
+        forward_first=int(raw["folds"]["forward_first"]),
         block_days=int(raw["bootstrap"]["block_days"]),
         draws=int(raw["bootstrap"]["draws"]),
         seed=int(raw["bootstrap"]["seed"]),
         rungs=tuple(
-            Rung(r["name"], tuple(r["groups"]), tuple(r.get("own_only", ()))) for r in raw["rungs"]
+            Rung(r["name"], tuple(r["groups"]), tuple(r.get("own_only", ())))
+            for r in raw.get("rungs", ())
         ),
         comparisons=tuple((c["first"], c["second"]) for c in raw.get("comparisons", ())),
         external=None
         if external is None
-        else (external["name"], (path.parent / external["path"]).resolve()),
+        else (external["name"], (path.parent / external["path"]).resolve(), external["scheme"]),
     )
     span.refuse(plan.start, plan.end)
     problems = [f"group {g}" for r in plan.rungs for g in r.groups if g not in inputs.GROUPS]
+    problems += [
+        f"group listed twice in {r.name}" for r in plan.rungs if len(set(r.groups)) < len(r.groups)
+    ]
     problems += [
         f"own-only {g} of {r.name}" for r in plan.rungs for g in r.own_only if g not in r.groups
     ]
     problems += [f"side {s}" for s in plan.sides if s not in SIDES]
     problems += [f"horizon {h}" for h in plan.horizons if h not in labels.HORIZONS]
     problems += [f"comparison name {n}" for c in plan.comparisons for n in c if n not in plan.names]
+    if plan.external is not None and plan.external[2] not in SCHEMES:
+        problems.append(f"external scheme {plan.external[2]}")
+    if not plan.rungs:
+        problems.append("an empty rung list")
+    for name, value in (("c", plan.c), ("clip", plan.clip)):
+        if not value > 0:
+            problems.append(f"{name} = {value} (must be above 0)")
+    for name, value in (("block_days", plan.block_days), ("draws", plan.draws)):
+        if value <= 0:
+            problems.append(f"{name} = {value} (must be above 0)")
+    if plan.gap_days < 0:
+        problems.append(f"gap_days = {plan.gap_days} (must not be negative)")
+    elif plan.gap_days * DAY_NS < needed_gap_ns(plan.horizons):
+        days = needed_gap_ns(plan.horizons) / DAY_NS
+        problems.append(
+            f"gap_days = {plan.gap_days}, shorter than the {days:.2f} days that the inputs' "
+            "look-back, the longest horizon and the labels' lead and look-back need"
+        )
     if len(set(plan.names)) != len(plan.names) or not plan.start <= plan.end:
         problems.append("names must be unique and the span must not end before it starts")
+    elif not 1 <= plan.forward_first < len(bounds(plan)) - 1:
+        problems.append(
+            f"forward_first = {plan.forward_first} (must name a quarter after the first)"
+        )
     if problems:
         raise ValueError(f"{path}: unknown or invalid: {', '.join(problems)}")
     return plan
@@ -132,9 +173,11 @@ def blocks_per_fold(edges: np.ndarray, block_days: int) -> np.ndarray:
 
 
 def training(
-    ts: np.ndarray, fold: np.ndarray, f: int, edges: np.ndarray, gap_days: int
+    ts: np.ndarray, fold: np.ndarray, f: int, edges: np.ndarray, gap_days: int, scheme: str = "loqo"
 ) -> np.ndarray:
     gap = gap_days * DAY_NS
+    if scheme == "forward":
+        return ts < edges[f] - gap
     return (fold != f) & ((ts < edges[f] - gap) | (ts >= edges[f + 1] + gap))
 
 
@@ -222,20 +265,24 @@ def draws(nblocks: np.ndarray, count: int, seed: int, horizon: int) -> list[np.n
     return out
 
 
-def within_coin(score: np.ndarray, label: np.ndarray, symbol: np.ndarray) -> float:
+def within_coin(
+    score: np.ndarray, label: np.ndarray, symbol: np.ndarray, fold: np.ndarray
+) -> float:
     total = weight = 0.0
     for s in np.unique(symbol):
-        mine = symbol == s
-        positives = int(label[mine].sum())
-        if positives and positives < mine.sum():
-            total += positives * auc(score[mine & label], score[mine & ~label])
-            weight += positives
+        for f in np.unique(fold):
+            cell = (symbol == s) & (fold == f)
+            positives = int(label[cell].sum())
+            if positives and positives < cell.sum():
+                total += positives * auc(score[cell & label], score[cell & ~label])
+                weight += positives
     return total / weight if weight else float("nan")
 
 
 @dataclass
 class Horizon:
-    accounting: list[dict[str, Any]]
+    scheme: str
+    first: int
     ts: np.ndarray
     symbol: np.ndarray
     labels: dict[str, np.ndarray]
@@ -251,7 +298,7 @@ def select(
     long, short = grid[f"long_{horizon}"], grid[f"short_{horizon}"]
     missing = np.zeros(len(ts), bool)
     for name in plan.columns:
-        missing |= np.isnan(values[name])
+        missing |= ~np.isfinite(values[name])
     edges = (labels.ns(plan.start), labels.ns(plan.end + timedelta(days=1)))
     steps = [
         ("outside the plan's span", (ts < edges[0]) | (ts >= edges[1])),
@@ -285,23 +332,32 @@ def out_of_fold(
     fold: np.ndarray,
     edges: np.ndarray,
     plan: Plan,
+    scheme: str,
     log: Callable[[str], None],
 ) -> dict[str, dict[str, np.ndarray]]:
     index = {name: i for i, name in enumerate(plan.columns)}
+    first = plan.first_fold(scheme)
     out = {r.name: {s: np.full(len(ts), np.nan) for s in ("long", "short")} for r in plan.rungs}
-    for f in range(len(edges) - 1):
+    for f in range(first, len(edges) - 1):
         test = fold == f
-        train = training(ts, fold, f, edges, plan.gap_days)
-        if not test.any() or not train.any():
+        if not test.any():
             continue
+        train = training(ts, fold, f, edges, plan.gap_days, scheme)
+        if not train.any():
+            raise ValueError(f"{scheme} fold {f}: a scored quarter has no training rows")
         z_train, z_test = standardise(x[train], x[test], plan.clip)
         for rung in plan.rungs:
             cols = [index[c] for c in rung.columns]
             for side in ("long", "short"):
                 beta = fit(z_train[:, cols], y[side][train].astype(np.float64), plan.c)
                 out[rung.name][side][test] = predict(z_test[:, cols], beta)
-        log(f"  fold {f + 1}: {int(train.sum())} training rows, {int(test.sum())} scored")
-    for sides in out.values():
+        log(f"  {scheme} fold {f + 1}: {int(train.sum())} training rows, {int(test.sum())} scored")
+    scored = fold >= first
+    for name, sides in out.items():
+        for side in ("long", "short"):
+            sides[side] = sides[side][scored]
+            if not np.isfinite(sides[side]).all():
+                raise RuntimeError(f"{scheme} {name} {side}: a scored row has no finite score")
         sides["any"] = 1 - (1 - sides["long"]) * (1 - sides["short"])
     return out
 
@@ -314,10 +370,10 @@ def external_scores(
         hours = hours.cast(pa.timestamp("ns")).cast(pa.int64())
     found = pa.table(
         {
-            "coin": table["coin"],
+            "coin": table["coin"].cast(pa.string()),
             "hour": hours,
             "horizon": table["horizon"].cast(pa.int64()),
-            "side": table["side"],
+            "side": table["side"].cast(pa.string()),
             "score": table["score"].cast(pa.float64()),
         }
     )
@@ -333,10 +389,10 @@ def external_scores(
             raise ValueError(f"the external scores give a row twice ({horizon} h, {side})")
         joined = joined.sort_by("row")
         score = joined["score"].to_numpy(zero_copy_only=False).astype(np.float64)
-        if np.isnan(score).any():
+        if not np.isfinite(score).all():
             raise ValueError(
-                f"the external scores miss {int(np.isnan(score).sum())} scored rows "
-                f"({horizon} h, {side})"
+                f"the external scores miss or give a non-finite score for "
+                f"{int((~np.isfinite(score)).sum())} scored rows ({horizon} h, {side})"
             )
         out[side] = score
     return out
@@ -349,7 +405,7 @@ def horizon_rows(
     horizon: int,
     external: pa.Table | None,
     log: Callable[[str], None],
-) -> Horizon:
+) -> tuple[list[dict[str, Any]], list[Horizon]]:
     keep, accounting = select(values, grid, plan, horizon)
     ts, symbol = grid["ts_ns"][keep], grid["symbol"][keep]
     y = {"long": grid[f"long_{horizon}"][keep], "short": grid[f"short_{horizon}"][keep]}
@@ -357,96 +413,117 @@ def horizon_rows(
     edges = bounds(plan)
     fold, block = folds(ts, edges, plan.block_days)
     x = np.column_stack([values[name][keep] for name in plan.columns])
-    scores = out_of_fold(x, y, ts, fold, edges, plan, log)
-    if external is not None and plan.external is not None:
-        scores[plan.external[0]] = external_scores(external, ts, symbol, horizon, plan.sides)
-    return Horizon(accounting, ts, symbol, y, fold, block, scores)
+    out = []
+    for scheme in SCHEMES:
+        first = plan.first_fold(scheme)
+        mine = fold >= first
+        scores = out_of_fold(x, y, ts, fold, edges, plan, scheme, log)
+        if external is not None and plan.external is not None and plan.external[2] == scheme:
+            scores[plan.external[0]] = external_scores(
+                external, ts[mine], symbol[mine], horizon, plan.sides
+            )
+        labelled = {side: v[mine] for side, v in y.items()}
+        out.append(
+            Horizon(
+                scheme, first, ts[mine], symbol[mine], labelled, fold[mine], block[mine], scores
+            )
+        )
+    return accounting, out
 
 
 def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dict], list[dict]]:
     edges = bounds(plan)
     nblocks = blocks_per_fold(edges, plan.block_days)
     weights = draws(nblocks, plan.draws, plan.seed, horizon)
-    nfolds = len(nblocks)
+    quarters = range(h.first, len(nblocks))
+    names = plan.scored_names(h.scheme)
     subsets = {"all": np.ones(len(h.ts), bool), "without": ~np.isin(h.symbol, plan.without)}
     score_rows, fold_rows, primary, boot = [], [], {}, {}
     complete: dict[str, float] = {}
-    for name in plan.names:
+    key = {"horizon": horizon, "scheme": h.scheme}
+    for name in names:
         for side in plan.sides:
             s, label = h.scores[name][side], h.labels[side]
             for subset, mask in subsets.items():
-                per_fold, booted = np.full(nfolds, np.nan), np.zeros((plan.draws, nfolds))
-                for f in range(nfolds):
+                per_fold = np.full(len(quarters), np.nan)
+                positives = np.zeros(len(quarters))
+                booted = np.zeros((plan.draws, len(quarters)))
+                for j, f in enumerate(quarters):
                     inside = mask & (h.fold == f)
                     counts = pair_counts(s[inside], label[inside], h.block[inside], int(nblocks[f]))
-                    per_fold[f] = block_auc(*counts)[0]
+                    per_fold[j] = block_auc(*counts)[0]
+                    positives[j] = label[inside].sum()
                     if subset == "all":
-                        booted[:, f] = block_auc(*counts, weights[f])
+                        booted[:, j] = block_auc(*counts, weights[f])
                     fold_rows.append(
                         {
-                            "horizon": horizon,
+                            **key,
                             "side": side,
                             "name": name,
                             "coins": subset,
                             "fold": f,
-                            "auc": float(per_fold[f]),
+                            "auc": float(per_fold[j]),
                             "rows": int(inside.sum()),
-                            "positives": int(label[inside].sum()),
+                            "positives": int(positives[j]),
                         }
                     )
+                finite = np.isfinite(per_fold)
                 if subset == "all":
                     primary[(name, side)] = per_fold
-                    with np.errstate(invalid="ignore"):
-                        boot[(name, side)] = _nanmean_rows(booted)
-                    if name == plan.names[0]:
-                        scored = np.isfinite(booted[:, np.isfinite(per_fold)])
-                        complete[side] = float(scored.all(axis=1).mean())
+                    boot[(name, side)] = _nanmean_rows(booted)
+                    if name == names[0]:
+                        complete[side] = float(np.isfinite(booted[:, finite]).all(axis=1).mean())
+                weight = positives[finite].sum()
                 score_rows.append(
                     {
-                        "horizon": horizon,
+                        **key,
                         "side": side,
                         "name": name,
                         "coins": subset,
-                        "fold_mean": float(np.nanmean(per_fold))
-                        if np.isfinite(per_fold).any()
-                        else float("nan"),
-                        "folds": int(np.isfinite(per_fold).sum()),
+                        "fold_mean": float(per_fold[finite].mean()) if finite.any() else np.nan,
+                        "fold_mean_weighted": float(per_fold[finite] @ positives[finite] / weight)
+                        if weight
+                        else np.nan,
+                        "folds": int(finite.sum()),
                         "pooled": auc(s[mask & label], s[mask & ~label]),
-                        "within_coin": within_coin(s[mask], label[mask], h.symbol[mask]),
+                        "within_coin": within_coin(
+                            s[mask], label[mask], h.symbol[mask], h.fold[mask]
+                        ),
                         "rows": int(mask.sum()),
                         "positives": int(label[mask].sum()),
                     }
                 )
     comparisons = []
     for first, second in plan.comparisons:
+        if first not in names or second not in names:
+            continue
         for side in plan.sides:
             a, b = primary[(first, side)], primary[(second, side)]
             difference = boot[(first, side)] - boot[(second, side)]
             difference = difference[np.isfinite(difference)]
             both = np.isfinite(a) & np.isfinite(b)
             per_fold = a - b
-            estimate = float(np.nanmean(a) - np.nanmean(b))
             q = np.quantile(difference, QUANTILES) if difference.size else [np.nan] * 3
+            spread = per_fold[both]
             comparisons.append(
                 {
-                    "horizon": horizon,
+                    **key,
                     "side": side,
                     "first": first,
                     "second": second,
-                    "estimate": estimate,
-                    "se": float(np.std(difference, ddof=1))
-                    if difference.size > 1
-                    else float("nan"),
+                    "estimate": float(np.nanmean(a) - np.nanmean(b)),
+                    "se": float(np.std(difference, ddof=1)) if difference.size > 1 else np.nan,
+                    "se_quarters": float(np.std(spread, ddof=1) / np.sqrt(spread.size))
+                    if spread.size > 1
+                    else np.nan,
                     "q025": float(q[0]),
                     "q05": float(q[1]),
                     "q975": float(q[2]),
-                    "above_zero": float(np.mean(difference > 0))
-                    if difference.size
-                    else float("nan"),
+                    "above_zero": float(np.mean(difference > 0)) if difference.size else np.nan,
                     "draws": int(difference.size),
                     "complete_draws": complete[side],
                     "fold_differences": [float(v) for v in per_fold],
-                    "folds_above_zero": int(np.sum(per_fold[both] > 0)),
+                    "folds_above_zero": int(np.sum(spread > 0)),
                     "folds": int(both.sum()),
                 }
             )
@@ -477,24 +554,26 @@ def ladder(
     }
     for horizon in plan.horizons:
         log(f"{horizon} h")
-        h = horizon_rows(values, grid, plan, horizon, external, log)
-        out["accounting"][horizon] = h.accounting
-        scores, fold_rows, comparisons = evaluate(h, plan, horizon)
-        out["scores"] += scores
-        out["folds"] += fold_rows
-        out["comparisons"] += comparisons
-        oof = {
-            "ts_ns": h.ts,
-            "symbol": h.symbol.astype(str),
-            "horizon": np.full(len(h.ts), horizon),
-            "fold": h.fold,
-            "long": h.labels["long"],
-            "short": h.labels["short"],
-        }
-        for name in plan.names:
-            for side in plan.sides:
-                oof[f"{name}:{side}"] = h.scores[name][side]
-        out["oof"].append(pa.table(oof))
+        accounting, schemes = horizon_rows(values, grid, plan, horizon, external, log)
+        out["accounting"][horizon] = accounting
+        for h in schemes:
+            scores, fold_rows, comparisons = evaluate(h, plan, horizon)
+            out["scores"] += scores
+            out["folds"] += fold_rows
+            out["comparisons"] += comparisons
+            oof = {
+                "scheme": [h.scheme] * len(h.ts),
+                "ts_ns": h.ts,
+                "symbol": h.symbol.astype(str),
+                "horizon": np.full(len(h.ts), horizon),
+                "fold": h.fold,
+                "long": h.labels["long"],
+                "short": h.labels["short"],
+            }
+            for name in plan.scored_names(h.scheme):
+                for side in plan.sides:
+                    oof[f"{name}:{side}"] = h.scores[name][side]
+            out["oof"].append(pa.table(oof))
     return out
 
 
@@ -510,15 +589,20 @@ def run(
     manifest = io.read_json(inputs_dir / "manifest.json")
     params = manifest["params"]
     span.refuse(*(date.fromisoformat(params[k]) for k in ("start", "dev_start", "end")))
+    complete = io.read_json(inputs_dir / "complete.json")
+    if complete.get("clean") is not True:
+        raise ValueError(f"{inputs_dir}: complete.json does not mark the run clean")
     labels_dir = data_dir / "labels" / params["labels_run"]
     grid_path = labels_dir / params["labels_grid"]["file"]
+    table_path = inputs_dir / "inputs.parquet"
+    for path in (grid_path, table_path):
+        store.refuse_held_back(path)
     if store.sha256(grid_path) != params["labels_grid"]["sha256"]:
         raise ValueError(f"{grid_path}: not the grid the inputs run was made from")
+    if store.sha256(table_path) != complete["files"].get(table_path.name):
+        raise ValueError(f"{table_path}: its sha256 differs from complete.json's")
     grid_table = pq.read_table(grid_path)
-    held = labels.ns(span.HELD_BACK)
-    if grid_table.num_rows and max(grid_table["ts_ns"].to_numpy()) >= held:
-        raise span.HeldBackError("the grid holds an hour in the held-back test span")
-    table = store.read(inputs_dir, "inputs").select(["ts_ns", "symbol", *plan.columns])
+    table = pq.read_table(table_path, columns=["ts_ns", "symbol", *plan.columns])
     if not (
         table["ts_ns"].equals(grid_table["ts_ns"]) and table["symbol"].equals(grid_table["symbol"])
     ):
@@ -528,7 +612,7 @@ def run(
         hours = pq.read_table(plan.external[1], columns=["hour"])["hour"]
         if pa.types.is_timestamp(hours.type):
             hours = hours.cast(pa.timestamp("ns")).cast(pa.int64())
-        if len(hours) and max(hours.to_numpy()) >= held:
+        if len(hours) and max(hours.to_numpy()) >= labels.ns(span.HELD_BACK):
             raise span.HeldBackError("the external scores hold an hour in the held-back test span")
         external = pq.read_table(plan.external[1])
     values = {n: table[n].to_numpy() for n in plan.columns}
@@ -546,11 +630,12 @@ def run(
             "name": plan.external[0],
             "file": plan.external[1].name,
             "sha256": store.sha256(plan.external[1]),
+            "scheme": plan.external[2],
         },
         "code": {"uv_lock_sha256": labels.uv_lock()},
     }
     tables = {
-        "oof": pa.concat_tables(out["oof"]),
+        "oof": pa.concat_tables(out["oof"], promote_options="default"),
         "scores": pa.Table.from_pylist(out["scores"]),
         "folds": pa.Table.from_pylist(out["folds"]),
         "comparisons": pa.Table.from_pylist(out["comparisons"]),
@@ -568,8 +653,10 @@ def run(
     return run_dir, out | {"seconds": seconds}
 
 
-def _f(value: float) -> str:
-    return "-" if not np.isfinite(value) else f"{value:.3f}"
+def _f(value: float, signed: bool = False) -> str:
+    if not np.isfinite(value):
+        return "-"
+    return f"{value:+.3f}" if signed else f"{value:.3f}"
 
 
 def report(
@@ -580,34 +667,44 @@ def report(
     plan_name: str,
     seconds: float,
 ) -> str:
+    gap = needed_gap_ns(plan.horizons) / DAY_NS
     lines = [
         "# Panel ladder",
         "",
         f"Inputs run `{inputs_run}`, labels run `{labels_run}`, plan `{plan_name}`; "
         f"{plan.start} to {plan.end}. Each rung is two L2 logistic regressions (C = {plan.c}), one "
-        f"for long_H and one for short_H, on inputs standardised by the training fold and clipped "
+        f"for long_H and one for short_H, on inputs standardised by the training rows and clipped "
         f"to +-{plan.clip:g}; the any score is 1 - (1 - p_long)(1 - p_short). Folds are the "
-        f"calendar quarters of the span, each left out in turn, with training rows within "
-        f"{plan.gap_days} days of the left-out quarter dropped. Every rung of a horizon is scored "
-        f"on the same rows.",
+        f"calendar quarters of the span, scored two ways. In loqo each quarter is left out in "
+        f"turn and training drops rows within {plan.gap_days} days of it on either side. In "
+        f"forward a quarter is scored by a model fitted only on rows more than {plan.gap_days} "
+        f"days before it, from quarter {plan.forward_first + 1} on, which previews scoring the "
+        f"held-back test span. The gap covers the inputs' longest look-back, the longest horizon "
+        f"and the labels' lead and 24-hour look-back ({gap:.2f} days). Every rung of a horizon and "
+        f"scheme is scored on the same rows.",
         "",
-        "Scores are AUCs: fold mean is the mean over folds of the AUC inside each left-out "
-        "quarter (the primary score), pooled is the AUC of all out-of-fold scores together, and "
-        "within coin is each coin's own AUC weighted by its positives. The second value of each "
-        "pair leaves "
-        f"out {', '.join(plan.without)}.",
+        "Scores are AUCs and rank rows; they say nothing about calibration. Fold mean is the mean "
+        "over quarters of the AUC inside each quarter (the primary score), weighted is the same "
+        "mean weighted by each quarter's positives, pooled is the AUC of all out-of-fold scores "
+        "together, and within coin is the AUC inside each coin and quarter weighted by its "
+        "positives. The second value of each pair leaves "
+        f"out {', '.join(plan.without)}. The eight-quarter loqo score is retrospective on a fixed "
+        f"coin cohort.",
         "",
         f"Comparisons are first minus second in the primary score. The interval comes from a joint "
         f"block bootstrap: within each quarter, {plan.block_days}-day blocks of calendar time are "
         f"drawn with replacement, every coin's rows of a drawn block taken together, "
-        f"{plan.draws} draws, seed {plan.seed}. q2.5, q5 and q97.5 are percentiles of the "
-        f"bootstrap differences; > 0 is the share of draws above zero; folds > 0 counts quarters "
-        f"where the first beats the second. A draw that takes no positive or no negative in a "
-        f"quarter cannot score that quarter, so its fold mean averages over the quarters it does "
-        f"score; complete is the share of draws that score every quarter, the same for every "
-        f"comparison of a side.",
+        f"{plan.draws} draws, seed {plan.seed}, the same draws for every rung and scheme. It is "
+        f"conditional on the fitted models and the observed quarters. q2.5, q5 and q97.5 are "
+        f"percentiles of the bootstrap differences; > 0 is the share of draws above zero; se q is "
+        f"the standard deviation of the per-quarter differences over the square root of their "
+        f"number, the between-quarter view; folds > 0 counts quarters where the first beats the "
+        f"second. A draw that takes no positive or no negative in a quarter cannot score that "
+        f"quarter, so its fold mean averages over the quarters it does score; complete is the "
+        f"share of draws that score every quarter, the same for every comparison of a side and "
+        f"scheme.",
         "",
-        f"Wall time {seconds / 60:.1f} minutes.",
+        f"Wall time {_f(seconds / 60)} minutes.",
     ]
     rungs = {r.name: r for r in plan.rungs}
     lines += ["", "## Rungs", "", "| rung | groups | inputs |", "|---|---|---|"]
@@ -617,7 +714,8 @@ def report(
             groups = ", ".join(g + (" (own only)" if g in r.own_only else "") for g in r.groups)
             lines.append(f"| {name} | {groups} | {len(r.columns)} |")
         else:
-            lines.append(f"| {name} | external out-of-fold scores | - |")
+            assert plan.external is not None
+            lines.append(f"| {name} | external out-of-fold scores ({plan.external[2]}) | - |")
     for horizon in plan.horizons:
         lines += ["", f"## {horizon} h", "", "Rows removed, in order:", ""]
         lines += ["| condition | rows | long | short | positives |", "|---|---|---|---|---|"]
@@ -626,33 +724,39 @@ def report(
                 f"| {row['condition']} | {row['rows']} | {row['long']} | {row['short']} | "
                 f"{row['positives']} |"
             )
-        scores = [s for s in out["scores"] if s["horizon"] == horizon]
-        lines += [
-            "",
-            "| rung | side | fold mean | pooled | within coin | folds |",
-            "|---|---|---|---|---|---|",
-        ]
-        for side in plan.sides:
-            for name in plan.names:
-                pair = {s["coins"]: s for s in scores if s["side"] == side and s["name"] == name}
-                a, w = pair["all"], pair["without"]
-                lines.append(
-                    f"| {name} | {side} | {_f(a['fold_mean'])} / {_f(w['fold_mean'])} | "
-                    f"{_f(a['pooled'])} / {_f(w['pooled'])} | {_f(a['within_coin'])} / "
-                    f"{_f(w['within_coin'])} | {a['folds']} |"
-                )
-        lines += [
-            "",
-            "| comparison | side | estimate | se | q2.5 | q5 | q97.5 | > 0 | complete "
-            "| folds > 0 |",
-            "|---|---|---|---|---|---|---|---|---|---|",
-        ]
-        for c in out["comparisons"]:
-            if c["horizon"] == horizon:
-                lines.append(
-                    f"| {c['first']} - {c['second']} | {c['side']} | {c['estimate']:+.3f} | "
-                    f"{_f(c['se'])} | {c['q025']:+.3f} | {c['q05']:+.3f} | {c['q975']:+.3f} | "
-                    f"{_f(c['above_zero'])} | {_f(c['complete_draws'])} | "
-                    f"{c['folds_above_zero']} of {c['folds']} |"
-                )
+        for scheme in SCHEMES:
+            scores = [s for s in out["scores"] if s["horizon"] == horizon and s["scheme"] == scheme]
+            lines += [
+                "",
+                f"### {scheme}",
+                "",
+                "| rung | side | fold mean | weighted | pooled | within coin | folds |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for side in plan.sides:
+                for name in plan.scored_names(scheme):
+                    pair = {
+                        s["coins"]: s for s in scores if s["side"] == side and s["name"] == name
+                    }
+                    a, w = pair["all"], pair["without"]
+                    cells = [
+                        f"{_f(a[k])} / {_f(w[k])}"
+                        for k in ("fold_mean", "fold_mean_weighted", "pooled", "within_coin")
+                    ]
+                    lines.append(f"| {name} | {side} | {' | '.join(cells)} | {a['folds']} |")
+            lines += [
+                "",
+                "| comparison | side | estimate | se | se q | q2.5 | q5 | q97.5 | > 0 | complete "
+                "| folds > 0 |",
+                "|---|---|---|---|---|---|---|---|---|---|---|",
+            ]
+            for c in out["comparisons"]:
+                if c["horizon"] == horizon and c["scheme"] == scheme:
+                    lines.append(
+                        f"| {c['first']} - {c['second']} | {c['side']} | "
+                        f"{_f(c['estimate'], True)} | {_f(c['se'])} | {_f(c['se_quarters'])} | "
+                        f"{_f(c['q025'], True)} | {_f(c['q05'], True)} | {_f(c['q975'], True)} | "
+                        f"{_f(c['above_zero'])} | {_f(c['complete_draws'])} | "
+                        f"{c['folds_above_zero']} of {c['folds']} |"
+                    )
     return "\n".join(lines) + "\n"

@@ -586,13 +586,17 @@ run and the sha256 of its grid.
 uv run python -m tipping_point.panel inputs --labels <labels run id>
 ```
 
-Timing rule: an input at hour t reads only 5-minute bars that start before t and metrics or funding
-rows stamped at or before t (open interest, the long/short ratio and the funding rate of the bar
-that starts at t are allowed; its close is not). The tests change every later bar and row and check
-that no input at t moves. Windows are counted in 5-minute bars (1 h = 12, 6 h = 72, 24 h = 288,
-7 d = 2016, 28 d = 8064) and end just before t, or at t for metrics and funding. A rolling value
-needs at least 5/6 of its window present, else it is missing; so does every 28-day mean or median.
-r is the 5-minute log return of close.
+Timing rule: an input at hour t reads only 5-minute bars that start before t, open interest
+stamped at or before t (that of the bar starting at t is allowed; its close is not), and the
+long/short ratio and funding rate of the bar before t, t - 5 min. A funding settlement falls on the
+hour and Binance stamps it on the hour or a few milliseconds after, so reading the bar at t would
+make the input depend on those milliseconds. The tests change, blank or delete every later bar and
+row, through the command on planted archive files as well as on bars, and check that no input at t
+moves. Windows are counted in 5-minute bars (1 h = 12, 6 h = 72, 24 h = 288, 7 d = 2016,
+28 d = 8064) and end just before t, at t for open interest. A rolling value needs at least 5/6 of
+its window present, else it is missing; so does every 28-day mean or median, counting only values
+observed in that bar, not carried into it. r is the 5-minute log return of close. The command
+refuses a span with a funding file missing.
 
 - `vol`: `vol_1h`, `vol_6h`, `vol_24h`, `vol_7d`, `vol_28d` = log(mean r^2 over the window / the
   coin's mean r^2 over the development span); `near_24h` = the largest |30-minute log return| of the
@@ -607,12 +611,15 @@ r is the 5-minute log return of close.
 - `classic`: `var_tau_24h` and `ac1_tau_24h`, Kendall's tau against time of the rolling variance and
   of the rolling lag-1 autocorrelation of r (72-bar windows, each needing 5/6 of its values or
   pairs) over the last 288 bars; `var_tau_7d` and `ac1_tau_7d`, the same on hourly log returns
-  (84-hour windows) over the last 168 hours. Kendall's tau is `ews.trend.kendall_tau`, over the
-  values present when at least 5/6 are.
+  (84-hour windows) over the last 168 hours. Each rolling statistic comes from its own window's
+  values alone (a flat window has none), so it does not change with how far back the series
+  starts. Kendall's tau is `ews.trend.kendall_tau`, over the values present when at least 5/6 are.
 - `lev`: `oi_24h`, `oi_7d`, the log change in open interest; `oi_vs_28d`, the log of open interest
-  over its 28-day median; `funding`, the last settled rate; `funding_rel`, funding minus its 28-day
-  time-weighted mean; `ls`, the log of Binance's long/short account ratio (`count_long_short_ratio`
-  of the metrics files, read from the same verified files); `ls_rel`, `ls` minus its 28-day mean.
+  over its 28-day median; `funding`, the rate settled before t - 5 min; `funding_rel`, funding minus
+  its mean over the last 28 days' 672 hourly readings, each taken at the bar before the hour;
+  `ls`, the log of Binance's long/short account ratio (`count_long_short_ratio` of the metrics
+  files, read from the same verified files) at t - 5 min; `ls_rel`, `ls` minus its 28-day mean
+  ending at the same bar.
   Open interest and the ratio are carried forward at most 12 bars (1 hour) across gaps, and zero or
   negative values count as missing. Binance's metrics files leave the ratio empty from 2021-12-30 to
   2022-01-19 on every panel coin, so `ls` is missing until 2022-01-19 14:00 UTC and `ls_rel` until
@@ -648,19 +655,29 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
 - Rows: the grid rows that are not skipped, not censored at that horizon and have every input of
   every rung in the plan, one common row set per horizon. The run reports how many rows and
   positives each condition removes, in that order.
-- Folds: the eight calendar quarters, each left out in turn; training rows within 28 days of the
-  left-out quarter, on either side, are dropped.
-- Scores per rung, side and horizon: the mean over folds of the AUC inside each fold (the primary
-  score), the pooled out-of-fold AUC, and the within-coin AUC weighted by each coin's positives;
-  each also without BTCUSDT and ETHUSDT (the same fits, scored on the other coins' rows).
+- Folds: the eight calendar quarters, scored two ways, each table carrying the `scheme`. In
+  `loqo` each quarter is left out in turn and training rows within 31 days of it, on either side,
+  are dropped. In `forward`, from the quarter `forward_first` names (2, counting from 0, so six
+  quarters are scored), a quarter is scored by a model fitted only on rows more than 31 days before
+  it, as the held-back test span will be. The gap must cover the inputs' longest look-back (28 days,
+  one bar and the 1-hour carry), the longest horizon, the labels' 30-minute lead and their 24-hour
+  look-back, 30.07 days in all; the plan refuses a shorter one. A scored quarter with rows but no
+  training rows, or a scored row without a finite score, stops the run.
+- Scores per scheme, rung, side and horizon: the mean over quarters of the AUC inside each quarter
+  (the primary score), the same mean weighted by each quarter's positives (`fold_mean_weighted`),
+  the pooled out-of-fold AUC, and the within-coin AUC, the AUC inside each coin and quarter
+  averaged with weights by positives over the cells that hold both classes; each also without
+  BTCUSDT and ETHUSDT (the same fits, scored on the other coins' rows).
 - Comparisons: the difference of the primary score with a joint block bootstrap. Each quarter is
   cut into 14-day blocks of calendar time from its first day (7 per quarter, the last shorter);
   each draw takes, in every quarter, as many blocks as it has, with replacement, and every coin's
-  rows of a drawn block come together. 2000 draws with the plan's seed, the same draws for every
-  rung, so each difference is paired. The run gives the estimate, the bootstrap standard error, the
-  2.5%, 5% and 97.5% points, the share of draws above zero, the per-fold differences and how many
-  folds are above zero. A draw that takes no positive or no negative in a quarter cannot score that
-  quarter, and its fold mean averages over the quarters it does score; the column
+  rows of a drawn block come together. 2000 draws with the plan's seed, a quarter's draws seeded by
+  the seed, the horizon and the quarter, so every rung and both schemes share them and each
+  difference is paired. The run gives the estimate, the bootstrap standard error, `se_quarters`
+  (the standard deviation of the per-quarter differences over the square root of their number),
+  the 2.5%, 5% and 97.5% points, the share of draws above zero, the per-fold differences and how
+  many folds are above zero. A draw that takes no positive or no negative in a quarter cannot
+  score that quarter, and its fold mean averages over the quarters it does score; the column
   `complete_draws` gives the share of draws that score every quarter, per horizon and side. On
   the development span it is below 1 on every side, because the first quarter of 2022 has no rows
   before `ls_rel` returns on 2022-02-11, so a draw can take only its empty blocks, and lowest on
@@ -674,10 +691,25 @@ P and N the blocks' positives and negatives: exactly the AUC of the rows the dra
 7 x 7 matrix per fold. All 2000 draws then cost a few matrix products, and the whole plan's
 bootstrap runs in seconds.
 
-An optional `[external]` entry (`name`, and `path` to a Parquet file relative to the plan) brings in
-out-of-fold scores fitted elsewhere, such as a sequence model's, with columns `coin`, `hour` (the
-grid's `ts_ns`), `horizon`, `side` and `score`. They are scored and compared like a rung on the same
-common rows, and the run refuses a file that misses one of them.
+Reading the scores. The eight-quarter `loqo` score is retrospective: a quarter's model is fitted on
+later quarters as well as earlier ones, on a coin cohort fixed at the end of the span. The
+`forward` scheme previews the held-back test. The bootstrap intervals are conditional on the
+fitted models and on the quarters observed: they redraw rows, not fits or new quarters, and
+`se_quarters` is the between-quarter view of the same difference. The 1 h scores are secondary,
+because part of what they rank is cascades already under way on other coins at t, which the market
+means carry. `full` holds the coin's own leverage inputs only and `full+mlev` adds their market
+means; the rung list was fixed before any score was computed. The scores rank rows and say nothing
+about calibration.
+
+An optional `[external]` entry (`name`, `path` to a Parquet file relative to the plan, and `scheme`,
+the scheme its scores were fitted under) brings in out-of-fold scores fitted elsewhere, such as a
+sequence model's, with columns `coin`, `hour` (the grid's `ts_ns`, as integers or timestamps),
+`horizon`, `side` and `score`. They are scored and compared like a rung on the same common rows of
+that scheme, and the run refuses a file that misses one of them, gives one twice or gives a score
+that is not finite.
 
 Both commands refuse any day from 2024-01-01 on: `inputs` refuses a labels run whose span reaches
-it, and `ladder` a plan, an inputs run, a grid or an external file that does.
+it, and `ladder` a plan, an inputs run, a grid or an external file that does. They read the time
+bounds of the grid, the thresholds and the inputs table from the files' Parquet metadata before
+hashing or reading them, and refuse a file whose metadata gives none; then they check each file's
+sha256 against the run that wrote it and refuse a run its `complete.json` does not mark clean.
