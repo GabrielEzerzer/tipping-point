@@ -100,13 +100,16 @@ def bucket(monkeypatch: pytest.MonkeyPatch) -> Bucket:
     publish(out, "1000EEEUSDT", 80.0)
     publish(out, "BBBUSDT", 999.0, months=coins.MONTHS[:4] + coins.MONTHS[5:])
     publish(out, "CCCUSDT", 999.0, metric_days=coins.METRIC_DAYS[1:])
+    publish(out, "FFFUSDT", 999.0)
+    key = f"{coins.KLINES}FFFUSDT/1d/FFFUSDT-1d-2023-03.zip"
+    out.put(key, kline_file("FFFUSDT", "2023-03", 999.0, days=[0, 30]))
     publish(out, "BTCDOMUSDT", 999.0)
     publish(out, "ETHBUSD", 999.0)
     publish(out, "DDDUSDT_230331", 999.0)
     return out
 
 
-def test_the_rule_keeps_named_symbols_with_every_month_and_both_metrics_days(
+def test_the_rule_keeps_named_symbols_with_every_day_and_both_metrics_days(
     bucket: Bucket, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     volumes = coins.derive(bucket.get, workers=4)
@@ -152,7 +155,7 @@ def test_a_row_outside_its_month_is_refused() -> None:
 
 def test_a_month_needs_one_row_for_each_of_its_days() -> None:
     assert coins.month_volume(kline_file("A", "2023-02", 2.0), "2023-02") == 2.0 * 28
-    with pytest.raises(archive.ArchiveError, match="27 daily rows for the 28 days"):
+    with pytest.raises(coins.ShortMonth, match="27 daily rows for the 28 days"):
         coins.month_volume(kline_file("A", "2023-02", 1.0, days=list(range(27))), "2023-02")
     twice = [*range(28), 5]
     with pytest.raises(archive.ArchiveError, match="not a new day's start"):

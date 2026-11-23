@@ -1,6 +1,6 @@
-# The panel's coins: USD-M symbols matching [A-Z0-9]+USDT, less EXCLUDED, with a 1-day kline file
-# for every month of YEAR and a metrics file on both METRIC_DAYS, ranked by YEAR's quote volume;
-# ALWAYS and the top OTHERS others. coins.txt holds the committed panel.
+# The panel's coins: USD-M symbols matching [A-Z0-9]+USDT, less EXCLUDED, with a 1-day kline row for
+# every day of YEAR and a metrics file on both METRIC_DAYS, ranked by YEAR's quote volume; ALWAYS
+# and the top OTHERS others. coins.txt holds the committed panel.
 
 from __future__ import annotations
 
@@ -30,6 +30,10 @@ METRIC_DAYS = (date(2021, 12, 1), date(2023, 12, 31))
 ALWAYS = ("BTCUSDT", "ETHUSDT")
 OTHERS = 28
 COMMITTED = Path(__file__).with_name("coins.txt")
+
+
+class ShortMonth(archive.ArchiveError):
+    pass
 
 
 def committed() -> list[str]:
@@ -128,14 +132,15 @@ def month_volume(data: bytes, month: str) -> float:
         total += float(row[7])
     days = (after - first) // archive.DAY_MS
     if len(seen) != days:
-        raise archive.ArchiveError(
-            f"{member}: {len(seen)} daily rows for the {days} days of {month}"
-        )
+        raise ShortMonth(f"{member}: {len(seen)} daily rows for the {days} days of {month}")
     return total
 
 
-def quote_volume(get: archive.Get, symbol: str) -> float:
-    return sum(month_volume(verified(get, kline_url(symbol, m)), m) for m in MONTHS)
+def quote_volume(get: archive.Get, symbol: str) -> float | None:
+    try:
+        return sum(month_volume(verified(get, kline_url(symbol, m)), m) for m in MONTHS)
+    except ShortMonth:
+        return None
 
 
 def derive(get: archive.Get, workers: int = fetch.WORKERS) -> dict[str, float]:
@@ -146,4 +151,4 @@ def derive(get: archive.Get, workers: int = fetch.WORKERS) -> dict[str, float]:
         keep = pool.map(lambda s: eligible(safe, s), names)
         ok = [s for s, kept in zip(names, keep, strict=True) if kept]
         volumes = pool.map(lambda s: quote_volume(safe, s), ok)
-        return dict(zip(ok, volumes, strict=True))
+        return {s: v for s, v in zip(ok, volumes, strict=True) if v is not None}

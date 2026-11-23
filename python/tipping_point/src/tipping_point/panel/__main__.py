@@ -16,8 +16,8 @@ DESCRIPTION = f"""\
 Command line: python -m tipping_point.panel <command> [options]
 
   coins   derive the panel from Binance Vision (network): every USD-M symbol matching
-          [A-Z0-9]+USDT but {", ".join(sorted(coins.EXCLUDED))}, with a monthly 1-day kline file for
-          every month of {coins.YEAR} and a daily metrics file on {coins.METRIC_DAYS[0]} and
+          [A-Z0-9]+USDT but {", ".join(sorted(coins.EXCLUDED))}, with a monthly 1-day kline file
+          holding every day of {coins.YEAR} and a daily metrics file on {coins.METRIC_DAYS[0]} and
           {coins.METRIC_DAYS[1]}, ranked by {coins.YEAR} quote volume; the panel is
           {" and ".join(coins.ALWAYS)} and the top {coins.OTHERS} others. Prints the ranking and
           exits 1 when it differs from the committed list (panel/coins.txt)
