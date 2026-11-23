@@ -1,6 +1,6 @@
 # Per-coin cascade thresholds, the pooled cascades and an hourly label grid, as one labels run.
-# Time convention: at hour t a feature reads only bars that start before t and metrics rows
-# stamped at or before t. The grid holds labels alone, each looking forward from t.
+# Time convention: at hour t a feature reads only bars that start before t and metrics rows stamped
+# at or before t. The grid dates a cascade by its first window's start, so none of it lies before t.
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ VOLUME = 3.0
 HORIZONS = (1, 6, 24)
 SKIP_HOURS = 24
 HOUR_NS = cascade.HOUR_NS
+LEAD_NS = cascade.Params().window * msvol.BAR_NS
 MIN_WINDOWS = 2
 THRESHOLDS = pa.schema(
     [
@@ -141,21 +142,29 @@ def grid(
     hours: np.ndarray, coin: Coin, end_ns: int, rows: Sequence[Mapping[str, Any]]
 ) -> dict[str, np.ndarray]:
     unevaluated = np.concatenate([[0], np.cumsum(~coin.evaluated)])
+    begins = {
+        kind: np.sort(
+            np.array([r["fired_ts_ns"] - LEAD_NS for r in rows if r["kind"] == kind], np.int64)
+        )
+        for kind in (cascade.LONG, cascade.SHORT)
+    }
     out: dict[str, np.ndarray] = {}
     for h in HORIZONS:
         stop = hours + h * HOUR_NS
-        lo = np.searchsorted(coin.windows_ts, hours, "right")
-        hi = np.searchsorted(coin.windows_ts, stop, "right")
+        lo = np.searchsorted(coin.windows_ts, hours + LEAD_NS, "left")
+        hi = np.searchsorted(coin.windows_ts, stop + LEAD_NS, "left")
         gaps = (unevaluated[hi] > unevaluated[lo]) | (hi - lo < h * HOUR_NS // msvol.BAR_NS)
         for name, kind in (("long", cascade.LONG), ("short", cascade.SHORT)):
-            onsets = np.sort(np.array([r["ts_ns"] for r in rows if r["kind"] == kind], np.int64))
-            found = np.searchsorted(onsets, stop, "left") - np.searchsorted(onsets, hours, "left")
+            found = np.searchsorted(begins[kind], stop, "left") - np.searchsorted(
+                begins[kind], hours, "left"
+            )
             out[f"{name}_{h}"] = found > 0
-        out[f"censored_{h}"] = (stop > end_ns) | (stop > coin.last_end_ns) | gaps
+        last = stop + LEAD_NS
+        out[f"censored_{h}"] = (last > end_ns) | (last > coin.last_end_ns) | gaps
     skip = np.zeros(len(hours), bool)
     for r in rows:
+        first = np.searchsorted(hours, r["fired_ts_ns"] - LEAD_NS, "right")
         last = r["last_fired_ts_ns"] + SKIP_HOURS * HOUR_NS
-        first = np.searchsorted(hours, r["ts_ns"], "right")
         skip[first : np.searchsorted(hours, last, "right")] = True
     out["skip"] = skip
     return out

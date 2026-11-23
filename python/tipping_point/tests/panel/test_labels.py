@@ -78,8 +78,17 @@ def test_too_few_windows_are_refused() -> None:
         labels.thresholds(labels.windows(columns), T0, T0 + 10 * DAY * BAR)
 
 
-def cascade_row(kind: str, onset: int, last_fired: int) -> dict[str, Any]:
-    return {"ts_ns": onset, "kind": kind, "last_fired_ts_ns": last_fired}
+MINUTE = 60 * 10**9
+
+
+def cascade_row(kind: str, begin: int, last_fired: int, onset: int | None = None) -> dict[str, Any]:
+    fired = begin + labels.LEAD_NS
+    return {
+        "ts_ns": begin if onset is None else onset,
+        "kind": kind,
+        "fired_ts_ns": fired,
+        "last_fired_ts_ns": max(last_fired, fired),
+    }
 
 
 def coin(last_end_ns: int, unevaluated: tuple[int, ...] = (), hours: int = 60) -> labels.Coin:
@@ -96,10 +105,10 @@ def hours_where(values: np.ndarray) -> list[int]:
     return np.flatnonzero(values).tolist()
 
 
-def test_a_label_counts_onsets_in_t_to_t_plus_h() -> None:
+def test_a_label_counts_window_starts_in_t_to_t_plus_h() -> None:
     rows = [
-        cascade_row(cascade.LONG, T0 + 5 * HOUR, T0 + 5 * HOUR + 30 * 60 * 10**9),
-        cascade_row(cascade.SHORT, T0 + 10 * HOUR + 25 * 60 * 10**9, T0 + 11 * HOUR),
+        cascade_row(cascade.LONG, T0 + 5 * HOUR, T0 + 5 * HOUR + 30 * MINUTE, T0 + 5 * HOUR),
+        cascade_row(cascade.SHORT, T0 + 10 * HOUR + 25 * MINUTE, T0 + 11 * HOUR),
     ]
     got = labels.grid(HOURS, coin(T0 + 60 * HOUR), END, rows)
     assert hours_where(got["long_1"]) == [5]
@@ -110,10 +119,19 @@ def test_a_label_counts_onsets_in_t_to_t_plus_h() -> None:
     assert hours_where(got["short_24"]) == list(range(11))
 
 
-def test_skip_runs_from_after_the_onset_to_a_day_after_the_last_firing() -> None:
+def test_a_cascade_under_way_at_t_is_skipped_not_positive() -> None:
+    begin, onset = T0 + 19 * HOUR + 50 * MINUTE, T0 + 20 * HOUR
+    rows = [cascade_row(cascade.LONG, begin, begin + labels.LEAD_NS, onset)]
+    got = labels.grid(HOURS, coin(T0 + 60 * HOUR), END, rows)
+    assert hours_where(got["long_1"]) == [19]
+    assert not got["long_1"][20] and not got["long_6"][20] and not got["long_24"][20]
+    assert got["skip"][20] and not got["skip"][19]
+
+
+def test_skip_runs_from_after_the_window_start_to_a_day_after_the_last_firing() -> None:
     rows = [
-        cascade_row(cascade.LONG, T0 + 5 * HOUR, T0 + 5 * HOUR + 30 * 60 * 10**9),
-        cascade_row(cascade.SHORT, T0 + 30 * HOUR + 25 * 60 * 10**9, T0 + 31 * HOUR),
+        cascade_row(cascade.LONG, T0 + 5 * HOUR, T0 + 5 * HOUR + 30 * MINUTE),
+        cascade_row(cascade.SHORT, T0 + 30 * HOUR + 25 * MINUTE, T0 + 31 * HOUR),
     ]
     got = labels.grid(HOURS, coin(T0 + 60 * HOUR), END, rows)
     assert hours_where(got["skip"]) == list(range(6, 30)) + list(range(31, 48))
@@ -123,15 +141,17 @@ def test_skip_runs_from_after_the_onset_to_a_day_after_the_last_firing() -> None
     )
 
 
-def test_censoring_follows_unevaluated_windows_the_end_and_the_last_bar() -> None:
+def test_censoring_follows_the_windows_starting_in_t_to_t_plus_h_the_end_and_the_last_bar() -> None:
     got = labels.grid(HOURS, coin(T0 + 60 * HOUR, unevaluated=(T0 + 20 * HOUR,)), END, [])
-    assert hours_where(got["censored_1"]) == [19]
-    assert hours_where(got["censored_6"]) == [14, 15, 16, 17, 18, 19, 43, 44, 45, 46, 47]
-    assert hours_where(got["censored_24"]) == list(range(0, 20)) + list(range(25, 48))
+    assert hours_where(got["censored_1"]) == [19, 47]
+    assert hours_where(got["censored_6"]) == [14, 15, 16, 17, 18, 19, 42, 43, 44, 45, 46, 47]
+    assert hours_where(got["censored_24"]) == list(range(0, 20)) + list(range(24, 48))
+    straddling = coin(T0 + 60 * HOUR, unevaluated=(T0 + 20 * HOUR + 15 * MINUTE,))
+    assert hours_where(labels.grid(HOURS, straddling, END, [])["censored_1"]) == [19, 47]
     got = labels.grid(HOURS, coin(T0 + 40 * HOUR), END, [])
-    assert hours_where(got["censored_1"]) == list(range(40, 48))
+    assert hours_where(got["censored_1"]) == list(range(39, 48))
     got = labels.grid(HOURS, coin(T0 + 60 * HOUR, hours=47), END, [])
-    assert hours_where(got["censored_1"]) == [47]
+    assert hours_where(got["censored_1"]) == [46, 47]
 
 
 def test_the_run_refuses_held_back_days(tmp_path: Path) -> None:

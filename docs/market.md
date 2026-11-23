@@ -559,13 +559,19 @@ coins as `market cascade` does.
 
 **Tables.** `thresholds` has one row per coin: `symbol`, `windows` (the evaluated windows used),
 `sd_ret`, `sd_oi`, `a` and `b`, with `ts_ns` the development span's start. `cascades` has the
-`market cascade` schema. `grid` has one row per coin per UTC hour t of the development span, with,
-for H = 1, 6 and 24 hours and onset a cascade's `ts_ns` (a bar's start):
+`market cascade` schema, whose `ts_ns` is the onset. `grid` has one row per coin per UTC hour t of
+the development span. It dates each cascade by begin, the start of its first firing window
+(`fired_ts_ns` - 30 minutes), not by its onset. The onset is the first extreme bar inside that
+window and can sit up to 25 minutes after it opens, so an hour between the two would see part of
+the event's price move and open-interest drop before t. Dated by begin, nothing of a labelled
+event lies before t. For H = 1, 6 and 24 hours:
 
-- `long_H`, `short_H`: the coin has a cascade of that kind with t <= onset < t + H.
-- `censored_H`: t + H runs past the end of the span or past the coin's last complete bar, or a
-  window closing in (t, t + H] could not be evaluated or does not exist.
-- `skip`: onset < t <= last firing + 24 hours for one of the coin's cascades.
+- `long_H`, `short_H`: the coin has a cascade of that kind with t <= begin < t + H.
+- `censored_H`: t + H + 30 minutes runs past the end of the span or past the coin's last complete
+  bar, or a window starting in [t, t + H) (closing in [t + 30 min, t + H + 30 min)) could not be
+  evaluated or does not exist. A window that straddles t does not censor: if it fires, the row is
+  skipped.
+- `skip`: begin < t <= last firing + 24 hours for one of the coin's cascades.
 
 The grid holds labels only: a feature at hour t may read only bars that start before t and metrics
 rows stamped at or before t.
