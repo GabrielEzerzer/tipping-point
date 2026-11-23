@@ -111,6 +111,21 @@ def test_the_shipped_plan() -> None:
     assert set(plan.columns) == set(inputs.OWN + inputs.MARKET)
 
 
+def test_each_sensitivity_plan_differs_from_the_plan_in_one_thing() -> None:
+    plan = ladder.load()
+    plans = {
+        n: ladder.load(ladder.PLAN.with_name(f"ladder-{n}.toml")) for n in ("gap92", "block28")
+    }
+    assert plans["gap92"] == dataclasses.replace(plan, gap_days=92)
+    assert plans["block28"] == dataclasses.replace(plan, block_days=28)
+    public = ladder.load(ladder.PLAN.with_name("ladder-public.toml"))
+    rungs = tuple(r for r in plan.rungs if "lev" not in r.groups)
+    assert [r.name for r in rungs] == ["vol", "vol+price", "vol+price+flow", "classic"]
+    comparisons = tuple(c for c in plan.comparisons if set(c) <= {r.name for r in rungs})
+    assert public == dataclasses.replace(plan, rungs=rungs, comparisons=comparisons)
+    assert not {"funding", "ls_rel", "m_ls_rel"} & set(public.columns)
+
+
 def test_folds_are_calendar_quarters_and_training_keeps_the_gap_away() -> None:
     plan = ladder.load()
     edges = ladder.bounds(plan)

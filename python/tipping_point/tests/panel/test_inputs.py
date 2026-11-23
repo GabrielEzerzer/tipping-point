@@ -21,6 +21,13 @@ from tipping_point.panel.__main__ import main
 DAY = bars.DAY_BARS
 T0 = labels.ns(date(2022, 1, 1))
 M, B = 4e-6, 0.02
+SD = float(np.sqrt(inputs.NEAR_BARS * M))
+
+
+def coin(
+    columns: dict[str, np.ndarray], ratio: np.ndarray, stop: np.ndarray
+) -> dict[str, np.ndarray]:
+    return inputs.coin(columns, ratio, stop, np.full(len(stop), SD), np.full(len(stop), B))
 
 
 def planted(seed: int = 5, days: int = 40) -> tuple[dict[str, np.ndarray], np.ndarray]:
@@ -82,12 +89,12 @@ def later_changed(
     for name in ("close", "volume", "taker_buy_share", "funding_rate"):
         changed[name] = scrambled(columns[name], from_t, rng)
     changed["oi"] = scrambled(columns["oi"], after_t, rng)
-    return inputs.coin(changed, scrambled(ratio, from_t, rng), np.array([k]), M, B)
+    return coin(changed, scrambled(ratio, from_t, rng), np.array([k]))
 
 
 def truncated(columns: dict[str, np.ndarray], ratio: np.ndarray, k: int) -> dict[str, np.ndarray]:
     cut = {name: values[: k + 1] for name, values in columns.items()}
-    return inputs.coin(cut, ratio[: k + 1], np.array([k]), M, B)
+    return coin(cut, ratio[: k + 1], np.array([k]))
 
 
 def same(a: float, b: float) -> bool:
@@ -102,7 +109,7 @@ def test_no_input_reads_a_bar_starting_at_or_after_t_or_a_row_stamped_after_t(
     if series is ticked:
         returns = np.diff(np.log(columns["close"]))
         assert (returns == 0).mean() > 0.3
-    base = inputs.coin(columns, ratio, STOPS, M, B)
+    base = coin(columns, ratio, STOPS)
     assert all(np.isfinite(base[name]).mean() > 0.5 for name in inputs.OWN)
     rng = np.random.default_rng(7)
     picked = set(range(0, len(STOPS), 9)) | set(np.flatnonzero(np.isin(STOPS, GAP_STOPS)).tolist())
@@ -113,10 +120,29 @@ def test_no_input_reads_a_bar_starting_at_or_after_t_or_a_row_stamped_after_t(
                 assert same(got[name][0], base[name][i]), (name, k)
 
 
+def test_the_volatility_scale_and_b_are_the_hours_own() -> None:
+    columns, ratio = planted()
+    stops = 12 * np.arange(30 * 24, 30 * 24 + 6)
+    sd = SD * np.array([1.0, 2.0, np.nan, 0.5, 1.0, 3.0])
+    b = B * np.array([1.0, 0.5, 2.0, np.nan, 4.0, 1.0])
+    got = inputs.coin(columns, ratio, stops, sd, b)
+    base = coin(columns, ratio, stops)
+    for i in range(len(stops)):
+        for name in inputs.WINDOWS:
+            expected = base[f"vol_{name}"][i] - 2 * np.log(sd[i] / SD)
+            assert got[f"vol_{name}"][i] == pytest.approx(expected, nan_ok=True)
+        assert got["near_24h"][i] == pytest.approx(base["near_24h"][i] * B / b[i], nan_ok=True)
+    assert np.isnan(got["vol_24h"][2]) and np.isfinite(got["near_24h"][2])
+    assert np.isnan(got["near_24h"][3]) and np.isfinite(got["vol_24h"][3])
+    for name in inputs.OWN:
+        if not name.startswith("vol_") and name != "near_24h":
+            assert np.array_equal(got[name], base[name], equal_nan=True), name
+
+
 def test_the_latest_data_allowed_is_read() -> None:
     columns, ratio = planted()
     k = int(STOPS[40])
-    base = inputs.coin(columns, ratio, np.array([k]), M, B)
+    base = coin(columns, ratio, np.array([k]))
     checks = [
         ("close", k - 1, ["ret_1h", "vol_1h", "near_24h", "dd_7d", *inputs.GROUPS["classic"]]),
         ("volume", k - 1, ["vsurge_1h", "volume_24h", "flow_1h"]),
@@ -127,19 +153,19 @@ def test_the_latest_data_allowed_is_read() -> None:
     for column, at, names in checks:
         changed = {name: values.copy() for name, values in columns.items()}
         changed[column][at] *= 1.5
-        got = inputs.coin(changed, ratio, np.array([k]), M, B)
+        got = coin(changed, ratio, np.array([k]))
         for name in names:
             assert got[name][0] != base[name][0], (column, name)
     moved = ratio.copy()
     moved[k - 1] *= 1.5
-    got = inputs.coin(columns, moved, np.array([k]), M, B)
+    got = coin(columns, moved, np.array([k]))
     assert got["ls"][0] != base["ls"][0] and got["ls_rel"][0] != base["ls_rel"][0]
 
 
 def test_vol_and_price_against_a_direct_calculation() -> None:
     columns, ratio = planted()
     k = 35 * DAY + 12 * 7
-    got = {n: v[0] for n, v in inputs.coin(columns, ratio, np.array([k]), M, B).items()}
+    got = {n: v[0] for n, v in coin(columns, ratio, np.array([k])).items()}
     close, volume = columns["close"], columns["volume"]
     r = np.diff(np.log(close))
     for name, w in inputs.WINDOWS.items():
@@ -164,7 +190,7 @@ def test_vol_and_price_against_a_direct_calculation() -> None:
 def test_classic_against_ews_indicators_and_scipy() -> None:
     columns, ratio = planted()
     k = 36 * DAY + 12 * 5
-    got = {n: v[0] for n, v in inputs.coin(columns, ratio, np.array([k]), M, B).items()}
+    got = {n: v[0] for n, v in coin(columns, ratio, np.array([k])).items()}
     r = np.diff(np.log(columns["close"]))
     variance = indicators.rolling_variance(r, 72)[k - 289 : k - 1]
     ac = indicators.rolling_autocorrelation(r, 72, 1)[k - 289 : k - 1]
@@ -182,7 +208,7 @@ def test_lev_against_a_direct_calculation_and_the_carry_rule() -> None:
     columns, ratio = planted()
     k = 37 * DAY
     oi, funding = columns["oi"], columns["funding_rate"]
-    got = {n: v[0] for n, v in inputs.coin(columns, ratio, np.array([k]), M, B).items()}
+    got = {n: v[0] for n, v in coin(columns, ratio, np.array([k])).items()}
     assert got["oi_24h"] == pytest.approx(np.log(oi[k] / oi[k - 288]))
     assert got["oi_7d"] == pytest.approx(np.log(oi[k] / oi[k - 2016]))
     assert got["oi_vs_28d"] == pytest.approx(np.log(oi[k] / np.median(oi[k - 8063 : k + 1])))
@@ -196,12 +222,12 @@ def test_lev_against_a_direct_calculation_and_the_carry_rule() -> None:
     held["oi"][k - 11 : k + 1] = np.nan
     gap = ratio.copy()
     gap[k - 12 : k] = -1.0
-    got = {n: v[0] for n, v in inputs.coin(held, gap, np.array([k]), M, B).items()}
+    got = {n: v[0] for n, v in coin(held, gap, np.array([k])).items()}
     assert got["oi_24h"] == pytest.approx(np.log(oi[k - 12] / oi[k - 288]))
     assert got["ls"] == pytest.approx(ls[k - 13])
     held["oi"][k - 12] = 0.0
     gap[k - 13] = np.nan
-    got = {n: v[0] for n, v in inputs.coin(held, gap, np.array([k]), M, B).items()}
+    got = {n: v[0] for n, v in coin(held, gap, np.array([k])).items()}
     assert np.isnan(got["oi_24h"]) and np.isnan(got["oi_vs_28d"]) and np.isnan(got["ls"])
 
 
@@ -214,7 +240,7 @@ def test_the_28_day_baselines_count_only_observed_values() -> None:
     sparse[k - 1 : k + 1] = True
     columns["oi"][~sparse] = np.nan
     ratio = np.where(sparse, ratio, np.nan)
-    got = {n: v[0] for n, v in inputs.coin(columns, ratio, np.array([k]), M, B).items()}
+    got = {n: v[0] for n, v in coin(columns, ratio, np.array([k])).items()}
     assert np.isfinite([got["oi_24h"], got["oi_7d"], got["ls"]]).all()
     assert np.isnan(got["oi_vs_28d"]) and np.isnan(got["ls_rel"])
 
@@ -223,8 +249,8 @@ def test_classic_values_depend_only_on_their_windows() -> None:
     columns, ratio = ticked(days=70)
     later = {name: values[30 * DAY :] for name, values in columns.items()}
     stops = 12 * np.arange(30 * 24, 40 * 24, 7)
-    early = inputs.coin(columns, ratio, stops + 30 * DAY, M, B)
-    late = inputs.coin(later, ratio[30 * DAY :], stops, M, B)
+    early = coin(columns, ratio, stops + 30 * DAY)
+    late = coin(later, ratio[30 * DAY :], stops)
     for name in inputs.GROUPS["classic"]:
         assert np.isfinite(late[name]).mean() > 0.5, name
         assert np.array_equal(early[name], late[name], equal_nan=True), name
@@ -240,14 +266,14 @@ def test_a_rolling_value_needs_five_sixths_of_its_window() -> None:
     columns, ratio = planted()
     k = 36 * DAY
     columns["close"][k - 5] = np.nan
-    got = inputs.coin(columns, ratio, np.array([k]), M, B)
+    got = coin(columns, ratio, np.array([k]))
     r = np.diff(np.log(columns["close"]))[k - 13 : k - 1]
     assert np.isfinite(r).sum() == 10
     assert got["vol_1h"][0] == pytest.approx(np.log(np.nanmean(r**2) / M))
     columns["close"][k - 9] = np.nan
-    assert np.isnan(inputs.coin(columns, ratio, np.array([k]), M, B)["vol_1h"][0])
+    assert np.isnan(coin(columns, ratio, np.array([k]))["vol_1h"][0])
     short = {name: values[: 25 * DAY] for name, values in columns.items()}
-    got = inputs.coin(short, ratio[: 25 * DAY], np.array([20 * DAY]), M, B)
+    got = coin(short, ratio[: 25 * DAY], np.array([20 * DAY]))
     assert np.isnan(got["vol_28d"][0]) and np.isfinite(got["vol_7d"][0])
 
 
@@ -414,14 +440,30 @@ def put(path: Path, name: str, csv: str) -> None:
     path.with_name(path.name + ".CHECKSUM").write_bytes(checksum(name, data))
 
 
-def fake_labels(folder: Path, end: date, hours: np.ndarray) -> Path:
+def daily_thresholds(end: date, scrambled_after: date | None = None) -> pa.Table:
+    days = [E2E_START + timedelta(days=d) for d in range((end - E2E_START).days + 1)]
+    sd = np.array([0.004 * (1 + 0.1 * np.sin(d)) for d in range(len(days))])
+    if scrambled_after is not None:
+        later = np.array([day > scrambled_after for day in days])
+        sd = np.where(later, sd * 7.0, sd)
+        sd[np.flatnonzero(later)[::2]] = np.nan
+    return pa.table(
+        {
+            "ts_ns": pa.array([labels.ns(day) for day in days], pa.int64()),
+            "symbol": ["XUSDT"] * len(days),
+            "sd_ret": pa.array(sd, pa.float64(), mask=np.isnan(sd)),
+            "b": pa.array(5.0 * sd, pa.float64(), mask=np.isnan(sd)),
+        }
+    )
+
+
+def fake_labels(
+    folder: Path, end: date, hours: np.ndarray, scrambled_after: date | None = None
+) -> Path:
     grid = pa.table(
         {"ts_ns": pa.array(hours, pa.int64()), "symbol": pa.array(["XUSDT"] * len(hours))}
     )
-    thresholds = pa.table(
-        {"ts_ns": [labels.ns(E2E_DEV)], "symbol": ["XUSDT"], "b": [0.02]},
-        schema=pa.schema([("ts_ns", pa.int64()), ("symbol", pa.string()), ("b", pa.float64())]),
-    )
+    thresholds = daily_thresholds(end, scrambled_after)
     files = {}
     for name, table in (("grid/g.parquet", grid), ("thresholds/t.parquet", thresholds)):
         (folder / name).parent.mkdir(parents=True, exist_ok=True)
@@ -444,15 +486,19 @@ def grid_hours(end: date) -> np.ndarray:
     return hours[hours <= T] if end < E2E_END else hours
 
 
-def inputs_table(tmp_path: Path, name: str, raw: dict, last: date, end: date) -> pa.Table:
+def inputs_table(
+    tmp_path: Path, name: str, raw: dict, last: date, end: date, scrambled_after: date | None = None
+) -> pa.Table:
     root = write_archive(tmp_path / name / "archive", raw, last)
-    folder = fake_labels(tmp_path / name / "labels" / name, end, grid_hours(end))
+    folder = fake_labels(tmp_path / name / "labels" / name, end, grid_hours(end), scrambled_after)
     run, _ = inputs.run(folder, root, tmp_path / name / "data", "t")
     return pq.read_table(run / "inputs.parquet")
 
 
-def row_at_t(tmp_path: Path, name: str, raw: dict, last: date, end: date) -> dict[str, float]:
-    table = inputs_table(tmp_path, name, raw, last, end)
+def row_at_t(
+    tmp_path: Path, name: str, raw: dict, last: date, end: date, scrambled_after: date | None = None
+) -> dict[str, float]:
+    table = inputs_table(tmp_path, name, raw, last, end, scrambled_after)
     (i,) = np.flatnonzero(table["ts_ns"].to_numpy() == T)
     return {n: float(table[n][i].as_py()) for n in inputs.OWN}
 
@@ -470,10 +516,7 @@ def test_funding_stamped_late_or_on_the_hour_gives_the_same_inputs(tmp_path: Pat
         assert np.array_equal(first[name].to_numpy(), second[name].to_numpy(), equal_nan=True)
 
 
-def test_no_input_through_the_command_reads_data_after_its_hour(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(inputs, "mean_r2", lambda columns, first_ns, end_ns: M)
+def test_no_input_through_the_command_reads_data_after_its_hour(tmp_path: Path) -> None:
     raw = raw_archive()
     t_ms = T // 1_000_000
     rng = np.random.default_rng(4)
@@ -505,12 +548,12 @@ def test_no_input_through_the_command_reads_data_after_its_hour(
     base = row_at_t(tmp_path, "base", raw, E2E_END, E2E_END)
     assert np.isfinite(list(base.values())).all()
     variants = {
-        "changed": (changed, E2E_END, E2E_END),
-        "dropped": (dropped, day_of_t, E2E_END),
-        "truncated": (dropped, day_of_t, day_of_t),
+        "changed": (changed, E2E_END, E2E_END, day_of_t),
+        "dropped": (dropped, day_of_t, E2E_END, None),
+        "truncated": (dropped, day_of_t, day_of_t, None),
     }
-    for name, (data, last, end) in variants.items():
-        got = row_at_t(tmp_path, name, data, last, end)
+    for name, (data, last, end, scrambled_after) in variants.items():
+        got = row_at_t(tmp_path, name, data, last, end, scrambled_after)
         for column in inputs.OWN:
             assert same(got[column], base[column]), (name, column)
 
@@ -555,6 +598,19 @@ def test_the_command_refuses_unclean_altered_or_unbounded_labels_and_missing_fun
     (folder / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
     with pytest.raises(span.HeldBackError, match="no bounds"):
         attempt(folder)
+    needed = labels.ns(E2E_DEV + timedelta(days=3))
+    for name in ("short", "twice"):
+        folder, complete = case(name)
+        table = pq.read_table(folder / "thresholds/t.parquet")
+        if name == "short":
+            table = table.filter(pa.array(table["ts_ns"].to_numpy() != needed))
+        else:
+            table = pa.concat_tables([table, table.slice(3, 1)])
+        pq.write_table(table, folder / "thresholds/t.parquet")
+        complete["files"]["thresholds/t.parquet"] = store.sha256(folder / "thresholds/t.parquet")
+        (folder / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+        with pytest.raises(ValueError, match="no row" if name == "short" else "twice"):
+            attempt(folder)
     folder, _ = case("unfunded")
     gone = archive.Source("fundingRate", "XUSDT", "2022-12")
     (root / gone.path).unlink()
@@ -577,6 +633,15 @@ def labelled(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     archive.fetch(SYMBOLS, FIRST, date(2022, 12, 31), dest, fake.get)
     data = tmp_path_factory.mktemp("data")
     run, _ = labels.run(dest, data, SYMBOLS, FIRST, date(2022, 12, 29), date(2022, 12, 31), "t")
+    complete = json.loads((run / "complete.json").read_text(encoding="utf-8"))
+    (name,) = [f for f in complete["files"] if f.startswith("thresholds/")]
+    once = pq.read_table(run / name).to_pylist()
+    days = [labels.ns(FIRST + timedelta(days=d)) for d in range(34)]
+    rows = [r | {"ts_ns": day} for r in once for day in days]
+    rows[len(days) + 31]["sd_ret"] = None
+    pq.write_table(pa.Table.from_pylist(rows, schema=labels.THRESHOLDS), run / name)
+    complete["files"][name] = store.sha256(run / name)
+    (run / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
     return dest, run
 
 
@@ -593,9 +658,10 @@ def test_the_command_writes_an_inputs_run_on_the_grids_rows(
     assert table.schema.equals(inputs.SCHEMA, check_metadata=False)
     grid = pq.read_table(next((labels_dir / "grid").glob("*.parquet")))
     assert table["ts_ns"].equals(grid["ts_ns"]) and table["symbol"].equals(grid["symbol"])
-    constants = pq.read_table(run / "constants.parquet").to_pylist()
-    thresholds = pq.read_table(next((labels_dir / "thresholds").glob("*.parquet"))).to_pylist()
-    assert [c["b"] for c in constants] == [t["b"] for t in thresholds]
+    assert set(json.loads((run / "complete.json").read_text(encoding="utf-8"))["files"]) == {
+        "inputs.parquet"
+    }
+    thresholds = pq.read_table(next((labels_dir / "thresholds").glob("*.parquet")))
     got = archive.collect(["ETHUSDT"], FIRST, date(2022, 12, 31), dest)
     columns, _ = bars.bars(
         archive.day_ms(FIRST), 34, *(got.columns[("ETHUSDT", k)] for k in archive.KINDS)
@@ -606,11 +672,14 @@ def test_the_command_writes_an_inputs_run_on_the_grids_rows(
     assert np.nanmax(ratio) == np.nanmin(ratio) == 2.1
     hours = np.unique(grid["ts_ns"].to_numpy())
     stop = (hours - labels.ns(FIRST)) // inputs.BAR_NS
-    expected = inputs.coin(columns, ratio, stop, constants[1]["mean_r2"], constants[1]["b"])
+    sd_ret, b = inputs.daily_scales(thresholds, "ETHUSDT", hours)
+    expected = inputs.coin(columns, ratio, stop, sd_ret, b)
     eth = table.filter(np.array(table["symbol"].to_pylist()) == "ETHUSDT")
     for name in inputs.OWN:
         assert np.array_equal(eth[name].to_numpy(), expected[name], equal_nan=True), name
-    assert np.isfinite(eth["vol_28d"].to_numpy()).all()
+    unscaled = (hours - hours % inputs.DAY_NS) == labels.ns(date(2022, 12, 29))
+    vol = eth["vol_28d"].to_numpy()
+    assert unscaled.any() and np.isnan(vol[unscaled]).all() and np.isfinite(vol[~unscaled]).all()
     assert all(np.isnan(table[name].to_numpy()).all() for name in inputs.MARKET)
 
 
