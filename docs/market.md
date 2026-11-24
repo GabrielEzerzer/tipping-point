@@ -667,9 +667,10 @@ at hour t may read only bars that start before t and metrics rows stamped at or 
 with the table `inputs`, one row per coin per hour t of the labels run's grid in the grid's order.
 Its manifest names the labels run and the sha256 of its grid and of its `thresholds` table. That
 table must give one row for each coin and each UTC day of the grid, or the command refuses; an hour
-in day d scales its volatility inputs by that day's `sd_ret` and `b`, which the labels run sets from
-windows closing in the 90 days before d, and those inputs are missing on a day whose row has no
-threshold.
+in day d scales its volatility inputs by that day's `sd_ret` and `b`, set from the 90 days before d
+(see Thresholds), and those inputs are missing on a day whose row has no threshold. The command
+takes the archive's file list only through the same check as `labels`, and refuses an archive that
+holds or lists a file naming a day from 2024-01-01 on before it reads anything.
 
 ```sh
 uv run python -m tipping_point.panel inputs --labels <labels run id>

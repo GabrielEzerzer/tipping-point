@@ -2,10 +2,13 @@
 # changes or goes, each group against a direct calculation, the 5/6 and carry rules, window-local
 # classic statistics, the ratio reader, the market mean's 15 coins and the held-back refusals.
 
+import builtins
+import io
 import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -335,12 +338,12 @@ def test_the_ratio_reader_takes_duplicate_unsorted_null_and_missing_rows(tmp_pat
         source = archive.Source("metrics", "XUSDT", f"{d:%Y-%m-%d}")
         metrics_file(root / source.path, [metrics_row(5, "2.0", d)])
     with pytest.raises(archive.ArchiveError, match="not fetched"):
-        inputs.ratios(root, "XUSDT", days[0], days[2])
+        inputs.ratios(root, span.manifest_files(root), "XUSDT", days[0], days[2])
     gone = archive.Source("metrics", "XUSDT", f"{days[1]:%Y-%m-%d}").path
     (root / "manifest.json").write_text(
         json.dumps({"files": {gone: {"status": "missing"}}}), encoding="utf-8"
     )
-    found = inputs.ratios(root, "XUSDT", days[0], days[2])
+    found = inputs.ratios(root, span.manifest_files(root), "XUSDT", days[0], days[2])
     grid = inputs.on_grid(found, archive.day_ms(days[0]), 3 * DAY)
     assert np.flatnonzero(np.isfinite(grid)).tolist() == [1, 2 * DAY + 1]
 
@@ -670,7 +673,9 @@ def test_the_command_writes_an_inputs_run_on_the_grids_rows(
         archive.day_ms(FIRST), 34, *(got.columns[("ETHUSDT", k)] for k in archive.KINDS)
     )
     ratio = inputs.on_grid(
-        inputs.ratios(dest, "ETHUSDT", FIRST, date(2022, 12, 31)), archive.day_ms(FIRST), 34 * DAY
+        inputs.ratios(dest, span.manifest_files(dest), "ETHUSDT", FIRST, date(2022, 12, 31)),
+        archive.day_ms(FIRST),
+        34 * DAY,
     )
     assert np.nanmax(ratio) == np.nanmin(ratio) == 2.1
     hours = np.unique(grid["ts_ns"].to_numpy())
@@ -695,5 +700,40 @@ def test_the_command_refuses_a_labels_run_reaching_the_held_back_span(tmp_path: 
     with pytest.raises(span.HeldBackError):
         inputs.labels_run(folder)
     with pytest.raises(span.HeldBackError):
-        inputs.ratios(tmp_path, "BTCUSDT", date(2023, 12, 30), date(2024, 1, 1))
+        inputs.ratios(tmp_path, {}, "BTCUSDT", date(2023, 12, 30), date(2024, 1, 1))
     assert not (tmp_path / "panel-inputs").exists()
+
+
+def test_the_command_refuses_an_archive_naming_a_held_back_day_before_reading_anything(
+    labelled: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, labels_dir = labelled
+    root = tmp_path / "archive"
+    name = "metrics/BTCUSDT/BTCUSDT-metrics-2024-01-02.zip"
+    held = root / name
+    held.parent.mkdir(parents=True)
+    held.write_bytes(b"")
+    (root / "manifest.json").write_text("{", encoding="utf-8")
+    opened: list[str] = []
+    real = io.open
+
+    def spy(file: Any, *args: Any, **kwargs: Any) -> Any:
+        opened.append(str(file))
+        return real(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    monkeypatch.setattr(io, "open", spy)
+    command = ["inputs", "--labels", str(labels_dir), "--archive", str(root)]
+    assert main([*command, "--data-dir", str(tmp_path / "out")]) == 1
+    held.unlink()
+    listed = json.dumps({"files": {name: {"status": "missing"}}})
+    (root / "manifest.json").write_text(listed, encoding="utf-8")
+    assert main([*command, "--data-dir", str(tmp_path / "out")]) == 1
+    errors = capsys.readouterr().err.splitlines()
+    assert len(errors) == 2 and all("BTCUSDT-metrics-2024-01-02.zip" in line for line in errors)
+    assert "holds" in errors[0] and "lists in its manifest" in errors[1]
+    assert not [p for p in opened if p.startswith((str(labels_dir), str(held.parent)))]
+    assert not (tmp_path / "out").exists()

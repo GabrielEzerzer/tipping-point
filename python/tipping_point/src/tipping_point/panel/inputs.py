@@ -343,10 +343,10 @@ def read_ratio(path: Path) -> dict[str, np.ndarray]:
     return {"create_time": stamps, "count_long_short_ratio": ratio}
 
 
-def ratios(root: Path, symbol: str, start: date, end: date) -> dict[str, np.ndarray]:
+def ratios(
+    root: Path, files: Mapping[str, Any], symbol: str, start: date, end: date
+) -> dict[str, np.ndarray]:
     span.refuse(start, end)
-    manifest_path = root / "manifest.json"
-    files = io.read_json(manifest_path)["files"] if manifest_path.exists() else {}
     parts = []
     for source in archive.sources([symbol], start, end):
         if source.kind != "metrics":
@@ -397,6 +397,7 @@ def run(
     tag: str,
     log: Callable[[str], None] = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
+    files = span.manifest_files(root)
     source = labels_run(labels_dir)
     if not source["clean"]:
         raise archive.ArchiveError(f"{labels_dir}: complete.json does not mark the run clean")
@@ -434,7 +435,7 @@ def run(
         if stop.size and stop[-1] >= len(columns["close"]):
             raise ValueError("the grid holds an hour after the span's last bar")
         ratio = on_grid(
-            ratios(root, symbol, start, end), archive.day_ms(start), len(columns["ts_ns"])
+            ratios(root, files, symbol, start, end), archive.day_ms(start), len(columns["ts_ns"])
         )
         sd_ret, b = scales[symbol]
         own.append(coin(columns, ratio, stop, sd_ret, b))
