@@ -262,7 +262,7 @@
       "description": "Writes the model inputs of every coin and UTC hour of a panel labels run's grid, own-coin and market means.",
       "command": "uv run python -m tipping_point.panel inputs --labels <run id>",
       "inputs": "a panel labels run and the fetched Binance files of the panel",
-      "outputs": "<data dir>/panel-inputs/<run_id>/ holding the inputs and constants tables",
+      "outputs": "<data dir>/panel-inputs/<run_id>/ holding the inputs table",
       "test": "python/tipping_point/tests/panel/test_inputs.py"
     },
     {

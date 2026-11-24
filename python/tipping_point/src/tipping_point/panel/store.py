@@ -64,19 +64,39 @@ def write(
     return run_dir
 
 
-def refuse_held_back(path: Path) -> None:
-    meta = pq.ParquetFile(path).metadata
-    index = meta.schema.names.index("ts_ns")
-    held = labels.ns(span.HELD_BACK)
+UNIT_NS = {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}
+
+
+def refuse_held_back(path: Path, column: str = "ts_ns") -> None:
+    file = pq.ParquetFile(path)
+    schema = file.schema_arrow
+    if column not in schema.names:
+        raise span.HeldBackError(f"{path}: it has no {column} column")
+    kind = schema.field(column).type
+    if not (pa.types.is_integer(kind) or pa.types.is_timestamp(kind)):
+        raise span.HeldBackError(f"{path}: its {column} column is {kind}, not integer or timestamp")
+    meta = file.metadata
+    index = [meta.schema.column(i).path for i in range(meta.num_columns)].index(column)
+    stamped = pa.types.is_timestamp(kind)
+    scale = UNIT_NS[kind.unit] if stamped else 1
+    first, held = labels.ns(span.START), labels.ns(span.HELD_BACK)
     for g in range(meta.num_row_groups):
         group = meta.row_group(g)
         if group.num_rows == 0:
             continue
         stats = group.column(index).statistics
-        if stats is None or not stats.has_min_max or not isinstance(stats.max, int):
-            raise span.HeldBackError(f"{path}: its metadata gives no bounds for ts_ns")
-        if stats.max >= held:
-            raise span.HeldBackError(f"{path}: ts_ns reaches the held-back test span")
+        if stats is None or not stats.has_min_max:
+            raise span.HeldBackError(f"{path}: its metadata gives no bounds for {column}")
+        low, top = (stats.min_raw, stats.max_raw) if stamped else (stats.min, stats.max)
+        if not (isinstance(low, int) and isinstance(top, int)):
+            raise span.HeldBackError(f"{path}: its metadata gives no bounds for {column}")
+        if top * scale >= held:
+            raise span.HeldBackError(f"{path}: {column} reaches the held-back test span")
+        if low * scale < first:
+            raise span.HeldBackError(
+                f"{path}: {column} starts before {span.START}, so it is not nanoseconds of the "
+                f"study's span"
+            )
 
 
 def read(run_dir: Path, name: str) -> pa.Table:

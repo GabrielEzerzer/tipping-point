@@ -82,7 +82,7 @@ class Plan:
 
 def needed_gap_ns(horizons: Sequence[int]) -> int:
     longest = max(horizons, default=0) * labels.HOUR_NS
-    return inputs.LOOKBACK_NS + longest + labels.LEAD_NS + labels.SKIP_HOURS * labels.HOUR_NS
+    return inputs.LOOKBACK_NS + longest + labels.LEAD_NS + labels.PAST_HOURS * labels.HOUR_NS
 
 
 def load(path: Path = PLAN) -> Plan:
@@ -125,9 +125,13 @@ def load(path: Path = PLAN) -> Plan:
         problems.append(f"external scheme {plan.external[2]}")
     if not plan.rungs:
         problems.append("an empty rung list")
+    problems += [f"no groups in {r.name}" for r in plan.rungs if not r.groups]
+    for name, listed in (("horizons", plan.horizons), ("sides", plan.sides)):
+        if not listed or len(set(listed)) < len(listed):
+            problems.append(f"{name} = {list(listed)} (must be non-empty and unique)")
     for name, value in (("c", plan.c), ("clip", plan.clip)):
-        if not value > 0:
-            problems.append(f"{name} = {value} (must be above 0)")
+        if not (np.isfinite(value) and value > 0):
+            problems.append(f"{name} = {value} (must be finite and above 0)")
     for name, value in (("block_days", plan.block_days), ("draws", plan.draws)):
         if value <= 0:
             problems.append(f"{name} = {value} (must be above 0)")
@@ -194,8 +198,7 @@ def fit(x: np.ndarray, y: np.ndarray, c: float) -> np.ndarray:
     beta = np.zeros(d + 1)
     share = float(np.mean(y))
     if share in (0.0, 1.0):
-        beta[-1] = -np.inf if share == 0.0 else np.inf
-        return beta
+        raise ValueError("a fit needs positive and negative rows")
     beta[-1] = np.log(share / (1 - share))
 
     def loss(b: np.ndarray) -> float:
@@ -333,6 +336,7 @@ def out_of_fold(
     edges: np.ndarray,
     plan: Plan,
     scheme: str,
+    horizon: int,
     log: Callable[[str], None],
 ) -> dict[str, dict[str, np.ndarray]]:
     index = {name: i for i, name in enumerate(plan.columns)}
@@ -345,6 +349,14 @@ def out_of_fold(
         train = training(ts, fold, f, edges, plan.gap_days, scheme)
         if not train.any():
             raise ValueError(f"{scheme} fold {f}: a scored quarter has no training rows")
+        for side in ("long", "short"):
+            share = float(np.mean(y[side][train]))
+            if share in (0.0, 1.0):
+                quarter = str(np.datetime64(int(edges[f]), "ns"))[:10]
+                raise ValueError(
+                    f"{scheme}, quarter from {quarter}, {horizon} h, {side}: the training rows "
+                    f"hold {'no' if share == 0.0 else 'only'} positives"
+                )
         z_train, z_test = standardise(x[train], x[test], plan.clip)
         for rung in plan.rungs:
             cols = [index[c] for c in rung.columns]
@@ -362,19 +374,76 @@ def out_of_fold(
     return out
 
 
-def external_scores(
-    table: pa.Table, ts: np.ndarray, symbol: np.ndarray, horizon: int, sides: Sequence[str]
-) -> dict[str, np.ndarray]:
-    hours = table["hour"]
+def _text(kind: pa.DataType) -> bool:
+    if pa.types.is_dictionary(kind):
+        return _text(kind.value_type)
+    return pa.types.is_string(kind) or pa.types.is_large_string(kind)
+
+
+def _hourly(kind: pa.DataType) -> bool:
+    return pa.types.is_integer(kind) or pa.types.is_timestamp(kind)
+
+
+EXTERNAL: dict[str, Callable[[pa.DataType], bool]] = {
+    "coin": _text,
+    "hour": _hourly,
+    "horizon": pa.types.is_integer,
+    "side": _text,
+    "score": pa.types.is_floating,
+    "fold": pa.types.is_integer,
+    "scheme": _text,
+}
+
+
+def external_columns(schema: pa.Schema) -> None:
+    for name, allowed in EXTERNAL.items():
+        if name not in schema.names:
+            raise ValueError(f"the external scores have no {name} column")
+        if not allowed(schema.field(name).type):
+            raise ValueError(
+                f"the external scores' {name} column is {schema.field(name).type}, not a type "
+                f"the ladder takes"
+            )
+
+
+def hour_ns(hours: pa.ChunkedArray) -> pa.ChunkedArray:
     if pa.types.is_timestamp(hours.type):
-        hours = hours.cast(pa.timestamp("ns")).cast(pa.int64())
+        hours = hours.cast(pa.timestamp("ns", hours.type.tz))
+    return hours.cast(pa.int64())
+
+
+def external_table(path: Path) -> pa.Table:
+    external_columns(pq.read_schema(path))
+    hours = pq.read_table(path, columns=["hour"])["hour"]
+    if hours.null_count:
+        raise ValueError(f"the external scores leave {hours.null_count} hours null")
+    ns = hour_ns(hours).to_numpy()
+    if ns.size and int(ns.max()) >= labels.ns(span.HELD_BACK):
+        raise span.HeldBackError("the external scores hold an hour in the held-back test span")
+    return pq.read_table(path)
+
+
+def external_scores(
+    table: pa.Table,
+    ts: np.ndarray,
+    symbol: np.ndarray,
+    fold: np.ndarray,
+    scheme: str,
+    horizon: int,
+    sides: Sequence[str],
+) -> dict[str, np.ndarray]:
+    external_columns(table.schema)
+    schemes = table["scheme"].cast(pa.string()).unique().to_pylist()
+    if schemes != [scheme]:
+        raise ValueError(f"the external scores were fitted under {schemes}, not {scheme}")
     found = pa.table(
         {
             "coin": table["coin"].cast(pa.string()),
-            "hour": hours,
+            "hour": hour_ns(table["hour"]),
             "horizon": table["horizon"].cast(pa.int64()),
             "side": table["side"].cast(pa.string()),
             "score": table["score"].cast(pa.float64()),
+            "fold": table["fold"].cast(pa.int64()),
         }
     )
     rows = pa.table({"coin": symbol.astype(str), "hour": ts, "row": np.arange(len(ts))})
@@ -383,7 +452,7 @@ def external_scores(
     out = {}
     for side in sides:
         mine = found.filter(pa.array(at_horizon & (named == side)))
-        mine = mine.select(["coin", "hour", "score"])
+        mine = mine.select(["coin", "hour", "score", "fold"])
         joined = rows.join(mine, keys=["coin", "hour"], join_type="left outer")
         if joined.num_rows != len(ts):
             raise ValueError(f"the external scores give a row twice ({horizon} h, {side})")
@@ -393,6 +462,12 @@ def external_scores(
             raise ValueError(
                 f"the external scores miss or give a non-finite score for "
                 f"{int((~np.isfinite(score)).sum())} scored rows ({horizon} h, {side})"
+            )
+        given = joined["fold"].to_numpy(zero_copy_only=False)
+        if not np.array_equal(given, fold):
+            raise ValueError(
+                f"the external scores give {int((given != fold).sum())} scored rows a fold other "
+                f"than the ladder's ({horizon} h, {side})"
             )
         out[side] = score
     return out
@@ -417,10 +492,10 @@ def horizon_rows(
     for scheme in SCHEMES:
         first = plan.first_fold(scheme)
         mine = fold >= first
-        scores = out_of_fold(x, y, ts, fold, edges, plan, scheme, log)
+        scores = out_of_fold(x, y, ts, fold, edges, plan, scheme, horizon, log)
         if external is not None and plan.external is not None and plan.external[2] == scheme:
             scores[plan.external[0]] = external_scores(
-                external, ts[mine], symbol[mine], horizon, plan.sides
+                external, ts[mine], symbol[mine], fold[mine], scheme, horizon, plan.sides
             )
         labelled = {side: v[mine] for side, v in y.items()}
         out.append(
@@ -472,7 +547,11 @@ def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dic
                     primary[(name, side)] = per_fold
                     boot[(name, side)] = _nanmean_rows(booted)
                     if name == names[0]:
-                        complete[side] = float(np.isfinite(booted[:, finite]).all(axis=1).mean())
+                        complete[side] = (
+                            float(np.isfinite(booted[:, finite]).all(axis=1).mean())
+                            if finite.any()
+                            else np.nan
+                        )
                 weight = positives[finite].sum()
                 score_rows.append(
                     {
@@ -595,8 +674,10 @@ def run(
     labels_dir = data_dir / "labels" / params["labels_run"]
     grid_path = labels_dir / params["labels_grid"]["file"]
     table_path = inputs_dir / "inputs.parquet"
-    for path in (grid_path, table_path):
-        store.refuse_held_back(path)
+    store.refuse_held_back(grid_path)
+    store.refuse_held_back(table_path)
+    if plan.external is not None:
+        store.refuse_held_back(plan.external[1], "hour")
     if store.sha256(grid_path) != params["labels_grid"]["sha256"]:
         raise ValueError(f"{grid_path}: not the grid the inputs run was made from")
     if store.sha256(table_path) != complete["files"].get(table_path.name):
@@ -609,12 +690,7 @@ def run(
         raise ValueError("the inputs' rows are not the grid's rows")
     external = None
     if plan.external is not None:
-        hours = pq.read_table(plan.external[1], columns=["hour"])["hour"]
-        if pa.types.is_timestamp(hours.type):
-            hours = hours.cast(pa.timestamp("ns")).cast(pa.int64())
-        if len(hours) and max(hours.to_numpy()) >= labels.ns(span.HELD_BACK):
-            raise span.HeldBackError("the external scores hold an hour in the held-back test span")
-        external = pq.read_table(plan.external[1])
+        external = external_table(plan.external[1])
     values = {n: table[n].to_numpy() for n in plan.columns}
     grid = {n: grid_table[n].to_numpy(zero_copy_only=False) for n in grid_table.column_names}
     out = ladder(values, grid, plan, external, log)

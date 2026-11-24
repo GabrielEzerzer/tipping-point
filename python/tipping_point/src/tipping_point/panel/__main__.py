@@ -16,8 +16,8 @@ DESCRIPTION = f"""\
 Command line: python -m tipping_point.panel <command> [options]
 
   coins   derive the panel from Binance Vision (network): every USD-M symbol matching
-          [A-Z0-9]+USDT but {", ".join(sorted(coins.EXCLUDED))}, with a monthly 1-day kline file for
-          every month of {coins.YEAR} and a daily metrics file on {coins.METRIC_DAYS[0]} and
+          [A-Z0-9]+USDT but {", ".join(sorted(coins.EXCLUDED))}, with a monthly 1-day kline file
+          holding every day of {coins.YEAR} and a daily metrics file on {coins.METRIC_DAYS[0]} and
           {coins.METRIC_DAYS[1]}, ranked by {coins.YEAR} quote volume; the panel is
           {" and ".join(coins.ALWAYS)} and the top {coins.OTHERS} others. Prints the ranking and
           exits 1 when it differs from the committed list (panel/coins.txt)
@@ -27,11 +27,11 @@ Command line: python -m tipping_point.panel <command> [options]
           already verified. Exit 1 when a file is refused, failed or unreadable
   labels  the panel's labels from the fetched files (--archive, same default), as a run in
           <data dir>/labels/<run_id>/ with the tables thresholds, cascades and grid: bars from
-          --start, thresholds, cascades and the hourly grid from --dev-start (default
-          {span.DEV_START}) to the end of --end
+          --start, daily trailing thresholds and cascades from the first day that has a threshold,
+          the hourly grid from --dev-start (default {span.DEV_START}) to the end of --end
   inputs  the model inputs of every coin and hour of a labels run's grid (--labels, a run id or
-          folder), as a run in <data dir>/panel-inputs/<run_id>/ with the tables inputs and
-          constants (each coin's development-span mean squared return and threshold b)
+          folder), as a run in <data dir>/panel-inputs/<run_id>/ with the table inputs, the
+          volatility inputs scaled by the labels run's threshold of each hour's day
   ladder  fit and score the rungs of a plan file (--plan, default panel/ladder.toml) on an inputs
           run (--inputs) and its labels run, out of fold by calendar quarter (each left out, and
           forward only), with a joint block bootstrap for each comparison, as a run in
@@ -53,7 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return args.command(args)
-    except (archive.ArchiveError, span.HeldBackError) as exc:
+    except (archive.ArchiveError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

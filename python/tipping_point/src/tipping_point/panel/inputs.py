@@ -1,13 +1,13 @@
-# Model inputs per coin and UTC hour t of a labels grid (docs/market.md, "Coin panel"). Timing rule:
-# at t an input reads bars starting before t, open interest stamped at or before t, and the ratio
-# and funding of bar t - 5 min. tests/panel/test_inputs.py checks that no later data is read.
+# Model inputs per coin and UTC hour t of a labels grid (docs/market.md, "Coin panel"). At t an
+# input reads bars starting before t, open interest stamped at or before t, the ratio and funding of
+# bar t - 5 min and the labels run's thresholds of t's day; tests/panel/test_inputs.py checks it.
 
 from __future__ import annotations
 
 import zipfile
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,10 @@ BAR_NS = labels.HOUR_NS // 12
 HOUR_BARS = 12
 WINDOWS = {"1h": 12, "6h": 72, "24h": 288, "7d": 2016, "28d": 8064}
 CARRY_BARS = 12
-LOOKBACK_BARS = WINDOWS["28d"] + 1 + CARRY_BARS
+NEAR_BARS = 6
+DAY_NS = 24 * labels.HOUR_NS
+FUNDING_CARRY_BARS = 8 * HOUR_BARS
+LOOKBACK_BARS = WINDOWS["28d"] + 1 + max(CARRY_BARS, FUNDING_CARRY_BARS)
 LOOKBACK_NS = LOOKBACK_BARS * BAR_NS
 MARKET_MIN = 15
 TAU_BARS = (72, 288)
@@ -63,9 +66,6 @@ OWN = tuple(name for names in GROUPS.values() for name in names)
 MARKET = tuple(f"m_{name}" for name in OWN)
 SCHEMA = pa.schema(
     [("ts_ns", pa.int64()), ("symbol", pa.string()), *[(n, pa.float64()) for n in OWN + MARKET]]
-)
-CONSTANTS = pa.schema(
-    [("ts_ns", pa.int64()), ("symbol", pa.string()), ("mean_r2", pa.float64()), ("b", pa.float64())]
 )
 Reduce = Callable[[np.ndarray, np.ndarray], np.ndarray]
 
@@ -221,8 +221,8 @@ def coin(
     columns: Mapping[str, np.ndarray],
     ratio: np.ndarray,
     stop: np.ndarray,
-    mean_r2: float,
-    b: float,
+    sd_ret: np.ndarray,
+    b: np.ndarray,
 ) -> dict[str, np.ndarray]:
     if np.any(stop % HOUR_BARS) or np.any(stop < 1):
         raise ValueError("every hour must start a bar after the first, on the hour")
@@ -230,9 +230,10 @@ def coin(
     r = returns(close)
     out: dict[str, np.ndarray] = {}
     with np.errstate(divide="ignore", invalid="ignore"):
+        scale = sd_ret * sd_ret / NEAR_BARS
         for name, w in WINDOWS.items():
-            out[f"vol_{name}"] = np.log(mean(r * r, stop, w) / mean_r2)
-        out["near_24h"] = windowed(np.abs(returns(close, 6)), stop, 288, largest) / b
+            out[f"vol_{name}"] = np.log(mean(r * r, stop, w) / scale)
+        out["near_24h"] = windowed(np.abs(returns(close, NEAR_BARS)), stop, 288, largest) / b
         out["vsurge_1h"] = np.log(mean(volume, stop, 12) / windowed(volume, stop, 8064, median))
         out["volume_24h"] = np.log(mean(volume, stop, 288) / mean(volume, stop, 8064))
 
@@ -291,10 +292,24 @@ def market(own: Sequence[Mapping[str, np.ndarray]]) -> dict[str, np.ndarray]:
     return out
 
 
-def mean_r2(columns: Mapping[str, np.ndarray], first_ns: int, end_ns: int) -> float:
-    r = returns(columns["close"])
-    inside = (columns["ts_ns"] >= first_ns) & (columns["ts_ns"] < end_ns) & np.isfinite(r)
-    return float(np.mean(r[inside] ** 2))
+def daily_scales(
+    thresholds: pa.Table, symbol: str, hours: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    named = thresholds["symbol"].to_numpy(zero_copy_only=False)
+    mine = thresholds.filter(pa.array(named == symbol))
+    row = {int(day): i for i, day in enumerate(mine["ts_ns"].to_numpy())}
+    if len(row) != mine.num_rows:
+        raise ValueError(f"{symbol}: the thresholds table gives a day twice")
+    of_hour = hours - hours % DAY_NS
+    wanted = np.unique(of_hour)
+    absent = [day for day in wanted.tolist() if day not in row]
+    if absent:
+        raise ValueError(f"{symbol}: the thresholds table has no row for {len(absent)} grid days")
+    index = np.array([row[day] for day in wanted.tolist()], np.int64)[
+        np.searchsorted(wanted, of_hour)
+    ]
+    sd_ret, b = (mine[n].to_numpy(zero_copy_only=False).astype(np.float64) for n in ("sd_ret", "b"))
+    return sd_ret[index], b[index]
 
 
 def read_ratio(path: Path) -> dict[str, np.ndarray]:
@@ -329,10 +344,10 @@ def read_ratio(path: Path) -> dict[str, np.ndarray]:
     return {"create_time": stamps, "count_long_short_ratio": ratio}
 
 
-def ratios(root: Path, symbol: str, start: date, end: date) -> dict[str, np.ndarray]:
+def ratios(
+    root: Path, files: Mapping[str, Any], symbol: str, start: date, end: date
+) -> dict[str, np.ndarray]:
     span.refuse(start, end)
-    manifest_path = root / "manifest.json"
-    files = io.read_json(manifest_path)["files"] if manifest_path.exists() else {}
     parts = []
     for source in archive.sources([symbol], start, end):
         if source.kind != "metrics":
@@ -383,6 +398,7 @@ def run(
     tag: str,
     log: Callable[[str], None] = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
+    files = span.manifest_files(root)
     source = labels_run(labels_dir)
     if not source["clean"]:
         raise archive.ArchiveError(f"{labels_dir}: complete.json does not mark the run clean")
@@ -394,11 +410,9 @@ def run(
         if store.sha256(path) != source[key]:
             raise archive.ArchiveError(f"{path}: its sha256 differs from complete.json's")
     grid = pq.read_table(grid_path, columns=["ts_ns", "symbol"])
-    thresholds = pq.read_table(thresholds_path).to_pylist()
-    b = {row["symbol"]: row["b"] for row in thresholds}
+    thresholds = pq.read_table(thresholds_path, columns=["ts_ns", "symbol", "sd_ret", "b"])
     symbols = list(source["params"]["symbols"])
     start, end = source["start"], source["end"]
-    first_ns, end_ns = labels.ns(source["dev_start"]), labels.ns(end + timedelta(days=1))
     hours = np.unique(grid["ts_ns"].to_numpy())
     if hours.size and hours[-1] >= labels.ns(span.HELD_BACK):
         raise span.HeldBackError("the grid holds an hour in the held-back test span")
@@ -408,7 +422,7 @@ def run(
     stop = (hours - start_ns) // BAR_NS
     days = (end - start).days + 1
     own: list[dict[str, np.ndarray]] = []
-    constants: list[dict[str, Any]] = []
+    scales = {symbol: daily_scales(thresholds, symbol, hours) for symbol in symbols}
     sources: list[dict[str, Any]] = []
     for symbol in symbols:
         got = archive.collect([symbol], start, end, root)
@@ -422,14 +436,14 @@ def run(
         if stop.size and stop[-1] >= len(columns["close"]):
             raise ValueError("the grid holds an hour after the span's last bar")
         ratio = on_grid(
-            ratios(root, symbol, start, end), archive.day_ms(start), len(columns["ts_ns"])
+            ratios(root, files, symbol, start, end), archive.day_ms(start), len(columns["ts_ns"])
         )
-        m = mean_r2(columns, first_ns, end_ns)
-        own.append(coin(columns, ratio, stop, m, b[symbol]))
-        constants.append({"ts_ns": first_ns, "symbol": symbol, "mean_r2": m, "b": b[symbol]})
+        sd_ret, b = scales[symbol]
+        own.append(coin(columns, ratio, stop, sd_ret, b))
         missing = {k: round(float(np.mean(np.isnan(v))), 4) for k, v in own[-1].items()}
         worst = sorted(missing.items(), key=lambda kv: -kv[1])[:3]
-        log(f"{symbol:<13} mean r^2 {m:.3e} b {b[symbol]:.4f}; most missing {worst}")
+        unscaled = int(np.isnan(sd_ret).sum())
+        log(f"{symbol:<13} {unscaled} hours without a threshold; most missing {worst}")
     shared = market(own)
     order = sorted(range(len(symbols)), key=lambda i: symbols[i])
     names = [symbols[i] for i in order]
@@ -465,5 +479,5 @@ def run(
         "code": {"uv_lock_sha256": labels.uv_lock()},
         "sources": sources,
     }
-    tables = {"inputs": out, "constants": pa.Table.from_pylist(constants, schema=CONSTANTS)}
+    tables = {"inputs": out}
     return store.write(data_dir, "panel-inputs", tag, tables, run_params, checks), checks

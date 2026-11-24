@@ -520,19 +520,21 @@ the sha256 their records name and exits 1 on any problem. `python -m tipping_poi
 The panel study asks whether leverage and positioning data warn of liquidation cascades on 30
 Binance USDT perpetuals. Its data and label layer is `python/tipping_point/src/tipping_point/panel/`,
 which reuses the archive reader, the bars and the cascade rule above unchanged. Bars start on
-2021-10-01 (three months of trailing history only); thresholds, cascades and labels cover the
-development span 2022-01-01 to 2023-12-31. Every day from 2024-01-01 is held back as the test span:
-every command refuses one, and every request is checked for one before it is sent.
+2021-10-01; thresholds and cascades start on each coin's first day with a threshold, and the label
+grid covers the development span 2022-01-01 to 2023-12-31. Every day from 2024-01-01 is held back
+as the test span: every command refuses one, and every request is checked for one before it is
+sent.
 
 **Coins.** A symbol enters the ranking when it is a USD-M symbol matching `[A-Z0-9]+USDT`, is not
 one of the index and stablecoin products `BTCDOMUSDT`, `DEFIUSDT` and `USDCUSDT`, publishes a
 monthly 1-day kline file for every month of 2023, and publishes a daily metrics file on both
 2021-12-01 and 2023-12-31. The ranking is by 2023 quote volume summed from those 1-day klines,
-each file checked against its `.CHECKSUM`. The panel is BTCUSDT, ETHUSDT and the top 28 others,
-committed in `panel/coins.txt`, which every other command reads: BTCUSDT ETHUSDT SOLUSDT XRPUSDT
-DOGEUSDT BNBUSDT LTCUSDT MATICUSDT BCHUSDT LINKUSDT AVAXUSDT ADAUSDT TRBUSDT FILUSDT 1000SHIBUSDT
-DYDXUSDT MASKUSDT FTMUSDT GALAUSDT ETCUSDT LINAUSDT DOTUSDT NEARUSDT EOSUSDT CRVUSDT SANDUSDT
-ATOMUSDT AXSUSDT STORJUSDT MKRUSDT.
+each file checked against its `.CHECKSUM` and required to hold one row for each day of its month,
+none twice. The panel is BTCUSDT, ETHUSDT and the top 28 others; the command fails when fewer
+symbols are eligible. It is committed in `panel/coins.txt`, which every other command reads:
+BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT BNBUSDT LTCUSDT MATICUSDT BCHUSDT LINKUSDT AVAXUSDT ADAUSDT
+TRBUSDT FILUSDT 1000SHIBUSDT DYDXUSDT MASKUSDT FTMUSDT GALAUSDT ETCUSDT LINAUSDT DOTUSDT NEARUSDT
+EOSUSDT CRVUSDT SANDUSDT ATOMUSDT AXSUSDT STORJUSDT MKRUSDT.
 
 ```sh
 uv run python -m tipping_point.panel coins
@@ -548,39 +550,127 @@ for 2021-10-01 to 2023-12-31 into the same folder as `market fetch`, `--workers`
 `.CHECKSUM`, a file that fails is refused and never written, a 404 is recorded as missing, a re-run
 skips verified files, and `manifest.json` keeps the same form. `labels` writes one run to
 `<data dir>/labels/<run_id>/` with the tables `thresholds`, `cascades` and `grid`; its manifest
-records the coin list, the span, the constants, HEAD and the sha256 of `uv.lock`.
+records the coin list, the span, the constants, HEAD and the sha256 of `uv.lock`. The archive root
+the panel reads holds no held-back file: `fetch` and `labels` scan the names under it (symlinked
+folders are not followed), opening none, and refuse a root where any name carries a day from
+2024-01-01 on before they read its manifest or any file. They then refuse a manifest that lists
+such a name, which a file moved away or never found leaves behind, before using any record in it.
+Every command exits 1 with a message on a refused day, a bad file or a bad argument.
 
-**Thresholds.** Per coin, over the windows that close in the development span and that the cascade
-rule could evaluate, `sd_ret` is the standard deviation (n - 1) of the rule's `price_change` and
-`sd_oi` that of its `oi_change`. The coin's rule is `cascade.Params(a = 3.7 sd_oi, b = 5.0 sd_ret,
-c = 0.15, v = 3.0)`, every other field at its default; the two multiples are constants in
-`panel/labels.py`. Each coin's candidates come from its own rule and are merged and pooled across
-coins as `market cascade` does.
+The run's checks add up, per coin and per kind, the row checks the archive's `manifest.json`
+records for each file read: rows, files with a header, unsorted rows, and for klines and metrics
+the rows off the file's grid, the slots holding more than one row and the runs of empty slots. The
+manifest counts a row stamped outside its own day together with a row stamped off the step grid
+inside it, as `off_grid`, so it cannot show a row outside its period on its own, and the run does
+not refuse on it; funding files get no period check at all.
 
-**Tables.** `thresholds` has one row per coin: `symbol`, `windows` (the evaluated windows used),
-`sd_ret`, `sd_oi`, `a` and `b`, with `ts_ns` the development span's start. `cascades` has the
-`market cascade` schema, whose `ts_ns` is the onset. `grid` has one row per coin per UTC hour t of
-the development span. It dates each cascade by begin, the start of its first firing window
-(`fired_ts_ns` - 30 minutes), not by its onset. The onset is the first extreme bar inside that
-window and can sit up to 25 minutes after it opens, so an hour between the two would see part of
-the event's price move and open-interest drop before t. Dated by begin, nothing of a labelled
-event lies before t. For H = 1, 6 and 24 hours:
+**Thresholds.** For each coin and each UTC day d, `sd_ret` and `sd_oi` are the sample standard
+deviations (n - 1) of the cascade rule's `price_change` and `oi_change` over every window closing
+in [d - 90 days, d), from the coin's first evaluated window on, whose change is known: the price
+change of every window with both closes, the open-interest change of every window with open
+interest at both ends. The coin's rule on day d is `cascade.Params(a = 3.7 sd_oi, b = 5.0 sd_ret,
+c = 0.15, v = 3.0)`, every other field at its default, for every window closing on d. A day has no
+threshold when the rule evaluated fewer than 28 x 288 x 0.8 of the windows closing in that span,
+when it did not evaluate more than 5% of them, known change or not, or when `sd_ret` or `sd_oi` is zero or not finite; its windows
+are left out of the run's window counts and are censored in the grid. Starting at the first
+evaluated window keeps a coin's ramp-up, before its open interest and 28 days of volume history
+start, out of both the spreads and the count of missing windows.
 
-- `long_H`, `short_H`: the coin has a cascade of that kind with t <= begin < t + H.
-- `censored_H`: t + H + 30 minutes runs past the end of the span or past the coin's last complete
-  bar, or a window starting in [t, t + H) (closing in [t + 30 min, t + H + 30 min)) could not be
-  evaluated or does not exist. A window that straddles t does not censor: if it fires, the row is
-  skipped.
-- `skip`: begin < t <= last firing + 24 hours for one of the coin's cascades.
+The spreads read more windows than the rule evaluates, on purpose. The rule skips a window when
+any of its seven open-interest rows is missing, but the change over that window is still known
+when the two end rows exist, and the windows around a missing row are not ordinary ones: the
+archive loses open-interest rows during falls. On 2021-12-04 three rows are missing (05:00, 05:25
+and 05:30 UTC), so 13 windows closing from 05:00 to 06:00 were not evaluated; 8 of them have a
+known open-interest change, a drop of 6% to 12% in BTCUSDT and of 14% to 24% in DYDXUSDT, whose
+price fell by up to 25% over the same windows. Spreads over the evaluated windows alone would
+leave those out and set a lower bar for the 90 days after: on the development data the price spread would be lower by up to
+28% (BCHUSDT, 2022-01-01) and by more than 5% on 1,063 of the 21,900 coin-days, the open-interest
+spread lower by up to 28% (DYDXUSDT, 2022-01-01) and by more than 5% on 503. The price leg is
+complete, since every window of the development data has a known price change. The open-interest
+leg is not: the change over a window with a missing end row is unknown, and such a window could
+hide a change large enough to move `a` and with it a later label. The 5% limit on windows not
+evaluated bounds the share of such windows, not their effect; in the run they are at most 2.4% of
+a day's windows (SANDUSDT, 2023-12-15), with a median of 0.03%, and 56% of the coin-days have at
+least one. The label is therefore defined on the changes that are known, and is not an estimate of what
+a complete open-interest history would give: a row is scored when its own detection and label
+windows are complete, whatever open-interest rows its 90-day history lacks inside the 5% limit.
+Every development day has a threshold. A day's threshold reads nothing from that day on, so no day
+sets its own threshold, but earlier development days set the thresholds of later development
+days. A coin whose typical move shrinks or grows is held to the same multiple of its recent moves
+throughout. The multiples, the 90 days, the minimum and the 5% limit are constants in
+`panel/labels.py`.
 
-The grid holds labels only: a feature at hour t may read only bars that start before t and metrics
-rows stamped at or before t.
+**Detection.** Each day's windows go through `cascade.candidates` unchanged, with that day's rule,
+on a slice of bars that holds all the history the rule reads before the day, keeping only the
+day's own windows; with one rule on every day this gives exactly what one call over the whole span
+gives. Candidates are merged per coin and pooled across coins as `market cascade` does, from each
+coin's first day with a threshold, so an episode that fired in the hours before the grid starts is
+known: its hours are skipped and a later firing within 24 hours merges into it.
+
+**Tables.** `thresholds` has one row per coin per day from the first day of bars: `ts_ns` the day's
+start, `symbol`, `windows` (the evaluated windows in its 90 days), `missing` (the windows in its 90
+days, from the coin's first evaluated window on, that were not evaluated), `oi_unknown` (those
+among them with no known open-interest change), and `sd_ret`, `sd_oi`, `a` and `b`, null on a day
+without a threshold. The run's checks give each coin's worst day among the days with enough
+evaluated windows, `worst_missing_share` and `worst_missing_ns`, the number of those days over
+5%, `days_over_max_missing`, and the same for the windows with no known open-interest change,
+`worst_oi_unknown_share` and `worst_oi_unknown_ns`. `cascades` has the `market cascade` schema,
+whose `ts_ns` is the onset, and `in_span`, true when the instance begins (below) at or after the
+grid's first hour; the instances that begin earlier are kept so that their skip and merges can be
+seen, and the run's counts of instances and market events take only `in_span` rows. A market event
+that pools instances from before the grid's first hour is counted with only its `in_span`
+instances. `grid` has one row per coin per UTC hour t of the development span. It dates each
+instance by begin, the start of its first firing window (`fired_ts_ns` - 30 minutes), not by its
+onset. The onset is the first extreme bar inside that window and can sit up to 25 minutes after it
+opens, so an hour between the two would see part of the event's price move and open-interest drop
+before t. Dated by begin, nothing of a labelled event lies before t. For H = 1, 6 and 24 hours:
+
+- `long_H`, `short_H`: an instance of that kind begins in [t, t + H).
+- `skip`: an instance has its first firing at or before t and its last firing no more than 24
+  hours before t, so an episode known at t is under way or just ended. An hour between an
+  instance's begin and its first firing is not skipped, since that firing is not known at t: it is
+  an ordinary row, positive only if another instance begins in [t, t + H). In the run there are 395
+  such coin-hours, 392 of them kept as ordinary rows (the other 3 are skipped for an earlier
+  episode), and at most one of those is positive at any horizon. Since they are a few hundred rows
+  among roughly half a million negatives, scoring them as negatives or leaving them out moves an
+  AUC by less than 0.001.
+- `censored_H`: a window closing in [t - 24 hours, t + H + 30 minutes) is not clean, or does not
+  exist yet because it closes past the span's end or the coin's last complete bar. The forward part
+  holds exactly the windows that begin in [t, t + H), the last of them closing at t + H + 25
+  minutes. The backward 24 hours are there because a missing stretch of open interest can hide an
+  earlier firing, after which a later firing would look like a new event rather than a skipped
+  follow-up. A window is clean when the rule could evaluate it, its day has a threshold, and no
+  kline bar is missing in the 28 days and 25 minutes before it opens, the history its volume median
+  and onset read; that last condition censors only and never changes detection.
+
+Censoring is symmetric: a row with a gap in its horizon is censored even when an instance was found
+in it, so that a gap removes positives and negatives alike. The grid holds labels only: a feature
+at hour t may read only bars that start before t and metrics rows stamped at or before t.
+
+**Limits.**
+
+- An episode takes the direction of its first firing. A short squeeze within 24 hours of a long
+  cascade is part of that episode, not a second event, and gives no `short_H`; the same holds the
+  other way round.
+- The coin list is chosen on 2023 volume, so scores on 2022-2023 describe the cohort that was among
+  the largest in 2023, not the coins a trader would have picked at the time. For any later span the
+  list is fixed in advance, and a coin that stops trading is censored from its last complete bar.
+- The same multiple of a standard deviation does not give heavy-tailed coins the same event rate.
+  In the development run the instances that begin in the grid's span number from 10 to 56 per coin
+  (median 26.5): BTCUSDT 56, ETHUSDT 30, SOLUSDT 24, XRPUSDT 30, DOGEUSDT 27, BNBUSDT 19,
+  LTCUSDT 31, MATICUSDT 21, BCHUSDT 17, LINKUSDT 23, AVAXUSDT 26, ADAUSDT 27, TRBUSDT 14,
+  FILUSDT 44, 1000SHIBUSDT 33, DYDXUSDT 32, MASKUSDT 33, FTMUSDT 31, GALAUSDT 39, ETCUSDT 32,
+  LINAUSDT 23, DOTUSDT 25, NEARUSDT 23, EOSUSDT 29, CRVUSDT 10, SANDUSDT 33, ATOMUSDT 25,
+  AXSUSDT 20, STORJUSDT 14, MKRUSDT 18.
 
 **Inputs.** `panel inputs --labels <run id>` writes one run to `<data dir>/panel-inputs/<run_id>/`
-with the table `inputs`, one row per coin per hour t of the labels run's grid in the grid's order,
-and the table `constants`, each coin's development-span mean squared 5-minute return and its
-threshold `b`, so a later run on other days can reuse them unchanged. Its manifest names the labels
-run and the sha256 of its grid.
+with the table `inputs`, one row per coin per hour t of the labels run's grid in the grid's order.
+Its manifest names the labels run and the sha256 of its grid and of its `thresholds` table. That
+table must give one row for each coin and each UTC day of the grid, or the command refuses; an hour
+in day d scales its volatility inputs by that day's `sd_ret` and `b`, set from the 90 days before d
+(see Thresholds), and those inputs are missing on a day whose row has no threshold. The command
+takes the archive's file list only through the same check as `labels`, and refuses an archive that
+holds or lists a file naming a day from 2024-01-01 on before it reads anything.
 
 ```sh
 uv run python -m tipping_point.panel inputs --labels <labels run id>
@@ -598,10 +688,11 @@ its window present, else it is missing; so does every 28-day mean or median, cou
 observed in that bar, not carried into it. r is the 5-minute log return of close. The command
 refuses a span with a funding file missing.
 
-- `vol`: `vol_1h`, `vol_6h`, `vol_24h`, `vol_7d`, `vol_28d` = log(mean r^2 over the window / the
-  coin's mean r^2 over the development span); `near_24h` = the largest |30-minute log return| of the
-  last 24 h over the coin's `b`; `vsurge_1h` = log(mean volume over 1 h / median 5-minute volume over
-  28 d); `volume_24h` = log(mean volume over 24 h / mean volume over 28 d).
+- `vol`: `vol_1h`, `vol_6h`, `vol_24h`, `vol_7d`, `vol_28d` = log(mean r^2 over the window /
+  (sd_ret^2 / 6)), where sd_ret^2 / 6 turns the day's 30-minute variance into a 5-minute one;
+  `near_24h` = the largest |30-minute log return| of the last 24 h over the day's `b`; `vsurge_1h`
+  = log(mean volume over 1 h / median 5-minute volume over 28 d); `volume_24h` = log(mean volume
+  over 24 h / mean volume over 28 d).
 - `price`: `ret_1h`, `ret_6h`, `ret_24h`, `ret_7d`, `ret_28d`, the log return over the window, from
   the close just before it to the last close before t (missing when either close is); `aret_24h`
   and `aret_7d`, their absolute values; `dd_7d` and `dd_28d`, the log of the last close over the
@@ -630,7 +721,7 @@ have a value, missing when fewer than 15 do.
 
 **Ladder.** `panel ladder --inputs <run id>` scores nested sets of inputs against each other and
 writes one run to `<data dir>/panel-ladder/<run_id>/`: the tables `oof` (each row's out-of-fold
-scores, one column per rung and side), `scores`, `folds` (each rung's AUC in each left-out quarter),
+scores, one column per rung and side), `scores`, `folds` (each rung's AUC in each scored quarter),
 `comparisons` and `rows` (the row accounting), `report.md`, and a copy of the plan.
 
 ```sh
@@ -660,9 +751,13 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   are dropped. In `forward`, from the quarter `forward_first` names (2, counting from 0, so six
   quarters are scored), a quarter is scored by a model fitted only on rows more than 31 days before
   it, as the held-back test span will be. The gap must cover the inputs' longest look-back (28 days,
-  one bar and the 1-hour carry), the longest horizon, the labels' 30-minute lead and their 24-hour
-  look-back, 30.07 days in all; the plan refuses a shorter one. A scored quarter with rows but no
-  training rows, or a scored row without a finite score, stops the run.
+  one bar and the funding rate's carry of up to 8 hours, longer than the 1-hour carry of the
+  other inputs), the longest horizon, the labels' 30-minute lead and their 24-hour look-back,
+  30.36 days in all; the plan refuses a shorter one. The 90-day thresholds that scale
+  `vol` and `near_24h`, and that set the labels, are not a direct look-back and the gap does not
+  cover them; `ladder-gap92.toml` runs the plan with a 92-day gap (below). A scored quarter with rows but no
+  training rows, training rows that hold no positives or only positives for a side, or a scored
+  row without a finite score, stops the run.
 - Scores per scheme, rung, side and horizon: the mean over quarters of the AUC inside each quarter
   (the primary score), the same mean weighted by each quarter's positives (`fold_mean_weighted`),
   the pooled out-of-fold AUC, and the within-coin AUC, the AUC inside each coin and quarter
@@ -679,9 +774,10 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   many folds are above zero. A draw that takes no positive or no negative in a quarter cannot
   score that quarter, and its fold mean averages over the quarters it does score; the column
   `complete_draws` gives the share of draws that score every quarter, per horizon and side. On
-  the development span it is below 1 on every side, because the first quarter of 2022 has no rows
-  before `ls_rel` returns on 2022-02-11, so a draw can take only its empty blocks, and lowest on
-  the short side, whose last quarters hold few positives.
+  the development span at 24 h it is 0.98 long and 0.91 short in both schemes, and 0.995 and 0.997 any. Most of
+  the shortfall is the third quarter of 2022, where 4 of the 7 blocks hold no long positive and 5
+  hold no short positive; in `loqo` the first quarter adds a little, as its rows start when
+  `ls_rel` returns on 2022-02-11 22:00, in its third block.
 
 The bootstrap does not recompute AUCs from rows. An AUC is a sum over (positive, negative) pairs, so
 for each fold, rung and side the run counts once, for every pair of blocks (a, b), the pairs C_ab
@@ -701,18 +797,86 @@ means carry. `full` holds the coin's own leverage inputs only and `full+mlev` ad
 means; the rung list was fixed before any score was computed. The scores rank rows and say nothing
 about calibration.
 
+**Development results.** On labels run `20261124T020153Z-panel-20220101-20231231` the inputs have a
+threshold on every coin-day of the grid and no funding file is missing. Rows at each horizon:
+
+| | 24 h | 6 h | 1 h |
+|---|---|---|---|
+| grid rows | 525600 | 525600 | 525600 |
+| skipped | 20423 | 20423 | 20423 |
+| censored | 14862 | 9721 | 8297 |
+| missing an input | 29074 | 29094 | 29110 |
+| eligible rows, all scored under `loqo` | 461241 | 466362 | 467770 |
+| long / short positives among them | 15481 / 2043 | 3990 / 534 | 674 / 90 |
+| scored under `forward` (six quarters) | 366203 | 370692 | 371931 |
+| long / short positives among them | 13812 / 1247 | 3564 / 332 | 603 / 56 |
+
+Primary score (`fold_mean`) at 24 h, `loqo` / `forward`:
+
+| rung | long | short | any |
+|---|---|---|---|
+| vol | 0.591 / 0.572 | 0.631 / 0.596 | 0.600 / 0.580 |
+| vol+price | 0.655 / 0.593 | 0.749 / 0.701 | 0.638 / 0.591 |
+| vol+price+flow | 0.681 / 0.626 | 0.822 / 0.773 | 0.648 / 0.608 |
+| full | 0.712 / 0.666 | 0.849 / 0.804 | 0.675 / 0.634 |
+| full+mlev | 0.680 / 0.659 | 0.826 / 0.769 | 0.645 / 0.621 |
+| classic | 0.582 / 0.555 | 0.619 / 0.590 | 0.591 / 0.566 |
+
+Comparisons at 24 h, estimate with the 2.5% and 97.5% bootstrap points, `loqo` then `forward`:
+
+| comparison | long | short | any |
+|---|---|---|---|
+| full - vol | 0.121 [0.069, 0.175]; 0.094 [0.035, 0.160] | 0.218 [0.122, 0.309]; 0.208 [0.100, 0.302] | 0.075 [0.024, 0.124]; 0.055 [0.001, 0.124] |
+| vol+price - vol | 0.064 [0.012, 0.121]; 0.021 [-0.029, 0.089] | 0.118 [0.062, 0.179]; 0.105 [0.023, 0.168] | 0.038 [-0.010, 0.091]; 0.011 [-0.033, 0.072] |
+| vol+price+flow - vol+price | 0.026 [0.012, 0.040]; 0.033 [0.008, 0.055] | 0.072 [0.032, 0.113]; 0.072 [0.020, 0.126] | 0.010 [-0.006, 0.023]; 0.018 [-0.007, 0.044] |
+| full - vol+price+flow | 0.030 [0.014, 0.045]; 0.040 [0.021, 0.054] | 0.028 [0.007, 0.048]; 0.031 [0.013, 0.051] | 0.027 [0.011, 0.039]; 0.026 [0.009, 0.042] |
+| full+mlev - full | -0.032 [-0.059, -0.010]; -0.007 [-0.056, 0.020] | -0.023 [-0.032, -0.009]; -0.035 [-0.057, -0.004] | -0.029 [-0.053, -0.007]; -0.013 [-0.048, 0.012] |
+| classic - vol | -0.009 [-0.032, 0.018]; -0.017 [-0.052, 0.023] | -0.013 [-0.039, 0.014]; -0.005 [-0.025, 0.018] | -0.009 [-0.034, 0.017]; -0.013 [-0.047, 0.023] |
+
+Three plans beside `ladder.toml` each change one thing. At 24 h on the long side:
+
+| plan | full - vol | full - vol+price+flow | classic - vol |
+|---|---|---|---|
+| `ladder.toml` | 0.121 [0.069, 0.175]; 0.094 [0.035, 0.160] | 0.030 [0.014, 0.045]; 0.040 [0.021, 0.054] | -0.009 [-0.032, 0.018]; -0.017 [-0.052, 0.023] |
+| `ladder-gap92.toml` | 0.109 [0.056, 0.169]; 0.056 [-0.039, 0.119] | 0.022 [0.007, 0.038]; 0.037 [0.019, 0.052] | 0.010 [-0.015, 0.033]; -0.003 [-0.030, 0.026] |
+| `ladder-block28.toml` | 0.121 [0.074, 0.175]; 0.094 [0.050, 0.161] | 0.030 [0.016, 0.046]; 0.040 [0.026, 0.056] | -0.009 [-0.027, 0.021]; -0.017 [-0.053, 0.024] |
+| `ladder-public.toml` | not in the plan | not in the plan | -0.013 [-0.031, 0.012]; -0.007 [-0.034, 0.020] |
+
+- `ladder-gap92.toml` (`gap_days = 92`, which covers the 90-day thresholds) leaves the scored rows
+  unchanged and drops more training rows: the first forward quarter trains on 30987 rows instead
+  of 73271. The forward `full - vol` interval then reaches below zero; every other interval in the
+  table stays on the side of zero it was on, or spans zero as before.
+- `ladder-block28.toml` (`block_days = 28`) leaves every estimate unchanged and moves the 2.5% and
+  97.5% points of the 24 h comparisons by at most 0.019; at 24 h `complete_draws` falls to 0.92
+  long and 0.87 short in `loqo`, 0.93 and 0.87 in `forward`.
+- `ladder-public.toml` (no rung with `lev`) builds its common rows without `ls` and `ls_rel`, so it
+  has 490314 eligible rows at 24 h (one missing an input), from 2022-01-01 17:00; `loqo` scores
+  all of them and `forward` 366295. Its `vol` scores 0.580
+  long in `loqo` and 0.565 in `forward`, and `vol+price - vol` is 0.074 [0.019, 0.135] and 0.029
+  [-0.026, 0.098].
+
 An optional `[external]` entry (`name`, `path` to a Parquet file relative to the plan, and `scheme`,
 the scheme its scores were fitted under) brings in out-of-fold scores fitted elsewhere, such as a
-sequence model's, with columns `coin`, `hour` (the grid's `ts_ns`, as integers or timestamps),
-`horizon`, `side` and `score`. They are scored and compared like a rung on the same common rows of
-that scheme, and the run refuses a file that misses one of them, gives one twice or gives a score
-that is not finite.
+sequence model's, with columns `coin` (text), `hour` (the grid's `ts_ns`, as integers of any
+width or timestamps of any unit, none null), `horizon` (integer), `side` (text), `score`
+(floating point), `fold` (integer, the ladder's quarter counted from 0 at the plan's `start`,
+which is 2022-01-01 in `ladder.toml`) and `scheme` (text, a single value equal to the plan's
+`scheme`). They are scored and compared like a
+rung on the same common rows of that scheme, and the run refuses a file that lacks one of those
+columns or gives one another type, misses a scored row, gives one twice, gives a score that is
+not finite, gives a row a fold other than the ladder's or holds scores fitted under another
+scheme.
 
 Both commands refuse any day from 2024-01-01 on: `inputs` refuses a labels run whose span reaches
 it, and `ladder` a plan, an inputs run, a grid or an external file that does. They read the time
-bounds of the grid, the thresholds and the inputs table from the files' Parquet metadata before
-hashing or reading them, and refuse a file whose metadata gives none; then they check each file's
-sha256 against the run that wrote it and refuse a run its `complete.json` does not mark clean.
+bounds of the grid, the thresholds, the inputs table and the external file's `hour` from the
+files' Parquet metadata before hashing or reading them, and refuse a file whose time column is
+neither integer nor timestamp, whose metadata gives no bounds for it, or whose earliest time lies
+before 2021-10-01, which an integer column counted in anything but nanoseconds does; then `inputs`
+checks the sha256 of the grid and the thresholds, and `ladder` that of the grid and the inputs
+table, against the run that wrote each, and both refuse a run its `complete.json` does not mark
+clean. The external file's sha256 is not checked against anything: the run records it in its
+manifest.
 
 `python -m tipping_point.panel sequence --inputs <run> --plan <sequence.toml>` fits sequence models
 on the same common rows as the ladder, whose plan it reads (`ladder.toml`). Each row's input is the

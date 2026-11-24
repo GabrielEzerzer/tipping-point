@@ -899,7 +899,9 @@ def rung_folds(
         x = np.column_stack([values[c][r.keep] for c in plan.ladder.columns])
         for scheme in plan.schemes:
             first = plan.ladder.first_fold(scheme)
-            scored = ladder.out_of_fold(x, r.y, ts[r.keep], r.fold, edges, plan.ladder, scheme, log)
+            scored = ladder.out_of_fold(
+                x, r.y, ts[r.keep], r.fold, edges, plan.ladder, scheme, h, log
+            )
             fold = r.fold[r.fold >= first]
             for name in plan.rungs:
                 for side in plan.ladder.sides:
