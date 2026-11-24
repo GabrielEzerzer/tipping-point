@@ -772,7 +772,7 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   many folds are above zero. A draw that takes no positive or no negative in a quarter cannot
   score that quarter, and its fold mean averages over the quarters it does score; the column
   `complete_draws` gives the share of draws that score every quarter, per horizon and side. On
-  the development span at 24 h it is 0.98 long, 0.91 short and 0.995 any in both schemes. Most of
+  the development span at 24 h it is 0.98 long and 0.91 short in both schemes, and 0.995 and 0.997 any. Most of
   the shortfall is the third quarter of 2022, where 4 of the 7 blocks hold no long positive and 5
   hold no short positive; in `loqo` the first quarter adds a little, as its rows start when
   `ls_rel` returns on 2022-02-11 22:00, in its third block.
@@ -795,60 +795,60 @@ means carry. `full` holds the coin's own leverage inputs only and `full+mlev` ad
 means; the rung list was fixed before any score was computed. The scores rank rows and say nothing
 about calibration.
 
-**Development results.** On labels run `20261123T203519Z-panel-20220101-20231231` the inputs have a
+**Development results.** On labels run `20261124T020153Z-panel-20220101-20231231` the inputs have a
 threshold on every coin-day of the grid and no funding file is missing. Rows at each horizon:
 
 | | 24 h | 6 h | 1 h |
 |---|---|---|---|
 | grid rows | 525600 | 525600 | 525600 |
-| skipped | 20842 | 20842 | 20842 |
+| skipped | 20423 | 20423 | 20423 |
 | censored | 14862 | 9721 | 8297 |
-| missing an input | 28776 | 28796 | 28812 |
-| scored | 461120 | 466241 | 467649 |
-| long / short positives scored | 15505 / 2139 | 3996 / 558 | 675 / 94 |
+| missing an input | 29074 | 29094 | 29110 |
+| scored | 461241 | 466362 | 467770 |
+| long / short positives scored | 15481 / 2043 | 3990 / 534 | 674 / 90 |
 
 Primary score (`fold_mean`) at 24 h, `loqo` / `forward`:
 
 | rung | long | short | any |
 |---|---|---|---|
-| vol | 0.593 / 0.571 | 0.630 / 0.582 | 0.602 / 0.579 |
-| vol+price | 0.654 / 0.589 | 0.727 / 0.695 | 0.627 / 0.587 |
-| vol+price+flow | 0.680 / 0.623 | 0.800 / 0.772 | 0.638 / 0.606 |
-| full | 0.711 / 0.663 | 0.828 / 0.800 | 0.664 / 0.632 |
-| full+mlev | 0.679 / 0.659 | 0.798 / 0.756 | 0.632 / 0.616 |
-| classic | 0.584 / 0.555 | 0.623 / 0.586 | 0.593 / 0.566 |
+| vol | 0.591 / 0.572 | 0.631 / 0.596 | 0.600 / 0.580 |
+| vol+price | 0.655 / 0.593 | 0.749 / 0.701 | 0.638 / 0.591 |
+| vol+price+flow | 0.681 / 0.626 | 0.822 / 0.773 | 0.648 / 0.608 |
+| full | 0.712 / 0.666 | 0.849 / 0.804 | 0.675 / 0.634 |
+| full+mlev | 0.680 / 0.659 | 0.826 / 0.769 | 0.645 / 0.621 |
+| classic | 0.582 / 0.555 | 0.619 / 0.590 | 0.591 / 0.566 |
 
 Comparisons at 24 h, estimate with the 2.5% and 97.5% bootstrap points, `loqo` then `forward`:
 
 | comparison | long | short | any |
 |---|---|---|---|
-| full - vol | 0.118 [0.066, 0.172]; 0.092 [0.035, 0.158] | 0.198 [0.103, 0.296]; 0.218 [0.109, 0.312] | 0.062 [0.013, 0.114]; 0.053 [-0.000, 0.122] |
-| vol+price - vol | 0.061 [0.009, 0.119]; 0.017 [-0.032, 0.086] | 0.096 [0.044, 0.166]; 0.113 [0.035, 0.176] | 0.025 [-0.021, 0.080]; 0.008 [-0.035, 0.069] |
-| vol+price+flow - vol+price | 0.027 [0.012, 0.041]; 0.034 [0.008, 0.057] | 0.073 [0.030, 0.115]; 0.077 [0.022, 0.127] | 0.010 [-0.005, 0.024]; 0.019 [-0.008, 0.047] |
-| full - vol+price+flow | 0.031 [0.014, 0.045]; 0.040 [0.021, 0.055] | 0.028 [0.005, 0.048]; 0.028 [0.011, 0.048] | 0.026 [0.011, 0.039]; 0.027 [0.009, 0.043] |
-| full+mlev - full | -0.032 [-0.059, -0.010]; -0.005 [-0.055, 0.022] | -0.030 [-0.040, -0.012]; -0.044 [-0.068, -0.009] | -0.032 [-0.057, -0.009]; -0.016 [-0.048, 0.009] |
-| classic - vol | -0.009 [-0.032, 0.017]; -0.016 [-0.050, 0.023] | -0.008 [-0.034, 0.019]; 0.004 [-0.019, 0.029] | -0.009 [-0.032, 0.017]; -0.013 [-0.045, 0.023] |
+| full - vol | 0.121 [0.069, 0.175]; 0.094 [0.035, 0.160] | 0.218 [0.122, 0.309]; 0.208 [0.100, 0.302] | 0.075 [0.024, 0.124]; 0.055 [0.001, 0.124] |
+| vol+price - vol | 0.064 [0.012, 0.121]; 0.021 [-0.029, 0.089] | 0.118 [0.062, 0.179]; 0.105 [0.023, 0.168] | 0.038 [-0.010, 0.091]; 0.011 [-0.033, 0.072] |
+| vol+price+flow - vol+price | 0.026 [0.012, 0.040]; 0.033 [0.008, 0.055] | 0.072 [0.032, 0.113]; 0.072 [0.020, 0.126] | 0.010 [-0.006, 0.023]; 0.018 [-0.007, 0.044] |
+| full - vol+price+flow | 0.030 [0.014, 0.045]; 0.040 [0.021, 0.054] | 0.028 [0.007, 0.048]; 0.031 [0.013, 0.051] | 0.027 [0.011, 0.039]; 0.026 [0.009, 0.042] |
+| full+mlev - full | -0.032 [-0.059, -0.010]; -0.007 [-0.056, 0.020] | -0.023 [-0.032, -0.009]; -0.035 [-0.057, -0.004] | -0.029 [-0.053, -0.007]; -0.013 [-0.048, 0.012] |
+| classic - vol | -0.009 [-0.032, 0.018]; -0.017 [-0.052, 0.023] | -0.013 [-0.039, 0.014]; -0.005 [-0.025, 0.018] | -0.009 [-0.034, 0.017]; -0.013 [-0.047, 0.023] |
 
 Three plans beside `ladder.toml` each change one thing. At 24 h on the long side:
 
 | plan | full - vol | full - vol+price+flow | classic - vol |
 |---|---|---|---|
-| `ladder.toml` | 0.118 [0.066, 0.172]; 0.092 [0.035, 0.158] | 0.031 [0.014, 0.045]; 0.040 [0.021, 0.055] | -0.009 [-0.032, 0.017]; -0.016 [-0.050, 0.023] |
-| `ladder-gap92.toml` | 0.107 [0.053, 0.168]; 0.054 [-0.040, 0.117] | 0.022 [0.007, 0.038]; 0.037 [0.020, 0.052] | 0.009 [-0.014, 0.032]; -0.004 [-0.030, 0.025] |
-| `ladder-block28.toml` | 0.118 [0.071, 0.172]; 0.092 [0.048, 0.157] | 0.031 [0.016, 0.046]; 0.040 [0.026, 0.056] | -0.009 [-0.028, 0.020]; -0.016 [-0.052, 0.023] |
-| `ladder-public.toml` | not in the plan | not in the plan | -0.013 [-0.031, 0.014]; -0.008 [-0.036, 0.022] |
+| `ladder.toml` | 0.121 [0.069, 0.175]; 0.094 [0.035, 0.160] | 0.030 [0.014, 0.045]; 0.040 [0.021, 0.054] | -0.009 [-0.032, 0.018]; -0.017 [-0.052, 0.023] |
+| `ladder-gap92.toml` | 0.109 [0.056, 0.169]; 0.056 [-0.039, 0.119] | 0.022 [0.007, 0.038]; 0.037 [0.019, 0.052] | 0.010 [-0.015, 0.033]; -0.003 [-0.030, 0.026] |
+| `ladder-block28.toml` | 0.121 [0.074, 0.175]; 0.094 [0.050, 0.161] | 0.030 [0.016, 0.046]; 0.040 [0.026, 0.056] | -0.009 [-0.027, 0.021]; -0.017 [-0.053, 0.024] |
+| `ladder-public.toml` | not in the plan | not in the plan | -0.013 [-0.031, 0.012]; -0.007 [-0.034, 0.020] |
 
 - `ladder-gap92.toml` (`gap_days = 92`, which covers the 90-day thresholds) leaves the scored rows
-  unchanged and drops more training rows: the first forward quarter trains on 30890 rows instead
-  of 73150. The forward `full - vol` interval then reaches below zero; every other interval in the
+  unchanged and drops more training rows: the first forward quarter trains on 30987 rows instead
+  of 73271. The forward `full - vol` interval then reaches below zero; every other interval in the
   table stays on the side of zero it was on, or spans zero as before.
 - `ladder-block28.toml` (`block_days = 28`) leaves every estimate unchanged and moves the 2.5% and
   97.5% points of the 24 h comparisons by at most 0.019; at 24 h `complete_draws` falls to 0.92
   long and 0.87 short in `loqo`, 0.93 and 0.87 in `forward`.
 - `ladder-public.toml` (no rung with `lev`) builds its common rows without `ls` and `ls_rel`, so it
-  scores 489895 rows at 24 h (one missing an input), from 2022-01-01 17:00. Its `vol` scores 0.577
-  long in `loqo` and 0.567 in `forward`, and `vol+price - vol` is 0.073 [0.017, 0.137] and 0.030
-  [-0.026, 0.102].
+  scores 490314 rows at 24 h (one missing an input), from 2022-01-01 17:00. Its `vol` scores 0.580
+  long in `loqo` and 0.565 in `forward`, and `vol+price - vol` is 0.074 [0.019, 0.135] and 0.029
+  [-0.026, 0.098].
 
 An optional `[external]` entry (`name`, `path` to a Parquet file relative to the plan, and `scheme`,
 the scheme its scores were fitted under) brings in out-of-fold scores fitted elsewhere, such as a
