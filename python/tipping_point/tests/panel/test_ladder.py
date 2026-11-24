@@ -6,6 +6,7 @@ import dataclasses
 import json
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -191,8 +192,8 @@ def test_a_cascade_after_a_quarter_reaches_no_model_of_that_quarter_through_a_28
     quarter = fold == 1
     for gap_days, moves in ((plan.gap_days, False), (28, True)):
         shorter = dataclasses.replace(plan, gap_days=gap_days)
-        base = ladder.out_of_fold(fed(raw), y, ts, fold, edges, shorter, "loqo", quiet)
-        got = ladder.out_of_fold(fed(cascade), hit, ts, fold, edges, shorter, "loqo", quiet)
+        base = ladder.out_of_fold(fed(raw), y, ts, fold, edges, shorter, "loqo", 24, quiet)
+        got = ladder.out_of_fold(fed(cascade), hit, ts, fold, edges, shorter, "loqo", 24, quiet)
         for rung in plan.names:
             for side in ("long", "short"):
                 same = np.array_equal(got[rung][side][quarter], base[rung][side][quarter])
@@ -203,7 +204,7 @@ def test_the_forward_scheme_fits_each_quarter_on_earlier_rows_only(tmp_path: Pat
     plan = ladder.load(plan_file(tmp_path))
     edges = ladder.bounds(plan)
     ts, x, y, fold = year(plan)
-    base = ladder.out_of_fold(x, y, ts, fold, edges, plan, "forward", quiet)
+    base = ladder.out_of_fold(x, y, ts, fold, edges, plan, "forward", 24, quiet)
     scored = fold >= plan.forward_first
     assert plan.forward_first == 2 and len(base["vol"]["long"]) == int(scored.sum())
     rng = np.random.default_rng(5)
@@ -213,26 +214,44 @@ def test_the_forward_scheme_fits_each_quarter_on_earlier_rows_only(tmp_path: Pat
         planted = late & (fold != f)
         moved[planted] = 50.0 * np.sign(rng.normal(size=(int(planted.sum()), x.shape[1])))
         flipped = {side: np.where(late, ~v, v) for side, v in y.items()}
-        got = ladder.out_of_fold(moved, flipped, ts, fold, edges, plan, "forward", quiet)
+        got = ladder.out_of_fold(moved, flipped, ts, fold, edges, plan, "forward", 24, quiet)
         mine = fold[scored] == f
         for rung in plan.names:
             for side in ("long", "short"):
                 assert np.array_equal(got[rung][side][mine], base[rung][side][mine]), (f, rung)
     alone = dataclasses.replace(plan, gap_days=200)
     with pytest.raises(ValueError, match="no training rows"):
-        ladder.out_of_fold(x, y, ts, fold, edges, alone, "forward", quiet)
+        ladder.out_of_fold(x, y, ts, fold, edges, alone, "forward", 24, quiet)
     broken = x.copy()
     broken[np.flatnonzero(fold == 3)[0], 0] = np.nan
     with pytest.raises(RuntimeError, match="no finite score"):
-        ladder.out_of_fold(broken, y, ts, fold, edges, plan, "forward", quiet)
+        ladder.out_of_fold(broken, y, ts, fold, edges, plan, "forward", 24, quiet)
+    early = ts < edges[2] - plan.gap_days * DAY
+    rare = dict(y, short=y["short"] & ~early)
+    named = r"forward, quarter from 2022-07-01, 24 h, short: the training rows hold no positives"
+    with pytest.raises(ValueError, match=named):
+        ladder.out_of_fold(x, rare, ts, fold, edges, plan, "forward", 24, quiet)
+    common = dict(y, long=y["long"] | (fold != 0))
+    named = r"loqo, quarter from 2022-01-01, 6 h, long: the training rows hold only positives"
+    with pytest.raises(ValueError, match=named):
+        ladder.out_of_fold(x, common, ts, fold, edges, plan, "loqo", 6, quiet)
 
 
 def test_the_plan_refuses_invalid_values(tmp_path: Path) -> None:
     cases = [
         ("c = 0.01", "c = 0.0", "c = 0.0"),
+        ("c = 0.01", "c = nan", "c = nan"),
+        ("c = 0.01", "c = inf", "c = inf"),
         ("clip = 5.0", "clip = -1.0", "clip"),
+        ("clip = 5.0", "clip = inf", "clip = inf"),
+        ("clip = 5.0", "clip = nan", "clip = nan"),
+        ("horizons = [24]", "horizons = []", "horizons"),
+        ("horizons = [24]", "horizons = [24, 24]", "horizons"),
+        ('sides = ["long", "short", "any"]', "sides = []", "sides"),
+        ('sides = ["long", "short", "any"]', 'sides = ["long", "long"]', "sides"),
+        ('groups = ["vol", "price"]', "groups = []", r"no groups in vol\+price"),
         ("gap_days = 31", "gap_days = -1", "negative"),
-        ("gap_days = 31", "gap_days = 30", "shorter than the 30.07 days"),
+        ("gap_days = 31", "gap_days = 30", "shorter than the 30.36 days"),
         ("block_days = 14", "block_days = 0", "block_days"),
         ("draws = 300", "draws = 0", "draws"),
         ('groups = ["vol", "price"]', 'groups = ["vol", "vol"]', "listed twice"),
@@ -254,7 +273,7 @@ def test_the_left_out_quarter_is_fitted_without_its_rows_or_its_gap(tmp_path: Pa
     edges = ladder.bounds(plan)
     ts, x, y, fold = year(plan)
     rng = np.random.default_rng(3)
-    base = ladder.out_of_fold(x, y, ts, fold, edges, plan, "loqo", quiet)
+    base = ladder.out_of_fold(x, y, ts, fold, edges, plan, "loqo", 24, quiet)
     gap = plan.gap_days * DAY
     left_out = fold == 1
     near = (ts >= edges[1] - gap) & (ts < edges[2] + gap) & ~left_out
@@ -262,7 +281,7 @@ def test_the_left_out_quarter_is_fitted_without_its_rows_or_its_gap(tmp_path: Pa
     moved = x.copy()
     moved[planted] = 50.0 * np.sign(rng.normal(size=(int(planted.sum()), x.shape[1])))
     flipped = {side: np.where(near | left_out, ~v, v) for side, v in y.items()}
-    got = ladder.out_of_fold(moved, flipped, ts, fold, edges, plan, "loqo", quiet)
+    got = ladder.out_of_fold(moved, flipped, ts, fold, edges, plan, "loqo", 24, quiet)
     kept = left_out & ~planted
     assert near.sum() > 0 and kept.sum() > 1000
     for rung in plan.names:
@@ -385,6 +404,60 @@ def test_the_bootstrap_resamples_whole_blocks_in_every_quarter(tmp_path: Path) -
     assert got["above_zero"] == pytest.approx(np.mean(difference > 0))
     per_fold = np.array(got["fold_differences"])
     assert got["se_quarters"] == pytest.approx(np.std(per_fold, ddof=1) / np.sqrt(2))
+    none = {"long": long, "short": np.zeros(len(ts), bool), "any": long}
+    _, _, comparisons = ladder.evaluate(
+        ladder.Horizon("loqo", 0, ts, symbol, none, fold, block, scores), plan, 24
+    )
+    (empty,) = [c for c in comparisons if c["first"] == "vol+price" and c["side"] == "short"]
+    assert empty["draws"] == 0 and np.isnan(empty["complete_draws"])
+
+
+def pairwise_auc(score: np.ndarray, label: np.ndarray) -> float:
+    above = score[label][:, None] - score[~label][None, :]
+    return float(np.mean(above > 0) + 0.5 * np.mean(above == 0))
+
+
+def test_within_coin_and_without_scores_against_pairwise_counts(tmp_path: Path) -> None:
+    text = PLAN.replace("end = 2022-12-31", "end = 2022-06-30").replace("draws = 300", "draws = 20")
+    plan = ladder.load(
+        plan_file(tmp_path, text=text.replace("forward_first = 2", "forward_first = 1"))
+    )
+    rng = np.random.default_rng(9)
+    ts = labels.ns(date(2022, 1, 1)) + 6 * HOUR * np.arange(181 * 4, dtype=np.int64)
+    fold, block = ladder.folds(ts, ladder.bounds(plan), plan.block_days)
+    symbol = rng.choice(np.array(COINS, dtype=object), len(ts))
+    long = rng.random(len(ts)) < 0.2
+    short = rng.random(len(ts)) < 0.2
+    y = {"long": long, "short": short, "any": long | short}
+    lift = np.where(symbol == "BBBUSDT", 2.0, 0.0)
+    scores = {
+        name: {
+            side: np.round(rng.normal(size=len(ts)) + lift + y[side], 1) for side in ladder.SIDES
+        }
+        for name in ("vol", "vol+price", "classic")
+    }
+    h = ladder.Horizon("loqo", 0, ts, symbol, y, fold, block, scores)
+    rows, _, _ = ladder.evaluate(h, plan, 24)
+    for name in ("vol", "classic"):
+        for side in ladder.SIDES:
+            s, label = scores[name][side], y[side]
+            for coins, mask in (("all", np.ones(len(ts), bool)), ("without", symbol != "AAAUSDT")):
+                (got,) = [
+                    r for r in rows if (r["name"], r["side"], r["coins"]) == (name, side, coins)
+                ]
+                cells = [(mask & (symbol == c) & (fold == f)) for c in COINS for f in (0, 1)]
+                cells = [c for c in cells if 0 < label[c].sum() < c.sum()]
+                weights = np.array([label[c].sum() for c in cells])
+                within = np.array([pairwise_auc(s[c], label[c]) for c in cells])
+                assert got["within_coin"] == pytest.approx(within @ weights / weights.sum())
+                quarters = [
+                    pairwise_auc(s[mask & (fold == f)], label[mask & (fold == f)]) for f in (0, 1)
+                ]
+                assert got["fold_mean"] == pytest.approx(np.mean(quarters))
+                assert got["pooled"] == pytest.approx(pairwise_auc(s[mask], label[mask]))
+                assert got["rows"] == mask.sum() and got["positives"] == label[mask].sum()
+    (vol,) = [r for r in rows if (r["name"], r["side"], r["coins"]) == ("vol", "long", "all")]
+    assert abs(vol["pooled"] - vol["within_coin"]) > 0.03
 
 
 def test_the_solver_on_rare_positives_a_constant_column_and_no_positives() -> None:
@@ -403,8 +476,9 @@ def test_the_solver_on_rare_positives_a_constant_column_and_no_positives() -> No
     ridge = np.array([1 / c, 1 / c, 1 / c, 0.0])
     assert np.abs(design.T @ (p - y) + ridge * beta).max() < 1e-4
     assert p.sum() == pytest.approx(y.sum(), rel=1e-5)
-    none = ladder.predict(z, ladder.fit(z, np.zeros(n), c))
-    assert np.isfinite(none).all() and (none == 0).all()
+    for one in (np.zeros(n), np.ones(n)):
+        with pytest.raises(ValueError, match="positive and negative"):
+            ladder.fit(z, one, c)
 
 
 def test_the_newton_fit_minimises_the_l2_logistic_loss() -> None:
@@ -495,7 +569,14 @@ def test_a_planted_signal_one_rung_sees_and_a_null(tmp_path: Path) -> None:
     assert compared(out, "vol+price", "long")["complete_draws"] == 1.0
 
 
-def external_table(values: dict, grid: dict, sides: list[str], drop: int = 0) -> pa.Table:
+def quarter(ts: np.ndarray) -> np.ndarray:
+    month = ts.astype("datetime64[ns]").astype("datetime64[M]").astype(np.int64)
+    return (month - (2022 - 1970) * 12) // 3
+
+
+def external_table(
+    values: dict, grid: dict, sides: list[str], drop: int = 0, scheme: str = "loqo"
+) -> pa.Table:
     n = len(grid["ts_ns"]) - drop
     parts = [
         pa.table(
@@ -505,11 +586,27 @@ def external_table(values: dict, grid: dict, sides: list[str], drop: int = 0) ->
                 "horizon": np.full(n, 24),
                 "side": [side] * n,
                 "score": (1 if side != "short" else -1) * values["ret_24h"][:n],
+                "fold": pa.array(quarter(grid["ts_ns"][:n]), pa.int16()),
+                "scheme": [scheme] * n,
             }
         )
         for side in sides
     ]
     return pa.concat_tables(parts)
+
+
+def external_file(path: Path, hours: pa.Array) -> None:
+    n = len(hours)
+    table = {
+        "coin": ["AAAUSDT"] * n,
+        "hour": hours,
+        "horizon": np.full(n, 24),
+        "side": ["long"] * n,
+        "score": np.full(n, 0.5),
+        "fold": np.zeros(n, np.int16),
+        "scheme": ["loqo"] * n,
+    }
+    pq.write_table(pa.table(table), path)
 
 
 def test_external_scores_are_scored_and_compared_like_a_rung(tmp_path: Path) -> None:
@@ -534,28 +631,56 @@ def test_external_scores_are_scored_and_compared_like_a_rung(tmp_path: Path) -> 
         ladder.ladder(values, grid, plan, external_table(values, grid, ["long", "short"]))
 
 
+def test_external_scores_carry_the_ladders_folds_and_the_plans_scheme(tmp_path: Path) -> None:
+    values, grid = world()
+    extra = '\n[external]\nname = "planted"\npath = "planted.parquet"\nscheme = "forward"\n'
+    plan = ladder.load(plan_file(tmp_path, extra))
+    table = external_table(values, grid, list(ladder.SIDES), scheme="forward")
+    assert ladder.ladder(values, grid, plan, table)["scores"]
+    shifted = table.set_column(5, "fold", pa.array(table["fold"].to_numpy() + 1, pa.int16()))
+    with pytest.raises(ValueError, match="fold other than the ladder's"):
+        ladder.ladder(values, grid, plan, shifted)
+    loqo = external_table(values, grid, list(ladder.SIDES), scheme="loqo")
+    with pytest.raises(ValueError, match=r"fitted under \['loqo'\], not forward"):
+        ladder.ladder(values, grid, plan, loqo)
+    mixed = pa.concat_tables([table, loqo.slice(0, 1)])
+    with pytest.raises(ValueError, match="fitted under"):
+        ladder.ladder(values, grid, plan, mixed)
+    for name in ("fold", "scheme"):
+        with pytest.raises(ValueError, match=f"no {name} column"):
+            ladder.ladder(values, grid, plan, table.drop_columns([name]))
+
+
 def test_external_scores_join_on_coin_and_hour_whatever_the_table_looks_like() -> None:
     values, grid = world(days=20)
     ts, symbol = grid["ts_ns"], grid["symbol"]
     table = external_table(values, grid, list(ladder.SIDES))
-    base = ladder.external_scores(table, ts, symbol, 24, ladder.SIDES)
+    fold = quarter(ts)
+    base = ladder.external_scores(table, ts, symbol, fold, "loqo", 24, ladder.SIDES)
     shuffled = table.take(np.random.default_rng(1).permutation(table.num_rows))
     stamped = table.set_column(1, "hour", table["hour"].cast(pa.timestamp("ns")))
     wide = table.set_column(0, "coin", table["coin"].cast(pa.large_string()))
     wide = wide.set_column(3, "side", wide["side"].cast(pa.large_string()))
-    for other in (shuffled, stamped, wide):
-        got = ladder.external_scores(other, ts, symbol, 24, ladder.SIDES)
+    unsigned = table.set_column(1, "hour", table["hour"].cast(pa.uint64()))
+    for other in (shuffled, stamped, wide, unsigned):
+        got = ladder.external_scores(other, ts, symbol, fold, "loqo", 24, ladder.SIDES)
         for side in ladder.SIDES:
             assert np.array_equal(got[side], base[side]), side
     twice = pa.concat_tables([table, table.slice(7, 1)])
     with pytest.raises(ValueError, match="twice"):
-        ladder.external_scores(twice, ts, symbol, 24, ladder.SIDES)
+        ladder.external_scores(twice, ts, symbol, fold, "loqo", 24, ladder.SIDES)
     for bad in (np.inf, -np.inf):
         score = table["score"].to_numpy().copy()
         score[3] = bad
         with pytest.raises(ValueError, match="non-finite"):
             ladder.external_scores(
-                table.set_column(4, "score", pa.array(score)), ts, symbol, 24, ladder.SIDES
+                table.set_column(4, "score", pa.array(score)),
+                ts,
+                symbol,
+                fold,
+                "loqo",
+                24,
+                ladder.SIDES,
             )
 
 
@@ -607,6 +732,49 @@ def test_the_command_writes_a_ladder_run(
     assert str(run) in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("scheme", ladder.SCHEMES)
+def test_the_command_scores_a_valid_external_file_under_its_scheme(
+    tmp_path: Path, scheme: str
+) -> None:
+    values, grid = world()
+    run_inputs = write_runs(tmp_path, values, grid)
+    table = external_table(values, grid, list(ladder.SIDES), scheme=scheme)
+    pq.write_table(table, tmp_path / "planted.parquet")
+    extra = f'\n[external]\nname = "planted"\npath = "planted.parquet"\nscheme = "{scheme}"\n'
+    extra += '\n[[comparisons]]\nfirst = "planted"\nsecond = "vol"\n'
+    run, _ = ladder.run(run_inputs, tmp_path, plan_file(tmp_path, extra), "x")
+    oof = pq.read_table(run / "oof.parquet")
+    mine = np.array(oof["scheme"].to_pylist()) == scheme
+    row = {(c, t): i for i, (c, t) in enumerate(zip(grid["symbol"], grid["ts_ns"], strict=True))}
+    at = np.array(
+        [
+            row[(c, t)]
+            for c, t in zip(oof["symbol"].to_pylist(), oof["ts_ns"].to_numpy(), strict=True)
+        ]
+    )
+    for side in ladder.SIDES:
+        column = oof[f"planted:{side}"].to_numpy(zero_copy_only=False).astype(np.float64)
+        sign = -1 if side == "short" else 1
+        assert np.array_equal(column[mine], sign * values["ret_24h"][at[mine]]), side
+        assert np.isnan(column[~mine]).all() and mine.any() and (~mine).any()
+    scores = pq.read_table(run / "scores.parquet").to_pylist()
+    planted = [r for r in scores if r["name"] == "planted"]
+    assert {(r["scheme"], r["side"], r["coins"]) for r in planted} == {
+        (scheme, side, coins) for side in ladder.SIDES for coins in ("all", "without")
+    }
+    vol = {
+        (r["side"], r["coins"]): r["rows"]
+        for r in scores
+        if r["name"] == "vol" and r["scheme"] == scheme
+    }
+    assert all(r["rows"] == vol[(r["side"], r["coins"])] for r in planted)
+    assert all(r["fold_mean"] > 0.7 for r in planted if r["side"] != "any")
+    comparisons = pq.read_table(run / "comparisons.parquet").to_pylist()
+    assert {c["scheme"] for c in comparisons if c["first"] == "planted"} == {scheme}
+    manifest = json.loads((run / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["params"]["external"]["scheme"] == scheme
+
+
 def test_the_ladder_refuses_the_held_back_span(tmp_path: Path) -> None:
     held = plan_file(tmp_path, text=PLAN.replace("end = 2022-12-31", "end = 2024-01-01"))
     with pytest.raises(span.HeldBackError):
@@ -622,14 +790,14 @@ def test_the_ladder_refuses_the_held_back_span(tmp_path: Path) -> None:
     shifted = write_runs(tmp_path / "c", values, grid)
     with pytest.raises(span.HeldBackError):
         ladder.run(shifted, tmp_path / "c", plan, "x")
-    hours = np.array([labels.ns(date(2022, 1, 1)), labels.ns(date(2024, 1, 1))], np.int64)
-    pq.write_table(pa.table({"hour": hours}), tmp_path / "late.parquet")
-    stamps = pa.array(hours, pa.int64()).cast(pa.timestamp("ns"))
-    pq.write_table(pa.table({"hour": stamps}), tmp_path / "stamped.parquet")
+    hours = pa.array([labels.ns(date(2022, 1, 1)), labels.ns(date(2024, 1, 1))], pa.int64())
+    external_file(tmp_path / "late.parquet", hours)
+    external_file(tmp_path / "stamped.parquet", hours.cast(pa.timestamp("ns")))
     for name in ("late", "stamped"):
         extra = f'\n[external]\nname = "{name}"\npath = "{name}.parquet"\nscheme = "loqo"\n'
         with pytest.raises(span.HeldBackError):
             ladder.run(early, tmp_path / "a", plan_file(tmp_path, extra), "x")
+    plan = plan_file(tmp_path)
     complete = json.loads((early / "complete.json").read_text(encoding="utf-8"))
     (early / "complete.json").write_text(json.dumps(complete | {"clean": False}), "utf-8")
     with pytest.raises(ValueError, match="clean"):
@@ -653,3 +821,81 @@ def test_the_docs_section_names_every_input_rung_and_command() -> None:
         assert f"`{rung.name}`" in section, rung.name
     for command in ("panel inputs", "panel ladder"):
         assert command in section
+
+
+def test_the_external_hours_are_checked_before_the_file_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values, grid = world(days=10)
+    early = write_runs(tmp_path, values, grid)
+    late = [labels.ns(date(2024, 1, 1)), labels.ns(date(2024, 1, 1)) + labels.HOUR_NS]
+    dev = [labels.ns(date(2022, 1, 1)), labels.ns(date(2022, 1, 1)) + labels.HOUR_NS]
+    held, fails = span.HeldBackError, ValueError
+    cases: dict[str, tuple[pa.Array, type[Exception], str, bool]] = {
+        "late": (pa.array(late, pa.int64()), held, "hour reaches", False),
+        "unsigned": (pa.array(late, pa.uint64()), held, "hour reaches", False),
+        "null-late": (pa.array([None, *late], pa.int64()), held, "hour reaches", False),
+        "float": (pa.array([np.nan, *map(float, dev)], pa.float64()), held, "double", False),
+        "text": (pa.array(["2022-01-01", "2022-01-02"]), held, "string", False),
+        "bare": (pa.array(late, pa.int64()), held, "no bounds", False),
+        "null": (pa.array([None, *dev], pa.int64()), fails, "null", True),
+    }
+    real_read, real_hash = pq.read_table, store.sha256
+    reads: list[tuple[str, Any]] = []
+
+    def spy(source: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(source).endswith("-hours.parquet"):
+            reads.append((Path(source).name, kwargs.get("columns")))
+        return real_read(source, *args, **kwargs)
+
+    def hash_spy(path: Path) -> str:
+        if str(path).endswith("-hours.parquet"):
+            reads.append((Path(path).name, "sha256"))
+        return real_hash(path)
+
+    for name, (hours, error, match, column_read) in cases.items():
+        path = tmp_path / f"{name}-hours.parquet"
+        external_file(path, hours)
+        if name == "bare":
+            pq.write_table(pq.read_table(path), path, write_statistics=False)
+        extra = f'\n[external]\nname = "e"\npath = "{name}-hours.parquet"\nscheme = "loqo"\n'
+        reads.clear()
+        monkeypatch.setattr(pq, "read_table", spy)
+        monkeypatch.setattr(store, "sha256", hash_spy)
+        with pytest.raises(error, match=match):
+            ladder.run(early, tmp_path, plan_file(tmp_path, extra), "x")
+        monkeypatch.undo()
+        assert reads == ([(path.name, ["hour"])] if column_read else []), name
+    assert not (tmp_path / "panel-ladder").exists()
+
+
+def rewrite(path: Path, table: pa.Table) -> str:
+    pq.write_table(table, path)
+    return store.sha256(path)
+
+
+def test_the_ladder_refuses_a_held_back_inputs_table_or_grid_on_its_own(tmp_path: Path) -> None:
+    values, grid = world(days=10)
+    held = labels.ns(date(2024, 1, 1))
+    run_inputs = write_runs(tmp_path / "a", values, grid)
+    table_path = run_inputs / "inputs.parquet"
+    table = pq.read_table(table_path)
+    ts = table["ts_ns"].to_numpy().copy()
+    ts[-1] = held
+    moved = table.set_column(0, "ts_ns", pa.array(ts))
+    complete = json.loads((run_inputs / "complete.json").read_text(encoding="utf-8"))
+    complete["files"]["inputs.parquet"] = rewrite(table_path, moved)
+    (run_inputs / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+    with pytest.raises(span.HeldBackError, match=r"inputs.parquet"):
+        ladder.run(run_inputs, tmp_path / "a", plan_file(tmp_path), "x")
+    run_inputs = write_runs(tmp_path / "b", values, grid)
+    manifest = json.loads((run_inputs / "manifest.json").read_text(encoding="utf-8"))
+    grid_path = tmp_path / "b" / "labels" / manifest["params"]["labels_run"] / "grid" / "0.parquet"
+    ts = grid["ts_ns"].copy()
+    ts[-1] = held
+    manifest["params"]["labels_grid"]["sha256"] = rewrite(grid_path, pa.table(dict(grid, ts_ns=ts)))
+    (run_inputs / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(span.HeldBackError, match="grid"):
+        ladder.run(run_inputs, tmp_path / "b", plan_file(tmp_path), "x")
+    for folder in ("a", "b"):
+        assert not (tmp_path / folder / "panel-ladder").exists()

@@ -5,6 +5,7 @@
 import builtins
 import io
 import json
+import shutil
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -205,6 +206,27 @@ def test_classic_against_ews_indicators_and_scipy() -> None:
     ac = indicators.rolling_autocorrelation(hourly, 84, 1)[j - 169 : j - 1]
     assert got["var_tau_7d"] == pytest.approx(kendalltau(np.arange(168), variance)[0])
     assert got["ac1_tau_7d"] == pytest.approx(kendalltau(np.arange(168), ac)[0])
+
+
+def test_trailing_tau_on_windows_with_missing_values_matches_scipy() -> None:
+    rng = np.random.default_rng(4)
+    v = rng.normal(size=400) + 0.01 * np.arange(400)
+    v[[50, 51, 120, 260, 261, 262]] = np.nan
+    v[300:330] = np.nan
+    window = 72
+    stop = np.arange(window, 401)
+    got = inputs.trailing_tau(v, stop, window)
+    kinds = {"full": 0, "partial": 0, "sparse": 0}
+    for k, value in zip(stop, got, strict=True):
+        block = v[k - window : k]
+        keep = np.isfinite(block)
+        if 6 * keep.sum() >= 5 * window:
+            kinds["full" if keep.all() else "partial"] += 1
+            assert value == pytest.approx(kendalltau(np.flatnonzero(keep), block[keep])[0]), k
+        else:
+            kinds["sparse"] += 1
+            assert np.isnan(value), k
+    assert min(kinds.values()) > 0
 
 
 def test_lev_against_a_direct_calculation_and_the_carry_rule() -> None:
@@ -651,6 +673,57 @@ def labelled(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     return dest, run
 
 
+def test_each_market_column_is_the_mean_over_coins_at_that_hour(tmp_path: Path) -> None:
+    coins = [f"C{k:02d}USDT" for k in range(inputs.MARKET_MIN + 1)][::-1]
+    first, dev, last = date(2022, 11, 28), date(2022, 12, 4), date(2022, 12, 7)
+    dest = tmp_path / "archive"
+    archive.fetch(coins, first, last, dest, vision(coins, first, (last - first).days + 1, 5).get)
+    names = sorted(coins)
+    hours = np.arange(labels.ns(dev), labels.ns(last + timedelta(days=1)), labels.HOUR_NS)
+    days = [labels.ns(dev + timedelta(days=d)) for d in range((last - dev).days + 1)]
+    folder = tmp_path / "labels" / "t"
+    tables = {
+        "grid/g.parquet": pa.table(
+            {"ts_ns": np.repeat(hours, len(names)), "symbol": np.tile(names, len(hours))}
+        ),
+        "thresholds/t.parquet": pa.table(
+            {
+                "ts_ns": np.repeat(days, len(names)),
+                "symbol": np.tile(names, len(days)),
+                "sd_ret": np.full(len(days) * len(names), 0.004),
+                "b": np.full(len(days) * len(names), 0.02),
+            }
+        ),
+    }
+    files = {}
+    for name, table in tables.items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, folder / name)
+        files[name] = store.sha256(folder / name)
+    params = {"start": str(first), "dev_start": str(dev), "end": str(last), "symbols": coins}
+    (folder / "manifest.json").write_text(json.dumps({"run_id": "t", "params": params}), "utf-8")
+    (folder / "complete.json").write_text(json.dumps({"files": files, "clean": True}), "utf-8")
+    run, _ = inputs.run(folder, dest, tmp_path / "data", "t")
+    table = pq.read_table(run / "inputs.parquet")
+    symbol = np.array(table["symbol"].to_pylist())
+    at = np.searchsorted(hours, table["ts_ns"].to_numpy())
+    checked = []
+    for name in inputs.OWN:
+        own = table[name].to_numpy().reshape(len(hours), len(names))
+        mean = np.array(
+            [
+                r[np.isfinite(r)].mean() if np.isfinite(r).sum() >= inputs.MARKET_MIN else np.nan
+                for r in own
+            ]
+        )
+        got = table[f"m_{name}"].to_numpy()
+        assert np.allclose(got, mean[at], equal_nan=True, rtol=1e-12, atol=0), name
+        if np.isfinite(mean).sum() > 1 and np.nanstd(mean) > 0:
+            checked.append(name)
+    assert {"vol_1h", "ret_1h"} <= set(checked) and len(checked) >= 10
+    assert list(symbol[: len(names)]) == names
+
+
 def test_the_command_writes_an_inputs_run_on_the_grids_rows(
     labelled: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -737,3 +810,21 @@ def test_the_command_refuses_an_archive_naming_a_held_back_day_before_reading_an
     assert "holds" in errors[0] and "lists in its manifest" in errors[1]
     assert not [p for p in opened if p.startswith((str(labels_dir), str(held.parent)))]
     assert not (tmp_path / "out").exists()
+
+
+def test_the_command_refuses_a_thresholds_table_reaching_the_held_back_span(
+    labelled: tuple[Path, Path], tmp_path: Path
+) -> None:
+    dest, labels_dir = labelled
+    run = tmp_path / "labels" / labels_dir.name
+    shutil.copytree(labels_dir, run)
+    complete = json.loads((run / "complete.json").read_text(encoding="utf-8"))
+    (name,) = [f for f in complete["files"] if f.startswith("thresholds/")]
+    table = pq.read_table(run / name)
+    late = table.slice(0, 1).set_column(0, "ts_ns", pa.array([labels.ns(span.HELD_BACK)]))
+    pq.write_table(pa.concat_tables([table, late]), run / name)
+    complete["files"][name] = store.sha256(run / name)
+    (run / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+    with pytest.raises(span.HeldBackError, match="thresholds"):
+        inputs.run(run, dest, tmp_path, "t")
+    assert not (tmp_path / "panel-inputs").exists()
