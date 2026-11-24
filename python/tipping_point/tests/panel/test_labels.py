@@ -100,7 +100,7 @@ def test_a_close_of_zero_or_below_is_refused() -> None:
         labels.windows(columns)
 
 
-def test_a_days_threshold_reads_the_evaluated_windows_of_its_90_days() -> None:
+def test_a_days_threshold_reads_every_known_change_of_its_90_days() -> None:
     columns = planted(days=100)
     columns["oi"][70 * DAY : 71 * DAY] = np.nan
     win = labels.windows(columns)
@@ -110,13 +110,19 @@ def test_a_days_threshold_reads_the_evaluated_windows_of_its_90_days() -> None:
     assert np.array_equal(has, counts >= 28 * DAY * 0.8)
     first = int(np.argmax(has))
     assert 40 < first < 60 and has[first:].all()
+    since = win["ts_ns"][win["evaluated"]][0]
     for d in (first, 75, 99):
         day = T0 + d * DAY_NS
-        inside = win["evaluated"] & (win["ts_ns"] >= day - 90 * DAY_NS) & (win["ts_ns"] < day)
-        assert rows[d]["windows"] == int(inside.sum())
-        assert rows[d]["sd_ret"] == float(np.std(win["price_change"][inside], ddof=1))
-        assert rows[d]["sd_oi"] == float(np.std(win["oi_change"][inside], ddof=1))
+        closing = (win["ts_ns"] >= max(day - 90 * DAY_NS, since)) & (win["ts_ns"] < day)
+        ret, oi = (
+            win[name][closing & np.isfinite(win[name])] for name in ("price_change", "oi_change")
+        )
+        assert rows[d]["windows"] == int((closing & win["evaluated"]).sum())
+        assert rows[d]["oi_unknown"] == int(closing.sum()) - len(oi)
+        assert rows[d]["sd_ret"] == float(np.std(ret, ddof=1))
+        assert rows[d]["sd_oi"] == float(np.std(oi, ddof=1))
         assert (rows[d]["a"], rows[d]["b"]) == (3.7 * rows[d]["sd_oi"], 5.0 * rows[d]["sd_ret"])
+    assert rows[first]["oi_unknown"] == 0 and rows[99]["oi_unknown"] == DAY + 6
     assert rows[99]["windows"] < 90 * DAY - DAY
 
 
@@ -171,36 +177,34 @@ def test_a_threshold_needs_95_percent_of_its_windows_since_the_first_evaluated_o
         closing = (win["ts_ns"] >= since) & (win["ts_ns"] < T0 + 95 * DAY_NS)
         assert row["windows"] + row["missing"] == int(closing.sum())
         assert (labels.missing_share(row) <= 0.05) == kept == (row["b"] is not None)
-        assert (row["sd_ret_shift"] is not None) == kept
         on = (coin.windows_ts >= T0 + 95 * DAY_NS) & (coin.windows_ts < T0 + 96 * DAY_NS)
         assert coin.clean[on].all() == kept and coin.clean[on].any() == kept
         got = labels.grid(np.array([at], np.int64), coin, [])
         assert all(got[f"censored_{h}"][0] != kept for h in labels.HORIZONS)
 
 
-def test_a_threshold_needs_its_price_spread_within_5_percent_of_every_priced_window() -> None:
-    for scale, kept in ((1.0, True), (20.0, False)):
-        columns = planted(days=100)
-        gap = slice(60 * DAY, 62 * DAY)
-        steps = np.diff(np.log(columns["close"]), prepend=0.0)
-        steps[gap] *= scale
-        columns["close"] = np.exp(np.cumsum(steps))
-        columns["oi"][gap] = np.nan
-        win = labels.windows(columns)
-        thresholds, _, _, coin = labels.coin(columns, T0 + 100 * DAY_NS)
-        row = thresholds[95]
-        since = win["ts_ns"][win["evaluated"]][0]
-        closing = (win["ts_ns"] >= since) & (win["ts_ns"] < T0 + 95 * DAY_NS)
-        seen, every = (
-            np.std(win["price_change"][closing & mask], ddof=1)
-            for mask in (win["evaluated"], np.isfinite(win["price_change"]))
-        )
-        assert row["sd_ret_shift"] == pytest.approx(abs(seen / every - 1))
-        assert row["windows"] >= labels.MIN_WINDOWS
-        assert labels.missing_share(row) <= labels.MAX_MISSING
-        assert (row["sd_ret_shift"] <= labels.MAX_SHIFT) == kept == (row["b"] is not None)
-        on = (coin.windows_ts >= T0 + 95 * DAY_NS) & (coin.windows_ts < T0 + 96 * DAY_NS)
-        assert coin.clean[on].all() == kept and coin.clean[on].any() == kept
+def test_a_threshold_counts_the_known_changes_of_windows_the_rule_could_not_evaluate() -> None:
+    columns = planted(days=100)
+    gap = slice(60 * DAY, 62 * DAY)
+    steps = np.diff(np.log(columns["close"]), prepend=0.0)
+    steps[gap] *= 20
+    columns["close"] = np.exp(np.cumsum(steps))
+    columns["oi"][gap] = np.nan
+    lone = 80 * DAY + 100
+    columns["oi"][lone] = np.nan
+    columns["oi"][lone + 1 :] *= np.exp(-0.3)
+    win = labels.windows(columns)
+    row = labels.daily(win, T0, 100)[95]
+    since = win["ts_ns"][win["evaluated"]][0]
+    closing = (win["ts_ns"] >= since) & (win["ts_ns"] < T0 + 95 * DAY_NS)
+    assert row["missing"] == 2 * DAY + 6 + 7 and row["oi_unknown"] == 2 * DAY + 6 + 2
+    assert labels.missing_share(row) <= labels.MAX_MISSING
+    for name, leg in (("price_change", "sd_ret"), ("oi_change", "sd_oi")):
+        known = closing & np.isfinite(win[name])
+        assert row[leg] == float(np.std(win[name][known], ddof=1))
+        assert row[leg] > 2 * np.std(win[name][closing & win["evaluated"]], ddof=1)
+    carried = closing & ~win["evaluated"] & (np.abs(win["oi_change"]) > 0.2)
+    assert int(carried.sum()) == 5
 
 
 def test_open_interest_that_starts_late_is_not_counted_missing() -> None:
