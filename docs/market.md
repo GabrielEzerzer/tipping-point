@@ -577,10 +577,12 @@ The grid holds labels only: a feature at hour t may read only bars that start be
 rows stamped at or before t.
 
 **Inputs.** `panel inputs --labels <run id>` writes one run to `<data dir>/panel-inputs/<run_id>/`
-with the table `inputs`, one row per coin per hour t of the labels run's grid in the grid's order,
-and the table `constants`, each coin's development-span mean squared 5-minute return and its
-threshold `b`, so a later run on other days can reuse them unchanged. Its manifest names the labels
-run and the sha256 of its grid.
+with the table `inputs`, one row per coin per hour t of the labels run's grid in the grid's order.
+Its manifest names the labels run and the sha256 of its grid and of its `thresholds` table. That
+table must give one row for each coin and each UTC day of the grid, or the command refuses; an hour
+in day d scales its volatility inputs by that day's `sd_ret` and `b`, which the labels run sets from
+windows closing in the 90 days before d, and those inputs are missing on a day whose row has no
+threshold.
 
 ```sh
 uv run python -m tipping_point.panel inputs --labels <labels run id>
@@ -598,10 +600,11 @@ its window present, else it is missing; so does every 28-day mean or median, cou
 observed in that bar, not carried into it. r is the 5-minute log return of close. The command
 refuses a span with a funding file missing.
 
-- `vol`: `vol_1h`, `vol_6h`, `vol_24h`, `vol_7d`, `vol_28d` = log(mean r^2 over the window / the
-  coin's mean r^2 over the development span); `near_24h` = the largest |30-minute log return| of the
-  last 24 h over the coin's `b`; `vsurge_1h` = log(mean volume over 1 h / median 5-minute volume over
-  28 d); `volume_24h` = log(mean volume over 24 h / mean volume over 28 d).
+- `vol`: `vol_1h`, `vol_6h`, `vol_24h`, `vol_7d`, `vol_28d` = log(mean r^2 over the window /
+  (sd_ret^2 / 6)), where sd_ret^2 / 6 turns the day's 30-minute variance into a 5-minute one;
+  `near_24h` = the largest |30-minute log return| of the last 24 h over the day's `b`; `vsurge_1h`
+  = log(mean volume over 1 h / median 5-minute volume over 28 d); `volume_24h` = log(mean volume
+  over 24 h / mean volume over 28 d).
 - `price`: `ret_1h`, `ret_6h`, `ret_24h`, `ret_7d`, `ret_28d`, the log return over the window, from
   the close just before it to the last close before t (missing when either close is); `aret_24h`
   and `aret_7d`, their absolute values; `dd_7d` and `dd_28d`, the log of the last close over the
@@ -661,7 +664,9 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   quarters are scored), a quarter is scored by a model fitted only on rows more than 31 days before
   it, as the held-back test span will be. The gap must cover the inputs' longest look-back (28 days,
   one bar and the 1-hour carry), the longest horizon, the labels' 30-minute lead and their 24-hour
-  look-back, 30.07 days in all; the plan refuses a shorter one. A scored quarter with rows but no
+  look-back, 30.07 days in all; the plan refuses a shorter one. The 90-day thresholds that scale
+  `vol` and `near_24h`, and that set the labels, are not a direct look-back and the gap does not
+  cover them; `ladder-gap92.toml` runs the plan with a 92-day gap (below). A scored quarter with rows but no
   training rows, or a scored row without a finite score, stops the run.
 - Scores per scheme, rung, side and horizon: the mean over quarters of the AUC inside each quarter
   (the primary score), the same mean weighted by each quarter's positives (`fold_mean_weighted`),
@@ -679,9 +684,10 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   many folds are above zero. A draw that takes no positive or no negative in a quarter cannot
   score that quarter, and its fold mean averages over the quarters it does score; the column
   `complete_draws` gives the share of draws that score every quarter, per horizon and side. On
-  the development span it is below 1 on every side, because the first quarter of 2022 has no rows
-  before `ls_rel` returns on 2022-02-11, so a draw can take only its empty blocks, and lowest on
-  the short side, whose last quarters hold few positives.
+  the development span at 24 h it is 0.98 long, 0.91 short and 0.995 any in both schemes. Most of
+  the shortfall is the third quarter of 2022, where 4 of the 7 blocks hold no long positive and 5
+  hold no short positive; in `loqo` the first quarter adds a little, as its rows start when
+  `ls_rel` returns on 2022-02-11 22:00, in its third block.
 
 The bootstrap does not recompute AUCs from rows. An AUC is a sum over (positive, negative) pairs, so
 for each fold, rung and side the run counts once, for every pair of blocks (a, b), the pairs C_ab
@@ -700,6 +706,61 @@ because part of what they rank is cascades already under way on other coins at t
 means carry. `full` holds the coin's own leverage inputs only and `full+mlev` adds their market
 means; the rung list was fixed before any score was computed. The scores rank rows and say nothing
 about calibration.
+
+**Development results.** On labels run `20261123T203519Z-panel-20220101-20231231` the inputs have a
+threshold on every coin-day of the grid and no funding file is missing. Rows at each horizon:
+
+| | 24 h | 6 h | 1 h |
+|---|---|---|---|
+| grid rows | 525600 | 525600 | 525600 |
+| skipped | 20842 | 20842 | 20842 |
+| censored | 14862 | 9721 | 8297 |
+| missing an input | 28776 | 28796 | 28812 |
+| scored | 461120 | 466241 | 467649 |
+| long / short positives scored | 15505 / 2139 | 3996 / 558 | 675 / 94 |
+
+Primary score (`fold_mean`) at 24 h, `loqo` / `forward`:
+
+| rung | long | short | any |
+|---|---|---|---|
+| vol | 0.593 / 0.571 | 0.630 / 0.582 | 0.602 / 0.579 |
+| vol+price | 0.654 / 0.589 | 0.727 / 0.695 | 0.627 / 0.587 |
+| vol+price+flow | 0.680 / 0.623 | 0.800 / 0.772 | 0.638 / 0.606 |
+| full | 0.711 / 0.663 | 0.828 / 0.800 | 0.664 / 0.632 |
+| full+mlev | 0.679 / 0.659 | 0.798 / 0.756 | 0.632 / 0.616 |
+| classic | 0.584 / 0.555 | 0.623 / 0.586 | 0.593 / 0.566 |
+
+Comparisons at 24 h, estimate with the 2.5% and 97.5% bootstrap points, `loqo` then `forward`:
+
+| comparison | long | short | any |
+|---|---|---|---|
+| full - vol | 0.118 [0.066, 0.172]; 0.092 [0.035, 0.158] | 0.198 [0.103, 0.296]; 0.218 [0.109, 0.312] | 0.062 [0.013, 0.114]; 0.053 [-0.000, 0.122] |
+| vol+price - vol | 0.061 [0.009, 0.119]; 0.017 [-0.032, 0.086] | 0.096 [0.044, 0.166]; 0.113 [0.035, 0.176] | 0.025 [-0.021, 0.080]; 0.008 [-0.035, 0.069] |
+| vol+price+flow - vol+price | 0.027 [0.012, 0.041]; 0.034 [0.008, 0.057] | 0.073 [0.030, 0.115]; 0.077 [0.022, 0.127] | 0.010 [-0.005, 0.024]; 0.019 [-0.008, 0.047] |
+| full - vol+price+flow | 0.031 [0.014, 0.045]; 0.040 [0.021, 0.055] | 0.028 [0.005, 0.048]; 0.028 [0.011, 0.048] | 0.026 [0.011, 0.039]; 0.027 [0.009, 0.043] |
+| full+mlev - full | -0.032 [-0.059, -0.010]; -0.005 [-0.055, 0.022] | -0.030 [-0.040, -0.012]; -0.044 [-0.068, -0.009] | -0.032 [-0.057, -0.009]; -0.016 [-0.048, 0.009] |
+| classic - vol | -0.009 [-0.032, 0.017]; -0.016 [-0.050, 0.023] | -0.008 [-0.034, 0.019]; 0.004 [-0.019, 0.029] | -0.009 [-0.032, 0.017]; -0.013 [-0.045, 0.023] |
+
+Three plans beside `ladder.toml` each change one thing. At 24 h on the long side:
+
+| plan | full - vol | full - vol+price+flow | classic - vol |
+|---|---|---|---|
+| `ladder.toml` | 0.118 [0.066, 0.172]; 0.092 [0.035, 0.158] | 0.031 [0.014, 0.045]; 0.040 [0.021, 0.055] | -0.009 [-0.032, 0.017]; -0.016 [-0.050, 0.023] |
+| `ladder-gap92.toml` | 0.107 [0.053, 0.168]; 0.054 [-0.040, 0.117] | 0.022 [0.007, 0.038]; 0.037 [0.020, 0.052] | 0.009 [-0.014, 0.032]; -0.004 [-0.030, 0.025] |
+| `ladder-block28.toml` | 0.118 [0.071, 0.172]; 0.092 [0.048, 0.157] | 0.031 [0.016, 0.046]; 0.040 [0.026, 0.056] | -0.009 [-0.028, 0.020]; -0.016 [-0.052, 0.023] |
+| `ladder-public.toml` | not in the plan | not in the plan | -0.013 [-0.031, 0.014]; -0.008 [-0.036, 0.022] |
+
+- `ladder-gap92.toml` (`gap_days = 92`, which covers the 90-day thresholds) leaves the scored rows
+  unchanged and drops more training rows: the first forward quarter trains on 30890 rows instead
+  of 73150. The forward `full - vol` interval then reaches below zero; every other interval in the
+  table stays on the side of zero it was on, or spans zero as before.
+- `ladder-block28.toml` (`block_days = 28`) leaves every estimate unchanged and moves the 2.5% and
+  97.5% points of the 24 h comparisons by at most 0.019; at 24 h `complete_draws` falls to 0.92
+  long and 0.87 short in `loqo`, 0.93 and 0.87 in `forward`.
+- `ladder-public.toml` (no rung with `lev`) builds its common rows without `ls` and `ls_rel`, so it
+  scores 489895 rows at 24 h (one missing an input), from 2022-01-01 17:00. Its `vol` scores 0.577
+  long in `loqo` and 0.567 in `forward`, and `vol+price - vol` is 0.073 [0.017, 0.137] and 0.030
+  [-0.026, 0.102].
 
 An optional `[external]` entry (`name`, `path` to a Parquet file relative to the plan, and `scheme`,
 the scheme its scores were fitted under) brings in out-of-fold scores fitted elsewhere, such as a

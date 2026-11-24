@@ -30,8 +30,8 @@ Command line: python -m tipping_point.panel <command> [options]
           --start, thresholds, cascades and the hourly grid from --dev-start (default
           {span.DEV_START}) to the end of --end
   inputs  the model inputs of every coin and hour of a labels run's grid (--labels, a run id or
-          folder), as a run in <data dir>/panel-inputs/<run_id>/ with the tables inputs and
-          constants (each coin's development-span mean squared return and threshold b)
+          folder), as a run in <data dir>/panel-inputs/<run_id>/ with the table inputs, the
+          volatility inputs scaled by the labels run's threshold of each hour's day
   ladder  fit and score the rungs of a plan file (--plan, default panel/ladder.toml) on an inputs
           run (--inputs) and its labels run, out of fold by calendar quarter (each left out, and
           forward only), with a joint block bootstrap for each comparison, as a run in
