@@ -33,9 +33,10 @@ Command line: python -m tipping_point.panel <command> [options]
           folder), as a run in <data dir>/panel-inputs/<run_id>/ with the tables inputs and
           constants (each coin's development-span mean squared return and threshold b)
   ladder  fit and score the rungs of a plan file (--plan, default panel/ladder.toml) on an inputs
-          run (--inputs) and its labels run, out of fold by calendar quarter, with a joint block
-          bootstrap for each comparison, as a run in <data dir>/panel-ladder/<run_id>/ with the
-          tables oof, scores, folds, comparisons and rows, and report.md
+          run (--inputs) and its labels run, out of fold by calendar quarter (each left out, and
+          forward only), with a joint block bootstrap for each comparison, as a run in
+          <data dir>/panel-ladder/<run_id>/ with the tables oof, scores, folds, comparisons and
+          rows, and report.md
   sequence
           train the sequence models of a plan file (--plan, default panel/sequence.toml) on an
           inputs run (--inputs): a JEPA, its untrained twin and a supervised model on the last

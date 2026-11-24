@@ -9,7 +9,8 @@ c = 0.01
 clip = 5.0
 
 [folds]
-gap_days = 28
+gap_days = 31
+forward_first = 2
 
 [bootstrap]
 block_days = 14
