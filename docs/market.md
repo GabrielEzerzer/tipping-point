@@ -579,7 +579,12 @@ are defined on the windows the rule could evaluate, which are the only windows t
 cap on the share of missing windows does not bound their effect, since the missing windows could
 be the extreme ones. For the price leg that effect is measured and capped: on the development
 data from 2022-04-15 on, the two standard deviations differ by at most 2.6% (SANDUSDT,
-2023-05-08), by more than 1% on 0.5% of the 18,780 coin-days and by more than 5% on none. For the
+2023-05-08), by more than 1% on 0.5% of the 18,780 coin-days and by more than 5% on none. Before
+that the rule removes the thresholds of 1,063 coin-days in 27 coins, from 2022-01-01 to
+2022-03-04: for about an hour of the fall on 2021-12-04 the archive has no open interest, so the
+13 windows with the largest price moves of those 90 days (in DOGEUSDT about 19 times the usual
+move) could not be evaluated, and `sd_ret` without them is up to 28% lower. A fall that takes the
+open-interest feed with it therefore censors up to 90 days after it. For the
 open-interest leg it cannot be measured, because the change in open interest over a window with
 no open interest is unknown: there the 5% share is the only limit, and `sd_oi` stands for the
 evaluated windows alone. A day's threshold reads nothing
