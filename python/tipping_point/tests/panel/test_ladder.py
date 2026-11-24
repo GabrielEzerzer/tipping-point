@@ -835,6 +835,14 @@ def test_the_external_hours_are_checked_before_the_file_is_read(
         "late": (pa.array(late, pa.int64()), held, "hour reaches", False),
         "unsigned": (pa.array(late, pa.uint64()), held, "hour reaches", False),
         "null-late": (pa.array([None, *late], pa.int64()), held, "hour reaches", False),
+        "micro": (
+            pa.array(late, pa.timestamp("ns")).cast(pa.timestamp("us")),
+            held,
+            "hour reaches",
+            False,
+        ),
+        "seconds": (pa.array([h // 10**9 for h in late], pa.int64()), held, "starts before", False),
+        "nested": (pa.array(late, pa.int64()), held, "hour reaches", False),
         "float": (pa.array([np.nan, *map(float, dev)], pa.float64()), held, "double", False),
         "text": (pa.array(["2022-01-01", "2022-01-02"]), held, "string", False),
         "bare": (pa.array(late, pa.int64()), held, "no bounds", False),
@@ -858,6 +866,10 @@ def test_the_external_hours_are_checked_before_the_file_is_read(
         external_file(path, hours)
         if name == "bare":
             pq.write_table(pq.read_table(path), path, write_statistics=False)
+        if name == "nested":
+            table = pq.read_table(path)
+            inner = pa.StructArray.from_arrays([pa.array(dev[: len(table)], pa.int64())], ["hour"])
+            pq.write_table(table.add_column(0, "x", inner), path)
         extra = f'\n[external]\nname = "e"\npath = "{name}-hours.parquet"\nscheme = "loqo"\n'
         reads.clear()
         monkeypatch.setattr(pq, "read_table", spy)

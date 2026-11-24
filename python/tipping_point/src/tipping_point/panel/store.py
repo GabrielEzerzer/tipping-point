@@ -76,8 +76,10 @@ def refuse_held_back(path: Path, column: str = "ts_ns") -> None:
     if not (pa.types.is_integer(kind) or pa.types.is_timestamp(kind)):
         raise span.HeldBackError(f"{path}: its {column} column is {kind}, not integer or timestamp")
     meta = file.metadata
-    index = meta.schema.names.index(column)
-    held = labels.ns(span.HELD_BACK)
+    index = [meta.schema.column(i).path for i in range(meta.num_columns)].index(column)
+    stamped = pa.types.is_timestamp(kind)
+    scale = UNIT_NS[kind.unit] if stamped else 1
+    first, held = labels.ns(span.START), labels.ns(span.HELD_BACK)
     for g in range(meta.num_row_groups):
         group = meta.row_group(g)
         if group.num_rows == 0:
@@ -85,14 +87,16 @@ def refuse_held_back(path: Path, column: str = "ts_ns") -> None:
         stats = group.column(index).statistics
         if stats is None or not stats.has_min_max:
             raise span.HeldBackError(f"{path}: its metadata gives no bounds for {column}")
-        if pa.types.is_timestamp(kind):
-            top = stats.max_raw * UNIT_NS[kind.unit] if isinstance(stats.max_raw, int) else None
-        else:
-            top = stats.max if isinstance(stats.max, int) else None
-        if top is None:
+        low, top = (stats.min_raw, stats.max_raw) if stamped else (stats.min, stats.max)
+        if not (isinstance(low, int) and isinstance(top, int)):
             raise span.HeldBackError(f"{path}: its metadata gives no bounds for {column}")
-        if top >= held:
+        if top * scale >= held:
             raise span.HeldBackError(f"{path}: {column} reaches the held-back test span")
+        if low * scale < first:
+            raise span.HeldBackError(
+                f"{path}: {column} starts before {span.START}, so it is not nanoseconds of the "
+                f"study's span"
+            )
 
 
 def read(run_dir: Path, name: str) -> pa.Table:

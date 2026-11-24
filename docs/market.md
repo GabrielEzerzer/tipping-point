@@ -867,5 +867,7 @@ Both commands refuse any day from 2024-01-01 on: `inputs` refuses a labels run w
 it, and `ladder` a plan, an inputs run, a grid or an external file that does. They read the time
 bounds of the grid, the thresholds, the inputs table and the external file's `hour` from the
 files' Parquet metadata before hashing or reading them, and refuse a file whose time column is
-neither integer nor timestamp or whose metadata gives no bounds for it; then they check each file's
-sha256 against the run that wrote it and refuse a run its `complete.json` does not mark clean.
+neither integer nor timestamp, whose metadata gives no bounds for it, or whose earliest time lies
+before 2021-10-01, which an integer column counted in anything but nanoseconds does; then they
+check each file's sha256 against the run that wrote it and refuse a run its `complete.json` does
+not mark clean.
