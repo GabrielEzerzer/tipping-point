@@ -294,15 +294,13 @@ def run(
     log: Callable[[str], None] = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
     span.refuse(start, dev_start, end)
-    span.refuse_archive(root)
+    files = span.manifest_files(root)
     if not start < dev_start <= end:
         raise ValueError(f"the span must run {start} < {dev_start} <= {end}")
     symbols = list(dict.fromkeys(symbols))
     lock = uv_lock()
     first_ns, end_ns = ns(dev_start), ns(end + timedelta(days=1))
     days = (end - start).days + 1
-    manifest_path = root / "manifest.json"
-    files = io.read_json(manifest_path)["files"] if manifest_path.exists() else {}
     found: dict[str, list[dict[str, Any]]] = {}
     coins: dict[str, Coin] = {}
     rows_thresholds: list[dict[str, Any]] = []

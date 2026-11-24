@@ -31,9 +31,8 @@ def fetch(
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     span.refuse(start, end)
-    span.refuse_archive(dest)
+    files = span.manifest_files(dest)
     manifest_path = dest / "manifest.json"
-    files = io.read_json(manifest_path)["files"] if manifest_path.exists() else {}
     todo = archive.sources(list(dict.fromkeys(symbols)), start, end)
     safe = guarded(get)
     done: dict[str, Any] = {}

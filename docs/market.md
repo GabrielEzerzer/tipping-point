@@ -551,10 +551,11 @@ for 2021-10-01 to 2023-12-31 into the same folder as `market fetch`, `--workers`
 skips verified files, and `manifest.json` keeps the same form. `labels` writes one run to
 `<data dir>/labels/<run_id>/` with the tables `thresholds`, `cascades` and `grid`; its manifest
 records the coin list, the span, the constants, HEAD and the sha256 of `uv.lock`. The archive root
-the panel reads holds no held-back file: `fetch` and `labels` scan the names under it, opening
-none, and refuse a root where any name carries a day from 2024-01-01 on before they read its
-manifest or any file. Every command exits 1 with a message on a refused day, a bad file or a bad
-argument.
+the panel reads holds no held-back file: `fetch` and `labels` scan the names under it (symlinked
+folders are not followed), opening none, and refuse a root where any name carries a day from
+2024-01-01 on before they read its manifest or any file. They then refuse a manifest that lists
+such a name, which a file moved away or never found leaves behind, before using any record in it.
+Every command exits 1 with a message on a refused day, a bad file or a bad argument.
 
 The run's checks add up, per coin and per kind, the row checks the archive's `manifest.json`
 records for each file read: rows, files with a header, unsorted rows, and for klines and metrics

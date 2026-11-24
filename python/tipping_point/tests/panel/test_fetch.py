@@ -148,8 +148,16 @@ def test_both_commands_refuse_an_archive_holding_a_held_back_file_before_reading
     assert not [p for p in opened if p.startswith(str(root))] and fake.requests == []
     assert not (tmp_path / "out").exists()
     held.unlink()
+    listed = '{"files": {"klines/BTCUSDT/BTCUSDT-1m-2024-01-02.zip": {"status": "missing"}}}'
+    (root / "manifest.json").write_text(listed)
+    assert main(["fetch", *window, "--dest", str(root)]) == 1
+    assert main(["labels", *window, *labels]) == 1
+    errors = capsys.readouterr().err.splitlines()
+    assert len(errors) == 2 and all("lists in its manifest" in line for line in errors)
+    assert fake.requests == [] and not (tmp_path / "out").exists()
+    assert (root / "manifest.json").read_text() == listed
     (root / "manifest.json").write_text('{"files": {}}')
-    span.refuse_archive(root)
+    assert span.manifest_files(root) == {}
     assert main(["fetch", *window, "--dest", str(root)]) == 0
     assert str(root / "manifest.json") in opened
 
