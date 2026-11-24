@@ -171,6 +171,7 @@ def test_a_threshold_needs_95_percent_of_its_windows_since_the_first_evaluated_o
         closing = (win["ts_ns"] >= since) & (win["ts_ns"] < T0 + 95 * DAY_NS)
         assert row["windows"] + row["missing"] == int(closing.sum())
         assert (labels.missing_share(row) <= 0.05) == kept == (row["b"] is not None)
+        assert (row["sd_ret_shift"] is not None) == kept
         on = (coin.windows_ts >= T0 + 95 * DAY_NS) & (coin.windows_ts < T0 + 96 * DAY_NS)
         assert coin.clean[on].all() == kept and coin.clean[on].any() == kept
         got = labels.grid(np.array([at], np.int64), coin, [])

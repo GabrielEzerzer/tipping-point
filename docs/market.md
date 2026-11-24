@@ -587,7 +587,12 @@ move) could not be evaluated, and `sd_ret` without them is up to 28% lower. A fa
 open-interest feed with it therefore censors up to 90 days after it. For the
 open-interest leg it cannot be measured, because the change in open interest over a window with
 no open interest is unknown: there the 5% share is the only limit, and `sd_oi` stands for the
-evaluated windows alone. A day's threshold reads nothing
+evaluated windows alone. One missing bar of open interest can hide a change large enough to move
+`a` and with it a later label. The label is therefore defined on the history the rule could
+observe, within the two limits above, and is not an estimate of what a complete history would
+give: a row is scored when its own detection and label windows are complete, whatever its 90-day
+history lacks inside those limits. Censoring every row whose history lacks any window would
+remove about half of the rows. A day's threshold reads nothing
 from that day on, so no day sets its own threshold, but earlier development days set the
 thresholds of later development days. A coin whose typical move shrinks or grows is held to the
 same multiple of its recent moves throughout. The multiples, the 90 days, the minimum and the two
@@ -604,11 +609,11 @@ known: its hours are skipped and a later firing within 24 hours merges into it.
 start, `symbol`, `windows` (the evaluated windows in its 90 days), `missing` (the windows in its 90
 days, from the coin's first evaluated window on, that were not evaluated), `sd_ret_shift` (how far
 `sd_ret` lies from the standard deviation over every window with a known price change, as a share
-of the latter; null on a day with too few or too many missing windows), and `sd_ret`, `sd_oi`, `a`
-and `b`, null on a day without a threshold. The run's checks give each coin's worst day among
+of the latter; null on a day with too few or too many missing windows, or when the price does
+not move), and `sd_ret`, `sd_oi`, `a` and `b`, null on a day without a threshold. The run's checks give each coin's worst day among
 the days with enough evaluated windows, `worst_missing_share` and `worst_missing_ns`, the
-number of those days over 5%, `days_over_max_missing`, and the same for the price leg,
-`worst_sd_ret_shift` and `days_over_max_shift`. `cascades` has the `market cascade` schema,
+number of those days over 5%, `days_over_max_missing`, and for the price leg, among the days that
+pass both window rules, `worst_sd_ret_shift` and `days_over_max_shift`. `cascades` has the `market cascade` schema,
 whose `ts_ns` is the onset, and `in_span`, true when the instance begins (below) at or after the
 grid's first hour; the instances that begin earlier are kept so that their skip and merges can be
 seen, and the run's counts of instances and market events take only `in_span` rows. A market event
