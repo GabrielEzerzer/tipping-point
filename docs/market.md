@@ -565,38 +565,40 @@ inside it, as `off_grid`, so it cannot show a row outside its period on its own,
 not refuse on it; funding files get no period check at all.
 
 **Thresholds.** For each coin and each UTC day d, `sd_ret` and `sd_oi` are the sample standard
-deviations (n - 1) of the cascade rule's `price_change` and `oi_change` over the windows the rule
-could evaluate that close in [d - 90 days, d). The coin's rule on day d is `cascade.Params(a = 3.7
-sd_oi, b = 5.0 sd_ret, c = 0.15, v = 3.0)`, every other field at its default, for every window
-closing on d. A day has no threshold when fewer than 28 x 288 x 0.8 such windows were evaluated,
-when more than 5% of the windows closing in [d - 90 days, d) from the coin's first evaluated
-window on were not evaluated, when `sd_ret` differs by more than 5% from the same standard
-deviation over every one of those windows with a known price change, evaluated or not, or when
-`sd_ret` or `sd_oi` is zero or not finite; its windows are left out of the run's window counts and
-are censored in the grid. Counting from the first evaluated window keeps a coin's ramp-up, before
-its open interest and 28 days of volume history start, from counting as missing. The thresholds
-are defined on the windows the rule could evaluate, which are the only windows that can fire. A
-cap on the share of missing windows does not bound their effect, since the missing windows could
-be the extreme ones. For the price leg that effect is measured and capped: on the development
-data from 2022-04-15 on, the two standard deviations differ by at most 2.6% (SANDUSDT,
-2023-05-08), by more than 1% on 0.5% of the 18,780 coin-days and by more than 5% on none. Before
-that the rule removes the thresholds of 1,063 coin-days in 27 coins, from 2022-01-01 to
-2022-03-04: for about an hour of the fall on 2021-12-04 the archive has no open interest, so the
-13 windows with the largest price moves of those 90 days (in DOGEUSDT about 19 times the usual
-move) could not be evaluated, and `sd_ret` without them is up to 28% lower. A fall that takes the
-open-interest feed with it therefore censors up to 90 days after it. For the
-open-interest leg it cannot be measured, because the change in open interest over a window with
-no open interest is unknown: there the 5% share is the only limit, and `sd_oi` stands for the
-evaluated windows alone. One missing bar of open interest can hide a change large enough to move
-`a` and with it a later label. The label is therefore defined on the history the rule could
-observe, within the two limits above, and is not an estimate of what a complete history would
-give: a row is scored when its own detection and label windows are complete, whatever its 90-day
-history lacks inside those limits. Censoring every row whose history lacks any window would
-remove about half of the rows. A day's threshold reads nothing
-from that day on, so no day sets its own threshold, but earlier development days set the
-thresholds of later development days. A coin whose typical move shrinks or grows is held to the
-same multiple of its recent moves throughout. The multiples, the 90 days, the minimum and the two
-5% limits are constants in `panel/labels.py`.
+deviations (n - 1) of the cascade rule's `price_change` and `oi_change` over every window closing
+in [d - 90 days, d), from the coin's first evaluated window on, whose change is known: the price
+change of every window with both closes, the open-interest change of every window with open
+interest at both ends. The coin's rule on day d is `cascade.Params(a = 3.7 sd_oi, b = 5.0 sd_ret,
+c = 0.15, v = 3.0)`, every other field at its default, for every window closing on d. A day has no
+threshold when fewer than 28 x 288 x 0.8 of those windows were evaluated by the rule, when more
+than 5% of them were not evaluated, or when `sd_ret` or `sd_oi` is zero or not finite; its windows
+are left out of the run's window counts and are censored in the grid. Starting at the first
+evaluated window keeps a coin's ramp-up, before its open interest and 28 days of volume history
+start, out of both the spreads and the count of missing windows.
+
+The spreads read more windows than the rule evaluates, on purpose. The rule skips a window when
+any of its seven open-interest rows is missing, but the change over that window is still known
+when the two end rows exist, and the windows around a missing row are not ordinary ones: the
+archive loses open-interest rows during falls. On 2021-12-04 three rows are missing (05:00, 05:25
+and 05:30 UTC), so 13 windows closing from 05:00 to 06:00 were not evaluated; 8 of them have a
+known open-interest change, a drop of 6% to 12% in BTCUSDT and of 14% to 24% in DYDXUSDT, whose
+price fell by up to 25% over the same windows. Spreads over the evaluated windows alone would
+leave those out and set a lower bar for the 90 days after: on the development data the price spread would be lower by up to
+28% (BCHUSDT, 2022-01-01) and by more than 5% on 1,063 of the 21,900 coin-days, the open-interest
+spread lower by up to 28% (DYDXUSDT, 2022-01-01) and by more than 5% on 503. The price leg is
+complete, since every window of the development data has a known price change. The open-interest
+leg is not: the change over a window with a missing end row is unknown, and such a window could
+hide a change large enough to move `a` and with it a later label. The 5% limit on windows not
+evaluated bounds the share of such windows, not their effect; in the run they are at most 2.4% of
+a day's windows (SANDUSDT, 2023-12-15), with a median of 0.03%, and 56% of the coin-days have at
+least one. The label is therefore defined on the changes that are known, and is not an estimate of what
+a complete open-interest history would give: a row is scored when its own detection and label
+windows are complete, whatever open-interest rows its 90-day history lacks inside the 5% limit.
+Every development day has a threshold. A day's threshold reads nothing from that day on, so no day
+sets its own threshold, but earlier development days set the thresholds of later development
+days. A coin whose typical move shrinks or grows is held to the same multiple of its recent moves
+throughout. The multiples, the 90 days, the minimum and the 5% limit are constants in
+`panel/labels.py`.
 
 **Detection.** Each day's windows go through `cascade.candidates` unchanged, with that day's rule,
 on a slice of bars that holds all the history the rule reads before the day, keeping only the
@@ -607,13 +609,12 @@ known: its hours are skipped and a later firing within 24 hours merges into it.
 
 **Tables.** `thresholds` has one row per coin per day from the first day of bars: `ts_ns` the day's
 start, `symbol`, `windows` (the evaluated windows in its 90 days), `missing` (the windows in its 90
-days, from the coin's first evaluated window on, that were not evaluated), `sd_ret_shift` (how far
-`sd_ret` lies from the standard deviation over every window with a known price change, as a share
-of the latter; null on a day with too few or too many missing windows, or when the price does
-not move), and `sd_ret`, `sd_oi`, `a` and `b`, null on a day without a threshold. The run's checks give each coin's worst day among
-the days with enough evaluated windows, `worst_missing_share` and `worst_missing_ns`, the
-number of those days over 5%, `days_over_max_missing`, and for the price leg, among the days that
-pass both window rules, `worst_sd_ret_shift` and `days_over_max_shift`. `cascades` has the `market cascade` schema,
+days, from the coin's first evaluated window on, that were not evaluated), `oi_unknown` (those
+among them with no known open-interest change), and `sd_ret`, `sd_oi`, `a` and `b`, null on a day
+without a threshold. The run's checks give each coin's worst day among the days with enough
+evaluated windows, `worst_missing_share` and `worst_missing_ns`, the number of those days over
+5%, `days_over_max_missing`, and the same for the windows with no known open-interest change,
+`worst_oi_unknown_share` and `worst_oi_unknown_ns`. `cascades` has the `market cascade` schema,
 whose `ts_ns` is the onset, and `in_span`, true when the instance begins (below) at or after the
 grid's first hour; the instances that begin earlier are kept so that their skip and merges can be
 seen, and the run's counts of instances and market events take only `in_span` rows. A market event
@@ -628,8 +629,8 @@ before t. Dated by begin, nothing of a labelled event lies before t. For H = 1, 
 - `skip`: an instance has its first firing at or before t and its last firing no more than 24
   hours before t, so an episode known at t is under way or just ended. An hour between an
   instance's begin and its first firing is not skipped, since that firing is not known at t: it is
-  an ordinary row, positive only if another instance begins in [t, t + H). In the run there are 398
-  such coin-hours, 395 of them kept as ordinary rows (the other 3 are skipped for an earlier
+  an ordinary row, positive only if another instance begins in [t, t + H). In the run there are 395
+  such coin-hours, 392 of them kept as ordinary rows (the other 3 are skipped for an earlier
   episode), and at most one of those is positive at any horizon. Since they are a few hundred rows
   among roughly half a million negatives, scoring them as negatives or leaving them out moves an
   AUC by less than 0.001.
@@ -656,8 +657,8 @@ at hour t may read only bars that start before t and metrics rows stamped at or 
   list is fixed in advance, and a coin that stops trading is censored from its last complete bar.
 - The same multiple of a standard deviation does not give heavy-tailed coins the same event rate.
   In the development run the instances that begin in the grid's span number from 10 to 56 per coin
-  (median 27): BTCUSDT 56, ETHUSDT 32, SOLUSDT 24, XRPUSDT 30, DOGEUSDT 29, BNBUSDT 20, LTCUSDT 33,
-  MATICUSDT 21, BCHUSDT 18, LINKUSDT 23, AVAXUSDT 26, ADAUSDT 28, TRBUSDT 14, FILUSDT 45,
-  1000SHIBUSDT 34, DYDXUSDT 33, MASKUSDT 33, FTMUSDT 31, GALAUSDT 41, ETCUSDT 33, LINAUSDT 23,
-  DOTUSDT 25, NEARUSDT 23, EOSUSDT 29, CRVUSDT 10, SANDUSDT 33, ATOMUSDT 25, AXSUSDT 20,
-  STORJUSDT 15, MKRUSDT 18.
+  (median 26.5): BTCUSDT 56, ETHUSDT 30, SOLUSDT 24, XRPUSDT 30, DOGEUSDT 27, BNBUSDT 19,
+  LTCUSDT 31, MATICUSDT 21, BCHUSDT 17, LINKUSDT 23, AVAXUSDT 26, ADAUSDT 27, TRBUSDT 14,
+  FILUSDT 44, 1000SHIBUSDT 33, DYDXUSDT 32, MASKUSDT 33, FTMUSDT 31, GALAUSDT 39, ETCUSDT 32,
+  LINAUSDT 23, DOTUSDT 25, NEARUSDT 23, EOSUSDT 29, CRVUSDT 10, SANDUSDT 33, ATOMUSDT 25,
+  AXSUSDT 20, STORJUSDT 14, MKRUSDT 18.
