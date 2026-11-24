@@ -434,6 +434,13 @@ def test_the_step_selection_reads_no_left_out_or_gap_hour(tmp_path: Path) -> Non
         )
 
     first = fit()
+    positions = np.flatnonzero(train)
+    start = positions[int(len(positions) * (1 - plan.selection.share))]
+    before = np.arange(nhours) >= start - plan.ladder.gap_days * 24
+    y[:, before & (np.arange(nhours) < start)] ^= True
+    near = fit()
+    assert json.dumps(first[2]) == json.dumps(near[2]) and first[3] == near[3]
+    y[:, before & (np.arange(nhours) < start)] ^= True
     out = ~train
     raw[:, out] = rng.normal(size=raw[:, out].shape) * 100
     y[:, out], keep[:, out], skip[:, out] = ~y[:, out], ~keep[:, out], ~skip[:, out]

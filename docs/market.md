@@ -713,3 +713,23 @@ it, and `ladder` a plan, an inputs run, a grid or an external file that does. Th
 bounds of the grid, the thresholds and the inputs table from the files' Parquet metadata before
 hashing or reading them, and refuse a file whose metadata gives none; then they check each file's
 sha256 against the run that wrote it and refuse a run its `complete.json` does not mark clean.
+
+`python -m tipping_point.panel sequence --inputs <run> --plan <sequence.toml>` fits sequence models
+on the same common rows as the ladder, whose plan it reads (`ladder.toml`). Each row's input is the
+last 336 hourly rows of a rung's inputs plus the share of them missing, cut into 4-hour patches and
+encoded by two causal ConvNeXt-style blocks and two causal attention blocks with rotary relative
+positions, so a lag means the same on the 84-token window and the 6-token target. The JEPA predicts
+the target encoder's tokens of the next 24 hours; its untrained twin is the JEPA's encoder before
+its first step, and logistic probes read z of both, and the `full` rung's inputs with the JEPA's z.
+A supervised model with the same encoder predicts the six labels directly. Every fold fits its own
+models, statistics and probes, under the plan's `schemes` (`forward` by default; `loqo` also
+works), on rows whose 336 hours back and 24 hours ahead all lie in the fold's training hours inside
+the plan's span. Test rows are every common row of the left-out quarter; one in the grid's first
+335 hours reads padding, marked as missing. The supervised model's step count is chosen on the last
+fifth of a fold's training hours, trained on hours a gap before that block, and then refitted on
+every training row for that many steps. Seeds are drawn per variant, fold, seed and stream; the
+twin shares the JEPA's initial weights. Before writing, the run checks that the scores give each
+key once, cover the common test rows exactly, are finite, and give each fold the AUC its folds
+table records. The 24-hour target, 4-hour patches, the 336-hour window and kernel 7 were kept: the
+padded start of the target's segment is the same regime as the window's first tokens, and the
+probes read the online encoder.
