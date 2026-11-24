@@ -16,8 +16,8 @@ DESCRIPTION = f"""\
 Command line: python -m tipping_point.panel <command> [options]
 
   coins   derive the panel from Binance Vision (network): every USD-M symbol matching
-          [A-Z0-9]+USDT but {", ".join(sorted(coins.EXCLUDED))}, with a monthly 1-day kline file for
-          every month of {coins.YEAR} and a daily metrics file on {coins.METRIC_DAYS[0]} and
+          [A-Z0-9]+USDT but {", ".join(sorted(coins.EXCLUDED))}, with a monthly 1-day kline file
+          holding every day of {coins.YEAR} and a daily metrics file on {coins.METRIC_DAYS[0]} and
           {coins.METRIC_DAYS[1]}, ranked by {coins.YEAR} quote volume; the panel is
           {" and ".join(coins.ALWAYS)} and the top {coins.OTHERS} others. Prints the ranking and
           exits 1 when it differs from the committed list (panel/coins.txt)
@@ -27,8 +27,8 @@ Command line: python -m tipping_point.panel <command> [options]
           already verified. Exit 1 when a file is refused, failed or unreadable
   labels  the panel's labels from the fetched files (--archive, same default), as a run in
           <data dir>/labels/<run_id>/ with the tables thresholds, cascades and grid: bars from
-          --start, thresholds, cascades and the hourly grid from --dev-start (default
-          {span.DEV_START}) to the end of --end
+          --start, daily trailing thresholds and cascades from the first day that has a threshold,
+          the hourly grid from --dev-start (default {span.DEV_START}) to the end of --end
 
 Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
 data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
@@ -39,7 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return args.command(args)
-    except (archive.ArchiveError, span.HeldBackError) as exc:
+    except (archive.ArchiveError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
