@@ -214,7 +214,7 @@ def test_open_interest_that_starts_late_is_not_counted_missing() -> None:
     since = int(win["ts_ns"][win["evaluated"]][0])
     assert T0 + 40 * DAY_NS < since < T0 + 41 * DAY_NS
     rows = labels.daily(win, T0, 100)
-    assert all(r["missing"] == 0 for r in rows)
+    assert all(r["missing"] == 0 == r["oi_unknown"] for r in rows)
     first = next(d for d, r in enumerate(rows) if r["b"] is not None)
     assert rows[first - 1]["windows"] < labels.MIN_WINDOWS <= rows[first]["windows"]
     assert all(r["b"] is not None for r in rows[first:])

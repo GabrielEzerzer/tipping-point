@@ -570,8 +570,8 @@ in [d - 90 days, d), from the coin's first evaluated window on, whose change is 
 change of every window with both closes, the open-interest change of every window with open
 interest at both ends. The coin's rule on day d is `cascade.Params(a = 3.7 sd_oi, b = 5.0 sd_ret,
 c = 0.15, v = 3.0)`, every other field at its default, for every window closing on d. A day has no
-threshold when fewer than 28 x 288 x 0.8 of those windows were evaluated by the rule, when more
-than 5% of them were not evaluated, or when `sd_ret` or `sd_oi` is zero or not finite; its windows
+threshold when the rule evaluated fewer than 28 x 288 x 0.8 of the windows closing in that span,
+when it did not evaluate more than 5% of them, known change or not, or when `sd_ret` or `sd_oi` is zero or not finite; its windows
 are left out of the run's window counts and are censored in the grid. Starting at the first
 evaluated window keeps a coin's ramp-up, before its open interest and 28 days of volume history
 start, out of both the spreads and the count of missing windows.
