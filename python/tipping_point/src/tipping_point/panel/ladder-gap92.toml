@@ -1,0 +1,67 @@
+start = 2022-01-01
+end = 2023-12-31
+horizons = [24, 6, 1]
+sides = ["long", "short", "any"]
+without = ["BTCUSDT", "ETHUSDT"]
+
+[model]
+c = 0.01
+clip = 5.0
+
+[folds]
+gap_days = 92
+forward_first = 2
+
+[bootstrap]
+block_days = 14
+draws = 2000
+seed = 20261123
+
+[[rungs]]
+name = "vol"
+groups = ["vol"]
+
+[[rungs]]
+name = "vol+price"
+groups = ["vol", "price"]
+
+[[rungs]]
+name = "vol+price+flow"
+groups = ["vol", "price", "flow"]
+
+[[rungs]]
+name = "full"
+groups = ["vol", "price", "flow", "lev"]
+own_only = ["lev"]
+
+[[rungs]]
+name = "full+mlev"
+groups = ["vol", "price", "flow", "lev"]
+
+[[rungs]]
+name = "classic"
+groups = ["vol", "classic"]
+
+[[comparisons]]
+first = "full"
+second = "vol"
+
+[[comparisons]]
+first = "vol+price"
+second = "vol"
+
+[[comparisons]]
+first = "vol+price+flow"
+second = "vol+price"
+
+[[comparisons]]
+first = "full"
+second = "vol+price+flow"
+
+[[comparisons]]
+first = "full+mlev"
+second = "full"
+
+[[comparisons]]
+first = "classic"
+second = "vol"

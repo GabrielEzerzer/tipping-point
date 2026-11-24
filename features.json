@@ -258,6 +258,22 @@
       "test": "python/tipping_point/tests/panel/test_labels.py"
     },
     {
+      "name": "Panel inputs",
+      "description": "Writes the model inputs of every coin and UTC hour of a panel labels run's grid, own-coin and market means.",
+      "command": "uv run python -m tipping_point.panel inputs --labels <run id>",
+      "inputs": "a panel labels run and the fetched Binance files of the panel",
+      "outputs": "<data dir>/panel-inputs/<run_id>/ holding the inputs table",
+      "test": "python/tipping_point/tests/panel/test_inputs.py"
+    },
+    {
+      "name": "Panel ladder",
+      "description": "Fits and scores nested sets of panel inputs out of fold by calendar quarter and compares them with a joint block bootstrap, from a plan file.",
+      "command": "uv run python -m tipping_point.panel ladder --inputs <run id>",
+      "inputs": "a panel inputs run, its labels run and a plan file (default panel/ladder.toml)",
+      "outputs": "<data dir>/panel-ladder/<run_id>/ holding out-of-fold scores, scores, folds, comparisons, row accounting and report.md",
+      "test": "python/tipping_point/tests/panel/test_ladder.py"
+    },
+    {
       "name": "Book feature range",
       "description": "Imports and reduces the Bybit order-book days of a range into per-day feature files.",
       "command": "uv run python -m tipping_point.market book --range training",
