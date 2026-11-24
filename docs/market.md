@@ -721,7 +721,7 @@ have a value, missing when fewer than 15 do.
 
 **Ladder.** `panel ladder --inputs <run id>` scores nested sets of inputs against each other and
 writes one run to `<data dir>/panel-ladder/<run_id>/`: the tables `oof` (each row's out-of-fold
-scores, one column per rung and side), `scores`, `folds` (each rung's AUC in each left-out quarter),
+scores, one column per rung and side), `scores`, `folds` (each rung's AUC in each scored quarter),
 `comparisons` and `rows` (the row accounting), `report.md`, and a copy of the plan.
 
 ```sh
@@ -751,11 +751,13 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   are dropped. In `forward`, from the quarter `forward_first` names (2, counting from 0, so six
   quarters are scored), a quarter is scored by a model fitted only on rows more than 31 days before
   it, as the held-back test span will be. The gap must cover the inputs' longest look-back (28 days,
-  one bar and the 1-hour carry), the longest horizon, the labels' 30-minute lead and their 24-hour
-  look-back, 30.07 days in all; the plan refuses a shorter one. The 90-day thresholds that scale
+  one bar and the funding rate's carry of up to 8 hours, longer than the 1-hour carry of the
+  other inputs), the longest horizon, the labels' 30-minute lead and their 24-hour look-back,
+  30.36 days in all; the plan refuses a shorter one. The 90-day thresholds that scale
   `vol` and `near_24h`, and that set the labels, are not a direct look-back and the gap does not
   cover them; `ladder-gap92.toml` runs the plan with a 92-day gap (below). A scored quarter with rows but no
-  training rows, or a scored row without a finite score, stops the run.
+  training rows, training rows that hold no positives or only positives for a side, or a scored
+  row without a finite score, stops the run.
 - Scores per scheme, rung, side and horizon: the mean over quarters of the AUC inside each quarter
   (the primary score), the same mean weighted by each quarter's positives (`fold_mean_weighted`),
   the pooled out-of-fold AUC, and the within-coin AUC, the AUC inside each coin and quarter
@@ -852,13 +854,18 @@ Three plans beside `ladder.toml` each change one thing. At 24 h on the long side
 
 An optional `[external]` entry (`name`, `path` to a Parquet file relative to the plan, and `scheme`,
 the scheme its scores were fitted under) brings in out-of-fold scores fitted elsewhere, such as a
-sequence model's, with columns `coin`, `hour` (the grid's `ts_ns`, as integers or timestamps),
-`horizon`, `side` and `score`. They are scored and compared like a rung on the same common rows of
-that scheme, and the run refuses a file that misses one of them, gives one twice or gives a score
-that is not finite.
+sequence model's, with columns `coin` (text), `hour` (the grid's `ts_ns`, as integers of any
+width or timestamps of any unit, none null), `horizon` (integer), `side` (text), `score`
+(floating point), `fold` (integer, the ladder's quarter counted from 0 at 2022-01-01) and
+`scheme` (text, a single value equal to the plan's `scheme`). They are scored and compared like a
+rung on the same common rows of that scheme, and the run refuses a file that lacks one of those
+columns or gives one another type, misses a scored row, gives one twice, gives a score that is
+not finite, gives a row a fold other than the ladder's or holds scores fitted under another
+scheme.
 
 Both commands refuse any day from 2024-01-01 on: `inputs` refuses a labels run whose span reaches
 it, and `ladder` a plan, an inputs run, a grid or an external file that does. They read the time
-bounds of the grid, the thresholds and the inputs table from the files' Parquet metadata before
-hashing or reading them, and refuse a file whose metadata gives none; then they check each file's
+bounds of the grid, the thresholds, the inputs table and the external file's `hour` from the
+files' Parquet metadata before hashing or reading them, and refuse a file whose time column is
+neither integer nor timestamp or whose metadata gives no bounds for it; then they check each file's
 sha256 against the run that wrote it and refuse a run its `complete.json` does not mark clean.
