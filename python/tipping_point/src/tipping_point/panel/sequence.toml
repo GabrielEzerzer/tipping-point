@@ -1,10 +1,12 @@
-ladder = "ladder-sequence.toml"
+ladder = "ladder.toml"
 variants = ["full", "vol"]
+rungs = ["full", "vol", "classic"]
 models = ["jepa", "twin", "supervised"]
+schemes = ["forward"]
 seeds = [1, 2, 3]
 folds = []
 target = "future"
-threads = 4
+threads = 2
 
 [window]
 length = 336
@@ -34,17 +36,24 @@ curve_every = 50
 momentum_start = 0.996
 momentum_end = 1.0
 prediction = 1.0
+objective = "z"
 variance = 1.0
 covariance = 0.04
 
 [supervised]
 steps = 3000
 batch = 256
-lr = 1e-3
+lr = 3e-4
 final_lr = 1e-5
 warmup = 200
-weight_decay = 0.05
+weight_decay = 0.1
 curve_every = 50
+dropout = 0.2
+
+[selection]
+share = 0.2
+every = 100
+negatives = 8000
 
 [probe]
 batch = 2048

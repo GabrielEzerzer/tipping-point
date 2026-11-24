@@ -1,6 +1,6 @@
 # The encoder the panel's JEPA, its untrained twin and its supervised model share: patches of
-# hourly input rows, causal ConvNeXt-style 1-D blocks, causal attention blocks, LayerNorm only.
-# Each token sees only itself and earlier tokens, so the last token's output z reads the window.
+# hourly input rows, causal ConvNeXt-style 1-D blocks, causal attention with rotary positions and
+# LayerNorm only. Each token sees only itself and earlier tokens; z is the last token's output.
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+
+ROTARY_BASE = 100.0
 
 
 @dataclass(frozen=True)
@@ -23,21 +25,31 @@ class Shape:
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, width: int, kernel: int, expansion: int) -> None:
+    def __init__(self, width: int, kernel: int, expansion: int, dropout: float) -> None:
         super().__init__()
         self.kernel = kernel
         self.conv = nn.Conv1d(width, width, kernel, groups=width)
         self.norm = nn.LayerNorm(width)
         self.up = nn.Linear(width, expansion * width)
         self.down = nn.Linear(expansion * width, width)
+        self.drop = nn.Dropout(dropout)
 
     def forward(self, x: Tensor) -> Tensor:
         h = self.conv(F.pad(x.transpose(1, 2), (self.kernel - 1, 0))).transpose(1, 2)
-        return x + self.down(F.gelu(self.up(self.norm(h))))
+        return x + self.drop(self.down(F.gelu(self.up(self.norm(h)))))
+
+
+def rotary(x: Tensor) -> Tensor:
+    half = x.shape[-1] // 2
+    freq = ROTARY_BASE ** (-torch.arange(half, dtype=x.dtype) / half)
+    angle = torch.arange(x.shape[-2], dtype=x.dtype)[:, None] * freq
+    cos, sin = angle.cos(), angle.sin()
+    a, b = x[..., :half], x[..., half:]
+    return torch.cat([a * cos - b * sin, a * sin + b * cos], dim=-1)
 
 
 class AttentionBlock(nn.Module):
-    def __init__(self, width: int, heads: int, expansion: int) -> None:
+    def __init__(self, width: int, heads: int, expansion: int, dropout: float) -> None:
         super().__init__()
         self.heads = heads
         self.norm1 = nn.LayerNorm(width)
@@ -46,29 +58,29 @@ class AttentionBlock(nn.Module):
         self.norm2 = nn.LayerNorm(width)
         self.up = nn.Linear(width, expansion * width)
         self.down = nn.Linear(expansion * width, width)
+        self.drop = nn.Dropout(dropout)
 
     def forward(self, x: Tensor) -> Tensor:
         b, t, d = x.shape
-        q, k, v = self.qkv(self.norm1(x)).view(b, t, 3, self.heads, d // self.heads).unbind(2)
-        a = F.scaled_dot_product_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
-        )
-        x = x + self.out(a.transpose(1, 2).reshape(b, t, d))
-        return x + self.down(F.gelu(self.up(self.norm2(x))))
+        qkv = self.qkv(self.norm1(x)).view(b, t, 3, self.heads, d // self.heads)
+        q, k, v = (part.transpose(1, 2) for part in qkv.unbind(2))
+        a = F.scaled_dot_product_attention(rotary(q), rotary(k), v, is_causal=True)
+        x = x + self.drop(self.out(a.transpose(1, 2).reshape(b, t, d)))
+        return x + self.drop(self.down(F.gelu(self.up(self.norm2(x)))))
 
 
 class Encoder(nn.Module):
-    def __init__(self, channels: int, shape: Shape) -> None:
+    def __init__(self, channels: int, shape: Shape, dropout: float = 0.0) -> None:
         super().__init__()
         self.patch = shape.patch
         self.embed = nn.Linear(channels * shape.patch, shape.width)
         self.blocks = nn.ModuleList(
             [
-                ConvBlock(shape.width, shape.kernel, shape.expansion)
+                ConvBlock(shape.width, shape.kernel, shape.expansion, dropout)
                 for _ in range(shape.conv_blocks)
             ]
             + [
-                AttentionBlock(shape.width, shape.heads, shape.expansion)
+                AttentionBlock(shape.width, shape.heads, shape.expansion, dropout)
                 for _ in range(shape.attention_blocks)
             ]
         )
@@ -103,9 +115,9 @@ class Predictor(nn.Module):
         return self.net(torch.cat([z.unsqueeze(1).expand_as(slots), slots], dim=-1))
 
 
-def encoder(channels: int, shape: Shape, seed: int) -> Encoder:
+def encoder(channels: int, shape: Shape, seed: int, dropout: float = 0.0) -> Encoder:
     torch.manual_seed(seed)
-    return Encoder(channels, shape)
+    return Encoder(channels, shape, dropout)
 
 
 def parameters(module: nn.Module) -> int:
