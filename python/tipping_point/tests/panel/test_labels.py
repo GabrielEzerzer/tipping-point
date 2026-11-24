@@ -137,6 +137,59 @@ def test_a_days_threshold_forgets_the_windows_closing_before_its_90_days() -> No
         assert labels.daily(off, T0, 130)[d]["windows"] == windows
 
 
+def test_a_flat_history_gives_no_threshold_so_a_volume_burst_is_no_cascade() -> None:
+    for flat in (("close",), ("oi",)):
+        columns = planted(days=60)
+        for name in flat:
+            columns[name][:] = 100.0
+        rows = labels.daily(labels.windows(columns), T0, 60)
+        assert rows[55]["windows"] >= labels.MIN_WINDOWS and rows[55]["missing"] == 0
+        assert all(r["b"] is None for r in rows), flat
+    columns = planted(days=60)
+    columns["close"][:], columns["oi"][:] = 100.0, 1e6
+    burst = slice(55 * DAY + 144, 55 * DAY + 150)
+    columns["volume"][burst] *= 10
+    columns["taker_buy_share"][burst] = 0.05
+    zero = cascade.Params(a=0.0, b=0.0, c=0.15, v=3.0)
+    assert cascade.candidates(columns, zero, 55 * DAY)[0]
+    thresholds, found, _, coin = labels.coin(columns, T0 + 60 * DAY_NS)
+    assert found == [] and all(r["b"] is None for r in thresholds)
+    got = labels.grid(T0 + 55 * DAY_NS + HOUR * np.arange(24, dtype=np.int64), coin, [])
+    assert all(got[f"censored_{h}"].all() for h in labels.HORIZONS)
+
+
+def test_a_threshold_needs_95_percent_of_its_windows_since_the_first_evaluated_one() -> None:
+    at = T0 + 95 * DAY_NS + 12 * HOUR
+    for gap, kept in ((2, True), (4, False)):
+        columns = planted(days=100)
+        columns["oi"][60 * DAY : (60 + gap) * DAY] = np.nan
+        win = labels.windows(columns)
+        since = win["ts_ns"][win["evaluated"]][0]
+        thresholds, _, _, coin = labels.coin(columns, T0 + 100 * DAY_NS)
+        row = thresholds[95]
+        assert row["windows"] >= labels.MIN_WINDOWS and row["missing"] == gap * DAY + 6
+        closing = (win["ts_ns"] >= since) & (win["ts_ns"] < T0 + 95 * DAY_NS)
+        assert row["windows"] + row["missing"] == int(closing.sum())
+        assert (labels.missing_share(row) <= 0.05) == kept == (row["b"] is not None)
+        on = (coin.windows_ts >= T0 + 95 * DAY_NS) & (coin.windows_ts < T0 + 96 * DAY_NS)
+        assert coin.clean[on].all() == kept and coin.clean[on].any() == kept
+        got = labels.grid(np.array([at], np.int64), coin, [])
+        assert all(got[f"censored_{h}"][0] != kept for h in labels.HORIZONS)
+
+
+def test_open_interest_that_starts_late_is_not_counted_missing() -> None:
+    columns = planted(days=100)
+    columns["oi"][: 40 * DAY] = np.nan
+    win = labels.windows(columns)
+    since = int(win["ts_ns"][win["evaluated"]][0])
+    assert T0 + 40 * DAY_NS < since < T0 + 41 * DAY_NS
+    rows = labels.daily(win, T0, 100)
+    assert all(r["missing"] == 0 for r in rows)
+    first = next(d for d, r in enumerate(rows) if r["b"] is not None)
+    assert rows[first - 1]["windows"] < labels.MIN_WINDOWS <= rows[first]["windows"]
+    assert all(r["b"] is not None for r in rows[first:])
+
+
 def test_a_days_threshold_does_not_change_when_that_day_or_later_changes() -> None:
     columns = planted(days=70)
     base = labels.daily(labels.windows(columns), T0, 70)
@@ -265,21 +318,21 @@ def test_a_short_squeeze_within_a_day_of_a_long_cascade_is_part_of_it() -> None:
 
 
 def test_days_between_losing_and_regaining_a_threshold_detect_nothing_and_censor() -> None:
-    columns = planted(days=160)
-    columns["oi"][52 * DAY : 125 * DAY] = np.nan
-    plant(columns, 135, 12)
-    plant(columns, 155, 12)
-    thresholds, found, _, coin = labels.coin(columns, T0 + 160 * DAY_NS)
+    columns = planted(days=130)
+    columns["oi"][70 * DAY : 74 * DAY] = np.nan
+    plant(columns, 90, 12)
+    plant(columns, 120, 12)
+    thresholds, found, _, coin = labels.coin(columns, T0 + 130 * DAY_NS)
     has = np.array([r["b"] is not None for r in thresholds])
-    assert has[51:120].all() and not has[120:148].any() and has[148:].all()
-    assert {fired_day(r) for r in found} == {155}
+    assert has[51:73].all() and not has[73:109].any() and has[109:].all()
+    assert {fired_day(r) for r in found} == {120}
     win = labels.windows(columns)
-    without = (win["ts_ns"] > T0 + 125 * DAY_NS + HOUR) & (win["ts_ns"] < T0 + 148 * DAY_NS)
+    without = (win["ts_ns"] > T0 + 74 * DAY_NS + HOUR) & (win["ts_ns"] < T0 + 109 * DAY_NS)
     assert win["evaluated"][without].all() and not coin.clean[without].any()
-    hours = T0 + HOUR * np.arange(135 * 24, 153 * 24, dtype=np.int64)
+    hours = T0 + HOUR * np.arange(90 * 24, 112 * 24, dtype=np.int64)
     got = labels.grid(hours, coin, [])
     for h in labels.HORIZONS:
-        assert got[f"censored_{h}"][: 13 * 24].all() and not got[f"censored_{h}"][-24:].any()
+        assert got[f"censored_{h}"][: 20 * 24].all() and not got[f"censored_{h}"][-24:].any()
 
 
 def test_the_coin_reads_and_counts_nothing_from_the_end_on() -> None:

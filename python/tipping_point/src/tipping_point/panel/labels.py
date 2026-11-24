@@ -27,6 +27,7 @@ FLOW = 0.15
 VOLUME = 3.0
 TRAILING_DAYS = 90
 MIN_WINDOWS = 28 * bars.DAY_BARS * 0.8
+MAX_MISSING = 0.05
 HORIZONS = (1, 6, 24)
 SKIP_HOURS = 24
 PAST_HOURS = 24
@@ -38,6 +39,7 @@ THRESHOLDS = pa.schema(
         ("ts_ns", pa.int64()),
         ("symbol", pa.string()),
         ("windows", pa.int64()),
+        ("missing", pa.int64()),
         ("sd_ret", pa.float64()),
         ("sd_oi", pa.float64()),
         ("a", pa.float64()),
@@ -63,6 +65,7 @@ def constants() -> dict[str, Any]:
         "v": VOLUME,
         "trailing_days": TRAILING_DAYS,
         "min_windows": MIN_WINDOWS,
+        "max_missing": MAX_MISSING,
         "horizons_hours": list(HORIZONS),
         "skip_hours": SKIP_HOURS,
         "past_hours": PAST_HOURS,
@@ -109,26 +112,40 @@ def windows(
 
 
 def daily(win: Mapping[str, np.ndarray], first_ns: int, days: int) -> list[dict[str, Any]]:
-    ok = win["evaluated"]
-    ts, ret, oi = win["ts_ns"][ok], win["price_change"][ok], win["oi_change"][ok]
+    ok, every = win["evaluated"], win["ts_ns"]
+    ts, ret, oi = every[ok], win["price_change"][ok], win["oi_change"][ok]
+    since = int(ts[0]) if len(ts) else None
     out = []
     for d in range(days):
         day = first_ns + d * DAY_NS
         lo, hi = (int(i) for i in np.searchsorted(ts, [day - TRAILING_DAYS * DAY_NS, day]))
-        row: dict[str, Any] = {"ts_ns": day, "windows": hi - lo}
-        if hi - lo < MIN_WINDOWS:
-            row |= {"sd_ret": None, "sd_oi": None, "a": None, "b": None}
-        else:
+        opened = day if since is None else max(day - TRAILING_DAYS * DAY_NS, since)
+        closing = np.searchsorted(every, [opened, day])
+        row: dict[str, Any] = {
+            "ts_ns": day,
+            "windows": hi - lo,
+            "missing": max(int(closing[1] - closing[0]), 0) - (hi - lo),
+        }
+        sd_ret = sd_oi = 0.0
+        if hi - lo >= MIN_WINDOWS and missing_share(row) <= MAX_MISSING:
             sd_ret = float(np.std(ret[lo:hi], ddof=1))
             sd_oi = float(np.std(oi[lo:hi], ddof=1))
+        if np.isfinite([sd_ret, sd_oi]).all() and sd_ret > 0 and sd_oi > 0:
             row |= {
                 "sd_ret": sd_ret,
                 "sd_oi": sd_oi,
                 "a": SD_OI_MULTIPLE * sd_oi,
                 "b": SD_RET_MULTIPLE * sd_ret,
             }
+        else:
+            row |= {"sd_ret": None, "sd_oi": None, "a": None, "b": None}
         out.append(row)
     return out
+
+
+def missing_share(row: Mapping[str, Any]) -> float:
+    total = row["windows"] + row["missing"]
+    return row["missing"] / total if total else 0.0
 
 
 def params(threshold: Mapping[str, Any]) -> cascade.Params | None:
@@ -277,6 +294,7 @@ def run(
     log: Callable[[str], None] = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
     span.refuse(start, dev_start, end)
+    span.refuse_archive(root)
     if not start < dev_start <= end:
         raise ValueError(f"the span must run {start} < {dev_start} <= {end}")
     symbols = list(dict.fromkeys(symbols))
@@ -303,6 +321,8 @@ def run(
         thresholds, found[symbol], counts, coins[symbol] = coin(columns, end_ns)
         rows_thresholds += [{"symbol": symbol, **row} for row in thresholds]
         set_days = [row for row in thresholds if row["b"] is not None]
+        decided = [row for row in thresholds if row["windows"] >= MIN_WINDOWS]
+        worst = max(decided, key=missing_share, default=None)
         checks[symbol] = {
             **bar_checks,
             **counts,
@@ -310,6 +330,9 @@ def run(
             "files_missing": len(got.missing),
             "days_with_threshold": len(set_days),
             "first_threshold_ns": set_days[0]["ts_ns"] if set_days else None,
+            "days_over_max_missing": sum(missing_share(r) > MAX_MISSING for r in decided),
+            "worst_missing_share": missing_share(worst) if worst else None,
+            "worst_missing_ns": worst["ts_ns"] if worst else None,
             "row_checks": row_checks(files, symbol, start, end),
         }
         b = [row["b"] for row in set_days]

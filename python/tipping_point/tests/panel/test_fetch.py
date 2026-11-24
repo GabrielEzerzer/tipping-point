@@ -1,9 +1,12 @@
 # The parallel fetch on a fake archive: it writes what archive.fetch writes, refuses a bad
 # checksum unwritten, records a 404, skips verified files, never requests a held-back day.
 
+import builtins
+import io as stdio
 import threading
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -113,6 +116,42 @@ def test_a_repeated_symbol_is_fetched_once(fake: Counted, tmp_path: Path) -> Non
     once = archive.fetch(["ETHUSDT", "BTCUSDT"], FIRST, LAST, tmp_path / "b", fake.get)
     assert done == once
     assert next(iter(done)).split("/")[1] == "ETHUSDT"
+
+
+def test_both_commands_refuse_an_archive_holding_a_held_back_file_before_reading_it(
+    fake: Counted,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "archive"
+    held = root / "klines" / "BTCUSDT" / "BTCUSDT-1m-2024-01-02.zip"
+    held.parent.mkdir(parents=True)
+    held.write_bytes(b"")
+    (root / "manifest.json").write_text("{")
+    opened: list[str] = []
+    real = stdio.open
+
+    def spy(file: Any, *args: Any, **kwargs: Any) -> Any:
+        opened.append(str(file))
+        return real(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    monkeypatch.setattr(stdio, "open", spy)
+    monkeypatch.setattr(archive, "http_get", fake.get)
+    window = ["--symbols", *SYMBOLS, "--start", str(FIRST), "--end", str(LAST)]
+    assert main(["fetch", *window, "--dest", str(root)]) == 1
+    labels = ["--dev-start", str(LAST), "--archive", str(root), "--data-dir", str(tmp_path / "out")]
+    assert main(["labels", *window, *labels]) == 1
+    errors = capsys.readouterr().err.splitlines()
+    assert len(errors) == 2 and all("BTCUSDT-1m-2024-01-02.zip" in line for line in errors)
+    assert not [p for p in opened if p.startswith(str(root))] and fake.requests == []
+    assert not (tmp_path / "out").exists()
+    held.unlink()
+    (root / "manifest.json").write_text('{"files": {}}')
+    span.refuse_archive(root)
+    assert main(["fetch", *window, "--dest", str(root)]) == 0
+    assert str(root / "manifest.json") in opened
 
 
 def test_the_command_fetches_and_refuses_the_held_back_span(

@@ -1,10 +1,12 @@
 # The study's days, and the refusal of every UTC day from HELD_BACK (2024-01-01) on: those days
-# are held back as the test span, so no command downloads, reads or computes on one.
+# are held back as the test span, so no command downloads, reads or computes on one, and an
+# archive root whose file names carry such a day is refused before anything in it is read.
 
 from __future__ import annotations
 
 import re
 from datetime import date
+from pathlib import Path
 
 START = date(2021, 10, 1)
 DEV_START = date(2022, 1, 1)
@@ -28,3 +30,14 @@ def refuse_url(url: str) -> str:
         if date(int(year), int(month or 1), int(day or 1)) >= HELD_BACK:
             raise HeldBackError(f"{url} names a day in the held-back test span")
     return url
+
+
+def refuse_archive(root: Path) -> None:
+    for path in root.rglob("*") if root.is_dir() else ():
+        try:
+            refuse_url(path.relative_to(root).as_posix())
+        except HeldBackError:
+            raise HeldBackError(
+                f"{root} holds {path.relative_to(root).as_posix()}, which names a day in the "
+                f"held-back test span: the panel reads no archive that holds one"
+            ) from None

@@ -550,8 +550,11 @@ for 2021-10-01 to 2023-12-31 into the same folder as `market fetch`, `--workers`
 `.CHECKSUM`, a file that fails is refused and never written, a 404 is recorded as missing, a re-run
 skips verified files, and `manifest.json` keeps the same form. `labels` writes one run to
 `<data dir>/labels/<run_id>/` with the tables `thresholds`, `cascades` and `grid`; its manifest
-records the coin list, the span, the constants, HEAD and the sha256 of `uv.lock`. Every command
-exits 1 with a message on a refused day, a bad file or a bad argument.
+records the coin list, the span, the constants, HEAD and the sha256 of `uv.lock`. The archive root
+the panel reads holds no held-back file: `fetch` and `labels` scan the names under it, opening
+none, and refuse a root where any name carries a day from 2024-01-01 on before they read its
+manifest or any file. Every command exits 1 with a message on a refused day, a bad file or a bad
+argument.
 
 The run's checks add up, per coin and per kind, the row checks the archive's `manifest.json`
 records for each file read: rows, files with a header, unsorted rows, and for klines and metrics
@@ -564,11 +567,19 @@ not refuse on it; funding files get no period check at all.
 deviations (n - 1) of the cascade rule's `price_change` and `oi_change` over the windows the rule
 could evaluate that close in [d - 90 days, d). The coin's rule on day d is `cascade.Params(a = 3.7
 sd_oi, b = 5.0 sd_ret, c = 0.15, v = 3.0)`, every other field at its default, for every window
-closing on d. A day with fewer than 28 x 288 x 0.8 such windows has no threshold: its windows are
-left out of the run's window counts and are censored in the grid. A day's threshold reads nothing
-from that day on, so the span being scored never sets its own labels, and a coin whose typical
-move shrinks or grows is held to the same multiple of its recent moves throughout. The multiples,
-the 90 days and the minimum are constants in `panel/labels.py`.
+closing on d. A day has no threshold when fewer than 28 x 288 x 0.8 such windows were evaluated,
+when more than 5% of the windows closing in [d - 90 days, d) from the coin's first evaluated
+window on were not evaluated, or when `sd_ret` or `sd_oi` is zero or not finite; its windows are
+left out of the run's window counts and are censored in the grid. Counting from the first
+evaluated window keeps a coin's ramp-up, before its open interest and 28 days of volume history
+start, from counting as missing. The 5% bounds how far missing metrics can move a threshold: on
+the development data from 2022-04-15 on, `sd_ret` over the evaluated windows differs from `sd_ret`
+over every window with a finite price change by at most 2.6% (SANDUSDT, 2023-05-08), by more than
+1% on 0.5% of the 18,780 coin-days and by more than 5% on none. A day's threshold reads nothing
+from that day on, so no day sets its own threshold, but earlier development days set the
+thresholds of later development days. A coin whose typical move shrinks or grows is held to the
+same multiple of its recent moves throughout. The multiples, the 90 days, the minimum and the 5%
+are constants in `panel/labels.py`.
 
 **Detection.** Each day's windows go through `cascade.candidates` unchanged, with that day's rule,
 on a slice of bars that holds all the history the rule reads before the day, keeping only the
@@ -578,17 +589,20 @@ coin's first day with a threshold, so an episode that fired in the hours before 
 known: its hours are skipped and a later firing within 24 hours merges into it.
 
 **Tables.** `thresholds` has one row per coin per day from the first day of bars: `ts_ns` the day's
-start, `symbol`, `windows` (the evaluated windows in its 90 days), and `sd_ret`, `sd_oi`, `a` and
-`b`, null on a day without a threshold. `cascades` has the `market cascade` schema, whose `ts_ns` is
-the onset, and `in_span`, true when the instance begins (below) at or after the grid's first hour;
-the instances that begin earlier are kept so that their skip and merges can be seen, and the run's
-counts of instances and market events take only `in_span` rows. A market event that pools
-instances from before the grid's first hour is counted with only its `in_span` instances. `grid`
-has one row per coin per UTC hour t of the development span. It dates each instance by begin, the
-start of its first firing window (`fired_ts_ns` - 30 minutes), not by its onset. The onset is the
-first extreme bar inside that window and can sit up to 25 minutes after it opens, so an hour
-between the two would see part of the event's price move and open-interest drop before t. Dated by
-begin, nothing of a labelled event lies before t. For H = 1, 6 and 24 hours:
+start, `symbol`, `windows` (the evaluated windows in its 90 days), `missing` (the windows in its 90
+days, from the coin's first evaluated window on, that were not evaluated), and `sd_ret`, `sd_oi`,
+`a` and `b`, null on a day without a threshold. The run's checks give each coin's worst day among
+the days with enough evaluated windows, `worst_missing_share` and `worst_missing_ns`, and the
+number of those days over 5%, `days_over_max_missing`. `cascades` has the `market cascade` schema,
+whose `ts_ns` is the onset, and `in_span`, true when the instance begins (below) at or after the
+grid's first hour; the instances that begin earlier are kept so that their skip and merges can be
+seen, and the run's counts of instances and market events take only `in_span` rows. A market event
+that pools instances from before the grid's first hour is counted with only its `in_span`
+instances. `grid` has one row per coin per UTC hour t of the development span. It dates each
+instance by begin, the start of its first firing window (`fired_ts_ns` - 30 minutes), not by its
+onset. The onset is the first extreme bar inside that window and can sit up to 25 minutes after it
+opens, so an hour between the two would see part of the event's price move and open-interest drop
+before t. Dated by begin, nothing of a labelled event lies before t. For H = 1, 6 and 24 hours:
 
 - `long_H`, `short_H`: an instance of that kind begins in [t, t + H).
 - `skip`: an instance has its first firing at or before t and its last firing no more than 24
