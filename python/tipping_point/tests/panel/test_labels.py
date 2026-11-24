@@ -177,6 +177,31 @@ def test_a_threshold_needs_95_percent_of_its_windows_since_the_first_evaluated_o
         assert all(got[f"censored_{h}"][0] != kept for h in labels.HORIZONS)
 
 
+def test_a_threshold_needs_its_price_spread_within_5_percent_of_every_priced_window() -> None:
+    for scale, kept in ((1.0, True), (20.0, False)):
+        columns = planted(days=100)
+        gap = slice(60 * DAY, 62 * DAY)
+        steps = np.diff(np.log(columns["close"]), prepend=0.0)
+        steps[gap] *= scale
+        columns["close"] = np.exp(np.cumsum(steps))
+        columns["oi"][gap] = np.nan
+        win = labels.windows(columns)
+        thresholds, _, _, coin = labels.coin(columns, T0 + 100 * DAY_NS)
+        row = thresholds[95]
+        since = win["ts_ns"][win["evaluated"]][0]
+        closing = (win["ts_ns"] >= since) & (win["ts_ns"] < T0 + 95 * DAY_NS)
+        seen, every = (
+            np.std(win["price_change"][closing & mask], ddof=1)
+            for mask in (win["evaluated"], np.isfinite(win["price_change"]))
+        )
+        assert row["sd_ret_shift"] == pytest.approx(abs(seen / every - 1))
+        assert row["windows"] >= labels.MIN_WINDOWS
+        assert labels.missing_share(row) <= labels.MAX_MISSING
+        assert (row["sd_ret_shift"] <= labels.MAX_SHIFT) == kept == (row["b"] is not None)
+        on = (coin.windows_ts >= T0 + 95 * DAY_NS) & (coin.windows_ts < T0 + 96 * DAY_NS)
+        assert coin.clean[on].all() == kept and coin.clean[on].any() == kept
+
+
 def test_open_interest_that_starts_late_is_not_counted_missing() -> None:
     columns = planted(days=100)
     columns["oi"][: 40 * DAY] = np.nan

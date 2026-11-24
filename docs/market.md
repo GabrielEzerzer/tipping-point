@@ -570,17 +570,23 @@ could evaluate that close in [d - 90 days, d). The coin's rule on day d is `casc
 sd_oi, b = 5.0 sd_ret, c = 0.15, v = 3.0)`, every other field at its default, for every window
 closing on d. A day has no threshold when fewer than 28 x 288 x 0.8 such windows were evaluated,
 when more than 5% of the windows closing in [d - 90 days, d) from the coin's first evaluated
-window on were not evaluated, or when `sd_ret` or `sd_oi` is zero or not finite; its windows are
-left out of the run's window counts and are censored in the grid. Counting from the first
-evaluated window keeps a coin's ramp-up, before its open interest and 28 days of volume history
-start, from counting as missing. The 5% bounds how far missing metrics can move a threshold: on
-the development data from 2022-04-15 on, `sd_ret` over the evaluated windows differs from `sd_ret`
-over every window with a finite price change by at most 2.6% (SANDUSDT, 2023-05-08), by more than
-1% on 0.5% of the 18,780 coin-days and by more than 5% on none. A day's threshold reads nothing
+window on were not evaluated, when `sd_ret` differs by more than 5% from the same standard
+deviation over every one of those windows with a known price change, evaluated or not, or when
+`sd_ret` or `sd_oi` is zero or not finite; its windows are left out of the run's window counts and
+are censored in the grid. Counting from the first evaluated window keeps a coin's ramp-up, before
+its open interest and 28 days of volume history start, from counting as missing. The thresholds
+are defined on the windows the rule could evaluate, which are the only windows that can fire. A
+cap on the share of missing windows does not bound their effect, since the missing windows could
+be the extreme ones. For the price leg that effect is measured and capped: on the development
+data from 2022-04-15 on, the two standard deviations differ by at most 2.6% (SANDUSDT,
+2023-05-08), by more than 1% on 0.5% of the 18,780 coin-days and by more than 5% on none. For the
+open-interest leg it cannot be measured, because the change in open interest over a window with
+no open interest is unknown: there the 5% share is the only limit, and `sd_oi` stands for the
+evaluated windows alone. A day's threshold reads nothing
 from that day on, so no day sets its own threshold, but earlier development days set the
 thresholds of later development days. A coin whose typical move shrinks or grows is held to the
-same multiple of its recent moves throughout. The multiples, the 90 days, the minimum and the 5%
-are constants in `panel/labels.py`.
+same multiple of its recent moves throughout. The multiples, the 90 days, the minimum and the two
+5% limits are constants in `panel/labels.py`.
 
 **Detection.** Each day's windows go through `cascade.candidates` unchanged, with that day's rule,
 on a slice of bars that holds all the history the rule reads before the day, keeping only the
@@ -591,10 +597,13 @@ known: its hours are skipped and a later firing within 24 hours merges into it.
 
 **Tables.** `thresholds` has one row per coin per day from the first day of bars: `ts_ns` the day's
 start, `symbol`, `windows` (the evaluated windows in its 90 days), `missing` (the windows in its 90
-days, from the coin's first evaluated window on, that were not evaluated), and `sd_ret`, `sd_oi`,
-`a` and `b`, null on a day without a threshold. The run's checks give each coin's worst day among
-the days with enough evaluated windows, `worst_missing_share` and `worst_missing_ns`, and the
-number of those days over 5%, `days_over_max_missing`. `cascades` has the `market cascade` schema,
+days, from the coin's first evaluated window on, that were not evaluated), `sd_ret_shift` (how far
+`sd_ret` lies from the standard deviation over every window with a known price change, as a share
+of the latter; null on a day with too few or too many missing windows), and `sd_ret`, `sd_oi`, `a`
+and `b`, null on a day without a threshold. The run's checks give each coin's worst day among
+the days with enough evaluated windows, `worst_missing_share` and `worst_missing_ns`, the
+number of those days over 5%, `days_over_max_missing`, and the same for the price leg,
+`worst_sd_ret_shift` and `days_over_max_shift`. `cascades` has the `market cascade` schema,
 whose `ts_ns` is the onset, and `in_span`, true when the instance begins (below) at or after the
 grid's first hour; the instances that begin earlier are kept so that their skip and merges can be
 seen, and the run's counts of instances and market events take only `in_span` rows. A market event

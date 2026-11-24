@@ -28,6 +28,7 @@ VOLUME = 3.0
 TRAILING_DAYS = 90
 MIN_WINDOWS = 28 * bars.DAY_BARS * 0.8
 MAX_MISSING = 0.05
+MAX_SHIFT = 0.05
 HORIZONS = (1, 6, 24)
 SKIP_HOURS = 24
 PAST_HOURS = 24
@@ -40,6 +41,7 @@ THRESHOLDS = pa.schema(
         ("symbol", pa.string()),
         ("windows", pa.int64()),
         ("missing", pa.int64()),
+        ("sd_ret_shift", pa.float64()),
         ("sd_ret", pa.float64()),
         ("sd_oi", pa.float64()),
         ("a", pa.float64()),
@@ -66,6 +68,7 @@ def constants() -> dict[str, Any]:
         "trailing_days": TRAILING_DAYS,
         "min_windows": MIN_WINDOWS,
         "max_missing": MAX_MISSING,
+        "max_shift": MAX_SHIFT,
         "horizons_hours": list(HORIZONS),
         "skip_hours": SKIP_HOURS,
         "past_hours": PAST_HOURS,
@@ -114,6 +117,8 @@ def windows(
 def daily(win: Mapping[str, np.ndarray], first_ns: int, days: int) -> list[dict[str, Any]]:
     ok, every = win["evaluated"], win["ts_ns"]
     ts, ret, oi = every[ok], win["price_change"][ok], win["oi_change"][ok]
+    priced = np.isfinite(win["price_change"])
+    ts_priced, ret_priced = every[priced], win["price_change"][priced]
     since = int(ts[0]) if len(ts) else None
     out = []
     for d in range(days):
@@ -125,12 +130,18 @@ def daily(win: Mapping[str, np.ndarray], first_ns: int, days: int) -> list[dict[
             "ts_ns": day,
             "windows": hi - lo,
             "missing": max(int(closing[1] - closing[0]), 0) - (hi - lo),
+            "sd_ret_shift": None,
         }
         sd_ret = sd_oi = 0.0
         if hi - lo >= MIN_WINDOWS and missing_share(row) <= MAX_MISSING:
             sd_ret = float(np.std(ret[lo:hi], ddof=1))
             sd_oi = float(np.std(oi[lo:hi], ddof=1))
-        if np.isfinite([sd_ret, sd_oi]).all() and sd_ret > 0 and sd_oi > 0:
+            first, last = (int(i) for i in np.searchsorted(ts_priced, [opened, day]))
+            sd_all = float(np.std(ret_priced[first:last], ddof=1))
+            if np.isfinite([sd_ret, sd_all]).all() and sd_all > 0:
+                row["sd_ret_shift"] = abs(sd_ret / sd_all - 1)
+        steady = row["sd_ret_shift"] is not None and row["sd_ret_shift"] <= MAX_SHIFT
+        if steady and np.isfinite([sd_ret, sd_oi]).all() and sd_ret > 0 and sd_oi > 0:
             row |= {
                 "sd_ret": sd_ret,
                 "sd_oi": sd_oi,
@@ -321,6 +332,7 @@ def run(
         set_days = [row for row in thresholds if row["b"] is not None]
         decided = [row for row in thresholds if row["windows"] >= MIN_WINDOWS]
         worst = max(decided, key=missing_share, default=None)
+        shifted = [row for row in thresholds if row["sd_ret_shift"] is not None]
         checks[symbol] = {
             **bar_checks,
             **counts,
@@ -331,6 +343,8 @@ def run(
             "days_over_max_missing": sum(missing_share(r) > MAX_MISSING for r in decided),
             "worst_missing_share": missing_share(worst) if worst else None,
             "worst_missing_ns": worst["ts_ns"] if worst else None,
+            "days_over_max_shift": sum(r["sd_ret_shift"] > MAX_SHIFT for r in shifted),
+            "worst_sd_ret_shift": max((r["sd_ret_shift"] for r in shifted), default=None),
             "row_checks": row_checks(files, symbol, start, end),
         }
         b = [row["b"] for row in set_days]
