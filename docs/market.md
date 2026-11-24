@@ -520,19 +520,21 @@ the sha256 their records name and exits 1 on any problem. `python -m tipping_poi
 The panel study asks whether leverage and positioning data warn of liquidation cascades on 30
 Binance USDT perpetuals. Its data and label layer is `python/tipping_point/src/tipping_point/panel/`,
 which reuses the archive reader, the bars and the cascade rule above unchanged. Bars start on
-2021-10-01 (three months of trailing history only); thresholds, cascades and labels cover the
-development span 2022-01-01 to 2023-12-31. Every day from 2024-01-01 is held back as the test span:
-every command refuses one, and every request is checked for one before it is sent.
+2021-10-01; thresholds and cascades start on each coin's first day with a threshold, and the label
+grid covers the development span 2022-01-01 to 2023-12-31. Every day from 2024-01-01 is held back
+as the test span: every command refuses one, and every request is checked for one before it is
+sent.
 
 **Coins.** A symbol enters the ranking when it is a USD-M symbol matching `[A-Z0-9]+USDT`, is not
 one of the index and stablecoin products `BTCDOMUSDT`, `DEFIUSDT` and `USDCUSDT`, publishes a
 monthly 1-day kline file for every month of 2023, and publishes a daily metrics file on both
 2021-12-01 and 2023-12-31. The ranking is by 2023 quote volume summed from those 1-day klines,
-each file checked against its `.CHECKSUM`. The panel is BTCUSDT, ETHUSDT and the top 28 others,
-committed in `panel/coins.txt`, which every other command reads: BTCUSDT ETHUSDT SOLUSDT XRPUSDT
-DOGEUSDT BNBUSDT LTCUSDT MATICUSDT BCHUSDT LINKUSDT AVAXUSDT ADAUSDT TRBUSDT FILUSDT 1000SHIBUSDT
-DYDXUSDT MASKUSDT FTMUSDT GALAUSDT ETCUSDT LINAUSDT DOTUSDT NEARUSDT EOSUSDT CRVUSDT SANDUSDT
-ATOMUSDT AXSUSDT STORJUSDT MKRUSDT.
+each file checked against its `.CHECKSUM` and required to hold one row for each day of its month,
+none twice. The panel is BTCUSDT, ETHUSDT and the top 28 others; the command fails when fewer
+symbols are eligible. It is committed in `panel/coins.txt`, which every other command reads:
+BTCUSDT ETHUSDT SOLUSDT XRPUSDT DOGEUSDT BNBUSDT LTCUSDT MATICUSDT BCHUSDT LINKUSDT AVAXUSDT ADAUSDT
+TRBUSDT FILUSDT 1000SHIBUSDT DYDXUSDT MASKUSDT FTMUSDT GALAUSDT ETCUSDT LINAUSDT DOTUSDT NEARUSDT
+EOSUSDT CRVUSDT SANDUSDT ATOMUSDT AXSUSDT STORJUSDT MKRUSDT.
 
 ```sh
 uv run python -m tipping_point.panel coins
@@ -548,33 +550,118 @@ for 2021-10-01 to 2023-12-31 into the same folder as `market fetch`, `--workers`
 `.CHECKSUM`, a file that fails is refused and never written, a 404 is recorded as missing, a re-run
 skips verified files, and `manifest.json` keeps the same form. `labels` writes one run to
 `<data dir>/labels/<run_id>/` with the tables `thresholds`, `cascades` and `grid`; its manifest
-records the coin list, the span, the constants, HEAD and the sha256 of `uv.lock`.
+records the coin list, the span, the constants, HEAD and the sha256 of `uv.lock`. The archive root
+the panel reads holds no held-back file: `fetch` and `labels` scan the names under it (symlinked
+folders are not followed), opening none, and refuse a root where any name carries a day from
+2024-01-01 on before they read its manifest or any file. They then refuse a manifest that lists
+such a name, which a file moved away or never found leaves behind, before using any record in it.
+Every command exits 1 with a message on a refused day, a bad file or a bad argument.
 
-**Thresholds.** Per coin, over the windows that close in the development span and that the cascade
-rule could evaluate, `sd_ret` is the standard deviation (n - 1) of the rule's `price_change` and
-`sd_oi` that of its `oi_change`. The coin's rule is `cascade.Params(a = 3.7 sd_oi, b = 5.0 sd_ret,
-c = 0.15, v = 3.0)`, every other field at its default; the two multiples are constants in
-`panel/labels.py`. Each coin's candidates come from its own rule and are merged and pooled across
-coins as `market cascade` does.
+The run's checks add up, per coin and per kind, the row checks the archive's `manifest.json`
+records for each file read: rows, files with a header, unsorted rows, and for klines and metrics
+the rows off the file's grid, the slots holding more than one row and the runs of empty slots. The
+manifest counts a row stamped outside its own day together with a row stamped off the step grid
+inside it, as `off_grid`, so it cannot show a row outside its period on its own, and the run does
+not refuse on it; funding files get no period check at all.
 
-**Tables.** `thresholds` has one row per coin: `symbol`, `windows` (the evaluated windows used),
-`sd_ret`, `sd_oi`, `a` and `b`, with `ts_ns` the development span's start. `cascades` has the
-`market cascade` schema, whose `ts_ns` is the onset. `grid` has one row per coin per UTC hour t of
-the development span. It dates each cascade by begin, the start of its first firing window
-(`fired_ts_ns` - 30 minutes), not by its onset. The onset is the first extreme bar inside that
-window and can sit up to 25 minutes after it opens, so an hour between the two would see part of
-the event's price move and open-interest drop before t. Dated by begin, nothing of a labelled
-event lies before t. For H = 1, 6 and 24 hours:
+**Thresholds.** For each coin and each UTC day d, `sd_ret` and `sd_oi` are the sample standard
+deviations (n - 1) of the cascade rule's `price_change` and `oi_change` over every window closing
+in [d - 90 days, d), from the coin's first evaluated window on, whose change is known: the price
+change of every window with both closes, the open-interest change of every window with open
+interest at both ends. The coin's rule on day d is `cascade.Params(a = 3.7 sd_oi, b = 5.0 sd_ret,
+c = 0.15, v = 3.0)`, every other field at its default, for every window closing on d. A day has no
+threshold when the rule evaluated fewer than 28 x 288 x 0.8 of the windows closing in that span,
+when it did not evaluate more than 5% of them, known change or not, or when `sd_ret` or `sd_oi` is zero or not finite; its windows
+are left out of the run's window counts and are censored in the grid. Starting at the first
+evaluated window keeps a coin's ramp-up, before its open interest and 28 days of volume history
+start, out of both the spreads and the count of missing windows.
 
-- `long_H`, `short_H`: the coin has a cascade of that kind with t <= begin < t + H.
-- `censored_H`: t + H + 30 minutes runs past the end of the span or past the coin's last complete
-  bar, or a window starting in [t, t + H) (closing in [t + 30 min, t + H + 30 min)) could not be
-  evaluated or does not exist. A window that straddles t does not censor: if it fires, the row is
-  skipped.
-- `skip`: begin < t <= last firing + 24 hours for one of the coin's cascades.
+The spreads read more windows than the rule evaluates, on purpose. The rule skips a window when
+any of its seven open-interest rows is missing, but the change over that window is still known
+when the two end rows exist, and the windows around a missing row are not ordinary ones: the
+archive loses open-interest rows during falls. On 2021-12-04 three rows are missing (05:00, 05:25
+and 05:30 UTC), so 13 windows closing from 05:00 to 06:00 were not evaluated; 8 of them have a
+known open-interest change, a drop of 6% to 12% in BTCUSDT and of 14% to 24% in DYDXUSDT, whose
+price fell by up to 25% over the same windows. Spreads over the evaluated windows alone would
+leave those out and set a lower bar for the 90 days after: on the development data the price spread would be lower by up to
+28% (BCHUSDT, 2022-01-01) and by more than 5% on 1,063 of the 21,900 coin-days, the open-interest
+spread lower by up to 28% (DYDXUSDT, 2022-01-01) and by more than 5% on 503. The price leg is
+complete, since every window of the development data has a known price change. The open-interest
+leg is not: the change over a window with a missing end row is unknown, and such a window could
+hide a change large enough to move `a` and with it a later label. The 5% limit on windows not
+evaluated bounds the share of such windows, not their effect; in the run they are at most 2.4% of
+a day's windows (SANDUSDT, 2023-12-15), with a median of 0.03%, and 56% of the coin-days have at
+least one. The label is therefore defined on the changes that are known, and is not an estimate of what
+a complete open-interest history would give: a row is scored when its own detection and label
+windows are complete, whatever open-interest rows its 90-day history lacks inside the 5% limit.
+Every development day has a threshold. A day's threshold reads nothing from that day on, so no day
+sets its own threshold, but earlier development days set the thresholds of later development
+days. A coin whose typical move shrinks or grows is held to the same multiple of its recent moves
+throughout. The multiples, the 90 days, the minimum and the 5% limit are constants in
+`panel/labels.py`.
 
-The grid holds labels only: a feature at hour t may read only bars that start before t and metrics
-rows stamped at or before t.
+**Detection.** Each day's windows go through `cascade.candidates` unchanged, with that day's rule,
+on a slice of bars that holds all the history the rule reads before the day, keeping only the
+day's own windows; with one rule on every day this gives exactly what one call over the whole span
+gives. Candidates are merged per coin and pooled across coins as `market cascade` does, from each
+coin's first day with a threshold, so an episode that fired in the hours before the grid starts is
+known: its hours are skipped and a later firing within 24 hours merges into it.
+
+**Tables.** `thresholds` has one row per coin per day from the first day of bars: `ts_ns` the day's
+start, `symbol`, `windows` (the evaluated windows in its 90 days), `missing` (the windows in its 90
+days, from the coin's first evaluated window on, that were not evaluated), `oi_unknown` (those
+among them with no known open-interest change), and `sd_ret`, `sd_oi`, `a` and `b`, null on a day
+without a threshold. The run's checks give each coin's worst day among the days with enough
+evaluated windows, `worst_missing_share` and `worst_missing_ns`, the number of those days over
+5%, `days_over_max_missing`, and the same for the windows with no known open-interest change,
+`worst_oi_unknown_share` and `worst_oi_unknown_ns`. `cascades` has the `market cascade` schema,
+whose `ts_ns` is the onset, and `in_span`, true when the instance begins (below) at or after the
+grid's first hour; the instances that begin earlier are kept so that their skip and merges can be
+seen, and the run's counts of instances and market events take only `in_span` rows. A market event
+that pools instances from before the grid's first hour is counted with only its `in_span`
+instances. `grid` has one row per coin per UTC hour t of the development span. It dates each
+instance by begin, the start of its first firing window (`fired_ts_ns` - 30 minutes), not by its
+onset. The onset is the first extreme bar inside that window and can sit up to 25 minutes after it
+opens, so an hour between the two would see part of the event's price move and open-interest drop
+before t. Dated by begin, nothing of a labelled event lies before t. For H = 1, 6 and 24 hours:
+
+- `long_H`, `short_H`: an instance of that kind begins in [t, t + H).
+- `skip`: an instance has its first firing at or before t and its last firing no more than 24
+  hours before t, so an episode known at t is under way or just ended. An hour between an
+  instance's begin and its first firing is not skipped, since that firing is not known at t: it is
+  an ordinary row, positive only if another instance begins in [t, t + H). In the run there are 395
+  such coin-hours, 392 of them kept as ordinary rows (the other 3 are skipped for an earlier
+  episode), and at most one of those is positive at any horizon. Since they are a few hundred rows
+  among roughly half a million negatives, scoring them as negatives or leaving them out moves an
+  AUC by less than 0.001.
+- `censored_H`: a window closing in [t - 24 hours, t + H + 30 minutes) is not clean, or does not
+  exist yet because it closes past the span's end or the coin's last complete bar. The forward part
+  holds exactly the windows that begin in [t, t + H), the last of them closing at t + H + 25
+  minutes. The backward 24 hours are there because a missing stretch of open interest can hide an
+  earlier firing, after which a later firing would look like a new event rather than a skipped
+  follow-up. A window is clean when the rule could evaluate it, its day has a threshold, and no
+  kline bar is missing in the 28 days and 25 minutes before it opens, the history its volume median
+  and onset read; that last condition censors only and never changes detection.
+
+Censoring is symmetric: a row with a gap in its horizon is censored even when an instance was found
+in it, so that a gap removes positives and negatives alike. The grid holds labels only: a feature
+at hour t may read only bars that start before t and metrics rows stamped at or before t.
+
+**Limits.**
+
+- An episode takes the direction of its first firing. A short squeeze within 24 hours of a long
+  cascade is part of that episode, not a second event, and gives no `short_H`; the same holds the
+  other way round.
+- The coin list is chosen on 2023 volume, so scores on 2022-2023 describe the cohort that was among
+  the largest in 2023, not the coins a trader would have picked at the time. For any later span the
+  list is fixed in advance, and a coin that stops trading is censored from its last complete bar.
+- The same multiple of a standard deviation does not give heavy-tailed coins the same event rate.
+  In the development run the instances that begin in the grid's span number from 10 to 56 per coin
+  (median 26.5): BTCUSDT 56, ETHUSDT 30, SOLUSDT 24, XRPUSDT 30, DOGEUSDT 27, BNBUSDT 19,
+  LTCUSDT 31, MATICUSDT 21, BCHUSDT 17, LINKUSDT 23, AVAXUSDT 26, ADAUSDT 27, TRBUSDT 14,
+  FILUSDT 44, 1000SHIBUSDT 33, DYDXUSDT 32, MASKUSDT 33, FTMUSDT 31, GALAUSDT 39, ETCUSDT 32,
+  LINAUSDT 23, DOTUSDT 25, NEARUSDT 23, EOSUSDT 29, CRVUSDT 10, SANDUSDT 33, ATOMUSDT 25,
+  AXSUSDT 20, STORJUSDT 14, MKRUSDT 18.
 
 **Inputs.** `panel inputs --labels <run id>` writes one run to `<data dir>/panel-inputs/<run_id>/`
 with the table `inputs`, one row per coin per hour t of the labels run's grid in the grid's order.

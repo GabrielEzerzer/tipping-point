@@ -1,6 +1,6 @@
-# The panel's coins: USD-M symbols matching [A-Z0-9]+USDT, less EXCLUDED, with a 1-day kline file
-# for every month of YEAR and a metrics file on both METRIC_DAYS, ranked by YEAR's quote volume;
-# ALWAYS and the top OTHERS others. coins.txt holds the committed panel.
+# The panel's coins: USD-M symbols matching [A-Z0-9]+USDT, less EXCLUDED, with a 1-day kline row for
+# every day of YEAR and a metrics file on both METRIC_DAYS, ranked by YEAR's quote volume; ALWAYS
+# and the top OTHERS others. coins.txt holds the committed panel.
 
 from __future__ import annotations
 
@@ -32,6 +32,10 @@ OTHERS = 28
 COMMITTED = Path(__file__).with_name("coins.txt")
 
 
+class ShortMonth(archive.ArchiveError):
+    pass
+
+
 def committed() -> list[str]:
     return COMMITTED.read_text(encoding="utf-8").split()
 
@@ -40,6 +44,10 @@ def rank(volumes: Mapping[str, float]) -> list[str]:
     absent = [s for s in ALWAYS if s not in volumes]
     if absent:
         raise archive.ArchiveError(f"not eligible: {', '.join(absent)}")
+    if len(volumes) < len(ALWAYS) + OTHERS:
+        raise archive.ArchiveError(
+            f"{len(volumes)} eligible symbols: the panel needs {len(ALWAYS) + OTHERS}"
+        )
     others = sorted((s for s in volumes if s not in ALWAYS), key=lambda s: (-volumes[s], s))
     return [*ALWAYS, *others[:OTHERS]]
 
@@ -111,17 +119,31 @@ def month_volume(data: bytes, month: str) -> float:
     year, number = map(int, month.split("-"))
     after = archive.day_ms(date(year + number // 12, number % 12 + 1, 1))
     total = 0.0
+    seen: set[int] = set()
     for row in csv.reader(io.StringIO(text)):
         if not row or row[0] == "open_time":
             continue
-        if not first <= int(row[0]) < after:
+        stamp = int(row[0])
+        if not first <= stamp < after:
             raise archive.ArchiveError(f"{member}: a row at {row[0]} lies outside {month}")
+        if (stamp - first) % archive.DAY_MS or stamp in seen:
+            raise archive.ArchiveError(f"{member}: the row at {row[0]} is not a new day's start")
+        seen.add(stamp)
         total += float(row[7])
+    days = (after - first) // archive.DAY_MS
+    if len(seen) != days:
+        raise ShortMonth(f"{member}: {len(seen)} daily rows for the {days} days of {month}")
     return total
 
 
-def quote_volume(get: archive.Get, symbol: str) -> float:
-    return sum(month_volume(verified(get, kline_url(symbol, m)), m) for m in MONTHS)
+def quote_volume(get: archive.Get, symbol: str) -> float | None:
+    total, short = 0.0, False
+    for month in MONTHS:
+        try:
+            total += month_volume(verified(get, kline_url(symbol, month)), month)
+        except ShortMonth:
+            short = True
+    return None if short else total
 
 
 def derive(get: archive.Get, workers: int = fetch.WORKERS) -> dict[str, float]:
@@ -132,4 +154,4 @@ def derive(get: archive.Get, workers: int = fetch.WORKERS) -> dict[str, float]:
         keep = pool.map(lambda s: eligible(safe, s), names)
         ok = [s for s, kept in zip(names, keep, strict=True) if kept]
         volumes = pool.map(lambda s: quote_volume(safe, s), ok)
-        return dict(zip(ok, volumes, strict=True))
+        return {s: v for s, v in zip(ok, volumes, strict=True) if v is not None}

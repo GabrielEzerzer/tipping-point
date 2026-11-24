@@ -635,10 +635,13 @@ def labelled(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     run, _ = labels.run(dest, data, SYMBOLS, FIRST, date(2022, 12, 29), date(2022, 12, 31), "t")
     complete = json.loads((run / "complete.json").read_text(encoding="utf-8"))
     (name,) = [f for f in complete["files"] if f.startswith("thresholds/")]
-    once = pq.read_table(run / name).to_pylist()
-    days = [labels.ns(FIRST + timedelta(days=d)) for d in range(34)]
-    rows = [r | {"ts_ns": day} for r in once for day in days]
-    rows[len(days) + 31]["sd_ret"] = None
+    rows = pq.read_table(run / name).to_pylist()
+    for i, r in enumerate(rows):
+        if r["ts_ns"] >= labels.ns(date(2022, 12, 29)):
+            r["sd_ret"] = 0.004 * (1 + 0.1 * (i % 3))
+            r["b"] = 5.0 * r["sd_ret"]
+            if (r["symbol"], r["ts_ns"]) == ("ETHUSDT", labels.ns(date(2022, 12, 29))):
+                r["sd_ret"] = None
     pq.write_table(pa.Table.from_pylist(rows, schema=labels.THRESHOLDS), run / name)
     complete["files"][name] = store.sha256(run / name)
     (run / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
