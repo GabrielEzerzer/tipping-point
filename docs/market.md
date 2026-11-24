@@ -806,8 +806,10 @@ threshold on every coin-day of the grid and no funding file is missing. Rows at 
 | skipped | 20423 | 20423 | 20423 |
 | censored | 14862 | 9721 | 8297 |
 | missing an input | 29074 | 29094 | 29110 |
-| scored | 461241 | 466362 | 467770 |
-| long / short positives scored | 15481 / 2043 | 3990 / 534 | 674 / 90 |
+| eligible rows, all scored under `loqo` | 461241 | 466362 | 467770 |
+| long / short positives among them | 15481 / 2043 | 3990 / 534 | 674 / 90 |
+| scored under `forward` (six quarters) | 366203 | 370692 | 371931 |
+| long / short positives among them | 13812 / 1247 | 3564 / 332 | 603 / 56 |
 
 Primary score (`fold_mean`) at 24 h, `loqo` / `forward`:
 
@@ -848,7 +850,8 @@ Three plans beside `ladder.toml` each change one thing. At 24 h on the long side
   97.5% points of the 24 h comparisons by at most 0.019; at 24 h `complete_draws` falls to 0.92
   long and 0.87 short in `loqo`, 0.93 and 0.87 in `forward`.
 - `ladder-public.toml` (no rung with `lev`) builds its common rows without `ls` and `ls_rel`, so it
-  scores 490314 rows at 24 h (one missing an input), from 2022-01-01 17:00. Its `vol` scores 0.580
+  has 490314 eligible rows at 24 h (one missing an input), from 2022-01-01 17:00; `loqo` scores
+  all of them and `forward` 366295. Its `vol` scores 0.580
   long in `loqo` and 0.565 in `forward`, and `vol+price - vol` is 0.074 [0.019, 0.135] and 0.029
   [-0.026, 0.098].
 
@@ -856,8 +859,9 @@ An optional `[external]` entry (`name`, `path` to a Parquet file relative to the
 the scheme its scores were fitted under) brings in out-of-fold scores fitted elsewhere, such as a
 sequence model's, with columns `coin` (text), `hour` (the grid's `ts_ns`, as integers of any
 width or timestamps of any unit, none null), `horizon` (integer), `side` (text), `score`
-(floating point), `fold` (integer, the ladder's quarter counted from 0 at 2022-01-01) and
-`scheme` (text, a single value equal to the plan's `scheme`). They are scored and compared like a
+(floating point), `fold` (integer, the ladder's quarter counted from 0 at the plan's `start`,
+which is 2022-01-01 in `ladder.toml`) and `scheme` (text, a single value equal to the plan's
+`scheme`). They are scored and compared like a
 rung on the same common rows of that scheme, and the run refuses a file that lacks one of those
 columns or gives one another type, misses a scored row, gives one twice, gives a score that is
 not finite, gives a row a fold other than the ladder's or holds scores fitted under another
@@ -868,6 +872,8 @@ it, and `ladder` a plan, an inputs run, a grid or an external file that does. Th
 bounds of the grid, the thresholds, the inputs table and the external file's `hour` from the
 files' Parquet metadata before hashing or reading them, and refuse a file whose time column is
 neither integer nor timestamp, whose metadata gives no bounds for it, or whose earliest time lies
-before 2021-10-01, which an integer column counted in anything but nanoseconds does; then they
-check each file's sha256 against the run that wrote it and refuse a run its `complete.json` does
-not mark clean.
+before 2021-10-01, which an integer column counted in anything but nanoseconds does; then `inputs`
+checks the sha256 of the grid and the thresholds, and `ladder` that of the grid and the inputs
+table, against the run that wrote each, and both refuse a run its `complete.json` does not mark
+clean. The external file's sha256 is not checked against anything: the run records it in its
+manifest.
