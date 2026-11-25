@@ -886,14 +886,14 @@ positions, so a lag means the same on the 84-token window and the 6-token target
 the target encoder's tokens of the next 24 hours; its untrained twin is the JEPA's encoder before
 its first step, and logistic probes read z of both, and the `full` rung's inputs with the JEPA's z.
 A supervised model with the same encoder predicts the six labels directly. Every fold fits its own
-models, statistics and probes, under the plan's `schemes` (`forward` by default; `loqo` also
-works), on rows whose 336 hours back and 24 hours ahead all lie in the fold's training hours inside
-the plan's span. Test rows are every common row of the left-out quarter; one in the grid's first
-335 hours reads padding, marked as missing. The supervised model's step count is chosen on the last
+models, statistics and probes, under the plan's `schemes` (`forward` by default; `loqo` also works),
+on rows whose 336 hours back and 24 hours ahead all lie in the fold's training hours inside the
+plan's span. Test rows are every common row of the left-out quarter; one in the grid's first 335
+hours reads padding, marked as missing. The supervised model's step count is chosen on the last
 fifth of a fold's training hours, trained on hours a gap before that block, and then refitted on
-every training row for that many steps. Seeds are drawn per variant, fold, seed and stream; the
-twin shares the JEPA's initial weights. Before writing, the run checks that the scores give each
-key once, cover the common test rows exactly, are finite, and give each fold the AUC its folds
-table records. The 24-hour target, 4-hour patches, the 336-hour window and kernel 7 were kept: the
-padded start of the target's segment is the same regime as the window's first tokens, and the
-probes read the online encoder.
+every training row under the same learning-rate schedule, stopped at the chosen step. Seeds are
+drawn per variant, fold, seed and stream; the twin shares the JEPA's initial weights. Before
+writing, the run checks that the scores give each key once, cover the common test rows exactly, are
+finite, and give each fold the AUC its folds table records. The 24-hour target, 4-hour patches, the
+336-hour window and kernel 7 were kept: the padded start of the target's segment is the same regime
+as the window's first tokens, and the probes read the online encoder.

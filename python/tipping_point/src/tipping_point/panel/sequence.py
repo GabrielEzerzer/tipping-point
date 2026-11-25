@@ -10,7 +10,7 @@ import time
 import tomllib
 import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -409,12 +409,14 @@ def train_supervised(
     feed_seed: np.random.SeedSequence,
     log: LOG,
     check: Callable[[Supervised], dict[str, float]] | None = None,
+    stop: int | None = None,
 ) -> tuple[Supervised, list[dict[str, Any]], list[dict[str, Any]]]:
     model = Supervised(x.shape[-1], plan, init)
     opt = optimiser([model], t)
     feed = batches(rows, x.shape[1] - plan.pad, t.batch, feed_seed)
     curve, checked = [], []
-    for step in range(t.steps):
+    last = t.steps if stop is None else stop
+    for step in range(last):
         schedule(opt, step, t)
         coin, hour = next(feed)
         logits = model(windows(x, coin, hour + plan.pad, plan.window))
@@ -424,7 +426,7 @@ def train_supervised(
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
-        if step % t.curve_every == 0 or step == t.steps - 1:
+        if step % t.curve_every == 0 or step == last - 1:
             curve.append({"step": step, "loss": loss.item()})
             log(f"      supervised step {step}: loss {loss.item():.4f}")
         if check is not None and (step + 1) % plan.selection.every == 0:
@@ -500,17 +502,17 @@ def supervise(
             steps = max(finite, key=lambda c: c["auc"])["step"]
     else:
         log("      no selection: no training row lies a gap before the validation block")
-    refit = replace(t, steps=steps, warmup=round(t.warmup * steps / t.steps))
     model, curve, _ = train_supervised(
         x,
         y,
         keep,
         sample_rows(fit_hours, ncoins, exclude),
-        refit,
+        t,
         plan,
         init,
         stream(*key, "supervised"),
         log,
+        stop=steps,
     )
     return model, curve, checked, steps, weights(Supervised(x.shape[-1], plan, init).encoder)
 

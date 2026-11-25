@@ -3,6 +3,7 @@
 # unread labels, the scores' checks, skipped folds, the command's run and its held-back refusal.
 
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -450,6 +451,56 @@ def test_the_step_selection_reads_no_left_out_or_gap_hour(tmp_path: Path) -> Non
     assert json.dumps(first[2]) == json.dumps(second[2]) and first[3] == second[3]
     assert sequence.weights(first[0]) == sequence.weights(second[0])
     assert first[3] in {c["step"] for c in first[2]}
+
+
+def test_the_refit_follows_the_selection_schedule_and_stops_at_the_chosen_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tiny(tmp_path)
+    plan = replace(base, supervised=replace(base.supervised, steps=8, warmup=2))
+    rng = np.random.default_rng(5)
+    ncoins, nhours = 2, 3000
+    train = np.ones(nhours, bool)
+    raw = rng.normal(size=(ncoins, nhours, 5))
+    y = rng.random((ncoins, nhours, len(plan.outputs))) < 0.2
+    keep = np.ones((ncoins, nhours, len(plan.outputs)), bool)
+    skip = np.zeros((ncoins, nhours), bool)
+    curve = {2: 0.6, 4: 0.9, 6: 0.7, 8: 0.5}
+
+    def validation(*args: object) -> object:
+        seen = []
+
+        def check(model: object) -> dict:
+            seen.append(None)
+            return {"auc": curve[2 * len(seen)]}
+
+        return check
+
+    rates: dict[int, list[float]] = {}
+    schedule = sequence.schedule
+
+    def recorded(opt: torch.optim.Optimizer, step: int, t: sequence.Training) -> None:
+        schedule(opt, step, t)
+        rates.setdefault(id(opt), []).append(opt.param_groups[0]["lr"])
+
+    monkeypatch.setattr(sequence, "validation", validation)
+    monkeypatch.setattr(sequence, "schedule", recorded)
+    mu, sd = sequence.statistics(raw, train)
+    x = torch.from_numpy(sequence.standardised(raw, mu, sd, 5.0, plan.pad))
+    _, fitted, _, steps, _ = sequence.supervise(
+        x,
+        torch.from_numpy(y.astype(np.float32)),
+        torch.from_numpy(keep.astype(np.float32)),
+        skip,
+        train,
+        plan,
+        ("vol", 1, 3),
+        lambda line: None,
+    )
+    selection, refit = rates.values()
+    assert steps == 4 and len(selection) == 8 and len(refit) == 4
+    assert refit == selection[:4]
+    assert fitted[-1]["step"] == 3
 
 
 def by_model(out: dict) -> dict:
