@@ -3,6 +3,7 @@
 # saved models, the selection rule, the scores the ladder reads, skipped folds and held-back data.
 
 import json
+import os
 import shutil
 from collections.abc import Callable
 from dataclasses import replace
@@ -1213,11 +1214,13 @@ SPLIT = {
     "b": ('["full"]', "[3, 4]", "[3]"),
     "c": ('["vol"]', "[3]", "[2, 3]"),
     "d": ('["vol"]', "[4]", "[2, 3]"),
+    "e": ('["full", "vol"]', "[5]", "[2, 3]"),
 }
 
 
 def split_plan(variants: str, seeds: str, folds: str) -> str:
     text = PLAN.replace('schemes = ["loqo", "forward"]', 'schemes = ["forward"]')
+    text = text.replace('rungs = ["full", "vol"]', 'rungs = ["vol", "full"]')
     text = text.replace('variants = ["vol"]', f"variants = {variants}")
     return text.replace("seeds = [3]", f"seeds = {seeds}").replace(
         "folds = [1, 3]", f"folds = {folds}"
@@ -1231,19 +1234,37 @@ def split(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     run_inputs = write_runs(data, values, grid)
     runs = {"inputs": run_inputs, "data": data}
     whole = {
-        "full": split_plan('["full", "vol"]', "[3, 4]", "[2, 3]"),
-        "reversed": split_plan('["vol", "full"]', "[4, 3]", "[3, 2]"),
+        "full": split_plan('["full", "vol"]', "[3, 4, 5]", "[2, 3]"),
+        "reversed": split_plan('["vol", "full"]', "[5, 4, 3]", "[3, 2]"),
     }
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(sequence.io, "code_version", lambda: {"git_sha": "c" * 40, "dirty": False})
         for name, text in (whole | {k: split_plan(*v) for k, v in SPLIT.items()}).items():
             path = plans(data / "plans" / name, text)
             runs[name], _ = sequence.run(run_inputs, data, path, name)
+    runs["parent"] = data / "plans" / "full" / "sequence.toml"
     return runs
 
 
 def without_seconds(path: Path) -> str:
     return json.dumps(pq.read_table(path).drop_columns(["seconds"]).to_pylist())
+
+
+def in_name_order(run: Path) -> None:
+    for name in ("diagnostics", "curves", "folds"):
+        rows = pq.read_table(run / f"{name}.parquet").to_pylist()
+        keys = [(r["variant"], r["fold"], r["seed"]) for r in rows if r.get("model") != "rung"]
+        assert keys and keys == sorted(keys), (run.name, name)
+
+
+def selection_metrics(run: Path) -> None:
+    rows = [
+        r for r in pq.read_table(run / "curves.parquet").to_pylist() if r["model"] == "selection"
+    ]
+    assert rows
+    for row in rows:
+        assert row.get("rows", 0) > 0 and row["loss"] is None, row
+        assert all(isinstance(row.get(k), float) for k in ("auc", "auc_long", "auc_short")), row
 
 
 def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
@@ -1269,8 +1290,10 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
     assert without_seconds(reverse / "diagnostics.parquet") == without_seconds(
         full / "diagnostics.parquet"
     )
-    order = [split[k] for k in ("d", "a", "c", "b")]
-    assert main(["merge", "--runs", *map(str, order), "--data-dir", str(data)]) == 0
+    order = [split[k] for k in ("d", "a", "e", "c", "b")]
+    parent = split["parent"]
+    argv = ["merge", "--runs", *map(str, order), "--plan", str(parent), "--data-dir", str(data)]
+    assert main(argv) == 0
     (merged,) = (data / "panel-sequence").glob("*-merged")
     params = json.loads((merged / "manifest.json").read_text(encoding="utf-8"))["params"]
     assert params["encoders"] == full_params["encoders"]
@@ -1284,7 +1307,17 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
         full / "diagnostics.parquet"
     )
     plan = sequence.load(merged / "plan.toml", merged / "ladder.toml")
-    assert plan == replace(sequence.load(full / "plan.toml"), ladder_path=plan.ladder_path)
+    assert plan == replace(sequence.load(parent), ladder_path=plan.ladder_path)
+    assert (merged / "plan.toml").read_text("utf-8") == parent.read_text("utf-8")
+    assert params["plan"] == {"file": parent.name, "sha256": store.sha256(parent)}
+    for run in (full, reverse, merged):
+        in_name_order(run)
+        selection_metrics(run)
+    runtime = full_params["runtime"]
+    assert runtime["capability"] == torch.backends.cpu.get_cpu_capability()
+    assert runtime["pins"] == {k: os.environ.get(k) for k in sequence.PINS} and runtime["cpu"]
+    assert params["runtime"] == {"capability": runtime["capability"], "pins": runtime["pins"]}
+    assert [s["cpu"] for s in params["sources"]] == [runtime["cpu"]] * len(order)
     assert [s["run"] for s in params["sources"]] == [d.name for d in order]
     assert all(
         s["manifest_sha256"] == store.sha256(d / "manifest.json")
@@ -1293,11 +1326,15 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
     for k in ("inputs_run", "inputs", "labels_run", "labels_grid", "ladder_plan", "torch", "numpy"):
         assert params[k] == full_params[k], k
     complete = json.loads((merged / "complete.json").read_text(encoding="utf-8"))
-    assert complete["clean"] and params["plan"]["sha256"] == store.sha256(merged / "plan.toml")
+    assert complete["clean"]
     for model, variant in (("jepa", "full"), ("supervised", "vol")):
         one, _ = sequence.scores_run(full, data, model, variant, f"full-{model}")
         two, _ = sequence.scores_run(merged, data, model, variant, f"merged-{model}")
         assert pq.read_table(one / "forward.parquet").equals(pq.read_table(two / "forward.parquet"))
+        three, _ = sequence.scores_run(reverse, data, model, variant, f"reversed-{model}")
+        assert pq.read_table(one / "forward.parquet").equals(
+            pq.read_table(three / "forward.parquet")
+        )
         picked = [
             {
                 k: v
@@ -1312,8 +1349,9 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
 def test_the_merge_refuses_runs_that_do_not_make_one_plan(
     split: dict[str, Path], tmp_path: Path
 ) -> None:
-    data = split["data"]
+    data, parent = split["data"], split["parent"]
     pieces = [split[k] for k in SPLIT]
+    narrow = plans(tmp_path / "narrow", split_plan('["full"]', "[3, 4, 5]", "[2, 3]"))
 
     def altered(name: str, change: Callable[[Path], None], piece: str = "d") -> list[Path]:
         copy = tmp_path / name / split[piece].name
@@ -1369,6 +1407,9 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
     def encoders(change: Callable[[dict], None]) -> Callable[[Path], None]:
         return manifest(lambda m: change(m["params"]["encoders"]))
 
+    def runtime(change: Callable[[dict], None]) -> Callable[[Path], None]:
+        return manifest(lambda m: change(m["params"]["runtime"]))
+
     def grow(copy: Path) -> None:
         key = next(
             iter(json.loads((copy / "manifest.json").read_text("utf-8"))["params"]["encoders"])
@@ -1379,13 +1420,14 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
     cases = {
         "plan": (
             altered("plan", complete(replan)),
-            "plans differ in more than variants, seeds, folds",
+            "differs from the parent plan in more than variants, seeds, folds",
         ),
         "inputs": (altered("inputs", params("inputs", zero)), "different inputs tables"),
         "grid": (altered("grid", params("labels_grid", zero)), "different labels grids"),
         "ladder": (altered("ladder", params("ladder_plan", zero)), "different ladder plans"),
         "twice": ([*pieces, altered("twice", lambda d: None)[-1]], "is in both"),
-        "missing": (pieces[:3], "no run fitted 6 cells"),
+        "missing": (pieces[:3], "no run fitted 18 cells"),
+        "seed": (pieces[:4], "no run fitted 12 cells of the parent plan"),
         "unclean": (
             altered("unclean", complete(lambda r, d: r.update(clean=False))),
             "does not mark the run clean",
@@ -1417,11 +1459,25 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
             altered("models", encoders(lambda e: e.pop(next(iter(e))))),
             "saved models are not every cell",
         ),
+        "capability": (
+            altered("capability", runtime(lambda r: r.update(capability="another"))),
+            "different CPU capabilities",
+        ),
+        "pins": (
+            altered("pins", runtime(lambda r: r["pins"].update(ATEN_CPU_CAPABILITY="avx"))),
+            "different instruction-set pins",
+        ),
+        "no runtime": (
+            altered("no runtime", manifest(lambda m: m["params"].pop("runtime"))),
+            "records no numerical runtime",
+        ),
     }
     before = sorted((data / "panel-sequence").iterdir())
     for name, (runs, message) in cases.items():
         with pytest.raises(ValueError, match=message):
-            sequence.merge_run(runs, data, name)
+            sequence.merge_run(runs, parent, data, name)
+    with pytest.raises(ValueError, match="variants the parent plan lacks: vol"):
+        sequence.merge_run(pieces, narrow, data, "narrow")
     assert sorted((data / "panel-sequence").iterdir()) == before
 
 
@@ -1453,9 +1509,27 @@ def test_the_merge_takes_a_nan_auc_in_a_shared_rung_row(
         (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
         pieces.append(copy)
     assert sharing >= 2
-    run_dir, _ = sequence.merge_run(pieces, tmp_path, "nan")
+    run_dir, _ = sequence.merge_run(pieces, split["parent"], tmp_path, "nan")
     (row,) = [r for r in pq.read_table(run_dir / "folds.parquet").to_pylist() if chosen(r)]
     assert np.isnan(row["auc"])
+
+
+def test_pieces_from_different_cpu_models_merge_and_list_them(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    pieces = []
+    for name in SPLIT:
+        copy = tmp_path / "pieces" / split[name].name
+        shutil.copytree(split[name], copy)
+        if name == "c":
+            record = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
+            record["params"]["runtime"]["cpu"] = "Another CPU"
+            (copy / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+        pieces.append(copy)
+    run_dir, _ = sequence.merge_run(pieces, split["parent"], tmp_path, "cpus")
+    params = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["params"]
+    cpus = [s["cpu"] for s in params["sources"]]
+    assert cpus[2] == "Another CPU" and len(set(cpus)) == 2
 
 
 def test_the_command_refuses_the_held_back_span(tmp_path: Path) -> None:

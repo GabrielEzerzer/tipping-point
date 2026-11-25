@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import math
+import os
+import platform
 import re
-import tempfile
 import time
 import tomllib
 import zlib
@@ -33,6 +33,25 @@ from ..jepa.objective import ema, learning_rate, momentum
 from . import encoder, labels, ladder, span, store
 
 PLAN = Path(__file__).with_name("sequence.toml")
+PINS = ("ATEN_CPU_CAPABILITY", "ONEDNN_MAX_CPU_ISA", "MKL_ENABLE_INSTRUCTIONS", "MKL_CBWR")
+CURVES = pa.schema(
+    [
+        ("fold", pa.int64()),
+        ("scheme", pa.string()),
+        ("seed", pa.int64()),
+        ("variant", pa.string()),
+        ("model", pa.string()),
+        ("step", pa.int64()),
+        ("loss", pa.float64()),
+        ("prediction", pa.float64()),
+        ("variance", pa.float64()),
+        ("covariance", pa.float64()),
+        ("auc", pa.float64()),
+        ("auc_long", pa.float64()),
+        ("auc_short", pa.float64()),
+        ("rows", pa.int64()),
+    ]
+)
 MODELS = ("jepa", "twin", "supervised")
 TARGETS = ("future", "shifted")
 OBJECTIVES = ("z", "predictor")
@@ -886,7 +905,7 @@ def external(
             x = torch.from_numpy(standardised(raw, mu, sd, plan.ladder.clip, plan.pad))
             need_train, need_test = kept & fit_rows, kept & (row_fold == f)
             at_train, at_test = np.cumsum(need_train) - 1, np.cumsum(need_test) - 1
-            for seed in plan.seeds:
+            for seed in sorted(plan.seeds):
                 key = encoder_name(variant, scheme, f, seed, model)
                 data = fetch(key)
                 log(f"  {scheme} fold {f + 1}, seed {seed}: {key}")
@@ -1062,6 +1081,30 @@ def read(
     return values, grid, source
 
 
+def cpu_name() -> str:
+    info = Path("/proc/cpuinfo")
+    if info.is_file():
+        found = re.search(r"^model name\s*:\s*(.+)$", info.read_text(), flags=re.MULTILINE)
+        if found:
+            return found.group(1).strip()
+    return platform.processor() or platform.machine()
+
+
+def runtime() -> dict[str, Any]:
+    return {
+        "cpu": cpu_name(),
+        "capability": torch.backends.cpu.get_cpu_capability(),
+        "pins": {name: os.environ.get(name) for name in PINS},
+    }
+
+
+def curve_table(rows: Sequence[Mapping[str, Any]]) -> pa.Table:
+    extra = {k for row in rows for k in row} - set(CURVES.names)
+    if extra:
+        raise ValueError(f"curve rows carry columns the curve table lacks: {sorted(extra)}")
+    return pa.Table.from_pylist(list(rows), schema=CURVES)
+
+
 def run(
     inputs_dir: Path,
     data_dir: Path,
@@ -1081,13 +1124,14 @@ def run(
         "ladder_plan": {"file": plan.ladder_path.name, "sha256": store.sha256(plan.ladder_path)},
         "torch": torch.__version__,
         "numpy": np.__version__,
+        "runtime": runtime(),
         "threads": plan.threads,
         "code": {"uv_lock_sha256": labels.uv_lock()},
         "encoders": {k: hashlib.sha256(v).hexdigest() for k, v in out["encoders"].items()},
     }
     tables = {
         "diagnostics": pa.Table.from_pylist(out["diagnostics"]),
-        "curves": pa.Table.from_pylist(out["curves"]),
+        "curves": curve_table(out["curves"]),
         "folds": pa.Table.from_pylist(out["folds"]),
         "rows": pa.Table.from_pylist(
             [{"horizon": h, **row} for h, rs in out["accounting"].items() for row in rs]
@@ -1254,6 +1298,8 @@ def _piece(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Plan]:
     for library in ("torch", "numpy"):
         if not params.get(library):
             raise ValueError(f"{run_dir}: the run records no {library} version")
+    if not params.get("runtime"):
+        raise ValueError(f"{run_dir}: the run records no numerical runtime")
     return manifest, complete, load(run_dir / "plan.toml", run_dir / "ladder.toml")
 
 
@@ -1261,31 +1307,21 @@ def _bare(plan: Plan) -> Plan:
     return replace(plan, variants=(), seeds=(), folds=(), ladder_path=Path())
 
 
-def _plan_text(text: str, plan: Plan, ladder_text: str) -> str:
-    for key in VARYING:
-        line = f"{key} = {json.dumps(list(getattr(plan, key)))}"
-        text, n = re.subn(rf"^{key} = .*$", line, text, flags=re.MULTILINE)
-        if n != 1:
-            raise ValueError(f"the plan has no single one-line {key} entry to rewrite")
-    with tempfile.TemporaryDirectory() as folder:
-        (Path(folder) / "plan.toml").write_text(text, encoding="utf-8")
-        (Path(folder) / "ladder.toml").write_text(ladder_text, encoding="utf-8")
-        written = load(Path(folder) / "plan.toml", Path(folder) / "ladder.toml")
-    if replace(written, ladder_path=plan.ladder_path) != plan:
-        raise ValueError("the merged plan file does not load as the merged plan")
-    return text
-
-
 def merge_run(
-    pieces: Sequence[Path], data_dir: Path, tag: str, log: LOG = lambda line: None
+    pieces: Sequence[Path],
+    parent_path: Path,
+    data_dir: Path,
+    tag: str,
+    log: LOG = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
     if len(pieces) < 2:
         raise ValueError("a merge takes at least two sequence runs")
+    parent = load(parent_path)
     loaded = [(run_dir, *_piece(run_dir)) for run_dir in pieces]
-    first_dir, first, _, base = loaded[0]
+    first_dir, first, _, _ = loaded[0]
     head = first["params"]
-    for run_dir, manifest, _, plan in loaded[1:]:
+    for run_dir, manifest, _, _ in loaded[1:]:
         params = manifest["params"]
         for what, keys in SHARED.items():
             if any(params[k] != head[k] for k in keys):
@@ -1295,13 +1331,32 @@ def merge_run(
                 raise ValueError(f"{run_dir.name} and {first_dir.name} ran different {library}")
         if manifest["producer"] != first["producer"] or params["code"] != head["code"]:
             raise ValueError(f"{run_dir.name} and {first_dir.name} ran different code")
-        if _bare(plan) != _bare(base):
+        mine, theirs = params["runtime"], head["runtime"]
+        if mine["capability"] != theirs["capability"]:
             raise ValueError(
-                f"{run_dir.name} and {first_dir.name}: the plans differ in more than "
-                + ", ".join(VARYING)
+                f"{run_dir.name} and {first_dir.name} ran torch at different CPU capabilities"
             )
+        if mine["pins"] != theirs["pins"]:
+            raise ValueError(
+                f"{run_dir.name} and {first_dir.name} set different instruction-set pins"
+            )
+    ladder_plan = {"file": parent.ladder_path.name, "sha256": store.sha256(parent.ladder_path)}
+    if head["ladder_plan"] != ladder_plan:
+        raise ValueError(f"{first_dir.name} read a different ladder plan from the parent plan's")
     owner: dict[str, Path] = {}
     for run_dir, manifest, _, plan in loaded:
+        if _bare(plan) != _bare(parent):
+            raise ValueError(
+                f"{run_dir.name}: its plan differs from the parent plan in more than "
+                + ", ".join(VARYING)
+            )
+        for key in VARYING:
+            extra = sorted(set(getattr(plan, key)) - set(getattr(parent, key)))
+            if extra:
+                raise ValueError(
+                    f"{run_dir.name} fitted {key} the parent plan lacks: "
+                    + ", ".join(map(str, extra))
+                )
         mine = cells(plan)
         if set(manifest["params"]["encoders"]) != mine:
             raise ValueError(f"{run_dir.name}: its saved models are not every cell of its plan")
@@ -1309,21 +1364,15 @@ def merge_run(
             if key in owner:
                 raise ValueError(f"{key} is in both {owner[key].name} and {run_dir.name}")
             owner[key] = run_dir
-    plan = replace(
-        base,
-        variants=tuple(sorted({v for *_, p in loaded for v in p.variants})),
-        seeds=tuple(sorted({s for *_, p in loaded for s in p.seeds})),
-        folds=tuple(sorted({f for *_, p in loaded for f in p.folds})),
-    )
-    missing = sorted(cells(plan) - set(owner))
+    missing = sorted(cells(parent) - set(owner))
     if missing:
         raise ValueError(
-            f"no run fitted {len(missing)} cells of the merged plan: {missing[0]}, ..."
+            f"no run fitted {len(missing)} cells of the parent plan: {missing[0]}, ..."
         )
-    ladder_text = (first_dir / "ladder.toml").read_text(encoding="utf-8")
-    text = _plan_text((first_dir / "plan.toml").read_text(encoding="utf-8"), plan, ladder_text)
+    text = parent_path.read_text(encoding="utf-8")
+    ladder_text = parent.ladder_path.read_text(encoding="utf-8")
 
-    cell, rung = cell_order(plan), rung_order(plan)
+    cell, rung = cell_order(parent), rung_order(parent)
     merged: dict[str, list[dict[str, Any]]] = {"diagnostics": [], "curves": [], "folds": []}
     rungs: dict[tuple[Any, ...], dict[str, Any]] = {}
     accounting: list[dict[str, Any]] | None = None
@@ -1348,31 +1397,36 @@ def merge_run(
     encoders = {key: (owner[key] / key).read_bytes() for key in sorted(owner)}
     source = {k: head[k] for k in ("inputs_run", "inputs", "labels_run", "labels_grid")}
     piece_seconds = sum(c["checks"]["seconds"] for _, _, c, _ in loaded)
-    plan_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     run_params = {
         **source,
-        "plan": {"file": "plan.toml", "sha256": plan_sha},
-        "ladder_plan": head["ladder_plan"],
+        "plan": {"file": parent_path.name, "sha256": store.sha256(parent_path)},
+        "ladder_plan": ladder_plan,
         "torch": head["torch"],
         "numpy": head["numpy"],
+        "runtime": {k: head["runtime"][k] for k in ("capability", "pins")},
         "threads": head["threads"],
         "code": head["code"],
         "pieces_producer": first["producer"],
         "encoders": {k: hashlib.sha256(v).hexdigest() for k, v in encoders.items()},
         "sources": [
-            {"run": m["run_id"], "manifest_sha256": store.sha256(d / "manifest.json")}
+            {
+                "run": m["run_id"],
+                "manifest_sha256": store.sha256(d / "manifest.json"),
+                "cpu": m["params"]["runtime"]["cpu"],
+            }
             for d, m, _, _ in loaded
         ],
     }
     out = {**merged, "skipped": skipped}
     names = ", ".join(f"`{m['run_id']}`" for _, m, _, _ in loaded)
     texts = {
-        "report.md": report(out, plan, source, piece_seconds)
+        "report.md": report(out, parent, source, piece_seconds)
         + f"\nMerged from {names}; the wall time is the sum of theirs.\n",
         "plan.toml": text,
         "ladder.toml": ladder_text,
     }
     tables = {name: pa.Table.from_pylist(rows) for name, rows in merged.items()}
+    tables["curves"] = curve_table(merged["curves"])
     tables["rows"] = pa.Table.from_pylist(accounting or [])
     seconds = time.perf_counter() - began
     checks = {"seconds": round(seconds, 1), "pieces_seconds": piece_seconds, "skipped": skipped}

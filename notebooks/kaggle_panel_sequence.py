@@ -27,22 +27,29 @@ the dry run (tp-panel-seq-dry), each this file with its job embedded and a kerne
 private, CPU, internet on (to fetch the code and the pinned packages). `kaggle kernels push -p
 <folder>` starts one. A piece is the shipped plan (panel/sequence.toml) with its variants, seeds
 and folds cut to one variant, one seed and three folds; the twelve pieces are every cell of the
-full plan once, so `python -m tipping_point.panel merge` joins them into the full run.
+full plan once, so `python -m tipping_point.panel merge`, whose parent plan is the shipped plan
+by default, joins them into the full run and refuses any set that misses or adds a cell.
 
 Every kernel clones the public repository at the job's commit and refuses to run unless that
 checkout's HEAD is the commit and it is clean. It runs from that checkout, so each run's manifest
 records the commit (producer.git_sha) and the sha256 of its uv.lock, in a Python 3.13 environment
 of torch 2.14.1+cpu and uv.lock's numpy and pyarrow, with OMP_NUM_THREADS=2 and the plan's
-threads = 2, one process per kernel. A piece reads the private dataset tp-panel-sequence-data,
+threads = 2, one process per kernel. Every process that imports torch starts with the instruction
+set pinned to AVX2 for torch's own kernels (ATEN_CPU_CAPABILITY=avx2), oneDNN
+(ONEDNN_MAX_CPU_ISA=AVX2) and MKL (MKL_ENABLE_INSTRUCTIONS=AVX2, MKL_CBWR=AVX2); the kernel
+refuses to run unless torch reports the AVX2 capability, and every sequence run records its CPU,
+capability and pins. A piece reads the private dataset tp-panel-sequence-data,
 which holds only the files the sequence run reads: the inputs run's manifest.json, complete.json
 and inputs.parquet, and the labels run's grid file. It writes its run to
 out/panel-sequence/<run id>/ and its log to out/logs/; `kaggle kernels output <owner>/<slug> -p
 <dir>` fetches out/. out/STATUS holds one line: running, complete or failed.
 
 The dry run reads no dataset. On a synthetic panel whose labels are planted on one input, it runs
-two pieces of a small plan, merges them, scores the merged run, and then times a fixed number of
-JEPA and supervised steps at the shipped plan's shapes on 30 synthetic coins (out/dry.json).
-`local-dry` runs the same steps on this machine in the current environment, for the speed ratio.
+two pieces of a small plan, merges them against that plan, scores the merged run, and then times
+a fixed number of JEPA and supervised steps at the shipped plan's shapes on 30 synthetic coins
+(out/dry.json). `local-dry` runs the same steps on this machine in the current environment, for
+the speed ratio; it needs a clean checkout, since the merge refuses runs made from uncommitted
+code.
 """
 JOB_JSON: str | None = None
 
@@ -62,6 +69,20 @@ SEEDS = (1, 2, 3)
 FOLD_GROUPS = ((2, 3, 4), (5, 6, 7))
 BENCH = {"coins": 30, "hours": 3000, "jepa_steps": 60, "supervised_steps": 60}
 COMMIT = re.compile(r"[0-9a-f]{40}")
+PINS = {
+    "ATEN_CPU_CAPABILITY": "avx2",
+    "ONEDNN_MAX_CPU_ISA": "AVX2",
+    "MKL_ENABLE_INSTRUCTIONS": "AVX2",
+    "MKL_CBWR": "AVX2",
+}
+CAPABILITY = "AVX2"
+ISA_PROBE = """import torch
+torch.set_num_threads(2)
+x = torch.randn(4, 8, 64)
+torch.nn.functional.conv1d(x, torch.randn(8, 8, 3))
+a = torch.randn(256, 256)
+print(float((a @ a).sum()))
+"""
 
 DRY_LADDER = """start = 2022-01-01
 end = 2022-12-31
@@ -212,7 +233,7 @@ def machine() -> dict[str, Any]:
 
 
 def child_env(src: Path | None) -> dict[str, str]:
-    env = dict(os.environ, OMP_NUM_THREADS=THREADS, MKL_NUM_THREADS=THREADS)
+    env = dict(os.environ, OMP_NUM_THREADS=THREADS, MKL_NUM_THREADS=THREADS, **PINS)
     if src is not None:
         env["PYTHONPATH"] = str(src / "python" / "tipping_point" / "src")
     return env
@@ -241,11 +262,17 @@ def environment(tmp: Path, commit: str, logs: Path) -> tuple[str, Path, dict[str
         "from tipping_point.ising import io\n"
         "print(json.dumps({'code': io.code_version(), 'torch': torch.__version__,"
         " 'numpy': numpy.__version__, 'pyarrow': pyarrow.__version__,"
-        " 'threads': torch.get_num_threads()}))\n"
+        " 'threads': torch.get_num_threads(),"
+        " 'capability': torch.backends.cpu.get_cpu_capability()}))\n"
     )
     info = json.loads(run([py, "-c", probe], child_env(src)).strip().splitlines()[-1])
     if info["code"] != {"git_sha": commit, "dirty": False}:
         raise RuntimeError(f"the checkout is {info['code']}, not commit {commit} clean")
+    if info["capability"] != CAPABILITY:
+        raise RuntimeError(f"torch runs at {info['capability']}, not the pinned {CAPABILITY}")
+    verbose = dict(child_env(src), ONEDNN_VERBOSE="1", MKL_VERBOSE="1")
+    said = run([py, "-c", ISA_PROBE], verbose).splitlines()
+    info["isa_lines"] = [line for line in said if re.search(r"isa|MKL_VERBOSE oneMKL", line)][:4]
     return py, src, info
 
 
@@ -258,7 +285,12 @@ def verify(run_dir: Path, commit: str | None) -> dict[str, Any]:
     producer = manifest["producer"]
     if commit is not None and (producer["git_sha"], producer["dirty"]) != (commit, False):
         raise RuntimeError(f"{run_dir.name}: made by {producer}, not commit {commit} clean")
-    return {"run": run_dir.name, "files": len(complete["files"]), "checks": complete["checks"]}
+    runtime = manifest["params"].get("runtime")
+    pinned = runtime is not None and (runtime["capability"], runtime["pins"]) == (CAPABILITY, PINS)
+    if manifest["domain"] == "panel-sequence" and not pinned:
+        raise RuntimeError(f"{run_dir.name}: ran at {runtime}, not {CAPABILITY} with {PINS}")
+    found = {"run": run_dir.name, "files": len(complete["files"]), "checks": complete["checks"]}
+    return found | ({"runtime": runtime} if runtime else {})
 
 
 def new_run(folder: Path, before: set[str]) -> Path:
@@ -336,7 +368,7 @@ def write_synthetic(data: Path) -> None:
         "end": "2022-12-31",
     }
     run_dir = store.write(data, "panel-inputs", "synthetic", {"inputs": table}, params, {})
-    for name, folds in (("a", "[2]"), ("b", "[3]")):
+    for name, folds in (("a", "[2]"), ("b", "[3]"), ("parent", "[2, 3]")):
         folder = data / "plans" / name
         folder.mkdir(parents=True)
         (folder / "ladder.toml").write_text(DRY_LADDER, encoding="utf-8")
@@ -402,7 +434,9 @@ def dry_steps(py: str, script: Path, env: dict[str, str], data: Path, logs: Path
         found[name] = verify(new_run(runs, before), None)
     before = {p.name for p in runs.iterdir()}
     pair = [runs / found["a"]["run"], runs / found["b"]["run"]]
-    run([*panel, "merge", "--runs", *pair, "--data-dir", data], env, logs / "dry.log")
+    parent = data / "plans" / "parent" / "sequence.toml"
+    argv = [*panel, "merge", "--runs", *pair, "--plan", parent, "--data-dir", data]
+    run(argv, env, logs / "dry.log")
     found["merged"] = verify(new_run(runs, before), None)
     argv = [*panel, "scores", "--sequence", found["merged"]["run"], "--model", "jepa"]
     run([*argv, "--variant", "vol", "--data-dir", data], env, logs / "dry.log")
@@ -512,7 +546,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("write")
     p.add_argument("--commit", required=True)
     p.add_argument("--out", type=Path, required=True)
-    sub.add_parser("local-dry").add_argument("root", type=Path)
+    local = sub.add_parser("local-dry", help="the dry run's steps here; needs a clean checkout")
+    local.add_argument("root", type=Path)
     sub.add_parser("synthetic").add_argument("data", type=Path)
     sub.add_parser("bench")
     args = parser.parse_args(argv)

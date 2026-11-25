@@ -63,6 +63,8 @@ def test_the_kernel_folders_carry_their_commit_and_piece(tmp_path: Path) -> None
         assert job["mode"] == ("dry" if dry else "piece")
         if not dry:
             assert k.slug(job["piece"]) == name
+    env = k.child_env(None)
+    assert set(k.PINS) == set(sequence.PINS) and all(env[n] == v for n, v in k.PINS.items())
     with pytest.raises(SystemExit, match="not empty"):
         k.write(COMMIT, out)
     with pytest.raises(SystemExit, match="40 hex"):

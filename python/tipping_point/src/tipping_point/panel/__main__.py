@@ -126,6 +126,12 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("merge", help="one sequence run from runs that split a plan's cells")
     p.add_argument("--runs", nargs="+", required=True, help="sequence run ids, or their folders")
+    p.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        help="the plan the runs split (default panel/sequence.toml); they must fit all its cells",
+    )
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--tag", default="merged", help="the run id's tag (default merged)")
     p.set_defaults(command=_merge)
@@ -274,6 +280,7 @@ def _merge(args: argparse.Namespace) -> int:
 
     run_dir, out = sequence.merge_run(
         [_run_dir(args.data_dir, "panel-sequence", name) for name in args.runs],
+        args.plan or sequence.PLAN,
         args.data_dir,
         args.tag,
         log=lambda line: print(line, flush=True),

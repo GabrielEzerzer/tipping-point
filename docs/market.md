@@ -925,13 +925,28 @@ One rule picks the configuration of the JEPA and of the twin, for each model and
 readout and c with the highest mean of the long and the short fold-mean AUCs at 24 hours under
 `forward`, where each fold's AUC is first averaged over seeds. Ties go to the earlier readout (in
 the order `last`, `means`, `spreads`) and then to the smaller c. The supervised model has no
-configuration to choose.
+configuration to choose. The rule ranks by the mean over seeds of each seed's AUC, while the scores
+file below holds the mean over seeds of the logit, whose AUC can differ, so the rule is a surrogate
+for the exported score's AUC. It is kept because it needs only the folds table, which holds every
+seed's AUC, where the exported score's AUC would need every readout and c refitted and scored; and
+on the classical side, which has no seeds, the two are the same number, so one rule chooses both
+sides.
 
 The configuration is chosen on the development span's own out-of-fold scores, so the chosen
 configuration's development score is optimistic and is not evidence for it. Before any comparison
 on held-back data, the classical comparator has to be chosen by the same rule from a fixed grid of
 penalties; the ladder does not do this yet, since its rungs use one penalty (issue #224). A
 comparison between them counts only on data that neither side's choice has seen.
+
+The two sides also see different inputs. A rung is a logistic on one row of the inputs table at
+hour t. Its columns summarise at most the last 28 days (8,064 five-minute bars, 672 hours: `vol_28d`,
+`ret_28d`, `dd_28d`, `ru_28d` and `oi_vs_28d`, and the 28-day references of `vsurge_1h`,
+`volume_24h`, `funding_rel` and `ls_rel`), but only as those fixed statistics. A sequence model sees
+the 336 hourly rows up to t and which of them are missing, so it could win on the window's shape
+rather than on what pretraining learned. Before any comparison on held-back data, the classical
+comparator will therefore also include a logistic on plain statistics of the same 336-hour windows
+(the last value, the means and spreads over the readouts' spans and the share missing), chosen by
+the same rule (issue #224). Nothing builds it yet.
 
 `python -m tipping_point.panel scores --sequence <run> --model <jepa|twin|supervised> --variant <v>`
 writes the out-of-fold scores of one model and variant. For the JEPA and the twin it applies the
@@ -953,24 +968,41 @@ hashing or reading them.
 A plan's cells (variant, fold and seed, each fitting every model) draw their seeds from the cell
 alone, so a sequence run whose plan keeps only some variants, seeds and folds fits exactly those
 cells of the full run, and the run can be split across machines.
-`python -m tipping_point.panel merge --runs <run> <run> ...` joins such runs into one sequence run
-that `scores` reads like any other. It refuses runs whose plans differ in anything but `variants`,
-`seeds` and `folds`; that read different inputs tables, labels grids or ladder plans; that ran
-different code (commit and `uv.lock`) or different torch or numpy versions, which every sequence
-run records; that were made by code with uncommitted changes or no recorded commit; whose saved
-models are not exactly their own plan's cells, or whose manifest's model sha256 values differ from
-`complete.json`'s; that fit a cell twice or leave a cell of the merged plan unfitted; that
-`complete.json` does not mark clean; and any file whose sha256 differs from its run's
-`complete.json`. A sequence run writes its rows ordered by variant name, scheme, fold and seed,
-and its rung rows by horizon, scheme, rung, side and fold, whatever order the plan lists them in,
-so the merged run's tables, which follow the same order, equal those of the single run of the
-merged plan. The merged plan lists its variants by name. It holds one copy of the rung rows and
-row accounting, which every source run must agree on (a missing AUC agrees with a missing AUC),
-the merged plan and every saved model, and its manifest lists the source runs with their
-manifests' sha256.
+`python -m tipping_point.panel merge --runs <run> <run> ... --plan <sequence.toml>` joins such
+runs into one sequence run that `scores` reads like any other. `--plan` is the parent plan, the
+plan the runs split (by default the shipped `panel/sequence.toml`), and the merged run's plan is
+that file. The merge refuses runs whose plans differ from the parent's in anything but `variants`,
+`seeds` and `folds`, or list a variant, seed or fold the parent lacks; that fit a cell twice or
+leave a cell of the parent unfitted; that read different inputs tables, labels grids or ladder
+plans, or a ladder plan other than the parent's; that ran different code (commit and `uv.lock`),
+different torch or numpy versions, or torch at a different CPU capability or under different
+instruction-set pins, which every sequence run records with its CPU model; that were made by code
+with uncommitted changes or no recorded commit; whose saved models are not exactly their own plan's
+cells, or whose manifest's model sha256 values differ from `complete.json`'s; that `complete.json`
+does not mark clean; and any file whose sha256 differs from its run's `complete.json`. A sequence
+run writes its rows ordered by variant name, then scheme, fold and seed, and its rung rows by
+horizon, scheme, rung, side and fold. Variants, seeds and folds take a fixed order whatever order
+the plan lists them in; schemes and rungs follow the plan's lists, which the parent fixes. So the
+merged run's tables equal those of the single run of the parent plan. The merged run holds one copy
+of the rung rows and row accounting, which every source run must agree on (a missing AUC agrees
+with a missing AUC), the parent plan and every saved model. Its manifest lists the source runs with
+their manifests' sha256 and CPU models.
+
+A merged run equals the single run on one machine: the tests merge split runs into tables, scores
+and saved models identical to the single run's. Across CPU models that equality is not guaranteed,
+even with the instruction set pinned. The Kaggle script starts every process with torch's own
+kernels, oneDNN and MKL pinned to AVX2 (`ATEN_CPU_CAPABILITY=avx2`, `ONEDNN_MAX_CPU_ISA=AVX2`,
+`MKL_ENABLE_INSTRUCTIONS=AVX2`, `MKL_CBWR=AVX2`). oneDNN honours its pin only if it was built to,
+MKL only on Intel CPUs, and the merge refuses differing capabilities or pins but not differing CPU
+models. Such differences start at rounding level in each step and grow through training like a
+change of seed. The three models of a cell (the JEPA, its twin and the supervised model) always
+train in one piece, so no arm is favoured. `scores` and any later test read the saved models' bytes,
+whose sha256 the manifest records.
 The merge reads no data table: its sources' tables carry no time column and are checked by sha256
 instead, and `scores` checks the inputs and the grid as for any sequence run.
 `uv run python notebooks/kaggle_panel_sequence.py write --commit <hash> --out <dir>` writes the
 shipped plan as twelve Kaggle CPU kernels (one variant, one seed and three folds each, every cell
 once), each running a clean checkout of the pushed commit, and a dry-run kernel that runs two
-pieces, their merge and scores on a synthetic panel; the script's `--help` is its manual.
+pieces, their merge and scores on a synthetic panel. Its `local-dry` runs the dry kernel's steps on
+this machine and needs a clean checkout, since the merge refuses runs made from uncommitted code.
+The script's `--help` is its manual.

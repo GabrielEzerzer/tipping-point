@@ -291,10 +291,10 @@
     },
     {
       "name": "Panel sequence merge",
-      "description": "Joins sequence runs whose plans differ only in variants, seeds and folds into one run that the scores command reads, after checking that they read the same inputs, labels grid, ladder plan, code and library versions and fitted every cell of the merged plan once.",
-      "command": "uv run python -m tipping_point.panel merge --runs <run id> <run id> ...",
+      "description": "Joins sequence runs that split a parent plan (by default the shipped one) into one run that the scores command reads, after checking that their plans differ from the parent only in variants, seeds and folds, that they fitted every cell of the parent once and no other, and that they read the same inputs, labels grid and ladder plan and ran the same code, library versions, CPU capability and instruction-set pins.",
+      "command": "uv run python -m tipping_point.panel merge --runs <run id> <run id> ... --plan <sequence.toml>",
       "inputs": "two or more completed panel sequence runs",
-      "outputs": "<data dir>/panel-sequence/<run_id>/ holding the merged diagnostics, curves, folds and rows tables, report.md, the merged plan and every saved model, with the source runs and their manifests' sha256 in the manifest",
+      "outputs": "<data dir>/panel-sequence/<run_id>/ holding the merged diagnostics, curves, folds and rows tables, report.md, the parent plan and every saved model, with the source runs, their manifests' sha256 and their CPU models in the manifest",
       "test": "python/tipping_point/tests/panel/test_sequence.py"
     },
     {
@@ -624,7 +624,7 @@
   "internal": [
     {
       "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py local-dry <empty dir>",
-      "reason": "the dry-run kernel's steps on this machine, for the speed ratio against Kaggle"
+      "reason": "the dry-run kernel's steps on this machine, for the speed ratio against Kaggle; needs a clean checkout, since its merge step refuses runs made from uncommitted code"
     },
     {
       "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py synthetic <dir>",
