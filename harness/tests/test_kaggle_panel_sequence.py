@@ -150,7 +150,9 @@ def test_a_piece_is_complete_only_with_exactly_its_cells_and_nothing_skipped(
     k = runner()
     cells = {"encoders/vol-forward-fold2-seed1-jepa.pt", "encoders/vol-forward-fold2-seed1-twin.pt"}
 
-    def piece(name: str, encoders: set[str], skipped: list[str], absent: str = "") -> Path:
+    def piece(
+        name: str, encoders: set[str], skipped: list[str], absent: str = "", null: bool = False
+    ) -> Path:
         run_dir = tmp_path / name
         run_dir.mkdir()
         (run_dir / "table.parquet").write_bytes(b"rows")
@@ -160,7 +162,11 @@ def test_a_piece_is_complete_only_with_exactly_its_cells_and_nothing_skipped(
             (run_dir / e).write_bytes(e.encode())
             files[e] = k.sha256(run_dir / e)
         runtime = {"cpu": "a cpu", "capability": k.CAPABILITY, "pins": k.PINS}
-        digests = {e: hashlib.sha256(e.encode()).hexdigest() for e in encoders}
+        digests: dict[str, str | None] = {
+            e: hashlib.sha256(e.encode()).hexdigest() for e in encoders
+        }
+        if null:
+            digests[absent] = None
         manifest = {
             "domain": "panel-sequence",
             "producer": {"git_sha": COMMIT, "dirty": False},
@@ -178,6 +184,8 @@ def test_a_piece_is_complete_only_with_exactly_its_cells_and_nothing_skipped(
         k.verify(piece("skipping", cells, ["vol forward fold 2 24 h: no probe row"]), COMMIT, cells)
     with pytest.raises(RuntimeError, match="not among its verified files"):
         k.verify(piece("absent", cells, [], absent=sorted(cells)[0]), COMMIT, cells)
+    with pytest.raises(RuntimeError, match="not among its verified files"):
+        k.verify(piece("null", cells, [], absent=sorted(cells)[0], null=True), COMMIT, cells)
 
 
 def test_the_pinned_packages_are_uv_lock_s() -> None:

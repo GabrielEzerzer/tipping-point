@@ -342,7 +342,8 @@ def verify(run_dir: Path, commit: str | None, cells: set[str] | None = None) -> 
     encoders = manifest["params"].get("encoders", {})
     if cells is not None and set(encoders) != cells:
         raise RuntimeError(f"{run_dir.name}: its saved models are not exactly its plan's cells")
-    if cells is not None and any(complete["files"].get(c) != encoders[c] for c in cells):
+    files = complete["files"]
+    if cells is not None and any(c not in files or files[c] != encoders[c] for c in cells):
         raise RuntimeError(f"{run_dir.name}: a saved model is not among its verified files")
     if cells is not None and complete["checks"]["skipped"]:
         raise RuntimeError(f"{run_dir.name}: skipped {complete['checks']['skipped']}")

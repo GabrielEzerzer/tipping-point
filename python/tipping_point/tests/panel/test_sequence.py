@@ -1418,6 +1418,13 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
     def runtime(change: Callable[[dict], None]) -> Callable[[Path], None]:
         return manifest(lambda m: change(m["params"]["runtime"]))
 
+    def unlisted(copy: Path) -> None:
+        record = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
+        key = next(iter(record["params"]["encoders"]))
+        encoders(lambda e: e.update({key: None}))(copy)
+        complete(lambda r, d: r["files"].pop(key))(copy)
+        (copy / key).unlink()
+
     def grow(copy: Path) -> None:
         key = next(
             iter(json.loads((copy / "manifest.json").read_text("utf-8"))["params"]["encoders"])
@@ -1469,6 +1476,7 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
             altered("digests", encoders(lambda e: e.update({next(iter(e)): "0" * 64}))),
             "model sha256 values differ",
         ),
+        "unlisted": (altered("unlisted", unlisted), "model sha256 values differ"),
         "models": (
             altered("models", encoders(lambda e: e.pop(next(iter(e))))),
             "saved models are not every cell",

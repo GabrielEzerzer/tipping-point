@@ -1316,7 +1316,7 @@ def _piece(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Plan]:
         if store.sha256(run_dir / name) != digest:
             raise ValueError(f"{run_dir / name}: its sha256 differs from complete.json's")
     params = manifest["params"]
-    if any(files.get(key) != digest for key, digest in params["encoders"].items()):
+    if any(key not in files or files[key] != digest for key, digest in params["encoders"].items()):
         raise ValueError(
             f"{run_dir}: its manifest's model sha256 values differ from complete.json's"
         )
