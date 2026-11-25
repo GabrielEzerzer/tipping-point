@@ -85,8 +85,8 @@ def needed_gap_ns(horizons: Sequence[int]) -> int:
     return inputs.LOOKBACK_NS + longest + labels.LEAD_NS + labels.PAST_HOURS * labels.HOUR_NS
 
 
-def load(path: Path = PLAN) -> Plan:
-    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+def load(path: Path = PLAN, text: str | None = None) -> Plan:
+    raw = tomllib.loads(path.read_text(encoding="utf-8") if text is None else text)
     external = raw.get("external")
     plan = Plan(
         start=raw["start"],

@@ -37,6 +37,21 @@ Command line: python -m tipping_point.panel <command> [options]
           forward only), with a joint block bootstrap for each comparison, as a run in
           <data dir>/panel-ladder/<run_id>/ with the tables oof, scores, folds, comparisons and
           rows, and report.md
+  sequence
+          train the sequence models of a plan file (--plan, default panel/sequence.toml) on an
+          inputs run (--inputs): a JEPA, its untrained twin and a supervised model on the last
+          336 hours of a ladder rung's inputs, inside each quarter fold, with logistic probes on
+          the JEPA's and twin's readouts over a grid of readouts and penalties, as a run in
+          <data dir>/panel-sequence/<run_id>/ with the tables diagnostics, curves, folds and rows,
+          report.md and every fitted model under encoders/
+  scores  out-of-fold scores of one model and variant of a sequence run (--sequence, --model,
+          --variant) from its saved models, the JEPA's and twin's readout and penalty chosen from
+          the run's folds table by the selection rule, the mean over seeds of each row's logit, as
+          a run in <data dir>/panel-scores/<run_id>/ with one table per scheme in the columns a
+          ladder plan's [external] section reads
+  merge   one sequence run from several (--runs) whose plans differ only in variants, seeds and
+          folds and which together fit every cell of the merged plan once, as a run in
+          <data dir>/panel-sequence/<run_id>/ that scores reads like any sequence run
 
 Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
 data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
@@ -93,6 +108,33 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--tag", default="ladder", help="the run id's tag (default ladder)")
     p.set_defaults(command=_ladder)
+
+    p = sub.add_parser("sequence", help="train and score a plan's sequence models on an inputs run")
+    p.add_argument("--inputs", required=True, help="an inputs run id, or its folder")
+    p.add_argument("--plan", type=Path, default=None, help="default panel/sequence.toml")
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    p.add_argument("--tag", default="sequence", help="the run id's tag (default sequence)")
+    p.set_defaults(command=_sequence)
+
+    p = sub.add_parser("scores", help="score one configuration of a sequence run")
+    p.add_argument("--sequence", required=True, help="a sequence run id, or its folder")
+    p.add_argument("--model", required=True, choices=("jepa", "twin", "supervised"))
+    p.add_argument("--variant", required=True)
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    p.add_argument("--tag", default="scores", help="the run id's tag (default scores)")
+    p.set_defaults(command=_scores)
+
+    p = sub.add_parser("merge", help="one sequence run from runs that split a plan's cells")
+    p.add_argument("--runs", nargs="+", required=True, help="sequence run ids, or their folders")
+    p.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        help="the plan the runs split (default panel/sequence.toml); they must fit all its cells",
+    )
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    p.add_argument("--tag", default="merged", help="the run id's tag (default merged)")
+    p.set_defaults(command=_merge)
     return parser
 
 
@@ -196,6 +238,54 @@ def _ladder(args: argparse.Namespace) -> int:
         log=lambda line: print(line, flush=True),
     )
     print(f"{out['seconds'] / 60:.1f} minutes")
+    print(run_dir)
+    return 0
+
+
+def _sequence(args: argparse.Namespace) -> int:
+    from . import sequence
+
+    run_dir, out = sequence.run(
+        _run_dir(args.data_dir, "panel-inputs", args.inputs),
+        args.data_dir,
+        args.plan or sequence.PLAN,
+        args.tag,
+        log=lambda line: print(line, flush=True),
+    )
+    print(f"{out['seconds'] / 60:.1f} minutes")
+    print(run_dir)
+    return 0
+
+
+def _scores(args: argparse.Namespace) -> int:
+    from . import sequence
+
+    run_dir, out = sequence.scores_run(
+        _run_dir(args.data_dir, "panel-sequence", args.sequence),
+        args.data_dir,
+        args.model,
+        args.variant,
+        args.tag,
+        log=lambda line: print(line, flush=True),
+    )
+    for scheme, table in out["tables"].items():
+        print(f"{scheme}: {table.num_rows} rows")
+    print(f"{out['seconds'] / 60:.1f} minutes")
+    print(run_dir)
+    return 0
+
+
+def _merge(args: argparse.Namespace) -> int:
+    from . import sequence
+
+    run_dir, out = sequence.merge_run(
+        [_run_dir(args.data_dir, "panel-sequence", name) for name in args.runs],
+        args.plan or sequence.PLAN,
+        args.data_dir,
+        args.tag,
+        log=lambda line: print(line, flush=True),
+    )
+    print(f"{len(out['folds'])} fold rows")
     print(run_dir)
     return 0
 

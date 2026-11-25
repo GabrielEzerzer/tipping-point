@@ -1,0 +1,61 @@
+ladder = "ladder.toml"
+variants = ["full", "vol"]
+rungs = ["full", "vol", "classic"]
+models = ["jepa", "twin", "supervised"]
+schemes = ["forward"]
+seeds = [1, 2, 3]
+folds = []
+target = "future"
+threads = 2
+
+[window]
+length = 336
+future = 24
+shifts = [6, 24]
+
+[encoder]
+patch = 4
+width = 32
+conv_blocks = 2
+attention_blocks = 2
+heads = 4
+kernel = 7
+expansion = 4
+
+[predictor]
+hidden = 64
+
+[jepa]
+steps = 3000
+batch = 256
+lr = 1e-3
+final_lr = 1e-5
+warmup = 200
+weight_decay = 0.05
+curve_every = 50
+momentum_start = 0.996
+momentum_end = 1.0
+prediction = 1.0
+objective = "predictor"
+variance = 0.5
+covariance = 0.02
+
+[supervised]
+steps = 3000
+batch = 256
+lr = 3e-4
+final_lr = 1e-5
+warmup = 200
+weight_decay = 0.1
+curve_every = 50
+dropout = 0.2
+
+[selection]
+share = 0.2
+every = 100
+negatives = 8000
+
+[probe]
+batch = 2048
+readouts = ["last", "means", "spreads"]
+c = [0.0001, 0.0003, 0.001, 0.01, 0.1, 1.0]

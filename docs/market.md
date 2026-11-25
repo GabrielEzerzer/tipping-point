@@ -877,3 +877,154 @@ checks the sha256 of the grid and the thresholds, and `ladder` that of the grid 
 table, against the run that wrote each, and both refuse a run its `complete.json` does not mark
 clean. The external file's sha256 is not checked against anything: the run records it in its
 manifest.
+
+`python -m tipping_point.panel sequence --inputs <run> --plan <sequence.toml>` fits sequence models
+on the same common rows as the ladder, whose plan it reads (`ladder.toml`). Each row's input is the
+last 336 hourly rows of a rung's inputs plus the share of them missing, cut into 4-hour patches and
+encoded by two causal ConvNeXt-style blocks and two causal attention blocks with rotary relative
+positions, so a lag means the same on the 84-token window and the 6-token target. The JEPA predicts
+the target encoder's tokens of the next 24 hours. Its objective (`objective = "predictor"`) puts
+variance and covariance terms, weighted 0.5 and 0.02, on the predicted tokens, and the target
+encoder's moving-average momentum rises from 0.996 to 1.0. On synthetic panels with a planted
+24-hour chirp, the objective that put those terms on z instead left the planted signal unlearned
+(probe AUC 0.52, against 0.995 for this one). The JEPA's untrained twin is its encoder before the
+first step. A supervised model with the same encoder predicts the six labels directly. Every fold
+fits its own models, scales and probes, under the plan's `schemes` (`forward` by default; `loqo`
+also works). The scales (each input's mean and standard deviation) are computed on all of the
+fold's training hours. The models and probes train on rows whose 336 hours back and 24 hours ahead
+all lie in the fold's training hours inside the plan's span, so the last 24 hours of each stretch
+of training hours, whose next 24 hours leave it, and the first 335 hours after each break are
+dropped. The probes and the supervised model use only common rows; JEPA pretraining reads every
+coin at every such hour, whether or not the row is a common row, since it reads no label. Test rows
+are every common row of the left-out quarter; one in the grid's first 335 hours reads padding,
+marked as missing. The supervised model's step count is chosen on the last fifth of a fold's
+training hours, trained on hours a gap before that block, and then refitted on every training row
+under the same learning-rate schedule, stopped at the chosen step. Each check scores a fixed sample
+of that block's common rows with both 24-hour labels uncensored: every row that is positive on
+either side, and at most 8,000 (`negatives`) of the rows negative on both, drawn at random with a
+seed. Scoring one side, the other side's positives count among its negatives at the same rate as
+the rows negative on both, so the sample's negatives are drawn alike. The check's AUC is the mean of
+the long and the short 24-hour AUCs.
+Seeds are drawn per variant, fold, seed and stream; the twin shares the JEPA's initial weights. The
+24-hour target, 4-hour patches, the 336-hour window and kernel 7 were kept: the padded start of the
+target's segment is the same regime as the window's first tokens, and the probes read the online
+encoder.
+
+Logistic probes read the JEPA and the twin through the same readouts, which take no label and fit
+nothing: `last` is the last token (32 values); `means` adds the means of the last 6, the last 18 and
+all 84 tokens (128 values); `spreads` adds the population standard deviations over the same spans
+(224 values). Each readout is standardised on the fold's training rows and probed at every penalty
+c of the plan's grid (0.0001, 0.0003, 0.001, 0.01, 0.1 and 1.0). The ladder's rungs keep their one
+c, 0.01. The run writes the AUC of every fold, model, variant, readout, c, seed, horizon and side to
+its folds table, where the supervised model has no readout or c. It saves every fitted model (the
+JEPA's online encoder, the twin and the supervised model of each variant, fold and seed) under
+`encoders/`, with each file's sha256 in the manifest and in `complete.json`. It writes no
+out-of-fold scores.
+
+One rule picks the configuration of the JEPA and of the twin, for each model and variant: the
+readout and c with the highest mean of the long and the short fold-mean AUCs at 24 hours under
+`forward`, where each fold's AUC is first averaged over seeds. Ties go to the earlier readout (in
+the order `last`, `means`, `spreads`) and then to the smaller c. The supervised model has no
+configuration to choose. The rule ranks by the mean over seeds of each seed's AUC, while the scores
+file below holds the mean over seeds of the logit, whose AUC can differ, so the rule is a surrogate
+for the exported score's AUC. It is kept because it needs only the folds table, which holds every
+seed's AUC, where the exported score's AUC would need every readout and c refitted and scored; and
+on the classical side, which has no seeds, the two are the same number, so one rule chooses both
+sides.
+
+The configuration is chosen on the development span's own out-of-fold scores, so the chosen
+configuration's development score is optimistic and is not evidence for it. Before any comparison
+on held-back data, the classical comparator has to be chosen by the same rule from a fixed grid of
+penalties; the ladder does not do this yet, since its rungs use one penalty (issue #224). A
+comparison between them counts only on data that neither side's choice has seen.
+
+The two sides also see different inputs. A rung is a logistic on one row of the inputs table at
+hour t, whose columns are fixed statistics of what came before t, of two kinds. Rolling windows
+reach 28 days back plus their carries: 8,064 five-minute bars (672 hours) for `dd_28d`, `ru_28d`
+and the 28-day references of `vsurge_1h` and `volume_24h`; one bar more for `vol_28d`, whose first
+return needs the close before the window, and for `ret_28d`'s starting price; up to 8,075 bars for
+`oi_vs_28d`, whose 8,064 snapshots end at t and each hold the last open interest, carried up to 12
+bars forward; up to 8,076 bars for `ls_rel`, whose 8,064 ratios before t are carried the same way;
+and up to 680 hours for `funding_rel`, whose 28-day reference averages hourly funding rates that
+each hold the last posted rate, carried up to 8 hours forward. Fitted thresholds reach further.
+The volatility-scaled columns
+(`vol_1h` to `vol_28d`) divide by `sd_ret` and `near_24h` divides by `b`, the labels run's daily
+thresholds for t's UTC day. Each is fitted on the 30-minute price changes of the 90 days before
+that day, so its values reach about 91 days before t. Whether a day has a threshold at all also
+depends on whether each of those windows has volume in the 28 days before it, which reaches about
+119 days before t. A sequence model sees
+the 336 hourly rows up to t and which of them are missing, so it could win on the window's shape
+rather than on what pretraining learned. Before any comparison on held-back data, the classical
+comparator will therefore also include a logistic on plain statistics of the same 336-hour windows
+(the last value, the means and spreads over the readouts' spans and the share missing), chosen by
+the same rule (issue #224). Nothing builds it yet.
+
+`python -m tipping_point.panel scores --sequence <run> --model <jepa|twin|supervised> --variant <v>`
+writes the out-of-fold scores of one model and variant. For the JEPA and the twin it applies the
+rule above to the run's folds table and writes the chosen readout and c, with the rule's value, to
+its manifest. It reloads the sequence run's saved models after checking each file's sha256 against
+the run's manifest and `complete.json`, refits the probe of each fold and seed on the same
+training rows, and writes one Parquet file per scheme to `<data dir>/panel-scores/<run_id>/` in the
+columns an `[external]` entry reads. A row's score is the mean over seeds of the probe's logit (for
+the supervised model, of its own logit), and its `any` score is the logit of
+1 - (1 - p_long)(1 - p_short) from those means. The file covers every scored row of the scheme with
+the ladder's folds. The command refuses a sequence run without `complete.json` or that it does not
+mark clean, a plan, ladder plan or folds table whose sha256 differs from `complete.json`'s, a model
+or variant the run did not fit, a plan whose folds leave a scored quarter unfitted, a missing or
+changed model for any seed, and an inputs table or labels grid other than the one the sequence run
+read. It writes nothing when it refuses. Like `ladder`,
+both commands check the grid's and the inputs' time bounds from their Parquet metadata before
+hashing or reading them.
+
+A plan's cells (variant, fold and seed, each fitting every model) draw their seeds from the cell
+alone, so a sequence run whose plan keeps only some variants, seeds and folds fits exactly those
+cells of the full run, and the run can be split across machines.
+`python -m tipping_point.panel merge --runs <run> <run> ... --plan <sequence.toml>` joins such
+runs into one sequence run that `scores` reads like any other. `--plan` is the parent plan, the
+plan the runs split (by default the shipped `panel/sequence.toml`), and the merged run's plan is
+that file. The merge refuses runs whose plans differ from the parent's in anything but `variants`,
+`seeds` and `folds`, or list a variant, seed or fold the parent lacks; that fit a cell twice or
+leave a cell of the parent unfitted; that read different inputs tables, labels grids or ladder
+plans, or a ladder plan other than the parent's; that ran different code (commit and `uv.lock`),
+different torch or numpy versions, or torch at a different CPU capability or under different
+instruction-set pins, which every sequence run records with its CPU model; that were made by code
+with uncommitted changes or no recorded commit; whose saved models are not exactly their own plan's
+cells, or whose manifest's model sha256 values differ from `complete.json`'s; that `complete.json`
+does not mark clean; and any file whose sha256 differs from its run's `complete.json`. A sequence
+run writes its rows ordered by variant name, then scheme, fold and seed, and its rung rows by
+horizon, scheme, rung, side and fold. Variants, seeds and folds take a fixed order whatever order
+the plan lists them in; schemes and rungs follow the plan's lists, which the parent fixes. So the
+merged run's tables equal those of the single run of the parent plan. The merged run holds one copy
+of the rung rows and row accounting, which every source run must agree on (a missing AUC agrees
+with a missing AUC), the parent plan and every saved model. Its manifest lists the source runs with
+their manifests' sha256 and CPU models.
+
+`merge` takes sequence runs only and refuses a merged run, a run whose plan fits no cell, and a
+run listed twice (by folder or run id). A merged run equals the single run on one machine, except
+for wall-clock timings (the diagnostics table's `seconds`, the report's times and
+`complete.json`'s `seconds`): the tests merge split runs into tables, scores and saved models
+identical to the single run's. Across CPU models that equality is not guaranteed, even with the
+instruction set pinned. The Kaggle script starts every process with torch's own kernels, oneDNN,
+MKL, numpy's OpenBLAS and numpy's own CPU dispatch, which run the ladder's and the probe's
+logistic fits, pinned to AVX2 (`ATEN_CPU_CAPABILITY=avx2`, `ONEDNN_MAX_CPU_ISA=AVX2`,
+`MKL_ENABLE_INSTRUCTIONS=AVX2`, `MKL_CBWR=AVX2`, `OPENBLAS_CORETYPE=Haswell`, OpenBLAS's AVX2
+core, with `OPENBLAS_NUM_THREADS=2`, and `NPY_DISABLE_CPU_FEATURES="X86_V4 AVX512_ICL
+AVX512_SPR"`, numpy's AVX512 targets; on a CPU without them numpy starts and reports them off).
+oneDNN honours its pin only if it was built to, MKL only on Intel CPUs, and the merge refuses
+differing capabilities or pins but not differing CPU models. Such differences start at rounding
+level in each step and grow through training like a change of seed.
+The three models of a cell (the JEPA, its twin and the supervised model) always
+train in one piece, so no arm is favoured. `scores` and any later test read the saved models' bytes,
+whose sha256 the manifest records.
+The merge reads no data table: its sources' tables carry no time column and are checked by sha256
+instead, and `scores` checks the inputs and the grid as for any sequence run.
+`uv run python notebooks/kaggle_panel_sequence.py write --commit <hash> --out <dir>` writes the
+shipped plan as twelve Kaggle CPU kernels (one variant, one seed and three folds each, every cell
+once), each running a clean checkout of the pushed commit, and a dry-run kernel that runs two
+pieces, their merge and scores on a synthetic panel. Each piece carries the sha256 of the inputs
+table and the labels grid from the local store's records and refuses a dataset whose files differ,
+after first refusing, from the manifest and the Parquet metadata alone, one that reaches the
+held-back span. A piece is complete only if its saved models are exactly its plan's cells, each
+among its verified files, and it skipped nothing. Its `local-dry` runs the dry kernel's steps on
+this machine and needs a clean checkout, since the merge refuses runs made from uncommitted code.
+The script's `--help` is its manual.

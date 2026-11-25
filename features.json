@@ -274,6 +274,30 @@
       "test": "python/tipping_point/tests/panel/test_ladder.py"
     },
     {
+      "name": "Panel sequence models",
+      "description": "Trains a JEPA, its untrained twin and a supervised model on the last 336 hours of a ladder rung's panel inputs inside each quarter fold, probes the JEPA's and twin's readouts over a grid of readouts and penalties on the ladder's common rows, and saves every fitted model, from a plan file.",
+      "command": "uv run python -m tipping_point.panel sequence --inputs <run id>",
+      "inputs": "a panel inputs run, its labels run and a plan file (default panel/sequence.toml, which names its ladder plan)",
+      "outputs": "<data dir>/panel-sequence/<run_id>/ holding diagnostics, loss curves, the per-fold AUC table, row accounting, report.md and the saved models under encoders/",
+      "test": "python/tipping_point/tests/panel/test_sequence.py"
+    },
+    {
+      "name": "Panel sequence scores",
+      "description": "Writes the out-of-fold scores of one model and variant of a sequence run from its saved models, choosing the JEPA's or twin's readout and penalty from the run's per-fold AUC table by the selection rule, for a ladder plan's external entry.",
+      "command": "uv run python -m tipping_point.panel scores --sequence <run id> --model <jepa|twin|supervised> --variant <variant>",
+      "inputs": "a panel sequence run, its inputs run and its labels run",
+      "outputs": "<data dir>/panel-scores/<run_id>/ holding one Parquet table per scheme with the columns coin, hour, horizon, side, score, fold and scheme",
+      "test": "python/tipping_point/tests/panel/test_sequence.py"
+    },
+    {
+      "name": "Panel sequence merge",
+      "description": "Joins sequence runs that split a parent plan (by default the shipped one) into one run that the scores command reads, after checking that their plans differ from the parent only in variants, seeds and folds, that they fitted every cell of the parent once and no other, and that they read the same inputs, labels grid and ladder plan and ran the same code, library versions, CPU capability and instruction-set pins.",
+      "command": "uv run python -m tipping_point.panel merge --runs <run id> <run id> ... --plan <sequence.toml>",
+      "inputs": "two or more completed panel sequence runs",
+      "outputs": "<data dir>/panel-sequence/<run_id>/ holding the merged diagnostics, curves, folds and rows tables, report.md, the parent plan and every saved model, with the source runs, their manifests' sha256 and their CPU models in the manifest",
+      "test": "python/tipping_point/tests/panel/test_sequence.py"
+    },
+    {
       "name": "Book feature range",
       "description": "Imports and reduces the Bybit order-book days of a range into per-day feature files.",
       "command": "uv run python -m tipping_point.market book --range training",
@@ -587,9 +611,33 @@
       "inputs": "a plan JSON",
       "outputs": "a kernel folder with --write-kernel; the checked plan with --dry-run",
       "test": "notebooks/kaggle_ising_runs_selftest.py"
+    },
+    {
+      "name": "Panel sequence Kaggle kernels",
+      "description": "Writes the panel sequence run as twelve Kaggle CPU kernels, one variant, one seed and three folds each, plus a dry-run kernel on a synthetic panel, every kernel pinned to one commit.",
+      "command": "uv run python notebooks/kaggle_panel_sequence.py write --commit <40 hex> --out <dir>",
+      "inputs": "a pushed commit",
+      "outputs": "thirteen kernel folders that kaggle kernels push takes",
+      "test": "harness/tests/test_kaggle_panel_sequence.py"
     }
   ],
   "internal": [
+    {
+      "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py local-dry <empty dir>",
+      "reason": "the dry-run kernel's steps on this machine, for the speed ratio against Kaggle; needs a clean checkout, since its merge step refuses runs made from uncommitted code"
+    },
+    {
+      "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py synthetic <dir>",
+      "reason": "run by the dry-run kernel and local-dry"
+    },
+    {
+      "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py bench",
+      "reason": "run by the dry-run kernel and local-dry"
+    },
+    {
+      "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py guard <dataset dir> <file>...",
+      "reason": "run by each piece kernel before it hashes the dataset's files"
+    },
     {
       "command": "cargo run -p engine-harness --bin crash-writer -- <run dir>",
       "reason": "test support: crash_recovery.rs kills it mid-write"
