@@ -61,15 +61,21 @@ def names(plan: sequence.Plan) -> tuple[str, ...]:
 
 
 def check(config: Config, plan: sequence.Plan) -> None:
-    known = (
-        config.model == "rung" and config.variant in plan.rungs and config.readout is None
-    ) or (
-        config.model == "window"
-        and config.variant in plan.variants
-        and config.readout in plan.readouts
-    )
-    if not known or not (np.isfinite(config.c) and config.c > 0):
+    if config not in configs(plan):
         raise ValueError(f"the plan has no classical configuration {asdict(config)}")
+
+
+def selectable(plan: sequence.Plan) -> None:
+    has = (
+        "forward" in plan.schemes
+        and 24 in plan.ladder.horizons
+        and {"long", "short"} <= set(plan.ladder.sides)
+    )
+    if not has:
+        raise ValueError(
+            "choosing a configuration needs the forward scheme, the 24 h horizon and the long "
+            "and short sides; give --fixed for a plan without them"
+        )
 
 
 def spans(plan: sequence.Plan) -> tuple[int, ...]:
@@ -157,7 +163,6 @@ def window_scores(
     variant: str,
     chosen: Sequence[Config],
     log: sequence.LOG,
-    skipped: list[str],
     fitted: dict[tuple[str, int], str],
 ) -> Iterator[tuple[str, int, int, np.ndarray, dict[Config, dict[str, np.ndarray]]]]:
     raw = sequence.by_coin(
@@ -172,9 +177,7 @@ def window_scores(
             train_hours = sequence.training(p.hours, plan, f, scheme)
             fit_hours = sequence.eligible(train_hours, plan.pad, plan.reach)
             if not fit_hours.any():
-                skipped.append(f"window {variant} {scheme} fold {f + 1}: no training row")
-                log(f"  {skipped[-1]}")
-                continue
+                raise ValueError(f"window {variant} {scheme} fold {f + 1}: no training row")
             log(f"  window {variant}, {scheme} fold {f + 1}")
             fit_rows = np.repeat(fit_hours, p.ncoins)
             mu, sd = sequence.statistics(raw, train_hours)
@@ -199,12 +202,17 @@ def window_scores(
                 if not test.any():
                     continue
                 if not train.any():
-                    skipped.append(f"window {variant} {scheme} fold {f + 1} {h} h: no probe row")
-                    log(f"  {skipped[-1]}")
-                    continue
+                    raise ValueError(f"window {variant} {scheme} fold {f + 1} {h} h: no probe row")
                 index = np.flatnonzero(r.keep)
                 a, b = at_train[index[train]], at_test[index[test]]
                 y_train = {side: r.y[side][train] for side in ("long", "short")}
+                for side, ys in y_train.items():
+                    share = float(np.mean(ys))
+                    if share in (0.0, 1.0):
+                        raise ValueError(
+                            f"window {variant} {scheme} fold {f + 1} {h} h {side}: the training "
+                            f"rows hold {'no' if share == 0.0 else 'only'} positives"
+                        )
                 probed = sequence.probe(
                     train_f[a], test_f[b], y_train, plan, digest, pairs, channels
                 )
@@ -258,7 +266,6 @@ def classical(
 ) -> dict[str, Any]:
     p = panel(values, grid, plan)
     folds: list[dict[str, Any]] = []
-    skipped: list[str] = []
     fitted: dict[str, str] = {}
     rungs = [c for c in chosen if c.model == "rung"]
     if rungs:
@@ -280,9 +287,7 @@ def classical(
         if not mine:
             continue
         found: dict[tuple[str, int], str] = {}
-        for scheme, f, h, test, got in window_scores(
-            values, p, plan, variant, mine, log, skipped, found
-        ):
+        for scheme, f, h, test, got in window_scores(values, p, plan, variant, mine, log, found):
             r = p.rows[h]
             for config, sides in got.items():
                 for side in plan.ladder.sides:
@@ -292,7 +297,6 @@ def classical(
     return {
         "folds": folds,
         "accounting": {h: r.accounting for h, r in p.rows.items()},
-        "skipped": sorted(set(skipped)),
         "fitted": fitted,
     }
 
@@ -311,6 +315,30 @@ def choose(
     def config(k: tuple[int, int, float]) -> Config:
         return Config(MODELS[k[0]], name, None if k[1] < 0 else readouts[k[1]], k[2])
 
+    scored: dict[Any, dict[str, dict[int, list[float]]]] = {}
+    for r in folds:
+        k = key(r)
+        mine = (r["scheme"], r["horizon"]) == ("forward", 24) and r["side"] in ("long", "short")
+        if mine and k is not None:
+            per = scored.setdefault(k, {}).setdefault(r["side"], {})
+            per.setdefault(r["fold"], []).append(r["auc"])
+    covered = {
+        k: tuple(
+            tuple(sorted(f for f, v in sides.get(side, {}).items() if np.isfinite(np.mean(v))))
+            for side in ("long", "short")
+        )
+        for k, sides in scored.items()
+    }
+    if len(set(covered.values())) > 1:
+        seen = sorted(
+            {
+                (tuple(f + 1 for f in long), tuple(f + 1 for f in short))
+                for long, short in covered.values()
+            }
+        )
+        raise ValueError(
+            f"the {name} candidates are not scored on the same folds (long, short): {seen}"
+        )
     candidates = sequence.ranked(folds, key)
     found = sequence.best(candidates)
     if found is None:
@@ -320,6 +348,11 @@ def choose(
         for k, score in candidates
     ]
     return config(found[0]), found[1], listed
+
+
+def finite(scores: np.ndarray, scheme: str, h: int, side: str) -> None:
+    if not np.isfinite(scores).all():
+        raise RuntimeError(f"{scheme} {h} h {side}: a score is not finite")
 
 
 def export(
@@ -337,6 +370,7 @@ def export(
             r = p.rows[h]
             mine = r.fold >= plan.ladder.first_fold(scheme)
             for side in plan.ladder.sides:
+                finite(scored[config][side], scheme, h, side)
                 parts[scheme].append(
                     sequence.scores_part(
                         p.symbol[r.keep],
@@ -356,7 +390,7 @@ def export(
             for h, r in p.rows.items()
         }
         for scheme, _, h, test, got in window_scores(
-            values, p, plan, config.variant, [config], log, [], {}
+            values, p, plan, config.variant, [config], log, {}
         ):
             total[(scheme, h)][test] = np.column_stack([got[config][s] for s in ("long", "short")])
         for scheme in plan.schemes:
@@ -368,6 +402,7 @@ def export(
                 sides = {"long": v[:, 0], "short": v[:, 1]}
                 sides["any"] = sequence.either(sides["long"], sides["short"])
                 for side in plan.ladder.sides:
+                    finite(sides[side], scheme, h, side)
                     parts[scheme].append(
                         sequence.scores_part(
                             p.symbol[r.keep], p.ts[r.keep], r.fold, mine, h, side, sides, scheme
@@ -386,7 +421,9 @@ def run(
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
     plan, records, (plan_text, ladder_text) = sequence.snapshot(plan_path)
-    if fixed is not None:
+    if fixed is None:
+        selectable(plan)
+    else:
         check(fixed, plan)
     values, grid, source = sequence.read(inputs_dir, data_dir, plan)
     out = classical(values, grid, plan, configs(plan) if fixed is None else [fixed], log)
@@ -428,7 +465,7 @@ def run(
         "plan.toml": plan_text,
         "ladder.toml": ladder_text,
     }
-    checks = {"seconds": round(seconds, 1), "skipped": out["skipped"]}
+    checks = {"seconds": round(seconds, 1)}
     run_dir = store.write(data_dir, "panel-classical", tag, tables, run_params, checks, texts)
     return run_dir, out | {"seconds": seconds, "selection": selection, "exported": exported}
 
@@ -458,8 +495,6 @@ def report(
         "",
         f"Wall time {seconds / 60:.1f} minutes.",
     ]
-    if out["skipped"]:
-        lines += ["", "Skipped: " + "; ".join(out["skipped"]) + "."]
     lines += ["", "## Exported", "", "| name | model | variant | readout | c | rule value |"]
     lines.append("|---|---|---|---|---|---|")
     for name, config in exported.items():

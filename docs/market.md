@@ -1029,8 +1029,8 @@ this machine and needs a clean checkout, since the merge refuses runs made from 
 The script's `--help` is its manual.
 
 `python -m tipping_point.panel classical --inputs <run> --plan <sequence.toml>` fits the classical
-comparators on the sequence plan's schemes, horizons and left-out quarters, with the long and short
-sides, and writes them to `<data dir>/panel-classical/<run_id>/`. It fits no sequence model and draws
+comparators on the sequence plan's schemes, horizons and left-out quarters, for the long, short and
+`any` sides, and writes them to `<data dir>/panel-classical/<run_id>/`. It fits no sequence model and draws
 no seed. Two kinds of comparator are fitted:
 
 - The plan's rungs at every c of its grid, through the ladder's own code: the ladder's training
@@ -1050,21 +1050,37 @@ sees, on the same rows and scales, through the same readouts and probe, so a seq
 beats it uses more of the window than these statistics hold. It is not a model of the order of the
 hours within those spans, and its statistics take no label and fit nothing.
 
-The folds table has the sequence run's folds table's columns. `model` is `rung` or `window`,
-`variant` is the rung's name or the window's variant, `readout` is empty for a rung, and `seed` is
-0. The run also writes the row accounting. For each name (each rung and each variant), the rule
-above chooses one configuration. Its candidates are:
+The folds table has the sequence run's folds table's columns. It scores every side the ladder plan
+lists, `any` included, and so does the report. `model` is `rung` or `window`, `variant` is the
+rung's name or the window's variant, `readout` is empty for a rung, and `seed` is 0. The run also
+writes the row accounting.
+
+A fold or horizon the window comparator cannot be fitted on stops the run: one with no training
+hour a window can end on, one with no probe row among the ladder's rows, or one whose training
+labels for a side are all one class, as the rungs refuse for the ladder.
+
+For each name (each rung and each variant), the rule above chooses one configuration. Its
+candidates are:
 
 - for a name that is both a rung and a variant (`full`, `vol`): the rung at every c and the window
   at every readout and c;
-- for a rung alone (`classic`): the rung at every c.
+- for a rung alone (`classic`): the rung at every c;
+- for a variant alone: the window at every readout and c.
+
+The choice refuses a name whose candidates do not have a finite long and short AUC on the same
+folds, since their means would then be over different quarters. A fold that no candidate can score,
+for example a quarter with no positives, is left out of every candidate's mean. Choosing needs the
+`forward` scheme, the 24-hour horizon and the long and short sides; without `--fixed`, a plan that
+lacks any of them is refused before any table is read.
 
 Ties go to the rung, then to the earlier readout, then to the smaller c. The manifest records each
 name's choice, its rule value and every candidate's value. The run writes each chosen
 configuration's out-of-fold scores as one Parquet file per scheme, `<name>-<scheme>.parquet`, in
 the columns an `[external]` entry reads. A window's `any` score is computed as in `scores`. A rung's
 `any` score is the ladder's, 1 - (1 - p_long)(1 - p_short). `--fixed <model> <variant> <readout> <c>`
-skips the choice, with `-` as a rung's readout. It fits and exports that one configuration.
+skips the choice, with `-` as a rung's readout. It fits and exports that one configuration, which
+must be one of the plan's: a rung or variant it lists, and a readout and c from its grid. A score
+that is not finite on any exported side stops the export.
 
 Choosing among more configurations makes the classical side's development score at least as
 optimistic as it would be with fewer, as it does for the sequence models. A chosen configuration's

@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -283,6 +284,23 @@ def test_the_window_statistics_are_a_slow_loop_over_the_window(tmp_path: Path) -
     assert np.array_equal(flat, np.concatenate([np.ones((3, 8)), np.zeros((3, 6))], 1))
 
 
+def test_the_window_statistics_are_the_encoders_readout_of_hourly_tokens(tmp_path: Path) -> None:
+    plan = tiny(tmp_path)
+    hourly = replace(plan, shape=replace(plan.shape, patch=1))
+    raw, mu, sd = standardised_panel(4, 120, plan)
+    x = sequence.standardised(raw, mu, sd, plan.ladder.clip, plan.pad)
+    coin, hour = np.array([0, 1, 2, 2, 0, 1]), np.array([0, 3, 20, 119, 60, 34])
+    got = classical.statistics(x, coin, hour, hourly)
+    tokens = sequence.windows(
+        torch.from_numpy(x), torch.from_numpy(coin), torch.from_numpy(hour + plan.pad), plan.window
+    )
+    want = sequence.readout(tokens).numpy()
+    assert classical.spans(hourly) == (*sequence.SPANS, plan.window)
+    assert got.shape == want.shape and got.dtype == want.dtype
+    assert np.allclose(got, want, rtol=0, atol=1e-5)
+    assert np.array_equal(got[:, : x.shape[2]], want[:, : x.shape[2]])
+
+
 def test_nothing_after_hour_t_reaches_the_statistics_at_t(tmp_path: Path) -> None:
     plan = tiny(tmp_path)
     raw, mu, sd = standardised_panel(2, 200, plan)
@@ -334,6 +352,13 @@ def test_the_left_out_quarter_and_its_gaps_reach_no_window_fit(fitted: dict) -> 
         assert first["fitted"][key] == second["fitted"][key], key
     others = [k for k in first["fitted"] if k.startswith("vol loqo") and k not in mine]
     assert others and all(first["fitted"][k] != second["fitted"][k] for k in others)
+    after_all = np.iinfo(np.int64).max
+    third = classical.classical(*perturbed(values, grid, edges[f] - gap, after_all), plan, chosen)
+    forward = [k for k in first["fitted"] if k.startswith("vol forward")]
+    assert forward[0] == f"vol forward fold {f + 1}" and len(forward) > 1
+    assert first["fitted"][forward[0]] == third["fitted"][forward[0]]
+    assert all(first["fitted"][k] != third["fitted"][k] for k in forward[1:])
+    assert first["fitted"][f"vol loqo fold {f + 1}"] != third["fitted"][f"vol loqo fold {f + 1}"]
     before = keyed([r for r in first["folds"] if r["model"] == "window" and r["fold"] == f])
     after = keyed([r for r in second["folds"] if r["fold"] == f])
     assert before.keys() == after.keys()
@@ -341,7 +366,7 @@ def test_the_left_out_quarter_and_its_gaps_reach_no_window_fit(fitted: dict) -> 
     p = classical.panel(values, grid, plan)
     seen = set()
     for scheme, g, h, test, _ in classical.window_scores(
-        values, p, plan, "vol", chosen[:1], lambda line: None, [], {}
+        values, p, plan, "vol", chosen[:1], lambda line: None, {}
     ):
         assert np.array_equal(test, p.rows[h].fold == g)
         seen.add((scheme, g, h))
@@ -413,7 +438,7 @@ def test_the_choice_is_the_rule_over_each_names_candidates() -> None:
             rows.append(fold_row("twin", "spreads", 0.1, fold, side, 0.99))
             rows.append(fold_row("rung", None, 0.1, fold, side, 0.70, variant="classic"))
             rows.append(fold_row("rung", None, 0.01, fold, side, 0.50, variant="classic"))
-        rows.append(fold_row("window", "spreads", 0.1, fold, "any", 0.99))
+        rows.append(fold_row("window", "last", 0.01, fold, "any", 0.99))
     config, score, listed = classical.choose(rows, "full")
     assert config == Config("rung", "full", None, 1.0) and score == pytest.approx(0.62)
     assert [(d["model"], d["readout"], d["c"]) for d in listed] == [
@@ -421,9 +446,8 @@ def test_the_choice_is_the_rule_over_each_names_candidates() -> None:
         ("rung", None, 1.0),
         ("window", "last", 0.01),
         ("window", "means", 0.001),
-        ("window", "spreads", 0.1),
     ]
-    assert listed[-1]["score"] is None and listed[1]["score"] == score
+    assert listed[2]["score"] == pytest.approx(0.62) and listed[1]["score"] == score
     assert classical.choose(rows, "classic")[0] == Config("rung", "classic", None, 0.1)
     assert classical.choose(rows, "vol")[0] == Config("window", "vol", "spreads", 0.1)
     no_rung = [r for r in rows if r["model"] != "rung"]
@@ -433,17 +457,23 @@ def test_the_choice_is_the_rule_over_each_names_candidates() -> None:
     assert classical.choose(readouts, "full")[0] == Config("window", "full", "means", 0.01)
     cs = [r | {"c": 0.1} for r in readouts] + [r | {"c": 0.001} for r in readouts]
     assert classical.choose(cs, "full")[0] == Config("window", "full", "means", 0.001)
+    quiet = [
+        r | {"auc": float("nan")} if (r["fold"], r["side"]) == (3, "short") else r for r in rows
+    ]
+    config, score, _ = classical.choose(quiet, "full")
+    assert config == Config("rung", "full", None, 1.0) and score == pytest.approx(0.62)
     holes = [
         r | {"auc": float("nan")} if (r["model"], r["c"], r["fold"]) == ("rung", 1.0, 3) else r
         for r in rows
     ]
-    holes.append(fold_row("rung", None, 0.01, 4, "long", 0.30))
-    config, score, listed = classical.choose(holes, "full")
-    assert config == Config("rung", "full", None, 1.0) and score == pytest.approx(0.62)
-    assert listed[0]["score"] == pytest.approx((np.mean([0.60, 0.60, 0.30]) + 0.60) / 2)
-    gone = [r | {"auc": float("nan")} if (r["c"], r["side"]) == (1.0, "short") else r for r in rows]
-    config, _, listed = classical.choose(gone, "full")
-    assert config == Config("window", "full", "last", 0.01) and listed[1]["score"] is None
+    extra = [*rows, fold_row("rung", None, 0.01, 4, "long", 0.30)]
+    one_side = [r for r in rows if (r["c"], r["side"]) != (1.0, "short")]
+    for unequal in (holes, extra, one_side):
+        with pytest.raises(
+            ValueError, match="the full candidates are not scored on the same folds"
+        ):
+            classical.choose(unequal, "full")
+    assert classical.choose(holes, "classic")[0] == Config("rung", "classic", None, 0.1)
     with pytest.raises(ValueError, match="no forward 24 h fold scores of the lev comparators"):
         classical.choose(rows, "lev")
 
@@ -504,8 +534,56 @@ def test_an_exported_configuration_scores_its_folds_table_rows(fitted: dict) -> 
             for (s, h, side, f), value in got.items():
                 row = folds[(config.model, config.variant, config.readout, config.c, s, h, side, f)]
                 assert value == row["auc"], (config, s, h, side, f)
-    with pytest.raises(ValueError, match="no classical configuration"):
-        classical.export(values, grid, plan, Config("window", "full", "last", 0.01))
+    for outside in (Config("window", "full", "last", 0.01), Config("rung", "full", None, 0.05)):
+        with pytest.raises(ValueError, match="no classical configuration"):
+            classical.export(values, grid, plan, outside)
+
+
+def test_an_export_refuses_a_score_that_is_not_finite_on_any_side(
+    fitted: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values, grid, plan = fitted["values"], fitted["grid"], fitted["plan"]
+    probe, penalised = sequence.probe, ladder.penalised
+
+    def low(*args: Any) -> dict:
+        got = probe(*args)
+        return {k: {s: v - 1000.0 for s, v in sides.items()} for k, sides in got.items()}
+
+    def hole(*args: Any) -> dict:
+        got = penalised(*args)
+        for sides in got.values():
+            sides["any"][0] = np.nan
+        return got
+
+    monkeypatch.setattr(sequence, "probe", low)
+    with pytest.raises(RuntimeError, match="any: a score is not finite"):
+        classical.export(values, grid, plan, Config("window", "vol", "last", 0.01))
+    monkeypatch.setattr(ladder, "penalised", hole)
+    with pytest.raises(RuntimeError, match="any: a score is not finite"):
+        classical.export(values, grid, plan, Config("rung", "vol", None, 0.01))
+
+
+def test_a_window_fold_without_training_or_probe_rows_or_one_class_stops_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values, grid = world(days=200)
+    plan = tiny(tmp_path, FORWARD)
+    chosen = windows(plan)
+    eligible = sequence.eligible
+    monkeypatch.setattr(sequence, "eligible", lambda hours, pad, reach: np.zeros_like(hours))
+    with pytest.raises(ValueError, match="window vol forward fold 3: no training row"):
+        classical.classical(values, grid, plan, chosen)
+    hours = np.unique(grid["ts_ns"])
+    early = np.zeros(len(hours), bool)
+    early[100:110] = True
+    monkeypatch.setattr(sequence, "eligible", lambda t, pad, reach: eligible(t, pad, reach) & early)
+    dropped = dict(grid, skip=grid["skip"] | np.isin(grid["ts_ns"], hours[early]))
+    with pytest.raises(ValueError, match=r"window vol forward fold 3 \d+ h: no probe row"):
+        classical.classical(values, dropped, plan, chosen)
+    monkeypatch.undo()
+    calm = dict(grid, short_24=np.zeros_like(grid["short_24"]))
+    with pytest.raises(ValueError, match="fold 3 24 h short: the training rows hold no positives"):
+        classical.classical(values, calm, plan, chosen)
 
 
 def run_args(data: Path, run_inputs: Path, plan: Path, tag: str, *extra: str) -> list[str]:
@@ -587,9 +665,34 @@ def test_the_command_chooses_writes_and_the_ladder_scores_the_choice(
     assert ext.keys() == full.keys() and ext
     for key, row in ext.items():
         assert (row["auc"], row["rows"]) == (full[key]["auc"], full[key]["rows"]), key
-    bad = ["--fixed", "window", "classic", "last", "0.01"]
-    assert main(run_args(tmp_path, run_inputs, path, "bad", *bad)) == 1
-    assert not list((tmp_path / "panel-classical").glob("*-bad"))
+    window = Config("window", "vol", "spreads", 1.0)
+    fixed = ["--fixed", "window", "vol", "spreads", "1.0"]
+    assert main(run_args(tmp_path, run_inputs, path, "wfixed", *fixed)) == 0
+    run = next((tmp_path / "panel-classical").glob("*-wfixed"))
+    mine = {
+        (r["horizon"], r["side"], r["fold"]): r
+        for r in pq.read_table(run / "folds.parquet").to_pylist()
+        if Config(r["model"], r["variant"], r["readout"], r["c"]) == window
+    }
+    file = run / "vol-forward.parquet"
+    external = f'\n[external]\nname = "wext"\npath = "{file.as_posix()}"\nscheme = "forward"\n'
+    (tmp_path / "ladder-wext.toml").write_text(LADDER + external, encoding="utf-8")
+    ladder_run, _ = ladder.run(run_inputs, tmp_path, tmp_path / "ladder-wext.toml", "wext")
+    scored = pq.read_table(ladder_run / "folds.parquet").to_pylist()
+    wext = {
+        (r["horizon"], r["side"], r["fold"]): r
+        for r in scored
+        if r["name"] == "wext" and r["coins"] == "all"
+    }
+    assert wext.keys() == mine.keys() and wext
+    for key, row in wext.items():
+        assert (row["auc"], row["rows"]) == (mine[key]["auc"], mine[key]["rows"]), key
+    for tag, bad in (
+        ("bad", ["window", "classic", "last", "0.01"]),
+        ("off", ["rung", "full", "-", "0.05"]),
+    ):
+        assert main(run_args(tmp_path, run_inputs, path, tag, "--fixed", *bad)) == 1
+        assert not list((tmp_path / "panel-classical").glob(f"*-{tag}"))
 
 
 def test_the_command_refuses_before_reading_and_writes_nothing(
@@ -651,6 +754,18 @@ def test_the_command_refuses_before_reading_and_writes_nothing(
     with pytest.raises(ValueError, match=r"quarters \[3\] unscored"):
         classical.run(run_inputs, tmp_path / "a", gappy, "x")
     monkeypatch.setattr(sequence, "read", lambda *args: pytest.fail("read the inputs"))
+    cannot = [
+        plans(
+            tmp_path / "loqo", PLAN.replace('schemes = ["loqo", "forward"]', 'schemes = ["loqo"]')
+        ),
+        plans(tmp_path / "hourly", FORWARD, LADDER.replace("horizons = [24, 1]", "horizons = [1]")),
+        plans(
+            tmp_path / "long", FORWARD, LADDER.replace('"long", "short", "any"', '"long", "any"')
+        ),
+    ]
+    for unchoosable in cannot:
+        with pytest.raises(ValueError, match="choosing a configuration needs the forward scheme"):
+            classical.run(run_inputs, tmp_path / "a", unchoosable, "x")
     with pytest.raises(ValueError, match="no classical configuration"):
         classical.run(run_inputs, tmp_path / "a", path, "x", Config("window", "classic", "last", 1))
 
