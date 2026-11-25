@@ -1127,7 +1127,7 @@ def test_a_fold_without_training_or_probe_rows_is_skipped(tmp_path: Path) -> Non
     assert out["skipped"] == ["vol forward fold 2: no training row"]
     assert out["encoders"] == {} and out["diagnostics"] == []
     assert {r["model"] for r in out["folds"]} == {"rung"}
-    plan = tiny(tmp_path / "b", text, base)
+    plan = tiny(tmp_path / "b", text.replace("seeds = [3]", "seeds = [3, 4]"), base)
     start = labels.ns(date(2022, 2, 20)) + plan.pad * HOUR
     censored = dict(grid)
     censored["censored_24"] = grid["censored_24"] | (
@@ -1199,8 +1199,8 @@ def test_the_command_writes_a_sequence_run(
     assert params["labels_grid"]["sha256"] == store.sha256(
         tmp_path / "labels" / params["labels_run"] / "grid" / "0.parquet"
     )
-    assert params["plan"]["sha256"] == store.sha256(plan)
-    assert params["ladder_plan"]["sha256"] == store.sha256(tmp_path / "ladder.toml")
+    assert params["plan"]["sha256"] == complete["files"]["plan.toml"]
+    assert params["ladder_plan"]["sha256"] == complete["files"]["ladder.toml"]
     folds = pq.read_table(run / "folds.parquet")
     assert set(folds.column_names) >= {"model", "variant", "readout", "c", "seed", "auc"}
     report = (run / "report.md").read_text(encoding="utf-8")
@@ -1309,7 +1309,7 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
     plan = sequence.load(merged / "plan.toml", merged / "ladder.toml")
     assert plan == replace(sequence.load(parent), ladder_path=plan.ladder_path)
     assert (merged / "plan.toml").read_text("utf-8") == parent.read_text("utf-8")
-    assert params["plan"] == {"file": parent.name, "sha256": store.sha256(parent)}
+    assert params["plan"] == {"file": parent.name, "sha256": store.sha256(merged / "plan.toml")}
     for run in (full, reverse, merged):
         in_name_order(run)
         selection_metrics(run)
@@ -1347,11 +1347,19 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
 
 
 def test_the_merge_refuses_runs_that_do_not_make_one_plan(
-    split: dict[str, Path], tmp_path: Path
+    split: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     data, parent = split["data"], split["parent"]
     pieces = [split[k] for k in SPLIT]
+    whole = split_plan('["full", "vol"]', "[3, 4, 5]", "[2, 3]")
     narrow = plans(tmp_path / "narrow", split_plan('["full"]', "[3, 4, 5]", "[2, 3]"))
+    longer = whole.replace("steps = 4\nbatch = 16\nlr", "steps = 5\nbatch = 16\nlr", 1)
+    stepped = plans(tmp_path / "stepped", longer)
+    relaid = plans(tmp_path / "relaid", whole, ladder_text() + "\n# the same ladder\n")
+    monkeypatch.setattr(sequence.io, "code_version", lambda: {"git_sha": "c" * 40, "dirty": False})
+    idle = plans(tmp_path / "idle", split_plan('["vol"]', "[3]", "[1]"))
+    wide = plans(tmp_path / "wide", split_plan('["full", "vol"]', "[3, 4, 5]", "[1, 2, 3]"))
+    empty, _ = sequence.run(split["inputs"], data, idle, "idle")
 
     def altered(name: str, change: Callable[[Path], None], piece: str = "d") -> list[Path]:
         copy = tmp_path / name / split[piece].name
@@ -1425,7 +1433,13 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
         "inputs": (altered("inputs", params("inputs", zero)), "different inputs tables"),
         "grid": (altered("grid", params("labels_grid", zero)), "different labels grids"),
         "ladder": (altered("ladder", params("ladder_plan", zero)), "different ladder plans"),
-        "twice": ([*pieces, altered("twice", lambda d: None)[-1]], "is in both"),
+        "twice": ([*pieces, split["full"]], "is in both"),
+        "same folder": ([*pieces, pieces[0]], "listed twice"),
+        "same run id": ([*pieces, altered("same id", lambda d: None, "e")[-1]], "listed twice"),
+        "merged": (
+            altered("merged", manifest(lambda m: m["params"].__setitem__("sources", []))),
+            "a merged run; merge takes sequence runs only",
+        ),
         "missing": (pieces[:3], "no run fitted 18 cells"),
         "seed": (pieces[:4], "no run fitted 12 cells of the parent plan"),
         "unclean": (
@@ -1478,6 +1492,12 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
             sequence.merge_run(runs, parent, data, name)
     with pytest.raises(ValueError, match="variants the parent plan lacks: vol"):
         sequence.merge_run(pieces, narrow, data, "narrow")
+    with pytest.raises(ValueError, match="fits no cell of its plan"):
+        sequence.merge_run([*pieces, empty], wide, data, "no cell")
+    with pytest.raises(ValueError, match="differs from the parent plan in more than"):
+        sequence.merge_run(pieces, stepped, data, "stepped")
+    with pytest.raises(ValueError, match="different ladder plan from the parent plan's"):
+        sequence.merge_run(pieces, relaid, data, "relaid")
     assert sorted((data / "panel-sequence").iterdir()) == before
 
 
@@ -1530,6 +1550,39 @@ def test_pieces_from_different_cpu_models_merge_and_list_them(
     params = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["params"]
     cpus = [s["cpu"] for s in params["sources"]]
     assert cpus[2] == "Another CPU" and len(set(cpus)) == 2
+
+
+def test_a_crlf_parent_plan_is_written_and_hashed_as_the_same_bytes(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    folder = tmp_path / "crlf"
+    folder.mkdir()
+    for name in ("sequence.toml", "ladder.toml"):
+        text = (split["parent"].parent / name).read_bytes().decode("utf-8")
+        crlf = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
+        (folder / name).write_bytes(crlf)
+    pieces = [split[k] for k in SPLIT]
+    run_dir, _ = sequence.merge_run(pieces, folder / "sequence.toml", tmp_path, "crlf")
+    params = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["params"]
+    files = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))["files"]
+    assert params["plan"]["sha256"] == files["plan.toml"] == store.sha256(run_dir / "plan.toml")
+    assert params["ladder_plan"]["sha256"] == files["ladder.toml"]
+
+
+def test_a_merge_without_a_supervised_model_types_its_curves_like_a_run(
+    split: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sequence.io, "code_version", lambda: {"git_sha": "c" * 40, "dirty": False})
+    data = split["data"]
+    unsupervised = '["jepa", "twin", "supervised"]'
+    runs = {}
+    for name, folds in (("whole", "[2, 3]"), ("two", "[2]"), ("three", "[3]")):
+        text = split_plan('["vol"]', "[3]", folds).replace(unsupervised, '["jepa", "twin"]')
+        runs[name], _ = sequence.run(split["inputs"], data, plans(tmp_path / name, text), name)
+    parent = tmp_path / "whole" / "sequence.toml"
+    merged, _ = sequence.merge_run([runs["two"], runs["three"]], parent, data, "untyped")
+    one, two = (pq.read_table(d / "curves.parquet") for d in (runs["whole"], merged))
+    assert one.schema == two.schema and one.equals(two)
 
 
 def test_the_command_refuses_the_held_back_span(tmp_path: Path) -> None:

@@ -939,9 +939,17 @@ penalties; the ladder does not do this yet, since its rungs use one penalty (iss
 comparison between them counts only on data that neither side's choice has seen.
 
 The two sides also see different inputs. A rung is a logistic on one row of the inputs table at
-hour t. Its columns summarise at most the last 28 days (8,064 five-minute bars, 672 hours: `vol_28d`,
-`ret_28d`, `dd_28d`, `ru_28d` and `oi_vs_28d`, and the 28-day references of `vsurge_1h`,
-`volume_24h`, `funding_rel` and `ls_rel`), but only as those fixed statistics. A sequence model sees
+hour t, whose columns are fixed statistics of what came before t, of two kinds. Rolling windows
+reach at most 28 days back, plus the funding rate's carry: 8,064 five-minute bars (672 hours) for
+`vol_28d`, `dd_28d`, `ru_28d` and `oi_vs_28d` and the 28-day references of `vsurge_1h`,
+`volume_24h` and `ls_rel`; one bar more for `ret_28d`'s starting price; and up to 680 hours for
+`funding_rel`, whose 28-day reference averages hourly funding rates that each hold the last posted
+rate, carried up to 8 hours forward. Fitted thresholds reach further. The volatility-scaled columns
+(`vol_1h` to `vol_28d`) divide by `sd_ret` and `near_24h` divides by `b`, the labels run's daily
+thresholds for t's UTC day. Each is fitted on the 30-minute price changes of the 90 days before
+that day, so its values reach about 91 days before t. Whether a day has a threshold at all also
+depends on whether each of those windows has volume in the 28 days before it, which reaches about
+119 days before t. A sequence model sees
 the 336 hourly rows up to t and which of them are missing, so it could win on the window's shape
 rather than on what pretraining learned. Before any comparison on held-back data, the classical
 comparator will therefore also include a logistic on plain statistics of the same 336-hour windows
@@ -988,13 +996,17 @@ of the rung rows and row accounting, which every source run must agree on (a mis
 with a missing AUC), the parent plan and every saved model. Its manifest lists the source runs with
 their manifests' sha256 and CPU models.
 
-A merged run equals the single run on one machine: the tests merge split runs into tables, scores
-and saved models identical to the single run's. Across CPU models that equality is not guaranteed,
-even with the instruction set pinned. The Kaggle script starts every process with torch's own
-kernels, oneDNN and MKL pinned to AVX2 (`ATEN_CPU_CAPABILITY=avx2`, `ONEDNN_MAX_CPU_ISA=AVX2`,
-`MKL_ENABLE_INSTRUCTIONS=AVX2`, `MKL_CBWR=AVX2`). oneDNN honours its pin only if it was built to,
-MKL only on Intel CPUs, and the merge refuses differing capabilities or pins but not differing CPU
-models. Such differences start at rounding level in each step and grow through training like a
+`merge` takes sequence runs only and refuses a merged run, a run whose plan fits no cell, and a
+run listed twice (by folder or run id). A merged run equals the single run on one machine, except
+for wall-clock timings (the diagnostics table's `seconds`, the report's times and
+`complete.json`'s `seconds`): the tests merge split runs into tables, scores and saved models
+identical to the single run's. Across CPU models that equality is not guaranteed, even with the
+instruction set pinned. The Kaggle script starts every process with torch's own kernels, oneDNN,
+MKL and numpy's OpenBLAS, which runs the ladder's and the probe's logistic fits, pinned to AVX2
+(`ATEN_CPU_CAPABILITY=avx2`, `ONEDNN_MAX_CPU_ISA=AVX2`, `MKL_ENABLE_INSTRUCTIONS=AVX2`,
+`MKL_CBWR=AVX2`, and `OPENBLAS_CORETYPE=Haswell`, OpenBLAS's AVX2 core, with
+`OPENBLAS_NUM_THREADS=2`). oneDNN honours its pin only if it was built to, MKL only on Intel CPUs,
+and the merge refuses differing capabilities or pins but not differing CPU models. Such differences start at rounding level in each step and grow through training like a
 change of seed. The three models of a cell (the JEPA, its twin and the supervised model) always
 train in one piece, so no arm is favoured. `scores` and any later test read the saved models' bytes,
 whose sha256 the manifest records.
@@ -1003,6 +1015,8 @@ instead, and `scores` checks the inputs and the grid as for any sequence run.
 `uv run python notebooks/kaggle_panel_sequence.py write --commit <hash> --out <dir>` writes the
 shipped plan as twelve Kaggle CPU kernels (one variant, one seed and three folds each, every cell
 once), each running a clean checkout of the pushed commit, and a dry-run kernel that runs two
-pieces, their merge and scores on a synthetic panel. Its `local-dry` runs the dry kernel's steps on
+pieces, their merge and scores on a synthetic panel. Each piece carries the sha256 of the inputs
+table and the labels grid from the local store's records and refuses a dataset whose files differ,
+and it is complete only if its saved models are exactly its plan's cells and it skipped nothing. Its `local-dry` runs the dry kernel's steps on
 this machine and needs a clean checkout, since the merge refuses runs made from uncommitted code.
 The script's `--help` is its manual.

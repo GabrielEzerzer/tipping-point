@@ -19,7 +19,8 @@ DESCRIPTION = """\
 Tipping Point: the panel sequence run (python -m tipping_point.panel sequence) split into pieces,
 one Kaggle CPU kernel each, and a dry run on a synthetic panel. A Kaggle script kernel.
 
-    uv run --no-sync python notebooks/kaggle_panel_sequence.py write --commit <40 hex> --out <dir>
+    uv run --no-sync python notebooks/kaggle_panel_sequence.py write --commit <40 hex> --out <dir> \
+        [--data-dir <store>]
     uv run --no-sync python notebooks/kaggle_panel_sequence.py local-dry <empty dir>
 
 `write` makes one kernel folder per piece (tp-panel-seq-<variant>-s<seed>-f<folds>) and one for
@@ -34,22 +35,29 @@ Every kernel clones the public repository at the job's commit and refuses to run
 checkout's HEAD is the commit and it is clean. It runs from that checkout, so each run's manifest
 records the commit (producer.git_sha) and the sha256 of its uv.lock, in a Python 3.13 environment
 of torch 2.14.1+cpu and uv.lock's numpy and pyarrow, with OMP_NUM_THREADS=2 and the plan's
-threads = 2, one process per kernel. Every process that imports torch starts with the instruction
-set pinned to AVX2 for torch's own kernels (ATEN_CPU_CAPABILITY=avx2), oneDNN
-(ONEDNN_MAX_CPU_ISA=AVX2) and MKL (MKL_ENABLE_INSTRUCTIONS=AVX2, MKL_CBWR=AVX2); the kernel
-refuses to run unless torch reports the AVX2 capability, and every sequence run records its CPU,
-capability and pins. A piece reads the private dataset tp-panel-sequence-data,
-which holds only the files the sequence run reads: the inputs run's manifest.json, complete.json
-and inputs.parquet, and the labels run's grid file. It writes its run to
-out/panel-sequence/<run id>/ and its log to out/logs/; `kaggle kernels output <owner>/<slug> -p
-<dir>` fetches out/. out/STATUS holds one line: running, complete or failed.
+threads = 2, one process per kernel. Every process starts with the instruction set pinned to AVX2
+for torch's own kernels (ATEN_CPU_CAPABILITY=avx2), oneDNN (ONEDNN_MAX_CPU_ISA=AVX2), MKL
+(MKL_ENABLE_INSTRUCTIONS=AVX2, MKL_CBWR=AVX2) and numpy's OpenBLAS, which the ladder's logistic
+fits use (OPENBLAS_CORETYPE=Haswell, its AVX2 core, and OPENBLAS_NUM_THREADS=2); the kernel
+refuses to run unless torch reports the AVX2 capability and OpenBLAS the Haswell core and two
+threads, and every sequence run records its CPU, capability and pins. A piece reads the private
+dataset tp-panel-sequence-data, which holds only the files the sequence run reads: the inputs
+run's manifest.json, complete.json and inputs.parquet, and the labels run's grid file. `write`
+reads the sha256 of the inputs table and the grid file from the inputs run's records in the local
+store and puts them in each piece's job; the kernel refuses before training unless the dataset's
+files have those sha256 values and its manifest names the expected inputs run and labels run. A
+piece writes its run to out/panel-sequence/<run id>/ and its log to out/logs/, and marks itself
+complete only if the run's saved models are exactly its plan's cells and it skipped nothing;
+`kaggle kernels output <owner>/<slug> -p <dir>` fetches out/. out/STATUS holds one line: running,
+complete or failed.
 
 The dry run reads no dataset. On a synthetic panel whose labels are planted on one input, it runs
 two pieces of a small plan, merges them against that plan, scores the merged run, and then times
-a fixed number of JEPA and supervised steps at the shipped plan's shapes on 30 synthetic coins
-(out/dry.json). `local-dry` runs the same steps on this machine in the current environment, for
-the speed ratio; it needs a clean checkout, since the merge refuses runs made from uncommitted
-code.
+a fixed number of JEPA and supervised steps at the shipped plan's shapes on 30 synthetic coins and
+one ladder fit at the probe's widest readout, once with the OpenBLAS pins and once without
+(out/summary.json). `local-dry` runs the same steps on this machine in the current environment,
+for the speed ratio, and writes dry.json in its folder; it needs a clean checkout, since the merge
+refuses runs made from uncommitted code.
 """
 JOB_JSON: str | None = None
 
@@ -67,15 +75,40 @@ THREADS = "2"
 VARIANTS = ("full", "vol")
 SEEDS = (1, 2, 3)
 FOLD_GROUPS = ((2, 3, 4), (5, 6, 7))
-BENCH = {"coins": 30, "hours": 3000, "jepa_steps": 60, "supervised_steps": 60}
+BENCH = {"coins": 30, "hours": 3000, "jepa_steps": 60, "supervised_steps": 60, "fit_rows": 100_000}
 COMMIT = re.compile(r"[0-9a-f]{40}")
 PINS = {
     "ATEN_CPU_CAPABILITY": "avx2",
     "ONEDNN_MAX_CPU_ISA": "AVX2",
     "MKL_ENABLE_INSTRUCTIONS": "AVX2",
     "MKL_CBWR": "AVX2",
+    "OPENBLAS_CORETYPE": "Haswell",
+    "OPENBLAS_NUM_THREADS": THREADS,
 }
 CAPABILITY = "AVX2"
+BLAS_PROBE = """import ctypes, json
+from pathlib import Path
+import numpy
+libs = Path(numpy.__file__).parent.parent / "numpy.libs"
+(path,) = [p for p in libs.iterdir() if "openblas" in p.name]
+lib = ctypes.CDLL(str(path))
+said = {}
+for key, name, kind in (
+    ("core", "scipy_openblas_get_corename64_", ctypes.c_char_p),
+    ("config", "scipy_openblas_get_config64_", ctypes.c_char_p),
+    ("threads", "scipy_openblas_get_num_threads64_", ctypes.c_int),
+):
+    fn = getattr(lib, name)
+    fn.restype = kind
+    value = fn()
+    said[key] = value.decode() if isinstance(value, bytes) else value
+print(json.dumps(said))
+"""
+CELLS = """import json, sys
+from pathlib import Path
+from tipping_point.panel import sequence
+print(json.dumps(sorted(sequence.cells(sequence.load(Path(sys.argv[1]))))))
+"""
 ISA_PROBE = """import torch
 torch.set_num_threads(2)
 x = torch.randn(4, 8, 64)
@@ -273,10 +306,14 @@ def environment(tmp: Path, commit: str, logs: Path) -> tuple[str, Path, dict[str
     verbose = dict(child_env(src), ONEDNN_VERBOSE="1", MKL_VERBOSE="1")
     said = run([py, "-c", ISA_PROBE], verbose).splitlines()
     info["isa_lines"] = [line for line in said if re.search(r"isa|MKL_VERBOSE oneMKL", line)][:4]
+    info["openblas"] = json.loads(run([py, "-c", BLAS_PROBE], child_env(src)).splitlines()[-1])
+    blas = (info["openblas"]["core"], str(info["openblas"]["threads"]))
+    if blas != (PINS["OPENBLAS_CORETYPE"], THREADS):
+        raise RuntimeError(f"OpenBLAS runs {info['openblas']}, not Haswell with {THREADS} threads")
     return py, src, info
 
 
-def verify(run_dir: Path, commit: str | None) -> dict[str, Any]:
+def verify(run_dir: Path, commit: str | None, cells: set[str] | None = None) -> dict[str, Any]:
     complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     bad = [n for n, d in complete["files"].items() if sha256(run_dir / n) != d]
@@ -289,6 +326,10 @@ def verify(run_dir: Path, commit: str | None) -> dict[str, Any]:
     pinned = runtime is not None and (runtime["capability"], runtime["pins"]) == (CAPABILITY, PINS)
     if manifest["domain"] == "panel-sequence" and not pinned:
         raise RuntimeError(f"{run_dir.name}: ran at {runtime}, not {CAPABILITY} with {PINS}")
+    if cells is not None and set(manifest["params"]["encoders"]) != cells:
+        raise RuntimeError(f"{run_dir.name}: its saved models are not exactly its plan's cells")
+    if cells is not None and complete["checks"]["skipped"]:
+        raise RuntimeError(f"{run_dir.name}: skipped {complete['checks']['skipped']}")
     found = {"run": run_dir.name, "files": len(complete["files"]), "checks": complete["checks"]}
     return found | ({"runtime": runtime} if runtime else {})
 
@@ -305,8 +346,24 @@ def find_dataset(root: Path) -> Path:
     return hits[0]
 
 
+def check_dataset(flat: Path, data: dict[str, Any]) -> None:
+    manifest = json.loads((flat / "manifest.json").read_text(encoding="utf-8"))
+    complete = json.loads((flat / "complete.json").read_text(encoding="utf-8"))
+    runs = (manifest.get("run_id"), manifest.get("params", {}).get("labels_run"))
+    if runs != (data["inputs_run"], data["labels_run"]):
+        raise RuntimeError(
+            f"the dataset holds runs {runs}, not {data['inputs_run']} of {data['labels_run']}"
+        )
+    if complete.get("files", {}).get("inputs.parquet") != data["sha256"]["inputs.parquet"]:
+        raise RuntimeError("the dataset's complete.json records another inputs table")
+    for name, digest in data["sha256"].items():
+        if sha256(flat / name) != digest:
+            raise RuntimeError(f"the dataset's {name} has changed: its sha256 is not {digest}")
+
+
 def piece_job(job: dict[str, Any], py: str, src: Path, tmp: Path, out: Path) -> dict[str, Any]:
     flat = find_dataset(Path("/kaggle/input"))
+    check_dataset(flat, job["data"])
     store = tmp / "store"
     inputs_dir = store / "panel-inputs" / INPUTS_RUN
     grid_dir = store / "labels" / LABELS_RUN / "grid"
@@ -329,7 +386,9 @@ def piece_job(job: dict[str, Any], py: str, src: Path, tmp: Path, out: Path) -> 
     argv += ["--plan", plan_dir / "sequence.toml", "--data-dir", store, "--tag", job["kernel"]]
     run(argv, child_env(src), out / "logs" / "sequence.log")
     made = new_run(runs, set())
-    return {"seconds": round(time.time() - began, 1), **verify(made, job["commit"])}
+    said = run([py, "-c", CELLS, plan_dir / "sequence.toml"], child_env(src))
+    cells = set(json.loads(said.strip().splitlines()[-1]))
+    return {"seconds": round(time.time() - began, 1), **verify(made, job["commit"], cells)}
 
 
 def write_synthetic(data: Path) -> None:
@@ -381,7 +440,7 @@ def bench() -> None:
 
     import numpy as np
     import torch
-    from tipping_point.panel import sequence
+    from tipping_point.panel import ladder, sequence
 
     plan = sequence.load()
     torch.set_num_threads(plan.threads)
@@ -406,6 +465,12 @@ def bench() -> None:
         x, y, keep, rows, t, plan, 0, np.random.SeedSequence(1), lambda line: None
     )
     supervised_s = time.perf_counter() - began
+    width = sequence.READOUTS["spreads"] * plan.shape.width
+    a = rng.normal(size=(BENCH["fit_rows"], width))
+    labels = rng.random(BENCH["fit_rows"]) < 1 / (1 + np.exp(3 - a[:, 0]))
+    began = time.perf_counter()
+    ladder.fit(a, labels.astype(np.float64), max(plan.cs))
+    fit_s = time.perf_counter() - began
     print(
         json.dumps(
             {
@@ -416,6 +481,11 @@ def bench() -> None:
                 "threads": torch.get_num_threads(),
                 "jepa_s_per_step": jepa_s / BENCH["jepa_steps"],
                 "supervised_s_per_step": supervised_s / BENCH["supervised_steps"],
+                "fit_features": width,
+                "fit_s": fit_s,
+                "openblas": {
+                    n: os.environ.get(n) for n in ("OPENBLAS_CORETYPE", "OPENBLAS_NUM_THREADS")
+                },
             }
         )
     )
@@ -443,6 +513,9 @@ def dry_steps(py: str, script: Path, env: dict[str, str], data: Path, logs: Path
     (scores,) = (data / "panel-scores").iterdir()
     found["scores"] = verify(scores, None)
     found["bench"] = json.loads(run([py, script, "bench"], env).strip().splitlines()[-1])
+    free = {n: v for n, v in env.items() if not n.startswith("OPENBLAS_")}
+    said = run([py, script, "bench"], free).strip().splitlines()[-1]
+    found["bench_openblas_unpinned"] = json.loads(said)
     return found
 
 
@@ -512,15 +585,34 @@ def write_kernel(job: dict[str, Any], dest: Path, datasets: list[str]) -> None:
     (dest / "kernel-metadata.json").write_text(text, encoding="utf-8", newline="\n")
 
 
-def write(commit: str, out: Path) -> None:
+def recorded_data(store: Path) -> dict[str, Any]:
+    inputs_dir = store / "panel-inputs" / INPUTS_RUN
+    try:
+        manifest = json.loads((inputs_dir / "manifest.json").read_text(encoding="utf-8"))
+        complete = json.loads((inputs_dir / "complete.json").read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise SystemExit(f"no inputs run {INPUTS_RUN} under {store}: {exc}") from exc
+    params = manifest["params"]
+    if manifest["run_id"] != INPUTS_RUN or params["labels_run"] != LABELS_RUN:
+        raise SystemExit(f"{inputs_dir} is not inputs run {INPUTS_RUN} of labels run {LABELS_RUN}")
+    if params["labels_grid"]["file"] != f"grid/{GRID_FILE}" or complete.get("clean") is not True:
+        raise SystemExit(f"{inputs_dir}: another grid file, or not marked clean")
+    digests = {"inputs.parquet": complete["files"]["inputs.parquet"]}
+    digests[GRID_FILE] = params["labels_grid"]["sha256"]
+    return {"inputs_run": INPUTS_RUN, "labels_run": LABELS_RUN, "sha256": digests}
+
+
+def write(commit: str, out: Path, store: Path) -> None:
     if not COMMIT.fullmatch(commit):
         raise SystemExit(f"--commit must be 40 hex digits, not {commit!r}")
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"{out} is not empty")
+    data = recorded_data(store)
     dry = {"kernel": "tp-panel-seq-dry", "mode": "dry", "commit": commit}
     write_kernel(dry, out / dry["kernel"], [])
     for piece in pieces():
         job = {"kernel": slug(piece), "mode": "piece", "commit": commit, "piece": piece}
+        job["data"] = data
         write_kernel(job, out / job["kernel"], [f"{OWNER}/{DATASET}"])
     print("\n".join(sorted(p.name for p in out.iterdir())))
 
@@ -546,13 +638,16 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("write")
     p.add_argument("--commit", required=True)
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--data-dir", type=Path, help="the local store (default $TP_DATA_DIR)")
     local = sub.add_parser("local-dry", help="the dry run's steps here; needs a clean checkout")
     local.add_argument("root", type=Path)
     sub.add_parser("synthetic").add_argument("data", type=Path)
     sub.add_parser("bench")
     args = parser.parse_args(argv)
     if args.command == "write":
-        write(args.commit, args.out)
+        from tipping_point import engine
+
+        write(args.commit, args.out, args.data_dir or engine.data_dir())
     elif args.command == "local-dry":
         local_dry(args.root)
     elif args.command == "synthetic":
