@@ -635,6 +635,10 @@
       "reason": "run by the dry-run kernel and local-dry"
     },
     {
+      "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py guard <dataset dir> <file>...",
+      "reason": "run by each piece kernel before it hashes the dataset's files"
+    },
+    {
       "command": "cargo run -p engine-harness --bin crash-writer -- <run dir>",
       "reason": "test support: crash_recovery.rs kills it mid-write"
     },

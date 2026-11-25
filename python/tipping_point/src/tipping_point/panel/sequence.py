@@ -40,6 +40,7 @@ PINS = (
     "MKL_CBWR",
     "OPENBLAS_CORETYPE",
     "OPENBLAS_NUM_THREADS",
+    "NPY_DISABLE_CPU_FEATURES",
 )
 CURVES = pa.schema(
     [
@@ -132,11 +133,15 @@ class Plan:
         return next(r for r in self.ladder.rungs if r.name == name)
 
 
-def load(path: Path = PLAN, ladder_path: Path | None = None) -> Plan:
-    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+def load(
+    path: Path = PLAN,
+    ladder_path: Path | None = None,
+    texts: tuple[str, str] | None = None,
+) -> Plan:
+    raw = tomllib.loads(path.read_text(encoding="utf-8") if texts is None else texts[0])
     if ladder_path is None:
         ladder_path = (path.parent / str(raw["ladder"])).resolve()
-    base = ladder.load(ladder_path)
+    base = ladder.load(ladder_path, None if texts is None else texts[1])
     nfolds = len(ladder.bounds(base)) - 1
     e = raw["encoder"]
     plan = Plan(
@@ -1112,9 +1117,16 @@ def curve_table(rows: Sequence[Mapping[str, Any]]) -> pa.Table:
     return pa.Table.from_pylist(list(rows), schema=CURVES)
 
 
-def recorded(path: Path) -> tuple[dict[str, str], str]:
+def snapshot(path: Path) -> tuple[Plan, dict[str, Any], tuple[str, str]]:
     text = path.read_text(encoding="utf-8")
-    return {"file": path.name, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}, text
+    ladder_path = (path.parent / str(tomllib.loads(text)["ladder"])).resolve()
+    texts = (text, ladder_path.read_text(encoding="utf-8"))
+    plan = load(path, ladder_path, texts)
+    records = [
+        {"file": p.name, "sha256": hashlib.sha256(t.encode("utf-8")).hexdigest()}
+        for p, t in zip((path, ladder_path), texts, strict=True)
+    ]
+    return plan, {"plan": records[0], "ladder_plan": records[1]}, texts
 
 
 def run(
@@ -1125,18 +1137,14 @@ def run(
     log: LOG = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
-    plan = load(plan_path)
-    (plan_record, plan_text), (ladder_record, ladder_text) = map(
-        recorded, (plan_path, plan.ladder_path)
-    )
+    plan, records, (plan_text, ladder_text) = snapshot(plan_path)
     torch.set_num_threads(plan.threads)
     values, grid, source = read(inputs_dir, data_dir, plan)
     out = sequence(values, grid, plan, log)
     seconds = time.perf_counter() - began
     run_params = {
         **source,
-        "plan": plan_record,
-        "ladder_plan": ladder_record,
+        **records,
         "torch": torch.__version__,
         "numpy": np.__version__,
         "runtime": runtime(),
@@ -1337,7 +1345,7 @@ def merge_run(
     began = time.perf_counter()
     if len(pieces) < 2:
         raise ValueError("a merge takes at least two sequence runs")
-    parent = load(parent_path)
+    parent, records, (plan_text, ladder_text) = snapshot(parent_path)
     loaded = [(run_dir, *_piece(run_dir)) for run_dir in pieces]
     seen: set[object] = set()
     for run_dir, manifest, _, _ in loaded:
@@ -1366,10 +1374,7 @@ def merge_run(
             raise ValueError(
                 f"{run_dir.name} and {first_dir.name} set different instruction-set pins"
             )
-    (plan_record, plan_text), (ladder_record, ladder_text) = map(
-        recorded, (parent_path, parent.ladder_path)
-    )
-    if head["ladder_plan"] != ladder_record:
+    if head["ladder_plan"] != records["ladder_plan"]:
         raise ValueError(f"{first_dir.name} read a different ladder plan from the parent plan's")
     owner: dict[str, Path] = {}
     for run_dir, manifest, _, plan in loaded:
@@ -1425,8 +1430,7 @@ def merge_run(
     piece_seconds = sum(c["checks"]["seconds"] for _, _, c, _ in loaded)
     run_params = {
         **source,
-        "plan": plan_record,
-        "ladder_plan": ladder_record,
+        **records,
         "torch": head["torch"],
         "numpy": head["numpy"],
         "runtime": {k: head["runtime"][k] for k in ("capability", "pins")},

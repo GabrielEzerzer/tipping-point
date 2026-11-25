@@ -1552,6 +1552,67 @@ def test_pieces_from_different_cpu_models_merge_and_list_them(
     assert cpus[2] == "Another CPU" and len(set(cpus)) == 2
 
 
+def test_a_plan_replaced_while_it_is_read_configures_and_records_one_text(
+    split: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = split["data"]
+    path = plans(tmp_path / "plan", split_plan('["vol"]', "[3]", "[2]"))
+    parent = plans(tmp_path / "parent", split_plan('["full", "vol"]', "[3, 4, 5]", "[2, 3]"))
+    swaps = {
+        path.with_name("ladder.toml").resolve(): ("c = 0.01", "c = 0.1"),
+        parent.resolve(): ("steps = 4\nbatch = 16\nlr", "steps = 5\nbatch = 16\nlr"),
+    }
+    reads: dict[Path, int] = {}
+    read_text = Path.read_text
+
+    def replaced(self: Path, encoding: str | None = None) -> str:
+        text = read_text(self, encoding=encoding)
+        key = self.resolve()
+        reads[key] = reads.get(key, 0) + 1
+        return text.replace(*swaps[key]) if key in swaps and reads[key] > 1 else text
+
+    monkeypatch.setattr(Path, "read_text", replaced)
+    run_dir, _ = sequence.run(split["inputs"], data, path, "replaced")
+    merged, _ = sequence.merge_run([split[k] for k in SPLIT], parent, tmp_path, "replaced")
+    monkeypatch.undo()
+    saved = sequence.load(run_dir / "plan.toml", run_dir / "ladder.toml")
+    rungs = [
+        r for r in pq.read_table(run_dir / "folds.parquet").to_pylist() if r["model"] == "rung"
+    ]
+    assert rungs and {r["c"] for r in rungs} == {saved.ladder.c} == {0.01}
+    assert sequence.load(merged / "plan.toml", merged / "ladder.toml").jepa.steps == 4
+
+
+def test_a_merge_lists_its_pieces_skipped_cells_sorted(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    pieces = []
+    for key, line in zip(
+        SPLIT,
+        (
+            "vol forward fold 3 24 h: no probe row",
+            "full forward fold 2 1 h: no probe row",
+            None,
+            None,
+            None,
+        ),
+        strict=True,
+    ):
+        copy = tmp_path / "pieces" / split[key].name
+        shutil.copytree(split[key], copy)
+        if line is not None:
+            record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+            record["checks"]["skipped"] = [line]
+            (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
+        pieces.append(copy)
+    run_dir, _ = sequence.merge_run(pieces, split["parent"], tmp_path, "skipped")
+    complete = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
+    assert complete["checks"]["skipped"] == [
+        "full forward fold 2 1 h: no probe row",
+        "vol forward fold 3 24 h: no probe row",
+    ]
+
+
 def test_a_crlf_parent_plan_is_written_and_hashed_as_the_same_bytes(
     split: dict[str, Path], tmp_path: Path
 ) -> None:

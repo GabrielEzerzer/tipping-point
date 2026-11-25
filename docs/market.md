@@ -940,11 +940,14 @@ comparison between them counts only on data that neither side's choice has seen.
 
 The two sides also see different inputs. A rung is a logistic on one row of the inputs table at
 hour t, whose columns are fixed statistics of what came before t, of two kinds. Rolling windows
-reach at most 28 days back, plus the funding rate's carry: 8,064 five-minute bars (672 hours) for
-`vol_28d`, `dd_28d`, `ru_28d` and `oi_vs_28d` and the 28-day references of `vsurge_1h`,
-`volume_24h` and `ls_rel`; one bar more for `ret_28d`'s starting price; and up to 680 hours for
-`funding_rel`, whose 28-day reference averages hourly funding rates that each hold the last posted
-rate, carried up to 8 hours forward. Fitted thresholds reach further. The volatility-scaled columns
+reach 28 days back plus their carries: 8,064 five-minute bars (672 hours) for `dd_28d`, `ru_28d`
+and the 28-day references of `vsurge_1h` and `volume_24h`; one bar more for `vol_28d`, whose first
+return needs the close before the window, and for `ret_28d`'s starting price; up to 8,075 bars for
+`oi_vs_28d`, whose 8,064 snapshots end at t and each hold the last open interest, carried up to 12
+bars forward; up to 8,076 bars for `ls_rel`, whose 8,064 ratios before t are carried the same way;
+and up to 680 hours for `funding_rel`, whose 28-day reference averages hourly funding rates that
+each hold the last posted rate, carried up to 8 hours forward. Fitted thresholds reach further.
+The volatility-scaled columns
 (`vol_1h` to `vol_28d`) divide by `sd_ret` and `near_24h` divides by `b`, the labels run's daily
 thresholds for t's UTC day. Each is fitted on the 30-minute price changes of the 90 days before
 that day, so its values reach about 91 days before t. Whether a day has a threshold at all also
@@ -1002,12 +1005,15 @@ for wall-clock timings (the diagnostics table's `seconds`, the report's times an
 `complete.json`'s `seconds`): the tests merge split runs into tables, scores and saved models
 identical to the single run's. Across CPU models that equality is not guaranteed, even with the
 instruction set pinned. The Kaggle script starts every process with torch's own kernels, oneDNN,
-MKL and numpy's OpenBLAS, which runs the ladder's and the probe's logistic fits, pinned to AVX2
-(`ATEN_CPU_CAPABILITY=avx2`, `ONEDNN_MAX_CPU_ISA=AVX2`, `MKL_ENABLE_INSTRUCTIONS=AVX2`,
-`MKL_CBWR=AVX2`, and `OPENBLAS_CORETYPE=Haswell`, OpenBLAS's AVX2 core, with
-`OPENBLAS_NUM_THREADS=2`). oneDNN honours its pin only if it was built to, MKL only on Intel CPUs,
-and the merge refuses differing capabilities or pins but not differing CPU models. Such differences start at rounding level in each step and grow through training like a
-change of seed. The three models of a cell (the JEPA, its twin and the supervised model) always
+MKL, numpy's OpenBLAS and numpy's own CPU dispatch, which run the ladder's and the probe's
+logistic fits, pinned to AVX2 (`ATEN_CPU_CAPABILITY=avx2`, `ONEDNN_MAX_CPU_ISA=AVX2`,
+`MKL_ENABLE_INSTRUCTIONS=AVX2`, `MKL_CBWR=AVX2`, `OPENBLAS_CORETYPE=Haswell`, OpenBLAS's AVX2
+core, with `OPENBLAS_NUM_THREADS=2`, and `NPY_DISABLE_CPU_FEATURES="X86_V4 AVX512_ICL
+AVX512_SPR"`, numpy's AVX512 targets; on a CPU without them numpy starts and reports them off).
+oneDNN honours its pin only if it was built to, MKL only on Intel CPUs, and the merge refuses
+differing capabilities or pins but not differing CPU models. Such differences start at rounding
+level in each step and grow through training like a change of seed.
+The three models of a cell (the JEPA, its twin and the supervised model) always
 train in one piece, so no arm is favoured. `scores` and any later test read the saved models' bytes,
 whose sha256 the manifest records.
 The merge reads no data table: its sources' tables carry no time column and are checked by sha256
@@ -1017,6 +1023,8 @@ shipped plan as twelve Kaggle CPU kernels (one variant, one seed and three folds
 once), each running a clean checkout of the pushed commit, and a dry-run kernel that runs two
 pieces, their merge and scores on a synthetic panel. Each piece carries the sha256 of the inputs
 table and the labels grid from the local store's records and refuses a dataset whose files differ,
-and it is complete only if its saved models are exactly its plan's cells and it skipped nothing. Its `local-dry` runs the dry kernel's steps on
+after first refusing, from the manifest and the Parquet metadata alone, one that reaches the
+held-back span. A piece is complete only if its saved models are exactly its plan's cells, each
+among its verified files, and it skipped nothing. Its `local-dry` runs the dry kernel's steps on
 this machine and needs a clean checkout, since the merge refuses runs made from uncommitted code.
 The script's `--help` is its manual.

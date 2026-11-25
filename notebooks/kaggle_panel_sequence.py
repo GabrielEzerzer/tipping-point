@@ -37,17 +37,20 @@ records the commit (producer.git_sha) and the sha256 of its uv.lock, in a Python
 of torch 2.14.1+cpu and uv.lock's numpy and pyarrow, with OMP_NUM_THREADS=2 and the plan's
 threads = 2, one process per kernel. Every process starts with the instruction set pinned to AVX2
 for torch's own kernels (ATEN_CPU_CAPABILITY=avx2), oneDNN (ONEDNN_MAX_CPU_ISA=AVX2), MKL
-(MKL_ENABLE_INSTRUCTIONS=AVX2, MKL_CBWR=AVX2) and numpy's OpenBLAS, which the ladder's logistic
-fits use (OPENBLAS_CORETYPE=Haswell, its AVX2 core, and OPENBLAS_NUM_THREADS=2); the kernel
-refuses to run unless torch reports the AVX2 capability and OpenBLAS the Haswell core and two
-threads, and every sequence run records its CPU, capability and pins. A piece reads the private
-dataset tp-panel-sequence-data, which holds only the files the sequence run reads: the inputs
-run's manifest.json, complete.json and inputs.parquet, and the labels run's grid file. `write`
-reads the sha256 of the inputs table and the grid file from the inputs run's records in the local
-store and puts them in each piece's job; the kernel refuses before training unless the dataset's
-files have those sha256 values and its manifest names the expected inputs run and labels run. A
-piece writes its run to out/panel-sequence/<run id>/ and its log to out/logs/, and marks itself
-complete only if the run's saved models are exactly its plan's cells and it skipped nothing;
+(MKL_ENABLE_INSTRUCTIONS=AVX2, MKL_CBWR=AVX2), numpy's OpenBLAS, which the ladder's logistic fits
+use (OPENBLAS_CORETYPE=Haswell, its AVX2 core, and OPENBLAS_NUM_THREADS=2), and numpy's own
+dispatch (NPY_DISABLE_CPU_FEATURES="X86_V4 AVX512_ICL AVX512_SPR", its AVX512 targets); the kernel
+refuses to run unless torch reports the AVX2 capability, OpenBLAS the Haswell core and two
+threads, and numpy those targets off, and every sequence run records its CPU, capability and
+pins. A piece reads the private dataset tp-panel-sequence-data, which holds only the files the
+sequence run reads: the inputs run's manifest.json, complete.json and inputs.parquet, and the
+labels run's grid file. `write` reads the sha256 of the inputs table and the grid file from the
+inputs run's records in the local store and puts them in each piece's job; the kernel refuses
+before training unless the dataset's files have those sha256 values and its manifest names the
+expected inputs run and labels run, and before hashing them it refuses a manifest span or Parquet
+time bounds that reach the held-back span, read from the metadata only. A piece writes its run
+to out/panel-sequence/<run id>/ and its log to out/logs/, and marks itself complete only if the
+run's saved models are exactly its plan's cells and it skipped nothing;
 `kaggle kernels output <owner>/<slug> -p <dir>` fetches out/. out/STATUS holds one line: running,
 complete or failed.
 
@@ -84,6 +87,7 @@ PINS = {
     "MKL_CBWR": "AVX2",
     "OPENBLAS_CORETYPE": "Haswell",
     "OPENBLAS_NUM_THREADS": THREADS,
+    "NPY_DISABLE_CPU_FEATURES": "X86_V4 AVX512_ICL AVX512_SPR",
 }
 CAPABILITY = "AVX2"
 BLAS_PROBE = """import ctypes, json
@@ -103,6 +107,11 @@ for key, name, kind in (
     value = fn()
     said[key] = value.decode() if isinstance(value, bytes) else value
 print(json.dumps(said))
+"""
+NPY_PROBE = """import json, sys
+from numpy._core import _multiarray_umath as m
+off = sys.argv[1].split()
+print(json.dumps({"dispatch": m.__cpu_dispatch__, "on": [f for f in off if m.__cpu_features__[f]]}))
 """
 CELLS = """import json, sys
 from pathlib import Path
@@ -310,6 +319,10 @@ def environment(tmp: Path, commit: str, logs: Path) -> tuple[str, Path, dict[str
     blas = (info["openblas"]["core"], str(info["openblas"]["threads"]))
     if blas != (PINS["OPENBLAS_CORETYPE"], THREADS):
         raise RuntimeError(f"OpenBLAS runs {info['openblas']}, not Haswell with {THREADS} threads")
+    off = PINS["NPY_DISABLE_CPU_FEATURES"]
+    info["numpy_cpu"] = json.loads(run([py, "-c", NPY_PROBE, off], child_env(src)).splitlines()[-1])
+    if info["numpy_cpu"]["on"]:
+        raise RuntimeError(f"numpy dispatches to {info['numpy_cpu']['on']}, which are pinned off")
     return py, src, info
 
 
@@ -326,8 +339,11 @@ def verify(run_dir: Path, commit: str | None, cells: set[str] | None = None) -> 
     pinned = runtime is not None and (runtime["capability"], runtime["pins"]) == (CAPABILITY, PINS)
     if manifest["domain"] == "panel-sequence" and not pinned:
         raise RuntimeError(f"{run_dir.name}: ran at {runtime}, not {CAPABILITY} with {PINS}")
-    if cells is not None and set(manifest["params"]["encoders"]) != cells:
+    encoders = manifest["params"].get("encoders", {})
+    if cells is not None and set(encoders) != cells:
         raise RuntimeError(f"{run_dir.name}: its saved models are not exactly its plan's cells")
+    if cells is not None and any(complete["files"].get(c) != encoders[c] for c in cells):
+        raise RuntimeError(f"{run_dir.name}: a saved model is not among its verified files")
     if cells is not None and complete["checks"]["skipped"]:
         raise RuntimeError(f"{run_dir.name}: skipped {complete['checks']['skipped']}")
     found = {"run": run_dir.name, "files": len(complete["files"]), "checks": complete["checks"]}
@@ -346,7 +362,18 @@ def find_dataset(root: Path) -> Path:
     return hits[0]
 
 
-def check_dataset(flat: Path, data: dict[str, Any]) -> None:
+def guard_dataset(flat: Path, names: list[str]) -> None:
+    from datetime import date
+
+    from tipping_point.panel import span, store
+
+    params = json.loads((flat / "manifest.json").read_text(encoding="utf-8"))["params"]
+    span.refuse(*(date.fromisoformat(params[k]) for k in ("start", "dev_start", "end")))
+    for name in names:
+        store.refuse_held_back(flat / name)
+
+
+def check_dataset(flat: Path, data: dict[str, Any], guard: Any) -> None:
     manifest = json.loads((flat / "manifest.json").read_text(encoding="utf-8"))
     complete = json.loads((flat / "complete.json").read_text(encoding="utf-8"))
     runs = (manifest.get("run_id"), manifest.get("params", {}).get("labels_run"))
@@ -356,6 +383,7 @@ def check_dataset(flat: Path, data: dict[str, Any]) -> None:
         )
     if complete.get("files", {}).get("inputs.parquet") != data["sha256"]["inputs.parquet"]:
         raise RuntimeError("the dataset's complete.json records another inputs table")
+    guard(flat, sorted(data["sha256"]))
     for name, digest in data["sha256"].items():
         if sha256(flat / name) != digest:
             raise RuntimeError(f"the dataset's {name} has changed: its sha256 is not {digest}")
@@ -363,7 +391,12 @@ def check_dataset(flat: Path, data: dict[str, Any]) -> None:
 
 def piece_job(job: dict[str, Any], py: str, src: Path, tmp: Path, out: Path) -> dict[str, Any]:
     flat = find_dataset(Path("/kaggle/input"))
-    check_dataset(flat, job["data"])
+    script = src / "notebooks" / "kaggle_panel_sequence.py"
+
+    def guard(folder: Path, names: list[str]) -> None:
+        run([py, script, "guard", folder, *names], child_env(src))
+
+    check_dataset(flat, job["data"], guard)
     store = tmp / "store"
     inputs_dir = store / "panel-inputs" / INPUTS_RUN
     grid_dir = store / "labels" / LABELS_RUN / "grid"
@@ -643,6 +676,9 @@ def main(argv: list[str] | None = None) -> int:
     local.add_argument("root", type=Path)
     sub.add_parser("synthetic").add_argument("data", type=Path)
     sub.add_parser("bench")
+    guard = sub.add_parser("guard")
+    guard.add_argument("flat", type=Path)
+    guard.add_argument("names", nargs="+")
     args = parser.parse_args(argv)
     if args.command == "write":
         from tipping_point import engine
@@ -652,6 +688,8 @@ def main(argv: list[str] | None = None) -> int:
         local_dry(args.root)
     elif args.command == "synthetic":
         write_synthetic(args.data)
+    elif args.command == "guard":
+        guard_dataset(args.flat, args.names)
     else:
         bench()
     return 0

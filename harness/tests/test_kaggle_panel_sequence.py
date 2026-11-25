@@ -1,8 +1,9 @@
 # notebooks/kaggle_panel_sequence.py: its twelve pieces are every cell of the shipped sequence plan
 # once, its kernel folders are private CPU kernels that carry their commit, piece and data digests,
-# and a kernel refuses a changed dataset and a run that is not exactly its plan's cells.
+# and a kernel refuses a changed or held-back dataset and a run that is not exactly its cells.
 
 import ast
+import hashlib
 import importlib.util
 import json
 import re
@@ -11,8 +12,10 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
-from tipping_point.panel import sequence
+from tipping_point.panel import labels, sequence, span
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "notebooks" / "kaggle_panel_sequence.py"
@@ -98,26 +101,47 @@ def test_the_kernel_folders_carry_their_commit_and_piece(tmp_path: Path) -> None
         k.write(COMMIT, tmp_path / "other", other)
 
 
+def dataset(root: Path, k, end: str = "2023-12-31", last: str = "2023-12-31") -> tuple[Path, dict]:
+    root.mkdir()
+    for name, value in (("inputs.parquet", 1.0), (k.GRID_FILE, 2.0)):
+        stamps = [labels.ns(span.DEV_START), labels.ns(labels.date.fromisoformat(last))]
+        pq.write_table(pa.table({"ts_ns": stamps, "x": [value, value]}), root / name)
+    digests = {n: k.sha256(root / n) for n in ("inputs.parquet", k.GRID_FILE)}
+    params = {"labels_run": k.LABELS_RUN, "start": "2021-10-01", "dev_start": "2022-01-01"}
+    manifest = {"run_id": k.INPUTS_RUN, "params": params | {"end": end}}
+    complete = {"files": {"inputs.parquet": digests["inputs.parquet"]}}
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (root / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+    return root, {"inputs_run": k.INPUTS_RUN, "labels_run": k.LABELS_RUN, "sha256": digests}
+
+
 def test_the_kernel_refuses_a_changed_dataset(tmp_path: Path) -> None:
     k = runner()
-    flat = tmp_path / "dataset"
-    flat.mkdir()
-    (flat / "inputs.parquet").write_bytes(b"inputs")
-    (flat / k.GRID_FILE).write_bytes(b"grid")
-    digests = {n: k.sha256(flat / n) for n in ("inputs.parquet", k.GRID_FILE)}
-    manifest = {"run_id": k.INPUTS_RUN, "params": {"labels_run": k.LABELS_RUN}}
-    complete = {"files": {"inputs.parquet": digests["inputs.parquet"]}}
-    (flat / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (flat / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
-    data = {"inputs_run": k.INPUTS_RUN, "labels_run": k.LABELS_RUN, "sha256": digests}
-    k.check_dataset(flat, data)
+    flat, data = dataset(tmp_path / "dataset", k)
+    k.check_dataset(flat, data, k.guard_dataset)
     with pytest.raises(RuntimeError, match="holds runs"):
-        k.check_dataset(flat, data | {"labels_run": "20260101T000000Z-other"})
+        k.check_dataset(flat, data | {"labels_run": "20260101T000000Z-other"}, k.guard_dataset)
     with pytest.raises(RuntimeError, match="records another inputs table"):
-        k.check_dataset(flat, data | {"sha256": digests | {"inputs.parquet": "0" * 64}})
-    (flat / k.GRID_FILE).write_bytes(b"another grid")
+        changed = data | {"sha256": data["sha256"] | {"inputs.parquet": "0" * 64}}
+        k.check_dataset(flat, changed, k.guard_dataset)
+    pq.write_table(pa.table({"ts_ns": [labels.ns(span.DEV_START)]}), flat / k.GRID_FILE)
     with pytest.raises(RuntimeError, match=f"{k.GRID_FILE} has changed"):
-        k.check_dataset(flat, data)
+        k.check_dataset(flat, data, k.guard_dataset)
+
+
+def test_the_kernel_refuses_a_held_back_dataset_before_hashing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    k = runner()
+    hashed: list[Path] = []
+    sha256 = k.sha256
+    monkeypatch.setattr(k, "sha256", lambda path: hashed.append(path) or sha256(path))
+    for name, reach in (("span", {"end": "2024-01-31"}), ("bounds", {"last": "2024-01-02"})):
+        flat, data = dataset(tmp_path / name, k, **reach)
+        hashed.clear()
+        with pytest.raises(span.HeldBackError):
+            k.check_dataset(flat, data, k.guard_dataset)
+        assert hashed == [], name
 
 
 def test_a_piece_is_complete_only_with_exactly_its_cells_and_nothing_skipped(
@@ -126,17 +150,22 @@ def test_a_piece_is_complete_only_with_exactly_its_cells_and_nothing_skipped(
     k = runner()
     cells = {"encoders/vol-forward-fold2-seed1-jepa.pt", "encoders/vol-forward-fold2-seed1-twin.pt"}
 
-    def piece(name: str, encoders: set[str], skipped: list[str]) -> Path:
+    def piece(name: str, encoders: set[str], skipped: list[str], absent: str = "") -> Path:
         run_dir = tmp_path / name
         run_dir.mkdir()
         (run_dir / "table.parquet").write_bytes(b"rows")
+        files = {"table.parquet": k.sha256(run_dir / "table.parquet")}
+        for e in sorted(encoders - {absent}):
+            (run_dir / e).parent.mkdir(parents=True, exist_ok=True)
+            (run_dir / e).write_bytes(e.encode())
+            files[e] = k.sha256(run_dir / e)
         runtime = {"cpu": "a cpu", "capability": k.CAPABILITY, "pins": k.PINS}
+        digests = {e: hashlib.sha256(e.encode()).hexdigest() for e in encoders}
         manifest = {
             "domain": "panel-sequence",
             "producer": {"git_sha": COMMIT, "dirty": False},
-            "params": {"runtime": runtime, "encoders": {e: "c" * 64 for e in encoders}},
+            "params": {"runtime": runtime, "encoders": digests},
         }
-        files = {"table.parquet": k.sha256(run_dir / "table.parquet")}
         complete = {"clean": True, "files": files, "checks": {"skipped": skipped}}
         (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         (run_dir / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
@@ -147,6 +176,8 @@ def test_a_piece_is_complete_only_with_exactly_its_cells_and_nothing_skipped(
         k.verify(piece("short", set(sorted(cells)[:1]), []), COMMIT, cells)
     with pytest.raises(RuntimeError, match="skipped"):
         k.verify(piece("skipping", cells, ["vol forward fold 2 24 h: no probe row"]), COMMIT, cells)
+    with pytest.raises(RuntimeError, match="not among its verified files"):
+        k.verify(piece("absent", cells, [], absent=sorted(cells)[0]), COMMIT, cells)
 
 
 def test_the_pinned_packages_are_uv_lock_s() -> None:
