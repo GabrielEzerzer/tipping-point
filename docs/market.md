@@ -1046,9 +1046,14 @@ no seed. Two kinds of comparator are fitted:
   deviations over the same spans. Each readout is fitted at every c of the grid.
 
 The window comparator is the like-for-like classical comparator. It sees what the sequence model
-sees, on the same rows and scales, through the same readouts and probe, so a sequence model that
-beats it uses more of the window than these statistics hold. It is not a model of the order of the
-hours within those spans, and its statistics take no label and fit nothing.
+sees, on the same rows and scales, through the same readouts and probe. It is not a model of the
+order of the hours within those spans, and its statistics take no label and fit nothing.
+
+A sequence model that beats it ranks better than this logistic on these statistics, and no more
+than that. The logistic is linear in the statistics, so an encoder can win by bending a statistic
+the comparator already holds, for example by scoring a large value of either sign as risky, without
+reading anything else in the window. What pretraining adds is read from the JEPA against its
+untrained twin, which has the same encoder and the same probe.
 
 The folds table has the sequence run's folds table's columns. It scores every side the ladder plan
 lists, `any` included, and so does the report. `model` is `rung` or `window`, `variant` is the
@@ -1085,6 +1090,16 @@ that is not finite on any exported side stops the export.
 Choosing among more configurations makes the classical side's development score at least as
 optimistic as it would be with fewer, as it does for the sequence models. A chosen configuration's
 development score is not evidence for it.
+
+The command chooses one configuration for every name and does not say which of them a sequence
+model is tested against. That is for the written plan to fix before any held-back day is opened:
+the one input variant of the primary comparison, each arm's configuration as chosen on the
+development span, how a sequence model's seeds are combined, and the one side and horizon it is
+read on, with every other pair named as secondary. `--fixed` exports a configuration named that
+way. The `classic` rung reads columns that neither variant has, so it is a secondary comparison.
+Nothing yet scores two exported files as a pair on the same bootstrap draws, or checks a file
+against the inputs run and labels grid it was made from; the ladder reads one external file and
+checks its rows, folds and scheme only (#228).
 
 The command reads the plan and ladder plan once each, recording their sha256 and copying both into
 the run. It records the inputs and labels runs, the code's `uv.lock` and the runtime's instruction-set
