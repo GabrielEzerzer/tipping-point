@@ -935,8 +935,8 @@ sides.
 The configuration is chosen on the development span's own out-of-fold scores, so the chosen
 configuration's development score is optimistic and is not evidence for it. Before any comparison
 on held-back data, the classical comparator has to be chosen by the same rule from a fixed grid of
-penalties; the ladder does not do this yet, since its rungs use one penalty (issue #224). A
-comparison between them counts only on data that neither side's choice has seen.
+penalties, which `panel classical` below does. A comparison between them counts only on data that
+neither side's choice has seen.
 
 The two sides also see different inputs. A rung is a logistic on one row of the inputs table at
 hour t, whose columns are fixed statistics of what came before t, of two kinds. Rolling windows
@@ -954,10 +954,9 @@ that day, so its values reach about 91 days before t. Whether a day has a thresh
 depends on whether each of those windows has volume in the 28 days before it, which reaches about
 119 days before t. A sequence model sees
 the 336 hourly rows up to t and which of them are missing, so it could win on the window's shape
-rather than on what pretraining learned. Before any comparison on held-back data, the classical
-comparator will therefore also include a logistic on plain statistics of the same 336-hour windows
-(the last value, the means and spreads over the readouts' spans and the share missing), chosen by
-the same rule (issue #224). Nothing builds it yet.
+rather than on what pretraining learned. The classical comparator therefore also includes a
+logistic on plain statistics of the same 336-hour windows, the window comparator of
+`panel classical` below.
 
 `python -m tipping_point.panel scores --sequence <run> --model <jepa|twin|supervised> --variant <v>`
 writes the out-of-fold scores of one model and variant. For the JEPA and the twin it applies the
@@ -1028,3 +1027,51 @@ held-back span. A piece is complete only if its saved models are exactly its pla
 among its verified files, and it skipped nothing. Its `local-dry` runs the dry kernel's steps on
 this machine and needs a clean checkout, since the merge refuses runs made from uncommitted code.
 The script's `--help` is its manual.
+
+`python -m tipping_point.panel classical --inputs <run> --plan <sequence.toml>` fits the classical
+comparators on the sequence plan's schemes, horizons and left-out quarters, with the long and short
+sides, and writes them to `<data dir>/panel-classical/<run_id>/`. It fits no sequence model and draws
+no seed. Two kinds of comparator are fitted:
+
+- The plan's rungs at every c of its grid, through the ladder's own code: the ladder's training
+  rows, its standardisation on all of its columns, and its rows. At the ladder plan's c, a rung's
+  scores are the ladder's.
+- The window comparator, one for each of the plan's variants. It is the probes' logistic, on the
+  probes' training rows, scales and test rows, but in place of an encoder's tokens it reads plain
+  statistics of the window a sequence model reads: the 336 hourly rows up to t of the variant's
+  columns, standardised and clipped on the fold's training hours with missing values at zero, and
+  the channel holding each hour's share of missing columns, which is 1 in the padding before a
+  coin's series starts. `last` is that tensor's row at t. `means` adds the means
+  over the last 24, the last 72 and all 336 hours. `spreads` adds the population standard
+  deviations over the same spans. Each readout is fitted at every c of the grid.
+
+The window comparator is the like-for-like classical comparator. It sees what the sequence model
+sees, on the same rows and scales, through the same readouts and probe, so a sequence model that
+beats it uses more of the window than these statistics hold. It is not a model of the order of the
+hours within those spans, and its statistics take no label and fit nothing.
+
+The folds table has the sequence run's folds table's columns. `model` is `rung` or `window`,
+`variant` is the rung's name or the window's variant, `readout` is empty for a rung, and `seed` is
+0. The run also writes the row accounting. For each name (each rung and each variant), the rule
+above chooses one configuration. Its candidates are:
+
+- for a name that is both a rung and a variant (`full`, `vol`): the rung at every c and the window
+  at every readout and c;
+- for a rung alone (`classic`): the rung at every c.
+
+Ties go to the rung, then to the earlier readout, then to the smaller c. The manifest records each
+name's choice, its rule value and every candidate's value. The run writes each chosen
+configuration's out-of-fold scores as one Parquet file per scheme, `<name>-<scheme>.parquet`, in
+the columns an `[external]` entry reads. A window's `any` score is computed as in `scores`. A rung's
+`any` score is the ladder's, 1 - (1 - p_long)(1 - p_short). `--fixed <model> <variant> <readout> <c>`
+skips the choice, with `-` as a rung's readout. It fits and exports that one configuration.
+
+Choosing among more configurations makes the classical side's development score at least as
+optimistic as it would be with fewer, as it does for the sequence models. A chosen configuration's
+development score is not evidence for it.
+
+The command reads the plan and ladder plan once each, recording their sha256 and copying both into
+the run. It records the inputs and labels runs, the code's `uv.lock` and the runtime's instruction-set
+pins. It refuses everything a sequence run refuses, before hashing or reading any table. It also
+refuses a plan whose folds leave a scored quarter unfitted, and a `--fixed` configuration the plan
+lacks. It writes nothing when it refuses. Two runs on the same inputs write identical tables.
