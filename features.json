@@ -611,9 +611,29 @@
       "inputs": "a plan JSON",
       "outputs": "a kernel folder with --write-kernel; the checked plan with --dry-run",
       "test": "notebooks/kaggle_ising_runs_selftest.py"
+    },
+    {
+      "name": "Panel sequence Kaggle kernels",
+      "description": "Writes the panel sequence run as twelve Kaggle CPU kernels, one variant, one seed and three folds each, plus a dry-run kernel on a synthetic panel, every kernel pinned to one commit.",
+      "command": "uv run python notebooks/kaggle_panel_sequence.py write --commit <40 hex> --out <dir>",
+      "inputs": "a pushed commit",
+      "outputs": "thirteen kernel folders that kaggle kernels push takes",
+      "test": "harness/tests/test_kaggle_panel_sequence.py"
     }
   ],
   "internal": [
+    {
+      "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py local-dry <empty dir>",
+      "reason": "the dry-run kernel's steps on this machine, for the speed ratio against Kaggle"
+    },
+    {
+      "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py synthetic <dir>",
+      "reason": "run by the dry-run kernel and local-dry"
+    },
+    {
+      "command": "uv run --no-sync python notebooks/kaggle_panel_sequence.py bench",
+      "reason": "run by the dry-run kernel and local-dry"
+    },
     {
       "command": "cargo run -p engine-harness --bin crash-writer -- <run dir>",
       "reason": "test support: crash_recovery.rs kills it mid-write"

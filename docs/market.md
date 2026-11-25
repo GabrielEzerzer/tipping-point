@@ -970,3 +970,7 @@ the merged plan and every saved model, and its manifest lists the source runs wi
 manifests' sha256.
 The merge reads no data table: its sources' tables carry no time column and are checked by sha256
 instead, and `scores` checks the inputs and the grid as for any sequence run.
+`uv run python notebooks/kaggle_panel_sequence.py write --commit <hash> --out <dir>` writes the
+shipped plan as twelve Kaggle CPU kernels (one variant, one seed and three folds each, every cell
+once), each running a clean checkout of the pushed commit, and a dry-run kernel that runs two
+pieces, their merge and scores on a synthetic panel; the script's `--help` is its manual.

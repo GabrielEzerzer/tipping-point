@@ -129,9 +129,9 @@ files:
 rule:
   any:
     - kind: import_statement
-      regex: '^import\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*(?:pytest|hypothesis|conftest|tests|harness|notebooks|explore|api_client|book_assemble|ews_planted|ews_v1_figure|ews_v1_golden|gate|ising_experiment|ising_figures|jepa_golden|jepa_ising|jepa_toy|kaggle_ising_runs|kaggle_ising_runs_selftest|latent_data_dir|latent_prereg|m4_pilot|m8_primaries|make_archive_fixtures|make_ews_golden|make_ising_fixture|market_ews_explore|market_floor|market_garch|market_planted|market_toy|strays|wheel_provenance)\b'
+      regex: '^import\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*(?:pytest|hypothesis|conftest|tests|harness|notebooks|explore|api_client|book_assemble|ews_planted|ews_v1_figure|ews_v1_golden|gate|ising_experiment|ising_figures|jepa_golden|jepa_ising|jepa_toy|kaggle_ising_runs|kaggle_ising_runs_selftest|kaggle_panel_sequence|latent_data_dir|latent_prereg|m4_pilot|m8_primaries|make_archive_fixtures|make_ews_golden|make_ising_fixture|market_ews_explore|market_floor|market_garch|market_planted|market_toy|strays|wheel_provenance)\b'
     - kind: import_from_statement
-      regex: '^from\s+(?:pytest|hypothesis|conftest|tests|harness|notebooks|explore|api_client|book_assemble|ews_planted|ews_v1_figure|ews_v1_golden|gate|ising_experiment|ising_figures|jepa_golden|jepa_ising|jepa_toy|kaggle_ising_runs|kaggle_ising_runs_selftest|latent_data_dir|latent_prereg|m4_pilot|m8_primaries|make_archive_fixtures|make_ews_golden|make_ising_fixture|market_ews_explore|market_floor|market_garch|market_planted|market_toy|strays|wheel_provenance)\b'
+      regex: '^from\s+(?:pytest|hypothesis|conftest|tests|harness|notebooks|explore|api_client|book_assemble|ews_planted|ews_v1_figure|ews_v1_golden|gate|ising_experiment|ising_figures|jepa_golden|jepa_ising|jepa_toy|kaggle_ising_runs|kaggle_ising_runs_selftest|kaggle_panel_sequence|latent_data_dir|latent_prereg|m4_pilot|m8_primaries|make_archive_fixtures|make_ews_golden|make_ising_fixture|market_ews_explore|market_floor|market_garch|market_planted|market_toy|strays|wheel_provenance)\b'
 ---
 id: tp-engine-core-no-io
 language: Rust
