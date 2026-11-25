@@ -1230,9 +1230,15 @@ def split(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     values, grid = world()
     run_inputs = write_runs(data, values, grid)
     runs = {"inputs": run_inputs, "data": data}
-    full = split_plan('["full", "vol"]', "[3, 4]", "[2, 3]")
-    for name, text in ({"full": full} | {k: split_plan(*v) for k, v in SPLIT.items()}).items():
-        runs[name], _ = sequence.run(run_inputs, data, plans(data / "plans" / name, text), name)
+    whole = {
+        "full": split_plan('["full", "vol"]', "[3, 4]", "[2, 3]"),
+        "reversed": split_plan('["vol", "full"]', "[4, 3]", "[3, 2]"),
+    }
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(sequence.io, "code_version", lambda: {"git_sha": "c" * 40, "dirty": False})
+        for name, text in (whole | {k: split_plan(*v) for k, v in SPLIT.items()}).items():
+            path = plans(data / "plans" / name, text)
+            runs[name], _ = sequence.run(run_inputs, data, path, name)
     return runs
 
 
@@ -1256,6 +1262,13 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
         cells = {(r["variant"], r["fold"], r["seed"]) for r in rows}
         same = [r for r in full_folds if (r["variant"], r["fold"], r["seed"]) in cells]
         assert json.dumps(rows) == json.dumps([r for r in same if r["model"] != "rung"])
+    reverse = split["reversed"]
+    for name in ("folds", "curves", "rows"):
+        one, two = (pq.read_table(d / f"{name}.parquet") for d in (full, reverse))
+        assert one.equals(two), name
+    assert without_seconds(reverse / "diagnostics.parquet") == without_seconds(
+        full / "diagnostics.parquet"
+    )
     order = [split[k] for k in ("d", "a", "c", "b")]
     assert main(["merge", "--runs", *map(str, order), "--data-dir", str(data)]) == 0
     (merged,) = (data / "panel-sequence").glob("*-merged")
@@ -1334,6 +1347,28 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
         )
         record["files"]["plan.toml"] = store.sha256(copy / "plan.toml")
 
+    def retable(name: str, change: Callable[[list[dict]], None]) -> Callable[[Path], None]:
+        def edit(copy: Path) -> None:
+            path = copy / f"{name}.parquet"
+            old = pq.read_table(path)
+            rows = old.to_pylist()
+            change(rows)
+            pq.write_table(pa.Table.from_pylist(rows, schema=old.schema), path)
+            rehash = complete(lambda r, d: r["files"].__setitem__(path.name, store.sha256(path)))
+            rehash(copy)
+
+        return edit
+
+    def other_rung(rows: list[dict]) -> None:
+        next(r for r in rows if r["model"] == "rung")["auc"] = 0.123
+
+    def other_count(rows: list[dict]) -> None:
+        key = next(k for k, v in rows[0].items() if k != "horizon" and type(v) is int)
+        rows[0][key] += 1
+
+    def encoders(change: Callable[[dict], None]) -> Callable[[Path], None]:
+        return manifest(lambda m: change(m["params"]["encoders"]))
+
     def grow(copy: Path) -> None:
         key = next(
             iter(json.loads((copy / "manifest.json").read_text("utf-8"))["params"]["encoders"])
@@ -1364,11 +1399,63 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
             "ran different code",
         ),
     }
+    producer = {
+        "dirty": ({"dirty": True}, "uncommitted changes"),
+        "unknown": ({"git_sha": None}, "records no commit"),
+    }
+    for name, (change, message) in producer.items():
+        edit = manifest(lambda m, change=change: m["producer"].update(change))
+        cases[name] = (altered(name, edit), message)
+    cases |= {
+        "rung rows": (altered("rung", retable("folds", other_rung)), "rung rows differ"),
+        "accounting": (altered("rows", retable("rows", other_count)), "row accounting differs"),
+        "digests": (
+            altered("digests", encoders(lambda e: e.update({next(iter(e)): "0" * 64}))),
+            "model sha256 values differ",
+        ),
+        "models": (
+            altered("models", encoders(lambda e: e.pop(next(iter(e))))),
+            "saved models are not every cell",
+        ),
+    }
     before = sorted((data / "panel-sequence").iterdir())
     for name, (runs, message) in cases.items():
         with pytest.raises(ValueError, match=message):
             sequence.merge_run(runs, data, name)
     assert sorted((data / "panel-sequence").iterdir()) == before
+
+
+def test_the_merge_takes_a_nan_auc_in_a_shared_rung_row(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    def chosen(row: dict) -> bool:
+        return (row["model"], row["variant"], row["fold"], row["horizon"], row["side"]) == (
+            "rung",
+            "vol",
+            2,
+            1,
+            "long",
+        )
+
+    pieces, sharing = [], 0
+    for name in SPLIT:
+        copy = tmp_path / "pieces" / split[name].name
+        shutil.copytree(split[name], copy)
+        old = pq.read_table(copy / "folds.parquet")
+        rows = old.to_pylist()
+        hits = [r for r in rows if chosen(r)]
+        for row in hits:
+            row["auc"] = float("nan")
+        sharing += len(hits)
+        pq.write_table(pa.Table.from_pylist(rows, schema=old.schema), copy / "folds.parquet")
+        record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+        record["files"]["folds.parquet"] = store.sha256(copy / "folds.parquet")
+        (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
+        pieces.append(copy)
+    assert sharing >= 2
+    run_dir, _ = sequence.merge_run(pieces, tmp_path, "nan")
+    (row,) = [r for r in pq.read_table(run_dir / "folds.parquet").to_pylist() if chosen(r)]
+    assert np.isnan(row["auc"])
 
 
 def test_the_command_refuses_the_held_back_span(tmp_path: Path) -> None:

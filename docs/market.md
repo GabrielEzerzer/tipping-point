@@ -957,10 +957,16 @@ cells of the full run, and the run can be split across machines.
 that `scores` reads like any other. It refuses runs whose plans differ in anything but `variants`,
 `seeds` and `folds`; that read different inputs tables, labels grids or ladder plans; that ran
 different code (commit and `uv.lock`) or different torch or numpy versions, which every sequence
-run records; that fit a cell twice or leave a cell of the merged plan unfitted; that
+run records; that were made by code with uncommitted changes or no recorded commit; whose saved
+models are not exactly their own plan's cells, or whose manifest's model sha256 values differ from
+`complete.json`'s; that fit a cell twice or leave a cell of the merged plan unfitted; that
 `complete.json` does not mark clean; and any file whose sha256 differs from its run's
-`complete.json`. The merged run holds every source run's tables in the order a single run writes
-them, one copy of the rung rows and row accounting (which every run must agree on), the merged
-plan and every saved model, and its manifest lists the source runs with their manifests' sha256.
+`complete.json`. A sequence run writes its rows ordered by variant name, scheme, fold and seed,
+and its rung rows by horizon, scheme, rung, side and fold, whatever order the plan lists them in,
+so the merged run's tables, which follow the same order, equal those of the single run of the
+merged plan. The merged plan lists its variants by name. It holds one copy of the rung rows and
+row accounting, which every source run must agree on (a missing AUC agrees with a missing AUC),
+the merged plan and every saved model, and its manifest lists the source runs with their
+manifests' sha256.
 The merge reads no data table: its sources' tables carry no time column and are checked by sha256
 instead, and `scores` checks the inputs and the grid as for any sequence run.

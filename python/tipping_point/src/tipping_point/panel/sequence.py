@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 import tempfile
 import time
@@ -801,7 +802,10 @@ def sequence(
                                     }
                                 )
                     diagnostics += [d | {"fitted": fitted[d["model"]].hexdigest()} for d in mine]
-    fold_rows += rung_folds(values, rows, ts, edges, plan, log)
+    diagnostics.sort(key=cell_order(plan))
+    curves.sort(key=cell_order(plan))
+    fold_rows.sort(key=cell_order(plan))
+    fold_rows += sorted(rung_folds(values, rows, ts, edges, plan, log), key=rung_order(plan))
     return {
         "diagnostics": diagnostics,
         "curves": curves,
@@ -1194,6 +1198,36 @@ def cells(plan: Plan) -> set[str]:
     }
 
 
+def cell_order(plan: Plan) -> Callable[[Mapping[str, Any]], tuple[Any, ...]]:
+    def key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return (row["variant"], plan.schemes.index(row["scheme"]), row["fold"], row["seed"])
+
+    return key
+
+
+def rung_order(plan: Plan) -> Callable[[Mapping[str, Any]], tuple[Any, ...]]:
+    def key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return (
+            plan.ladder.horizons.index(row["horizon"]),
+            plan.schemes.index(row["scheme"]),
+            plan.rungs.index(row["variant"]),
+            plan.ladder.sides.index(row["side"]),
+            row["fold"],
+        )
+
+    return key
+
+
+def _same(a: object, b: object) -> bool:
+    if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        return True
+    if isinstance(a, Mapping) and isinstance(b, Mapping):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
+
+
 def _piece(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Plan]:
     if not (run_dir / "complete.json").is_file():
         raise ValueError(f"{run_dir}: the run has no complete.json")
@@ -1203,6 +1237,11 @@ def _piece(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Plan]:
     manifest = io.read_json(run_dir / "manifest.json")
     if manifest.get("domain") != "panel-sequence":
         raise ValueError(f"{run_dir}: not a sequence run")
+    producer = manifest.get("producer") or {}
+    if not producer.get("git_sha"):
+        raise ValueError(f"{run_dir}: the run records no commit for its code")
+    if producer.get("dirty") is not False:
+        raise ValueError(f"{run_dir}: the run's code had uncommitted changes")
     files = complete["files"]
     for name, digest in files.items():
         if store.sha256(run_dir / name) != digest:
@@ -1272,7 +1311,7 @@ def merge_run(
             owner[key] = run_dir
     plan = replace(
         base,
-        variants=tuple(v for v in base.rungs if any(v in p.variants for *_, p in loaded)),
+        variants=tuple(sorted({v for *_, p in loaded for v in p.variants})),
         seeds=tuple(sorted({s for *_, p in loaded for s in p.seeds})),
         folds=tuple(sorted({f for *_, p in loaded for f in p.folds})),
     )
@@ -1284,25 +1323,9 @@ def merge_run(
     ladder_text = (first_dir / "ladder.toml").read_text(encoding="utf-8")
     text = _plan_text((first_dir / "plan.toml").read_text(encoding="utf-8"), plan, ladder_text)
 
-    def cell(row: Mapping[str, Any]) -> tuple[int, ...]:
-        return (
-            plan.variants.index(row["variant"]),
-            plan.schemes.index(row["scheme"]),
-            row["fold"],
-            plan.seeds.index(row["seed"]),
-        )
-
-    def rung(row: Mapping[str, Any]) -> tuple[int, ...]:
-        return (
-            plan.ladder.horizons.index(row["horizon"]),
-            plan.schemes.index(row["scheme"]),
-            plan.rungs.index(row["variant"]),
-            plan.ladder.sides.index(row["side"]),
-            row["fold"],
-        )
-
+    cell, rung = cell_order(plan), rung_order(plan)
     merged: dict[str, list[dict[str, Any]]] = {"diagnostics": [], "curves": [], "folds": []}
-    rungs: dict[tuple[int, ...], dict[str, Any]] = {}
+    rungs: dict[tuple[Any, ...], dict[str, Any]] = {}
     accounting: list[dict[str, Any]] | None = None
     skipped: list[str] = []
     for run_dir, _, complete, _ in loaded:
@@ -1312,11 +1335,11 @@ def merge_run(
         for row in tables["folds"]:
             if row["model"] != "rung":
                 merged["folds"].append(row)
-            elif rungs.setdefault(rung(row), row) != row:
+            elif not _same(rungs.setdefault(rung(row), row), row):
                 raise ValueError(f"{run_dir.name}: its rung rows differ from another run's")
         if accounting is None:
             accounting = tables["rows"]
-        elif tables["rows"] != accounting:
+        elif not _same(tables["rows"], accounting):
             raise ValueError(f"{run_dir.name}: its row accounting differs from another run's")
         skipped += [line for line in complete["checks"]["skipped"] if line not in skipped]
     for name in merged:
