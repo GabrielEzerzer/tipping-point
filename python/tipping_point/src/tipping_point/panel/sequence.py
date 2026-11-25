@@ -166,10 +166,16 @@ def load(path: Path = PLAN, ladder_path: Path | None = None) -> Plan:
         problems.append("seeds must not be negative")
     if not 0 < plan.selection.share < 1 or plan.selection.every <= 0:
         problems.append("the selection share must lie in (0, 1) and its interval be above 0")
+    if plan.selection.negatives <= 0:
+        problems.append("the selection must draw at least one negative row")
+    if plan.jepa.dropout != 0:
+        problems.append("the JEPA takes no dropout, so its twin is its encoder at step 0")
     lengths = [plan.window, plan.future]
     if any(n % plan.shape.patch for n in lengths) or plan.shape.width % plan.shape.heads:
         problems.append("window lengths must be whole patches and width whole heads")
-    elif plan.window // plan.shape.patch < max(SPANS):
+    elif plan.shape.width // plan.shape.heads % 2:
+        problems.append("each head's width must be even for the rotary positions")
+    if plan.window // plan.shape.patch < max(SPANS):
         problems.append(f"the window must hold at least {max(SPANS)} tokens for the readouts")
     if problems:
         raise ValueError(f"{path}: unknown or invalid: {', '.join(problems)}")
@@ -458,16 +464,20 @@ def validation(
     allowed = hours_ok[None, :] & ~skip & (keep.numpy()[..., cols] > 0).all(axis=-1)
     coin, hour = np.nonzero(allowed)
     label = y.numpy()[coin, hour][:, cols] > 0.5
-    negative = np.flatnonzero(~label.any(axis=1))
-    drawn = np.random.default_rng(seed).choice(
-        negative, min(len(negative), plan.selection.negatives), replace=False
-    )
-    take = np.sort(np.concatenate([np.flatnonzero(label.any(axis=1)), drawn]))
-    coin, hour, label = coin[take], hour[take], label[take]
+    u = np.random.default_rng(seed).random(len(coin))
+    both = ~label.any(axis=1)
+    sampled = np.ones(len(coin), bool)
+    if both.sum() > plan.selection.negatives:
+        sampled = u <= np.sort(u[both])[plan.selection.negatives - 1]
+    take = np.flatnonzero(~both | sampled)
+    coin, hour, label, sampled = coin[take], hour[take], label[take], sampled[take]
 
     def check(model: Supervised) -> dict[str, float]:
         logits = encode(model, x, coin, hour, plan)
-        scores = [auc(logits[label[:, i], c], logits[~label[:, i], c]) for i, c in enumerate(cols)]
+        scores = [
+            auc(logits[label[:, i], c], logits[~label[:, i] & sampled, c])
+            for i, c in enumerate(cols)
+        ]
         finite = [s for s in scores if np.isfinite(s)]
         return {
             "auc_long": scores[0],
@@ -484,6 +494,7 @@ def supervise(
     y: Tensor,
     keep: Tensor,
     skip: np.ndarray,
+    common: np.ndarray,
     train_hours: np.ndarray,
     plan: Plan,
     key: tuple[str, int, int],
@@ -493,7 +504,8 @@ def supervise(
     ncoins, nhours = x.shape[0], len(train_hours)
     t = plan.supervised
     init = torch_seed(variant, f, seed, "init")
-    exclude = skip | (keep.numpy() == 0).all(axis=-1)
+    hidden = skip | ~common
+    exclude = hidden | (keep.numpy() == 0).all(axis=-1)
     fit_hours = eligible(train_hours, plan.pad, plan.reach)
     positions = np.flatnonzero(train_hours)
     start = positions[int(len(positions) * (1 - plan.selection.share))]
@@ -502,7 +514,7 @@ def supervise(
     rows = sample_rows(eligible(early, plan.pad, plan.reach), ncoins, exclude)
     steps, checked = t.steps, []
     if rows.size:
-        check = validation(x, y, keep, skip, fit_hours & block, plan, stream(*key, "validation"))
+        check = validation(x, y, keep, hidden, fit_hours & block, plan, stream(*key, "validation"))
         _, _, checked = train_supervised(
             x, y, keep, rows, t, plan, init, stream(*key, "selection"), log, check
         )
@@ -662,6 +674,7 @@ def sequence(
     row_fold, _ = ladder.folds(ts, edges, plan.ladder.block_days)
     y, keep, skip = targets(grid, plan, ncoins)
     kept = np.any([r.keep for r in rows.values()], axis=0)
+    common = by_coin(kept, ncoins)
     configs = [(name, c) for name in plan.readouts for c in plan.cs]
     width = plan.shape.width
     diagnostics: list[dict[str, Any]] = []
@@ -720,7 +733,7 @@ def sequence(
                     if "supervised" in plan.models:
                         began = time.perf_counter()
                         model, curve, checked, steps, initial = supervise(
-                            x, y, keep, skip, train_hours, plan, (variant, f, seed), log
+                            x, y, keep, skip, common, train_hours, plan, (variant, f, seed), log
                         )
                         logits = encode(model, x, test_coin, test_hour, plan)
                         found["supervised"] = (logits, logits)
@@ -799,6 +812,8 @@ def sequence(
 def choose(
     folds: Sequence[Mapping[str, Any]], model: str, variant: str
 ) -> tuple[str, float, float]:
+    if model not in ("jepa", "twin"):
+        raise ValueError(f"the {model} model has no readout or c to choose")
     cells: dict[tuple[str, float], dict[str, dict[int, list[float]]]] = {}
     for r in folds:
         mine = (r["model"], r["variant"], r["scheme"], r["horizon"]) == (
@@ -807,7 +822,7 @@ def choose(
             "forward",
             24,
         )
-        if mine and r["side"] in ("long", "short"):
+        if mine:
             per = cells.setdefault((r["readout"], r["c"]), {}).setdefault(r["side"], {})
             per.setdefault(r["fold"], []).append(r["auc"])
     order = list(READOUTS)
@@ -981,6 +996,8 @@ def rung_folds(
                         if f < first:
                             continue
                         test = fold == f
+                        if not test.any():
+                            continue
                         s = scored[name][side][test]
                         out.append(
                             {
@@ -1083,32 +1100,44 @@ def run(
 def scores_run(
     sequence_dir: Path,
     data_dir: Path,
-    choice: tuple[str, str, str | None, float | None],
+    model: str,
+    variant: str,
     tag: str,
     log: LOG = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
-    model, variant, name, c = choice
     manifest = io.read_json(sequence_dir / "manifest.json")
+    if not (sequence_dir / "complete.json").is_file():
+        raise ValueError(f"{sequence_dir}: the run has no complete.json")
     complete = io.read_json(sequence_dir / "complete.json")
     if complete.get("clean") is not True:
         raise ValueError(f"{sequence_dir}: complete.json does not mark the run clean")
     files = complete["files"]
-    for text in ("plan.toml", "ladder.toml"):
-        if store.sha256(sequence_dir / text) != files.get(text):
-            raise ValueError(f"{sequence_dir / text}: its sha256 differs from complete.json's")
+    for name in ("plan.toml", "ladder.toml", "folds.parquet"):
+        if store.sha256(sequence_dir / name) != files.get(name):
+            raise ValueError(f"{sequence_dir / name}: its sha256 differs from complete.json's")
     plan = load(sequence_dir / "plan.toml", sequence_dir / "ladder.toml")
     torch.set_num_threads(plan.threads)
     if model not in plan.models or variant not in plan.variants:
         raise ValueError(f"the sequence run fitted no {model} on {variant}")
-    if model == "supervised" and (name is not None or c is not None):
-        raise ValueError("the supervised model takes no readout or c")
-    if model != "supervised" and (name not in plan.readouts or c not in plan.cs):
-        raise ValueError(f"readout {name} and c {c} are not in the sequence run's grid")
     params = manifest["params"]
     values, grid, source = read(data_dir / "panel-inputs" / params["inputs_run"], data_dir, plan)
     if source["inputs"]["sha256"] != params["inputs"]["sha256"]:
         raise ValueError("the inputs table differs from the one the sequence run read")
+    if source["labels_grid"]["sha256"] != params["labels_grid"]["sha256"]:
+        raise ValueError("the labels grid differs from the one the sequence run read")
+    name: str | None = None
+    c: float | None = None
+    selection = None
+    if model != "supervised":
+        folds = pq.read_table(sequence_dir / "folds.parquet").to_pylist()
+        name, c, value = choose(folds, model, variant)
+        selection = {
+            "metric": "mean of the long and short 24 h forward fold-mean AUCs, seeds averaged",
+            "value": value,
+        }
+        log(f"  chose readout {name}, c {c:g}: {value:.4f}")
+    choice = (model, variant, name, c)
     saved, used = params["encoders"], {}
 
     def fetch(key: str) -> bytes:
@@ -1130,6 +1159,7 @@ def scores_run(
         "variant": variant,
         "readout": name,
         "c": c,
+        "selection": selection,
         "inputs_run": source["inputs_run"],
         "labels_run": source["labels_run"],
         "encoders": used,

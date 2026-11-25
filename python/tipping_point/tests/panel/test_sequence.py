@@ -3,6 +3,7 @@
 # saved models, the selection rule, the scores the ladder reads, skipped folds and held-back data.
 
 import json
+import shutil
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -194,6 +195,9 @@ def test_the_shipped_plan_is_the_scorers_plan() -> None:
         [("c = [0.01, 1.0]", "c = [-1.0, 1.0]")],
         [("c = [0.01, 1.0]", 'c = [0.01, "nan"]')],
         [("length = 36", "length = 34")],
+        [("width = 8", "width = 6")],
+        [("covariance = 0.04", "covariance = 0.04\ndropout = 0.1")],
+        [("negatives = 200", "negatives = 0")],
     ],
 )
 def test_the_plan_refuses_repeats_and_empty_windows(
@@ -207,9 +211,24 @@ def test_the_plan_refuses_repeats_and_empty_windows(
         tiny(tmp_path, text)
 
 
-def test_every_token_sees_only_its_own_and_earlier_hours(tmp_path: Path) -> None:
+def net_for(plan: sequence.Plan, trained: bool) -> encoder.Encoder:
+    if not trained:
+        return encoder.encoder(6, plan.shape, 0)
+    torch.manual_seed(0)
+    x = torch.randn(2, plan.pad + 300, 6)
+    fit = sequence.eligible(np.ones(300, bool), plan.pad, plan.reach)
+    shipped = replace(plan, jepa=replace(plan.jepa, objective="predictor", steps=20))
+    net, _, initial = sequence.pretrain(
+        x, fit, shipped, 0, np.random.SeedSequence(0), lambda line: None
+    )
+    assert sequence.weights(net) != initial
+    return net
+
+
+@pytest.mark.parametrize("trained", [False, True])
+def test_every_token_sees_only_its_own_and_earlier_hours(tmp_path: Path, trained: bool) -> None:
     plan = tiny(tmp_path)
-    net = encoder.encoder(6, plan.shape, 0)
+    net = net_for(plan, trained)
     x = torch.randn(3, plan.window, 6)
     later = x.clone()
     later[:, 9:] = torch.randn_like(later[:, 9:]) * 50
@@ -443,6 +462,7 @@ def test_the_step_selection_reads_no_left_out_or_gap_hour(tmp_path: Path) -> Non
             torch.from_numpy(y.astype(np.float32)),
             torch.from_numpy(keep.astype(np.float32)),
             skip,
+            np.ones((ncoins, nhours), bool),
             train,
             plan,
             ("vol", 1, 3),
@@ -507,6 +527,7 @@ def test_the_refit_follows_the_selection_schedule_and_stops_at_the_chosen_step(
         torch.from_numpy(y.astype(np.float32)),
         torch.from_numpy(keep.astype(np.float32)),
         skip,
+        np.ones((ncoins, nhours), bool),
         train,
         plan,
         ("vol", 1, 3),
@@ -516,6 +537,88 @@ def test_the_refit_follows_the_selection_schedule_and_stops_at_the_chosen_step(
     assert steps == 4 and len(selection) == 8 and len(refit) == 4
     assert refit == selection[:4]
     assert fitted[-1]["step"] == 3
+
+
+def hand_vicreg(a: torch.Tensor) -> tuple[float, float]:
+    v = a.detach().numpy().astype(np.float64)
+    centred = v - v.mean(axis=0)
+    cov = centred.T @ centred / (len(v) - 1)
+    variance = np.maximum(0.0, 1.0 - np.sqrt(np.diag(cov) + 1e-4)).mean()
+    off = cov - np.diag(np.diag(cov))
+    return float(variance), float((off**2).sum() / v.shape[1])
+
+
+def test_the_predictor_objective_is_its_hand_computation(tmp_path: Path) -> None:
+    plan = tiny(tmp_path, PLAN.replace('objective = "z"', 'objective = "predictor"'))
+    assert plan.jepa.objective == "predictor"
+    g = torch.Generator().manual_seed(0)
+    z = torch.randn(40, 8, generator=g, dtype=torch.float64) * torch.linspace(0.2, 2.0, 8)
+    predicted = torch.randn(40, 3, 8, generator=g, dtype=torch.float64)
+    predicted[:, 1] *= 0.3
+    predicted[:, 2, 1] = predicted[:, 2, 0] * 2
+    assert np.allclose([float(t) for t in sequence.vicreg(z)], hand_vicreg(z), rtol=1e-10)
+    parts = np.array([hand_vicreg(predicted[:, i]) for i in range(3)])
+    got = sequence.regulariser(z, predicted, plan.jepa)
+    assert np.allclose([float(t) for t in got], parts.mean(axis=0), rtol=1e-10)
+    on_z = sequence.regulariser(z, predicted, replace(plan.jepa, objective="z"))
+    assert np.allclose([float(t) for t in on_z], hand_vicreg(z), rtol=1e-10)
+    torch.manual_seed(1)
+    x = torch.randn(2, plan.pad + 300, 6)
+    fit = sequence.eligible(np.ones(300, bool), plan.pad, plan.reach)
+    _, curve, _ = sequence.pretrain(x, fit, plan, 0, np.random.SeedSequence(1), lambda line: None)
+    t = plan.jepa
+    assert len(curve) == 3
+    for c in curve:
+        parts = t.prediction * c["prediction"] + t.variance * c["variance"]
+        assert np.isfinite(c["loss"]) and c["loss"] == pytest.approx(
+            parts + t.covariance * c["covariance"], rel=1e-5
+        )
+
+
+def test_the_validation_sample_draws_each_sides_negatives_at_one_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tiny(tmp_path)
+    plan = replace(base, selection=replace(base.selection, negatives=2000))
+    rng = np.random.default_rng(10)
+    ncoins, nhours = 2, 20000
+    shape = (ncoins, nhours)
+    i_long, i_short = plan.outputs.index(("long", 24)), plan.outputs.index(("short", 24))
+    long, short = rng.random(shape) < 0.1, rng.random(shape) < 0.1
+    y = np.zeros((*shape, len(plan.outputs)), np.float32)
+    y[..., i_long], y[..., i_short] = long, short
+    score = rng.normal(size=(*shape, len(plan.outputs)))
+    score[..., i_long] += np.where(long, 1.0, np.where(short, 3.0, 0.0))
+    score[..., i_short] += np.where(short, 1.0, np.where(long, 3.0, 0.0))
+    seen: list[int] = []
+
+    def encode(model: object, x: object, coin: np.ndarray, hour: np.ndarray, p: object):
+        seen.append(len(coin))
+        return score[coin, hour]
+
+    monkeypatch.setattr(sequence, "encode", encode)
+    check = sequence.validation(
+        torch.zeros(1),
+        torch.from_numpy(y),
+        torch.ones(y.shape),
+        np.zeros(shape, bool),
+        np.ones(nhours, bool),
+        plan,
+        np.random.SeedSequence(2),
+    )
+    got = check(sequence.Supervised(6, plan, 0))
+    full, old = {}, {}
+    both = ~long & ~short
+    drawn = np.zeros(shape, bool)
+    drawn.ravel()[rng.choice(np.flatnonzero(both.ravel()), 2000, replace=False)] = True
+    for side, pos, i in (("long", long, i_long), ("short", short, i_short)):
+        s = score[..., i]
+        full[side] = auc(s[pos], s[~pos])
+        old[side] = auc(s[pos], s[~pos & (~both | drawn)])
+        assert abs(old[side] - full[side]) > 0.2
+        assert abs(got[f"auc_{side}"] - full[side]) < 0.04, (side, got, full)
+    assert seen[0] == int((~both).sum() + 2000)
+    assert check(sequence.Supervised(6, plan, 0)) == got
 
 
 def by_model(out: dict) -> dict:
@@ -611,12 +714,13 @@ def test_each_readout_is_its_hand_computation() -> None:
     assert sequence.READOUTS == {"last": 1, "means": 4, "spreads": 7}
 
 
-def test_the_readouts_read_only_their_rows_window(tmp_path: Path) -> None:
+@pytest.mark.parametrize("trained", [False, True])
+def test_the_readouts_read_only_their_rows_window(tmp_path: Path, trained: bool) -> None:
     plan = tiny(tmp_path)
     rng = np.random.default_rng(7)
     raw = rng.normal(size=(2, 200, 5))
     mu, sd = sequence.statistics(raw, np.ones(200, bool))
-    net = encoder.encoder(6, plan.shape, 0)
+    net = net_for(plan, trained)
     coin, hour = np.array([0, 1]), np.array([120, 150])
 
     def features(r: np.ndarray) -> np.ndarray:
@@ -739,16 +843,19 @@ def test_the_choice_is_the_best_seed_mean_of_long_and_short_at_24_hours() -> Non
                 rows.append(fold_row("jepa", "last", 0.01, seed, fold, side, 0.99, variant="full"))
                 rows.append(fold_row("jepa", "last", 0.01, seed, fold, side, 0.99, scheme="loqo"))
             rows.append(fold_row("jepa", "spreads", 0.1, 1, fold, "any", 0.99))
+            rows.append(fold_row("supervised", None, None, 1, fold, side, 0.99))
     assert sequence.choose(rows, "jepa", "vol") == pytest.approx(("means", 0.01, 0.60))
     assert sequence.choose(rows, "twin", "vol")[:2] == ("last", 0.01)
     tied = [r | {"readout": "spreads"} for r in rows if r["readout"] == "means"]
     tied += [r | {"c": 0.001} for r in rows if r["readout"] == "means"]
     assert sequence.choose(tied, "jepa", "vol")[:2] == ("means", 0.001)
-    with pytest.raises(ValueError, match="no forward 24 h"):
+    with pytest.raises(ValueError, match="supervised model has no readout or c to choose"):
         sequence.choose(rows, "supervised", "vol")
+    with pytest.raises(ValueError, match="no forward 24 h"):
+        sequence.choose(rows, "twin", "full")
 
 
-def scores_args(run: Path, data: Path, model: str, *choice: str) -> list[str]:
+def scores_args(run: Path, data: Path, model: str, tag: str) -> list[str]:
     return [
         "scores",
         "--sequence",
@@ -757,10 +864,22 @@ def scores_args(run: Path, data: Path, model: str, *choice: str) -> list[str]:
         model,
         "--variant",
         "vol",
-        *choice,
         "--data-dir",
         str(data),
+        "--tag",
+        tag,
     ]
+
+
+def table_side(table: pa.Table, h: int, side: str) -> pa.Table:
+    mask = (table["horizon"].to_numpy() == h) & (
+        table["side"].to_numpy(zero_copy_only=False) == side
+    )
+    return table.filter(pa.array(mask))
+
+
+def softplus(v: np.ndarray) -> np.ndarray:
+    return np.logaddexp(0.0, v)
 
 
 def test_the_scores_command_writes_a_file_the_ladder_scores_on_its_rows(tmp_path: Path) -> None:
@@ -772,17 +891,25 @@ def test_the_scores_command_writes_a_file_the_ladder_scores_on_its_rows(tmp_path
     command = ["sequence", "--inputs", run_inputs.name, "--plan", str(plan_path)]
     assert main([*command, "--data-dir", str(tmp_path)]) == 0
     (run,) = (tmp_path / "panel-sequence").glob("*-sequence")
-    picks = {"jepa": ["--readout", "means", "--c", "0.01"], "supervised": []}
-    for model, choice in picks.items():
-        assert main([*scores_args(run, tmp_path, model, *choice), "--tag", model]) == 0
+    folds = pq.read_table(run / "folds.parquet").to_pylist()
+    for model in ("jepa", "twin", "supervised"):
+        assert main(scores_args(run, tmp_path, model, model)) == 0
         (out,) = (tmp_path / "panel-scores").glob(f"*-{model}")
+        params = json.loads((out / "manifest.json").read_text(encoding="utf-8"))["params"]
+        assert params["sequence_run"] == run.name and len(params["encoders"]) == 4
+        if model == "supervised":
+            assert (params["readout"], params["c"], params["selection"]) == (None, None, None)
+        else:
+            name, c, value = sequence.choose(folds, model, "vol")
+            assert (params["readout"], params["c"]) == (name, c)
+            assert params["selection"]["value"] == value
+        if model == "twin":
+            continue
         file = out / "forward.parquet"
         store.refuse_held_back(file, "hour")
         meta = pq.ParquetFile(file).metadata
         stats = meta.row_group(0).column(meta.schema.names.index("hour")).statistics
         assert stats is not None and stats.has_min_max
-        params = json.loads((out / "manifest.json").read_text(encoding="utf-8"))["params"]
-        assert params["sequence_run"] == run.name and len(params["encoders"]) == 4
         external = f'\n[external]\nname = "seq"\npath = "{file.as_posix()}"\nscheme = "forward"\n'
         (tmp_path / f"ladder-{model}.toml").write_text(ladder_text() + external, encoding="utf-8")
         ladder_run, _ = ladder.run(run_inputs, tmp_path, tmp_path / f"ladder-{model}.toml", model)
@@ -795,20 +922,126 @@ def test_the_scores_command_writes_a_file_the_ladder_scores_on_its_rows(tmp_path
             int((r.fold >= 2).sum())
             for r in sequence.common_rows(values, grid, sequence.load(plan_path)).values()
         )
-    assert main(scores_args(run, tmp_path, "jepa", "--readout", "means", "--c", "0.5")) == 1
-    assert main(scores_args(run, tmp_path, "supervised", "--readout", "means")) == 1
-    (run / sequence.encoder_name("vol", "forward", 3, 4, "jepa")).unlink()
-    assert (
-        main(
-            [
-                *scores_args(run, tmp_path, "jepa", "--readout", "means", "--c", "0.01"),
-                "--tag",
-                "gone",
+    plan = sequence.load(run / "plan.toml", run / "ladder.toml")
+    rows = sequence.common_rows(values, grid, plan)
+    symbol = grid["symbol"].astype(str)
+
+    def fetch(key: str) -> bytes:
+        return (run / key).read_bytes()
+
+    recorded = {
+        (r["model"], r["readout"], r["c"], r["horizon"], r["side"], r["fold"]): r["auc"]
+        for r in folds
+        if r["seed"] == 3 and r["model"] != "rung"
+    }
+    choices = [("jepa", "means", 0.01), ("twin", "spreads", 1.0), ("supervised", None, None)]
+    for model, name, c in choices:
+        choice = (model, "vol", name, c)
+        one = sequence.external(values, grid, replace(plan, seeds=(3,)), choice, fetch)["forward"]
+        checked = 0
+        for h, r in rows.items():
+            at = {
+                (k, t): i
+                for i, (k, t) in enumerate(zip(symbol[r.keep], grid["ts_ns"][r.keep], strict=True))
+            }
+            for side in plan.ladder.sides:
+                part = table_side(one, h, side)
+                index = np.array(
+                    [
+                        at[(k, t)]
+                        for k, t in zip(
+                            part["coin"].to_pylist(), part["hour"].to_pylist(), strict=True
+                        )
+                    ]
+                )
+                s = part["score"].to_numpy()
+                fold = part["fold"].to_numpy()
+                for f in (2, 3):
+                    label = r.y[side][index[fold == f]]
+                    got = auc(s[fold == f][label], s[fold == f][~label])
+                    assert got == recorded[(model, name, c, h, side, f)], (model, h, side, f)
+                    checked += 1
+        assert checked == 2 * 3 * 2
+        tables = {
+            seeds: sequence.external(values, grid, replace(plan, seeds=seeds), choice, fetch)[
+                "forward"
             ]
-        )
-        == 1
-    )
+            for seeds in ((3,), (4,), (3, 4))
+        }
+        for h in rows:
+            mean = {}
+            for side in ("long", "short"):
+                per = [table_side(tables[k], h, side)["score"].to_numpy() for k in ((3,), (4,))]
+                mean[side] = (per[0] + per[1]) / 2
+                both = table_side(tables[(3, 4)], h, side)["score"].to_numpy()
+                assert np.allclose(both, mean[side], rtol=1e-12, atol=1e-12), (model, h, side)
+            either = np.log(np.expm1(softplus(mean["long"]) + softplus(mean["short"])))
+            got = table_side(tables[(3, 4)], h, "any")["score"].to_numpy()
+            assert np.allclose(got, either, rtol=1e-10, atol=1e-12), (model, h)
+    (run / sequence.encoder_name("vol", "forward", 3, 4, "jepa")).unlink()
+    assert main(scores_args(run, tmp_path, "jepa", "gone")) == 1
     assert not list((tmp_path / "panel-scores").glob("*-gone"))
+
+
+def test_the_scores_command_refuses_a_changed_run_and_writes_nothing(tmp_path: Path) -> None:
+    values, grid = world(days=200)
+    run_inputs = write_runs(tmp_path, values, grid)
+    text = PLAN.replace('schemes = ["loqo", "forward"]', 'schemes = ["forward"]')
+    plan_path = plans(tmp_path, text.replace("folds = [1, 3]", "folds = [2]"))
+    command = ["sequence", "--inputs", run_inputs.name, "--plan", str(plan_path)]
+    assert main([*command, "--data-dir", str(tmp_path)]) == 0
+    (run,) = (tmp_path / "panel-sequence").glob("*-sequence")
+    shift = labels.ns(date(2024, 1, 1)) - labels.ns(date(2022, 1, 1)) - 5 * 24 * HOUR
+    late = write_runs(tmp_path / "late", values, dict(grid, ts_ns=grid["ts_ns"] + shift))
+
+    def params(copy: Path, change: dict) -> None:
+        manifest = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
+        for key, value in change.items():
+            manifest["params"][key] = value
+        (copy / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def complete(copy: Path, clean: bool) -> None:
+        record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+        (copy / "complete.json").write_text(json.dumps(record | {"clean": clean}), "utf-8")
+
+    encoder_file = sequence.encoder_name("vol", "forward", 2, 3, "jepa")
+    zero = "0" * 64
+    cases = {
+        "encoder": (
+            lambda d: (d / encoder_file).write_bytes((d / encoder_file).read_bytes() + b"0"),
+            "sha256 differs from the sequence run's",
+        ),
+        "inputs": (
+            lambda d: params(d, {"inputs": {"file": "inputs.parquet", "sha256": zero}}),
+            "inputs table differs",
+        ),
+        "grid": (
+            lambda d: params(d, {"labels_grid": {"file": "grid/0.parquet", "sha256": zero}}),
+            "labels grid differs",
+        ),
+        "missing": (lambda d: (d / "complete.json").unlink(), "no complete.json"),
+        "unclean": (lambda d: complete(d, False), "does not mark the run clean"),
+        "plan": (lambda d: (d / "plan.toml").write_text(text + "\n", "utf-8"), "plan.toml"),
+        "ladder": (
+            lambda d: (d / "ladder.toml").write_text(ladder_text() + "\n", "utf-8"),
+            "ladder.toml",
+        ),
+    }
+    for name, (change, message) in cases.items():
+        copy = tmp_path / "copies" / name
+        shutil.copytree(run, copy)
+        change(copy)
+        with pytest.raises(ValueError, match=message):
+            sequence.scores_run(copy, tmp_path, "jepa", "vol", name)
+    assert not (tmp_path / "panel-scores").exists()
+    copy = tmp_path / "copies" / "late"
+    shutil.copytree(run, copy)
+    params(copy, {"inputs_run": late.name})
+    with pytest.raises(span.HeldBackError):
+        sequence.scores_run(copy, tmp_path / "late", "jepa", "vol", "late")
+    assert not (tmp_path / "late" / "panel-scores").exists()
+    sequence.scores_run(run, tmp_path, "jepa", "vol", "kept")
+    assert len(list((tmp_path / "panel-scores").glob("*-kept"))) == 1
 
 
 def test_the_scores_need_every_seed_and_every_scored_quarter(tmp_path: Path) -> None:
@@ -865,13 +1098,15 @@ def test_the_left_out_quarter_and_its_gaps_reach_no_fitted_parameter(tmp_path: P
     assert [r["auc"] for r in first["folds"]] != [r["auc"] for r in second["folds"]]
 
 
-def test_labels_of_skipped_rows_and_censored_horizons_are_never_read(tmp_path: Path) -> None:
+def test_labels_of_skipped_censored_and_uncommon_rows_are_never_read(tmp_path: Path) -> None:
     values, grid = world(skip=0.3, censored=0.3)
+    values["ls"][np.random.default_rng(11).random(len(values["ls"])) < 0.2] = np.nan
     plan = tiny(tmp_path, PLAN.replace("folds = [1, 3]", "folds = [2]"))
     first = sequence.sequence(values, grid, plan)
+    common = np.any([r.keep for r in sequence.common_rows(values, grid, plan).values()], axis=0)
     flipped = dict(grid)
     for h in labels.HORIZONS:
-        hidden = grid["skip"] | grid[f"censored_{h}"]
+        hidden = grid["skip"] | grid[f"censored_{h}"] | ~common
         for side in ("long", "short"):
             flipped[f"{side}_{h}"] = np.where(hidden, ~grid[f"{side}_{h}"], grid[f"{side}_{h}"])
     second = sequence.sequence(values, flipped, plan)
@@ -899,6 +1134,9 @@ def test_a_fold_without_training_or_probe_rows_is_skipped(tmp_path: Path) -> Non
     out = sequence.sequence(values, censored, plan)
     assert out["skipped"] == ["vol forward fold 2 24 h: no probe row"]
     assert {r["horizon"] for r in out["folds"] if r["model"] != "rung"} == {1}
+    empty = tiny(tmp_path / "c", PLAN.replace("folds = [1, 3]", "folds = [3]"))
+    out = sequence.sequence(values, grid, empty)
+    assert out["folds"] == [] and out["skipped"] == [] and out["diagnostics"]
 
 
 def write_runs(data: Path, values: dict, grid: dict, end: str = "2022-12-31") -> Path:

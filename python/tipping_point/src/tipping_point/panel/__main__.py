@@ -44,10 +44,11 @@ Command line: python -m tipping_point.panel <command> [options]
           the JEPA's and twin's readouts over a grid of readouts and penalties, as a run in
           <data dir>/panel-sequence/<run_id>/ with the tables diagnostics, curves, folds and rows,
           report.md and every fitted model under encoders/
-  scores  out-of-fold scores of one configuration of a sequence run (--sequence; --model,
-          --variant, and for the JEPA and twin --readout and --c) from its saved models, the mean
-          over seeds of each row's logit, as a run in <data dir>/panel-scores/<run_id>/ with one
-          table per scheme in the columns a ladder plan's [external] section reads
+  scores  out-of-fold scores of one model and variant of a sequence run (--sequence, --model,
+          --variant) from its saved models, the JEPA's and twin's readout and penalty chosen from
+          the run's folds table by the selection rule, the mean over seeds of each row's logit, as
+          a run in <data dir>/panel-scores/<run_id>/ with one table per scheme in the columns a
+          ladder plan's [external] section reads
 
 Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
 data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
@@ -116,8 +117,6 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--sequence", required=True, help="a sequence run id, or its folder")
     p.add_argument("--model", required=True, choices=("jepa", "twin", "supervised"))
     p.add_argument("--variant", required=True)
-    p.add_argument("--readout", default=None, help="the JEPA's or twin's readout")
-    p.add_argument("--c", type=float, default=None, help="the JEPA's or twin's probe penalty")
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--tag", default="scores", help="the run id's tag (default scores)")
     p.set_defaults(command=_scores)
@@ -249,7 +248,8 @@ def _scores(args: argparse.Namespace) -> int:
     run_dir, out = sequence.scores_run(
         _run_dir(args.data_dir, "panel-sequence", args.sequence),
         args.data_dir,
-        (args.model, args.variant, args.readout, args.c),
+        args.model,
+        args.variant,
         args.tag,
         log=lambda line: print(line, flush=True),
     )

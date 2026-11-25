@@ -889,12 +889,22 @@ encoder's moving-average momentum rises from 0.996 to 1.0. On synthetic panels w
 24-hour chirp, the objective that put those terms on z instead left the planted signal unlearned
 (probe AUC 0.52, against 0.995 for this one). The JEPA's untrained twin is its encoder before the
 first step. A supervised model with the same encoder predicts the six labels directly. Every fold
-fits its own models, statistics and probes, under the plan's `schemes` (`forward` by default;
-`loqo` also works), on rows whose 336 hours back and 24 hours ahead all lie in the fold's training
-hours inside the plan's span. Test rows are every common row of the left-out quarter; one in the
-grid's first 335 hours reads padding, marked as missing. The supervised model's step count is chosen
-on the last fifth of a fold's training hours, trained on hours a gap before that block, and then
-refitted on every training row under the same learning-rate schedule, stopped at the chosen step.
+fits its own models, scales and probes, under the plan's `schemes` (`forward` by default; `loqo`
+also works). The scales (each input's mean and standard deviation) are computed on all of the
+fold's training hours. The models and probes train on rows whose 336 hours back and 24 hours ahead
+all lie in the fold's training hours inside the plan's span, so the last 24 hours of each stretch
+of training hours, whose next 24 hours leave it, and the first 335 hours after each break are
+dropped. The probes and the supervised model use only common rows; JEPA pretraining reads every
+coin at every such hour, whether or not the row is a common row, since it reads no label. Test rows
+are every common row of the left-out quarter; one in the grid's first 335 hours reads padding,
+marked as missing. The supervised model's step count is chosen on the last fifth of a fold's
+training hours, trained on hours a gap before that block, and then refitted on every training row
+under the same learning-rate schedule, stopped at the chosen step. Each check scores a fixed sample
+of that block's common rows with both 24-hour labels uncensored: every row that is positive on
+either side, and at most 8,000 (`negatives`) of the rows negative on both, drawn at random with a
+seed. Scoring one side, the other side's positives count among its negatives at the same rate as
+the rows negative on both, so the sample's negatives are drawn alike. The check's AUC is the mean of
+the long and the short 24-hour AUCs.
 Seeds are drawn per variant, fold, seed and stream; the twin shares the JEPA's initial weights. The
 24-hour target, 4-hour patches, the 336-hour window and kernel 7 were kept: the padded start of the
 target's segment is the same regime as the window's first tokens, and the probes read the online
@@ -914,19 +924,27 @@ out-of-fold scores.
 One rule picks the configuration of the JEPA and of the twin, for each model and variant: the
 readout and c with the highest mean of the long and the short fold-mean AUCs at 24 hours under
 `forward`, where each fold's AUC is first averaged over seeds. Ties go to the earlier readout (in
-the order `last`, `means`, `spreads`) and then to the smaller c.
+the order `last`, `means`, `spreads`) and then to the smaller c. The supervised model has no
+configuration to choose.
 
-`python -m tipping_point.panel scores --sequence <run> --model <jepa|twin|supervised> --variant <v>`,
-with `--readout <r> --c <c>` for the JEPA and the twin, writes the out-of-fold scores of one
-configuration. It reloads the sequence run's saved models after checking each file's sha256
-against the run's manifest and `complete.json`, refits the probe of each fold and seed on the same
+The configuration is chosen on the development span's own out-of-fold scores, so the chosen
+configuration's development score is optimistic and is not evidence for it. The classical
+comparator is chosen the same way. A comparison between them counts only on data that neither
+side's choice has seen.
+
+`python -m tipping_point.panel scores --sequence <run> --model <jepa|twin|supervised> --variant <v>`
+writes the out-of-fold scores of one model and variant. For the JEPA and the twin it applies the
+rule above to the run's folds table and writes the chosen readout and c, with the rule's value, to
+its manifest. It reloads the sequence run's saved models after checking each file's sha256 against
+the run's manifest and `complete.json`, refits the probe of each fold and seed on the same
 training rows, and writes one Parquet file per scheme to `<data dir>/panel-scores/<run_id>/` in the
 columns an `[external]` entry reads. A row's score is the mean over seeds of the probe's logit (for
 the supervised model, of its own logit), and its `any` score is the logit of
 1 - (1 - p_long)(1 - p_short) from those means. The file covers every scored row of the scheme with
-the ladder's folds. The command refuses a sequence run that `complete.json` does not mark clean, a
-plan copy whose sha256 differs from `complete.json`'s, a configuration outside the run's models,
-variants, readouts or penalties, a plan whose folds leave a scored quarter unfitted, a missing
-model for any seed, and an inputs table other than the one the sequence run read. Like `ladder`,
+the ladder's folds. The command refuses a sequence run without `complete.json` or that it does not
+mark clean, a plan, ladder plan or folds table whose sha256 differs from `complete.json`'s, a model
+or variant the run did not fit, a plan whose folds leave a scored quarter unfitted, a missing or
+changed model for any seed, and an inputs table or labels grid other than the one the sequence run
+read. It writes nothing when it refuses. Like `ladder`,
 both commands check the grid's and the inputs' time bounds from their Parquet metadata before
 hashing or reading them.

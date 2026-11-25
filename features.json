@@ -275,10 +275,18 @@
     },
     {
       "name": "Panel sequence models",
-      "description": "Trains a JEPA, its untrained twin and a supervised model on the last 336 hours of a ladder rung's panel inputs inside each quarter fold, probes the representations and scores them on the ladder's common rows, from a plan file.",
+      "description": "Trains a JEPA, its untrained twin and a supervised model on the last 336 hours of a ladder rung's panel inputs inside each quarter fold, probes the JEPA's and twin's readouts over a grid of readouts and penalties on the ladder's common rows, and saves every fitted model, from a plan file.",
       "command": "uv run python -m tipping_point.panel sequence --inputs <run id>",
       "inputs": "a panel inputs run, its labels run and a plan file (default panel/sequence.toml, which names its ladder plan)",
-      "outputs": "<data dir>/panel-sequence/<run_id>/ holding scores, diagnostics, loss curves, per-fold AUCs, row accounting and report.md",
+      "outputs": "<data dir>/panel-sequence/<run_id>/ holding diagnostics, loss curves, the per-fold AUC table, row accounting, report.md and the saved models under encoders/",
+      "test": "python/tipping_point/tests/panel/test_sequence.py"
+    },
+    {
+      "name": "Panel sequence scores",
+      "description": "Writes the out-of-fold scores of one model and variant of a sequence run from its saved models, choosing the JEPA's or twin's readout and penalty from the run's per-fold AUC table by the selection rule, for a ladder plan's external entry.",
+      "command": "uv run python -m tipping_point.panel scores --sequence <run id> --model <jepa|twin|supervised> --variant <variant>",
+      "inputs": "a panel sequence run, its inputs run and its labels run",
+      "outputs": "<data dir>/panel-scores/<run_id>/ holding one Parquet table per scheme with the columns coin, hour, horizon, side, score, fold and scheme",
       "test": "python/tipping_point/tests/panel/test_sequence.py"
     },
     {
