@@ -1,5 +1,5 @@
 # A panel run in the shared layout: <data dir>/<domain>/<run_id>/ with manifest.json first, one
-# Parquet file per table, any text files, then complete.json with every file's sha256 and checks.
+# Parquet file per table, any text and binary files, then complete.json with every sha256 and check.
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ def write(
     params: dict[str, Any],
     checks: dict[str, Any],
     texts: dict[str, str] | None = None,
+    blobs: dict[str, bytes] | None = None,
 ) -> Path:
     run_id = engine.run_id(tag)
     run_dir = Path(data_dir) / domain / run_id
@@ -53,6 +54,11 @@ def write(
         path = run_dir / name
         io.write_file(path, lambda f, text=text: f.write(text.encode("utf-8")))
         files[path.name] = sha256(path)
+    for name, data in (blobs or {}).items():
+        path = run_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        io.write_file(path, lambda f, data=data: f.write(data))
+        files[name] = sha256(path)
     record = {
         "ended_ns": time.time_ns(),
         "rows": {name: table.num_rows for name, table in tables.items()},

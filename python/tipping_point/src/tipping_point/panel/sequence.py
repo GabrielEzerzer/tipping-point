@@ -1,6 +1,6 @@
 # Sequence models on the panel (docs/market.md, "Coin panel"): a JEPA, its untrained twin and a
-# supervised model share one encoder over the last 336 hourly input rows of a ladder rung, each
-# fitted inside each quarter fold on its training hours, then scored on the ladder's common rows.
+# supervised model share one encoder over the last 336 hourly input rows of a ladder rung, fitted in
+# each quarter fold, probed over a grid of readouts and penalties, and saved for the scores step.
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,8 @@ MODELS = ("jepa", "twin", "supervised")
 TARGETS = ("future", "shifted")
 OBJECTIVES = ("z", "predictor")
 LOG = Callable[[str], None]
-KEYS = ("horizon", "side", "model", "variant", "scheme", "seed")
+READOUTS = {"last": 1, "means": 4, "spreads": 7}
+SPANS = (6, 18)
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,8 @@ class Plan:
     supervised: Training
     selection: Selection
     encode_batch: int
+    readouts: tuple[str, ...]
+    cs: tuple[float, ...]
 
     @property
     def pad(self) -> int:
@@ -98,9 +102,10 @@ class Plan:
         return next(r for r in self.ladder.rungs if r.name == name)
 
 
-def load(path: Path = PLAN) -> Plan:
+def load(path: Path = PLAN, ladder_path: Path | None = None) -> Plan:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    ladder_path = (path.parent / raw["ladder"]).resolve()
+    if ladder_path is None:
+        ladder_path = (path.parent / str(raw["ladder"])).resolve()
     base = ladder.load(ladder_path)
     nfolds = len(ladder.bounds(base)) - 1
     e = raw["encoder"]
@@ -132,6 +137,8 @@ def load(path: Path = PLAN) -> Plan:
         supervised=Training(**raw["supervised"]),
         selection=Selection(**raw["selection"]),
         encode_batch=int(raw["probe"]["batch"]),
+        readouts=tuple(raw["probe"]["readouts"]),
+        cs=tuple(float(c) for c in raw["probe"]["c"]),
     )
     rungs = {r.name for r in base.rungs}
     problems = [f"variant {v}" for v in plan.variants if v not in rungs]
@@ -139,7 +146,9 @@ def load(path: Path = PLAN) -> Plan:
     problems += [f"model {m}" for m in plan.models if m not in MODELS]
     problems += [f"scheme {s}" for s in plan.schemes if s not in ladder.SCHEMES]
     problems += [f"fold {f}" for f in plan.folds if not 0 <= f < nfolds]
-    for name in ("variants", "rungs", "models", "schemes", "folds", "seeds"):
+    problems += [f"readout {r}" for r in plan.readouts if r not in READOUTS]
+    problems += [f"c {c}" for c in plan.cs if not (np.isfinite(c) and c > 0)]
+    for name in ("variants", "rungs", "models", "schemes", "folds", "seeds", "readouts", "cs"):
         values = getattr(plan, name)
         if not values or len(set(values)) != len(values):
             problems.append(f"{name} must be given and distinct")
@@ -147,8 +156,6 @@ def load(path: Path = PLAN) -> Plan:
         problems.append(f"target {plan.target}")
     if plan.jepa.objective not in OBJECTIVES:
         problems.append(f"objective {plan.jepa.objective}")
-    if "jepa" in plan.models and "full" not in rungs:
-        problems.append("full+z needs a rung named full")
     if plan.future <= 0 or any(s <= 0 for s in plan.shifts):
         problems.append("future and every shift must be above 0")
     if plan.target == "shifted" and not plan.shifts:
@@ -162,6 +169,8 @@ def load(path: Path = PLAN) -> Plan:
     lengths = [plan.window, plan.future]
     if any(n % plan.shape.patch for n in lengths) or plan.shape.width % plan.shape.heads:
         problems.append("window lengths must be whole patches and width whole heads")
+    elif plan.window // plan.shape.patch < max(SPANS):
+        problems.append(f"the window must hold at least {max(SPANS)} tokens for the readouts")
     if problems:
         raise ValueError(f"{path}: unknown or invalid: {', '.join(problems)}")
     return plan
@@ -532,22 +541,72 @@ def encode(
     return np.concatenate(out) if out else np.empty((0, width))
 
 
+def readout(tokens: Tensor) -> Tensor:
+    spans = (*SPANS, tokens.shape[1])
+    means = [tokens[:, -s:].mean(dim=1) for s in spans]
+    spreads = [tokens[:, -s:].std(dim=1, unbiased=False) for s in spans]
+    return torch.cat([tokens[:, -1], *means, *spreads], dim=1)
+
+
+@torch.inference_mode()
+def features(
+    net: encoder.Encoder, x: Tensor, coin: np.ndarray, hour: np.ndarray, plan: Plan
+) -> np.ndarray:
+    net.eval()
+    out = []
+    for i in range(0, len(coin), plan.encode_batch):
+        c = torch.from_numpy(coin[i : i + plan.encode_batch])
+        h = torch.from_numpy(hour[i : i + plan.encode_batch])
+        out.append(readout(net.tokens(windows(x, c, h + plan.pad, plan.window))).numpy())
+    net.train()
+    width = READOUTS["spreads"] * plan.shape.width
+    return np.concatenate(out) if out else np.empty((0, width), np.float32)
+
+
+def either(long: np.ndarray, short: np.ndarray) -> np.ndarray:
+    total = np.logaddexp(0.0, long) + np.logaddexp(0.0, short)
+    with np.errstate(divide="ignore"):
+        return np.where(total > 30, total, np.log(np.expm1(np.minimum(total, 30))))
+
+
 def probe(
     train: np.ndarray,
     test: np.ndarray,
     y: Mapping[str, np.ndarray],
     plan: Plan,
     fitted: Any,
-) -> dict[str, np.ndarray]:
-    a, b = ladder.standardise(train, test, plan.ladder.clip)
-    fitted.update(a.tobytes())
+    configs: Sequence[tuple[str, float]],
+) -> dict[tuple[str, float], dict[str, np.ndarray]]:
     out = {}
-    for side in ("long", "short"):
-        beta = ladder.fit(a, y[side].astype(np.float64), plan.ladder.c)
-        fitted.update(beta.tobytes())
-        out[side] = ladder.predict(b, beta)
-    out["any"] = 1 - (1 - out["long"]) * (1 - out["short"])
+    for name in dict.fromkeys(n for n, _ in configs):
+        k = READOUTS[name] * plan.shape.width
+        a, b = ladder.standardise(
+            train[:, :k].astype(np.float64), test[:, :k].astype(np.float64), plan.ladder.clip
+        )
+        fitted.update(a.tobytes())
+        for c in (c for n, c in configs if n == name):
+            sides = {}
+            for side in ("long", "short"):
+                beta = ladder.fit(a, y[side].astype(np.float64), c)
+                fitted.update(beta.tobytes())
+                sides[side] = b @ beta[:-1] + beta[-1]
+            sides["any"] = either(sides["long"], sides["short"])
+            out[(name, c)] = sides
     return out
+
+
+def encoder_name(variant: str, scheme: str, f: int, seed: int, model: str) -> str:
+    return f"encoders/{variant}-{scheme}-fold{f}-seed{seed}-{model}.pt"
+
+
+def save(net: nn.Module) -> bytes:
+    buffer = BytesIO()
+    torch.save(net.state_dict(), buffer)
+    return buffer.getvalue()
+
+
+def restore(net: nn.Module, data: bytes) -> None:
+    net.load_state_dict(torch.load(BytesIO(data), weights_only=True))
 
 
 def describe(z: np.ndarray) -> dict[str, float]:
@@ -602,14 +661,14 @@ def sequence(
     ts = grid["ts_ns"]
     row_fold, _ = ladder.folds(ts, edges, plan.ladder.block_days)
     y, keep, skip = targets(grid, plan, ncoins)
-    full = plan.rung("full").columns if "jepa" in plan.models else ()
     kept = np.any([r.keep for r in rows.values()], axis=0)
-    scores: list[pa.Table] = []
+    configs = [(name, c) for name in plan.readouts for c in plan.cs]
+    width = plan.shape.width
     diagnostics: list[dict[str, Any]] = []
     curves: list[dict[str, Any]] = []
     fold_rows: list[dict[str, Any]] = []
-    scored: dict[tuple[str, int], set[int]] = {(s, h): set() for s in plan.schemes for h in rows}
     skipped: list[str] = []
+    encoders: dict[str, bytes] = {}
     for variant in plan.variants:
         raw = by_coin(np.column_stack([values[c] for c in plan.rung(variant).columns]), ncoins)
         for scheme in plan.schemes:
@@ -623,10 +682,11 @@ def sequence(
                     log(f"  {skipped[-1]}")
                     continue
                 fit_rows = np.repeat(fit_hours, ncoins)
-                test_rows = row_fold == f
                 mu, sd = statistics(raw, train_hours)
                 x = torch.from_numpy(standardised(raw, mu, sd, plan.ladder.clip, plan.pad))
-                need_train, need_test = kept & fit_rows, kept & test_rows
+                need_train, need_test = kept & fit_rows, kept & (row_fold == f)
+                at_train, at_test = np.cumsum(need_train) - 1, np.cumsum(need_test) - 1
+                test_coin, test_hour = _coin_hour(need_test, ncoins)
                 for seed in plan.seeds:
                     log(f"  {variant}, {scheme} fold {f + 1}, seed {seed}")
                     tag = {"fold": f, "scheme": scheme, "seed": seed, "variant": variant}
@@ -645,15 +705,14 @@ def sequence(
                         else:
                             feed = stream(variant, f, seed, "jepa")
                             net, curve, initial = pretrain(x, fit_hours, plan, init, feed, log)
-                        z_train = np.full((len(ts), plan.shape.width), np.nan)
-                        z_test = np.full((len(ts), plan.shape.width), np.nan)
-                        z_train[need_train] = encode(net, x, *_coin_hour(need_train, ncoins), plan)
-                        z_test[need_test] = encode(net, x, *_coin_hour(need_test, ncoins), plan)
-                        found[model_name] = (z_train, z_test)
-                        fitted[model_name] = _fitted(mu, sd, net, z_train[need_train])
+                        train_f = features(net, x, *_coin_hour(need_train, ncoins), plan)
+                        test_f = features(net, x, test_coin, test_hour, plan)
+                        found[model_name] = (train_f, test_f)
+                        fitted[model_name] = _fitted(mu, sd, net, train_f)
+                        encoders[encoder_name(variant, scheme, f, seed, model_name)] = save(net)
                         mine.append(
                             tag
-                            | _diagnostic(model_name, plan, curve, z_test[need_test], net)
+                            | _diagnostic(model_name, plan, curve, test_f[:, :width], net)
                             | {"initial": initial, "weights": weights(net)}
                             | {"seconds": time.perf_counter() - began}
                         )
@@ -663,13 +722,10 @@ def sequence(
                         model, curve, checked, steps, initial = supervise(
                             x, y, keep, skip, train_hours, plan, (variant, f, seed), log
                         )
-                        p = np.full((len(ts), len(plan.outputs)), np.nan)
-                        test_coin, test_hour = _coin_hour(need_test, ncoins)
-                        p[need_test] = ladder._probability(
-                            encode(model, x, test_coin, test_hour, plan)
-                        )
-                        found["supervised"] = (p, p)
+                        logits = encode(model, x, test_coin, test_hour, plan)
+                        found["supervised"] = (logits, logits)
                         fitted["supervised"] = _fitted(mu, sd, model, np.array([steps]))
+                        encoders[encoder_name(variant, scheme, f, seed, "supervised")] = save(model)
                         z = encode(model.encoder, x, test_coin, test_hour, plan)
                         mine.append(
                             tag
@@ -689,52 +745,38 @@ def sequence(
                             skipped.append(f"{variant} {scheme} fold {f + 1} {h} h: no probe row")
                             log(f"  {skipped[-1]}")
                             continue
+                        index = np.flatnonzero(r.keep)
+                        a, b = at_train[index[train]], at_test[index[test]]
                         y_train = {side: r.y[side][train] for side in ("long", "short")}
-                        got: dict[str, dict[str, np.ndarray]] = {}
+                        got: dict[tuple[str, str | None, float | None], dict[str, np.ndarray]] = {}
                         for model_name in ("jepa", "twin"):
                             if model_name in found:
-                                z_train, z_test = found[model_name]
-                                got[model_name] = probe(
-                                    z_train[r.keep][train],
-                                    z_test[r.keep][test],
+                                train_f, test_f = found[model_name]
+                                probed = probe(
+                                    train_f[a],
+                                    test_f[b],
                                     y_train,
                                     plan,
                                     fitted[model_name],
+                                    configs,
                                 )
-                        if "jepa" in found:
-                            z_train, z_test = found["jepa"]
-                            got["full+z"] = probe(
-                                np.column_stack(
-                                    [
-                                        *(values[c][r.keep][train] for c in full),
-                                        z_train[r.keep][train],
-                                    ]
-                                ),
-                                np.column_stack(
-                                    [*(values[c][r.keep][test] for c in full), z_test[r.keep][test]]
-                                ),
-                                y_train,
-                                plan,
-                                fitted["jepa"],
-                            )
+                                for (name, c), sides in probed.items():
+                                    got[(model_name, name, c)] = sides
                         if "supervised" in found:
-                            p = found["supervised"][1][r.keep][test]
+                            p = found["supervised"][1][b]
                             sides = {
                                 side: p[:, plan.outputs.index((side, h))]
                                 for side in ("long", "short")
                             }
-                            sides["any"] = 1 - (1 - sides["long"]) * (1 - sides["short"])
-                            got["supervised"] = sides
-                        scored[(scheme, h)].add(f)
-                        for model_name, sides in got.items():
-                            scores.append(
-                                _scores(grid, r.keep, test, h, model_name, tag, sides, plan)
-                            )
+                            sides["any"] = either(sides["long"], sides["short"])
+                            got[("supervised", None, None)] = sides
+                        for (model_name, name, c), sides in got.items():
                             for side in plan.ladder.sides:
                                 label = r.y[side][test]
                                 s = sides[side]
                                 fold_rows.append(
                                     {"horizon": h, "side": side, "model": model_name}
+                                    | {"readout": name, "c": c}
                                     | tag
                                     | {
                                         "auc": auc(s[label], s[~label]),
@@ -743,17 +785,145 @@ def sequence(
                                     }
                                 )
                     diagnostics += [d | {"fitted": fitted[d["model"]].hexdigest()} for d in mine]
-    table = pa.concat_tables(scores) if scores else pa.table({})
-    check(table, fold_rows, grid, rows, scored, plan, ncoins, hours, coins)
     fold_rows += rung_folds(values, rows, ts, edges, plan, log)
     return {
-        "scores": table,
         "diagnostics": diagnostics,
         "curves": curves,
         "folds": fold_rows,
         "accounting": {h: r.accounting for h, r in rows.items()},
         "skipped": skipped,
+        "encoders": encoders,
     }
+
+
+def choose(
+    folds: Sequence[Mapping[str, Any]], model: str, variant: str
+) -> tuple[str, float, float]:
+    cells: dict[tuple[str, float], dict[str, dict[int, list[float]]]] = {}
+    for r in folds:
+        mine = (r["model"], r["variant"], r["scheme"], r["horizon"]) == (
+            model,
+            variant,
+            "forward",
+            24,
+        )
+        if mine and r["side"] in ("long", "short"):
+            per = cells.setdefault((r["readout"], r["c"]), {}).setdefault(r["side"], {})
+            per.setdefault(r["fold"], []).append(r["auc"])
+    order = list(READOUTS)
+    best: tuple[str, float, float] | None = None
+    for name, c in sorted(cells, key=lambda k: (order.index(k[0]), k[1])):
+        means = []
+        for side in ("long", "short"):
+            per_fold = [float(np.mean(v)) for v in cells[(name, c)].get(side, {}).values()]
+            finite = [v for v in per_fold if np.isfinite(v)]
+            means.append(float(np.mean(finite)) if finite else float("nan"))
+        score = float(np.mean(means))
+        if np.isfinite(score) and (best is None or score > best[2]):
+            best = (name, c, score)
+    if best is None:
+        raise ValueError(f"no forward 24 h fold scores of {model} on {variant} to choose from")
+    return best
+
+
+def external(
+    values: Mapping[str, np.ndarray],
+    grid: Mapping[str, np.ndarray],
+    plan: Plan,
+    choice: tuple[str, str, str | None, float | None],
+    fetch: Callable[[str], bytes],
+    log: LOG = lambda line: None,
+) -> dict[str, pa.Table]:
+    model, variant, name, c = choice
+    configs: list[tuple[str, float]] = []
+    if model != "supervised":
+        if name is None or c is None:
+            raise ValueError(f"the {model} needs a readout and a c")
+        configs.append((name, c))
+    hours, coins = layout(grid)
+    ncoins = len(coins)
+    edges = ladder.bounds(plan.ladder)
+    rows = common_rows(values, grid, plan)
+    ts, symbol = grid["ts_ns"], grid["symbol"].astype(str)
+    row_fold, _ = ladder.folds(ts, edges, plan.ladder.block_days)
+    kept = np.any([r.keep for r in rows.values()], axis=0)
+    raw = by_coin(np.column_stack([values[k] for k in plan.rung(variant).columns]), ncoins)
+    out = {}
+    for scheme in plan.schemes:
+        first = plan.ladder.first_fold(scheme)
+        quarters = sorted({int(f) for r in rows.values() for f in np.unique(r.fold) if f >= first})
+        missing = [f + 1 for f in quarters if f not in plan.folds]
+        if missing:
+            raise ValueError(f"the plan's folds leave {scheme} quarters {missing} unscored")
+        total = {h: np.zeros((int(r.keep.sum()), 2)) for h, r in rows.items()}
+        count = {h: np.zeros(int(r.keep.sum()), np.int64) for h, r in rows.items()}
+        for f in quarters:
+            train_hours = training(hours, plan, f, scheme)
+            fit_rows = np.repeat(eligible(train_hours, plan.pad, plan.reach), ncoins)
+            mu, sd = statistics(raw, train_hours)
+            x = torch.from_numpy(standardised(raw, mu, sd, plan.ladder.clip, plan.pad))
+            need_train, need_test = kept & fit_rows, kept & (row_fold == f)
+            at_train, at_test = np.cumsum(need_train) - 1, np.cumsum(need_test) - 1
+            for seed in plan.seeds:
+                key = encoder_name(variant, scheme, f, seed, model)
+                data = fetch(key)
+                log(f"  {scheme} fold {f + 1}, seed {seed}: {key}")
+                if configs:
+                    net = encoder.encoder(x.shape[-1], plan.shape, 0)
+                    restore(net, data)
+                    train_f = features(net, x, *_coin_hour(need_train, ncoins), plan)
+                    test_f = features(net, x, *_coin_hour(need_test, ncoins), plan)
+                else:
+                    model_net = Supervised(x.shape[-1], plan, 0)
+                    restore(model_net, data)
+                    train_f = test_f = encode(model_net, x, *_coin_hour(need_test, ncoins), plan)
+                for h, r in rows.items():
+                    test = r.fold == f
+                    if not test.any():
+                        continue
+                    train = fit_rows[r.keep]
+                    index = np.flatnonzero(r.keep)
+                    b = at_test[index[test]]
+                    if not configs:
+                        cols = [plan.outputs.index((side, h)) for side in ("long", "short")]
+                        total[h][test] += test_f[b][:, cols]
+                    else:
+                        if not train.any():
+                            raise ValueError(f"{scheme} fold {f + 1} {h} h: no probe row")
+                        a = at_train[index[train]]
+                        y_train = {side: r.y[side][train] for side in ("long", "short")}
+                        got = probe(train_f[a], test_f[b], y_train, plan, hashlib.sha256(), configs)
+                        total[h][test] += np.column_stack(
+                            [got[configs[0]][side] for side in ("long", "short")]
+                        )
+                    count[h][test] += 1
+        parts = []
+        for h, r in rows.items():
+            scored = r.fold >= first
+            if (count[h][scored] != len(plan.seeds)).any():
+                raise RuntimeError(f"{scheme} {h} h: a scored row lacks a score from every seed")
+            mean = total[h][scored] / len(plan.seeds)
+            sides = {"long": mean[:, 0], "short": mean[:, 1]}
+            sides["any"] = either(sides["long"], sides["short"])
+            n = int(scored.sum())
+            for side in plan.ladder.sides:
+                if not np.isfinite(sides[side]).all():
+                    raise RuntimeError(f"{scheme} {h} h {side}: a score is not finite")
+                parts.append(
+                    pa.table(
+                        {
+                            "coin": pa.array(symbol[r.keep][scored]),
+                            "hour": pa.array(ts[r.keep][scored], pa.int64()),
+                            "horizon": pa.array(np.full(n, h), pa.int16()),
+                            "side": pa.array(np.full(n, side)),
+                            "score": pa.array(sides[side], pa.float64()),
+                            "fold": pa.array(r.fold[scored], pa.int16()),
+                            "scheme": pa.array(np.full(n, scheme)),
+                        }
+                    )
+                )
+        out[scheme] = pa.concat_tables(parts)
+    return out
 
 
 def _coin_hour(mask: np.ndarray, ncoins: int) -> tuple[np.ndarray, np.ndarray]:
@@ -787,107 +957,6 @@ def _diagnostic(
     }
 
 
-def _scores(
-    grid: Mapping[str, np.ndarray],
-    keep: np.ndarray,
-    test: np.ndarray,
-    horizon: int,
-    model: str,
-    tag: Mapping[str, Any],
-    sides: Mapping[str, np.ndarray],
-    plan: Plan,
-) -> pa.Table:
-    n = int(test.sum())
-    coin = pa.array(grid["symbol"][keep][test].astype(str)).dictionary_encode()
-    hour = pa.array(grid["ts_ns"][keep][test], pa.int64())
-    parts = []
-    for side in plan.ladder.sides:
-        parts.append(
-            pa.table(
-                {
-                    "coin": coin,
-                    "hour": hour,
-                    "horizon": pa.array(np.full(n, horizon), pa.int16()),
-                    "side": _constant(side, n),
-                    "model": _constant(model, n),
-                    "variant": _constant(tag["variant"], n),
-                    "scheme": _constant(tag["scheme"], n),
-                    "fold": pa.array(np.full(n, tag["fold"]), pa.int16()),
-                    "seed": pa.array(np.full(n, tag["seed"]), pa.int64()),
-                    "score": pa.array(sides[side], pa.float64()),
-                }
-            )
-        )
-    return pa.concat_tables(parts)
-
-
-def _constant(value: str, n: int) -> pa.DictionaryArray:
-    return pa.DictionaryArray.from_arrays(pa.array(np.zeros(n, np.int32)), pa.array([value]))
-
-
-def _codes(column: pa.ChunkedArray) -> tuple[np.ndarray, np.ndarray]:
-    if pa.types.is_dictionary(column.type):
-        column = column.cast(column.type.value_type)
-    names, codes = np.unique(column.to_numpy(zero_copy_only=False), return_inverse=True)
-    return names, codes
-
-
-def check(
-    table: pa.Table,
-    fold_rows: Sequence[Mapping[str, Any]],
-    grid: Mapping[str, np.ndarray],
-    rows: Mapping[int, Rows],
-    scored: Mapping[tuple[str, int], set[int]],
-    plan: Plan,
-    ncoins: int,
-    hours: np.ndarray,
-    coins: np.ndarray,
-) -> None:
-    if not table.num_rows:
-        if fold_rows:
-            raise RuntimeError("the folds table holds rows the scores table lacks")
-        return
-    score = table["score"].to_numpy()
-    if not np.isfinite(score).all():
-        raise RuntimeError("a score is not finite")
-    coin = np.searchsorted(coins, table["coin"].cast(pa.string()).to_numpy(zero_copy_only=False))
-    hour = (table["hour"].to_numpy() - hours[0]) // labels.HOUR_NS
-    row = hour * ncoins + coin
-    named = {k: _codes(table[k]) for k in KEYS}
-    group = np.zeros(table.num_rows, np.int64)
-    for k in KEYS:
-        group = group * len(named[k][0]) + named[k][1]
-    key = group * len(grid["ts_ns"]) + row
-    order = np.argsort(key, kind="stable")
-    if np.any(np.diff(key[order]) == 0):
-        raise RuntimeError("the scores give a key twice")
-    fold = table["fold"].to_numpy()
-    aucs: dict[tuple[str, ...], list[float]] = {}
-    for d in fold_rows:
-        aucs.setdefault((*(str(d[k]) for k in KEYS), str(d["fold"])), []).append(d["auc"])
-    starts = np.flatnonzero(np.diff(group[order], prepend=-1))
-    found = set()
-    for a, b in zip(starts, [*starts[1:], len(order)], strict=True):
-        picked = order[a:b]
-        i = picked[0]
-        values = {k: named[k][0][named[k][1][i]] for k in KEYS}
-        h, side, scheme = int(values["horizon"]), str(values["side"]), str(values["scheme"])
-        found.add(tuple(str(values[k]) for k in KEYS))
-        r = rows[h]
-        expected = np.flatnonzero(r.keep)[np.isin(r.fold, sorted(scored[(scheme, h)]))]
-        if not np.array_equal(np.sort(row[picked]), expected):
-            raise RuntimeError(f"the scores do not cover the common test rows exactly: {values}")
-        label = grid[f"long_{h}"] | grid[f"short_{h}"] if side == "any" else grid[f"{side}_{h}"]
-        for f in sorted(scored[(scheme, h)]):
-            mine = picked[fold[picked] == f]
-            want = aucs.get((*(str(values[k]) for k in KEYS), str(f)), [])
-            got = auc(score[mine][label[row[mine]]], score[mine][~label[row[mine]]])
-            if len(want) != 1 or not (got == want[0] or (np.isnan(got) and np.isnan(want[0]))):
-                raise RuntimeError(f"fold {f}'s AUC differs from its scores: {values}")
-    if found != {key[:-1] for key in aucs}:
-        raise RuntimeError("the scores and the folds table name different groups")
-
-
 def rung_folds(
     values: Mapping[str, np.ndarray],
     rows: Mapping[int, Rows],
@@ -918,6 +987,8 @@ def rung_folds(
                                 "horizon": h,
                                 "side": side,
                                 "model": "rung",
+                                "readout": None,
+                                "c": plan.ladder.c,
                                 "variant": name,
                                 "scheme": scheme,
                                 "seed": 0,
@@ -987,9 +1058,9 @@ def run(
         "torch": torch.__version__,
         "threads": plan.threads,
         "code": {"uv_lock_sha256": labels.uv_lock()},
+        "encoders": {k: hashlib.sha256(v).hexdigest() for k, v in out["encoders"].items()},
     }
     tables = {
-        "scores": out["scores"],
         "diagnostics": pa.Table.from_pylist(out["diagnostics"]),
         "curves": pa.Table.from_pylist(out["curves"]),
         "folds": pa.Table.from_pylist(out["folds"]),
@@ -1003,8 +1074,70 @@ def run(
         "ladder.toml": plan.ladder_path.read_text(encoding="utf-8"),
     }
     checks = {"seconds": round(seconds, 1), "skipped": out["skipped"]}
-    run_dir = store.write(data_dir, "panel-sequence", tag, tables, run_params, checks, texts)
+    run_dir = store.write(
+        data_dir, "panel-sequence", tag, tables, run_params, checks, texts, out["encoders"]
+    )
     return run_dir, out | {"seconds": seconds}
+
+
+def scores_run(
+    sequence_dir: Path,
+    data_dir: Path,
+    choice: tuple[str, str, str | None, float | None],
+    tag: str,
+    log: LOG = lambda line: None,
+) -> tuple[Path, dict[str, Any]]:
+    began = time.perf_counter()
+    model, variant, name, c = choice
+    manifest = io.read_json(sequence_dir / "manifest.json")
+    complete = io.read_json(sequence_dir / "complete.json")
+    if complete.get("clean") is not True:
+        raise ValueError(f"{sequence_dir}: complete.json does not mark the run clean")
+    files = complete["files"]
+    for text in ("plan.toml", "ladder.toml"):
+        if store.sha256(sequence_dir / text) != files.get(text):
+            raise ValueError(f"{sequence_dir / text}: its sha256 differs from complete.json's")
+    plan = load(sequence_dir / "plan.toml", sequence_dir / "ladder.toml")
+    torch.set_num_threads(plan.threads)
+    if model not in plan.models or variant not in plan.variants:
+        raise ValueError(f"the sequence run fitted no {model} on {variant}")
+    if model == "supervised" and (name is not None or c is not None):
+        raise ValueError("the supervised model takes no readout or c")
+    if model != "supervised" and (name not in plan.readouts or c not in plan.cs):
+        raise ValueError(f"readout {name} and c {c} are not in the sequence run's grid")
+    params = manifest["params"]
+    values, grid, source = read(data_dir / "panel-inputs" / params["inputs_run"], data_dir, plan)
+    if source["inputs"]["sha256"] != params["inputs"]["sha256"]:
+        raise ValueError("the inputs table differs from the one the sequence run read")
+    saved, used = params["encoders"], {}
+
+    def fetch(key: str) -> bytes:
+        path = sequence_dir / key
+        if key not in saved or not path.is_file():
+            raise ValueError(f"{sequence_dir}: no saved encoder {key}")
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != saved[key] or digest != files.get(key):
+            raise ValueError(f"{path}: its sha256 differs from the sequence run's")
+        used[key] = digest
+        return data
+
+    tables = external(values, grid, plan, choice, fetch, log)
+    seconds = time.perf_counter() - began
+    run_params = {
+        "sequence_run": manifest["run_id"],
+        "model": model,
+        "variant": variant,
+        "readout": name,
+        "c": c,
+        "inputs_run": source["inputs_run"],
+        "labels_run": source["labels_run"],
+        "encoders": used,
+        "code": {"uv_lock_sha256": labels.uv_lock()},
+    }
+    checks = {"seconds": round(seconds, 1)}
+    run_dir = store.write(data_dir, "panel-scores", tag, tables, run_params, checks)
+    return run_dir, {"tables": tables, "seconds": seconds}
 
 
 def _f(value: float) -> str:
@@ -1029,20 +1162,24 @@ def report(out: Mapping[str, Any], plan: Plan, source: Mapping[str, Any], second
     for h in plan.ladder.horizons:
         lines += ["", f"## {h} h", ""]
         lines += [
-            "| model | variant | scheme | seed | side | " + " | ".join(f"q{f + 1}" for f in folds)
+            "| model | variant | readout | c | scheme | seed | side | "
+            + " | ".join(f"q{f + 1}" for f in folds)
         ]
         lines[-1] += " | mean |"
-        lines.append("|---" * (6 + len(folds)) + "|")
-        keyed: dict[tuple[str, str, str, int, str], dict[int, float]] = {}
+        lines.append("|---" * (8 + len(folds)) + "|")
+        keyed: dict[tuple[Any, ...], dict[int, float]] = {}
         for row in out["folds"]:
             if row["horizon"] == h:
-                key = (row["model"], row["variant"], row["scheme"], row["seed"], row["side"])
+                key = tuple(
+                    row[k] for k in ("model", "variant", "readout", "c", "scheme", "seed", "side")
+                )
                 keyed.setdefault(key, {})[row["fold"]] = row["auc"]
-        for (model, variant, scheme, seed, side), per in keyed.items():
+        for (model, variant, name, c, scheme, seed, side), per in keyed.items():
             cells = [per.get(f, float("nan")) for f in folds]
             mean = float(np.nanmean(cells)) if np.isfinite(cells).any() else float("nan")
             lines.append(
-                f"| {model} | {variant} | {scheme} | {seed} | {side} | "
+                f"| {model} | {variant} | {name or '-'} | {'-' if c is None else f'{c:g}'} | "
+                f"{scheme} | {seed} | {side} | "
                 + " | ".join(_f(c) for c in cells)
                 + f" | {_f(mean)} |"
             )
