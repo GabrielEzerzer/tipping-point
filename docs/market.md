@@ -949,3 +949,18 @@ changed model for any seed, and an inputs table or labels grid other than the on
 read. It writes nothing when it refuses. Like `ladder`,
 both commands check the grid's and the inputs' time bounds from their Parquet metadata before
 hashing or reading them.
+
+A plan's cells (variant, fold and seed, each fitting every model) draw their seeds from the cell
+alone, so a sequence run whose plan keeps only some variants, seeds and folds fits exactly those
+cells of the full run, and the run can be split across machines.
+`python -m tipping_point.panel merge --runs <run> <run> ...` joins such runs into one sequence run
+that `scores` reads like any other. It refuses runs whose plans differ in anything but `variants`,
+`seeds` and `folds`; that read different inputs tables, labels grids or ladder plans; that ran
+different code (commit and `uv.lock`) or different torch or numpy versions, which every sequence
+run records; that fit a cell twice or leave a cell of the merged plan unfitted; that
+`complete.json` does not mark clean; and any file whose sha256 differs from its run's
+`complete.json`. The merged run holds every source run's tables in the order a single run writes
+them, one copy of the rung rows and row accounting (which every run must agree on), the merged
+plan and every saved model, and its manifest lists the source runs with their manifests' sha256.
+The merge reads no data table: its sources' tables carry no time column and are checked by sha256
+instead, and `scores` checks the inputs and the grid as for any sequence run.

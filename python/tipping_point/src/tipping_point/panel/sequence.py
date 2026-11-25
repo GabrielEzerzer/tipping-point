@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+import re
+import tempfile
 import time
 import tomllib
 import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from io import BytesIO
 from pathlib import Path
@@ -1073,6 +1076,7 @@ def run(
         "plan": {"file": plan_path.name, "sha256": store.sha256(plan_path)},
         "ladder_plan": {"file": plan.ladder_path.name, "sha256": store.sha256(plan.ladder_path)},
         "torch": torch.__version__,
+        "numpy": np.__version__,
         "threads": plan.threads,
         "code": {"uv_lock_sha256": labels.uv_lock()},
         "encoders": {k: hashlib.sha256(v).hexdigest() for k, v in out["encoders"].items()},
@@ -1168,6 +1172,192 @@ def scores_run(
     checks = {"seconds": round(seconds, 1)}
     run_dir = store.write(data_dir, "panel-scores", tag, tables, run_params, checks)
     return run_dir, {"tables": tables, "seconds": seconds}
+
+
+VARYING = ("variants", "seeds", "folds")
+SHARED = {
+    "inputs table": ("inputs_run", "inputs"),
+    "labels grid": ("labels_run", "labels_grid"),
+    "ladder plan": ("ladder_plan",),
+}
+
+
+def cells(plan: Plan) -> set[str]:
+    return {
+        encoder_name(variant, scheme, f, seed, model)
+        for variant in plan.variants
+        for scheme in plan.schemes
+        for f in plan.folds
+        if f >= plan.ladder.first_fold(scheme)
+        for seed in plan.seeds
+        for model in plan.models
+    }
+
+
+def _piece(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Plan]:
+    if not (run_dir / "complete.json").is_file():
+        raise ValueError(f"{run_dir}: the run has no complete.json")
+    complete = io.read_json(run_dir / "complete.json")
+    if complete.get("clean") is not True:
+        raise ValueError(f"{run_dir}: complete.json does not mark the run clean")
+    manifest = io.read_json(run_dir / "manifest.json")
+    if manifest.get("domain") != "panel-sequence":
+        raise ValueError(f"{run_dir}: not a sequence run")
+    files = complete["files"]
+    for name, digest in files.items():
+        if store.sha256(run_dir / name) != digest:
+            raise ValueError(f"{run_dir / name}: its sha256 differs from complete.json's")
+    params = manifest["params"]
+    if any(files.get(key) != digest for key, digest in params["encoders"].items()):
+        raise ValueError(
+            f"{run_dir}: its manifest's model sha256 values differ from complete.json's"
+        )
+    for library in ("torch", "numpy"):
+        if not params.get(library):
+            raise ValueError(f"{run_dir}: the run records no {library} version")
+    return manifest, complete, load(run_dir / "plan.toml", run_dir / "ladder.toml")
+
+
+def _bare(plan: Plan) -> Plan:
+    return replace(plan, variants=(), seeds=(), folds=(), ladder_path=Path())
+
+
+def _plan_text(text: str, plan: Plan, ladder_text: str) -> str:
+    for key in VARYING:
+        line = f"{key} = {json.dumps(list(getattr(plan, key)))}"
+        text, n = re.subn(rf"^{key} = .*$", line, text, flags=re.MULTILINE)
+        if n != 1:
+            raise ValueError(f"the plan has no single one-line {key} entry to rewrite")
+    with tempfile.TemporaryDirectory() as folder:
+        (Path(folder) / "plan.toml").write_text(text, encoding="utf-8")
+        (Path(folder) / "ladder.toml").write_text(ladder_text, encoding="utf-8")
+        written = load(Path(folder) / "plan.toml", Path(folder) / "ladder.toml")
+    if replace(written, ladder_path=plan.ladder_path) != plan:
+        raise ValueError("the merged plan file does not load as the merged plan")
+    return text
+
+
+def merge_run(
+    pieces: Sequence[Path], data_dir: Path, tag: str, log: LOG = lambda line: None
+) -> tuple[Path, dict[str, Any]]:
+    began = time.perf_counter()
+    if len(pieces) < 2:
+        raise ValueError("a merge takes at least two sequence runs")
+    loaded = [(run_dir, *_piece(run_dir)) for run_dir in pieces]
+    first_dir, first, _, base = loaded[0]
+    head = first["params"]
+    for run_dir, manifest, _, plan in loaded[1:]:
+        params = manifest["params"]
+        for what, keys in SHARED.items():
+            if any(params[k] != head[k] for k in keys):
+                raise ValueError(f"{run_dir.name} and {first_dir.name} read different {what}s")
+        for library in ("torch", "numpy"):
+            if params[library] != head[library]:
+                raise ValueError(f"{run_dir.name} and {first_dir.name} ran different {library}")
+        if manifest["producer"] != first["producer"] or params["code"] != head["code"]:
+            raise ValueError(f"{run_dir.name} and {first_dir.name} ran different code")
+        if _bare(plan) != _bare(base):
+            raise ValueError(
+                f"{run_dir.name} and {first_dir.name}: the plans differ in more than "
+                + ", ".join(VARYING)
+            )
+    owner: dict[str, Path] = {}
+    for run_dir, manifest, _, plan in loaded:
+        mine = cells(plan)
+        if set(manifest["params"]["encoders"]) != mine:
+            raise ValueError(f"{run_dir.name}: its saved models are not every cell of its plan")
+        for key in sorted(mine):
+            if key in owner:
+                raise ValueError(f"{key} is in both {owner[key].name} and {run_dir.name}")
+            owner[key] = run_dir
+    plan = replace(
+        base,
+        variants=tuple(v for v in base.rungs if any(v in p.variants for *_, p in loaded)),
+        seeds=tuple(sorted({s for *_, p in loaded for s in p.seeds})),
+        folds=tuple(sorted({f for *_, p in loaded for f in p.folds})),
+    )
+    missing = sorted(cells(plan) - set(owner))
+    if missing:
+        raise ValueError(
+            f"no run fitted {len(missing)} cells of the merged plan: {missing[0]}, ..."
+        )
+    ladder_text = (first_dir / "ladder.toml").read_text(encoding="utf-8")
+    text = _plan_text((first_dir / "plan.toml").read_text(encoding="utf-8"), plan, ladder_text)
+
+    def cell(row: Mapping[str, Any]) -> tuple[int, ...]:
+        return (
+            plan.variants.index(row["variant"]),
+            plan.schemes.index(row["scheme"]),
+            row["fold"],
+            plan.seeds.index(row["seed"]),
+        )
+
+    def rung(row: Mapping[str, Any]) -> tuple[int, ...]:
+        return (
+            plan.ladder.horizons.index(row["horizon"]),
+            plan.schemes.index(row["scheme"]),
+            plan.rungs.index(row["variant"]),
+            plan.ladder.sides.index(row["side"]),
+            row["fold"],
+        )
+
+    merged: dict[str, list[dict[str, Any]]] = {"diagnostics": [], "curves": [], "folds": []}
+    rungs: dict[tuple[int, ...], dict[str, Any]] = {}
+    accounting: list[dict[str, Any]] | None = None
+    skipped: list[str] = []
+    for run_dir, _, complete, _ in loaded:
+        tables = {n: pq.read_table(run_dir / f"{n}.parquet").to_pylist() for n in (*merged, "rows")}
+        for name in ("diagnostics", "curves"):
+            merged[name] += tables[name]
+        for row in tables["folds"]:
+            if row["model"] != "rung":
+                merged["folds"].append(row)
+            elif rungs.setdefault(rung(row), row) != row:
+                raise ValueError(f"{run_dir.name}: its rung rows differ from another run's")
+        if accounting is None:
+            accounting = tables["rows"]
+        elif tables["rows"] != accounting:
+            raise ValueError(f"{run_dir.name}: its row accounting differs from another run's")
+        skipped += [line for line in complete["checks"]["skipped"] if line not in skipped]
+    for name in merged:
+        merged[name].sort(key=cell)
+    merged["folds"] += [rungs[k] for k in sorted(rungs)]
+    encoders = {key: (owner[key] / key).read_bytes() for key in sorted(owner)}
+    source = {k: head[k] for k in ("inputs_run", "inputs", "labels_run", "labels_grid")}
+    piece_seconds = sum(c["checks"]["seconds"] for _, _, c, _ in loaded)
+    plan_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    run_params = {
+        **source,
+        "plan": {"file": "plan.toml", "sha256": plan_sha},
+        "ladder_plan": head["ladder_plan"],
+        "torch": head["torch"],
+        "numpy": head["numpy"],
+        "threads": head["threads"],
+        "code": head["code"],
+        "pieces_producer": first["producer"],
+        "encoders": {k: hashlib.sha256(v).hexdigest() for k, v in encoders.items()},
+        "sources": [
+            {"run": m["run_id"], "manifest_sha256": store.sha256(d / "manifest.json")}
+            for d, m, _, _ in loaded
+        ],
+    }
+    out = {**merged, "skipped": skipped}
+    names = ", ".join(f"`{m['run_id']}`" for _, m, _, _ in loaded)
+    texts = {
+        "report.md": report(out, plan, source, piece_seconds)
+        + f"\nMerged from {names}; the wall time is the sum of theirs.\n",
+        "plan.toml": text,
+        "ladder.toml": ladder_text,
+    }
+    tables = {name: pa.Table.from_pylist(rows) for name, rows in merged.items()}
+    tables["rows"] = pa.Table.from_pylist(accounting or [])
+    seconds = time.perf_counter() - began
+    checks = {"seconds": round(seconds, 1), "pieces_seconds": piece_seconds, "skipped": skipped}
+    run_dir = store.write(
+        data_dir, "panel-sequence", tag, tables, run_params, checks, texts, encoders
+    )
+    log(f"merged {len(loaded)} runs, {len(encoders)} models")
+    return run_dir, out | {"seconds": seconds}
 
 
 def _f(value: float) -> str:

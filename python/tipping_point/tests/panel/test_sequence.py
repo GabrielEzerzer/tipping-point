@@ -4,6 +4,7 @@
 
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -1205,6 +1206,169 @@ def test_the_command_writes_a_sequence_run(
     assert "| jepa | vol | means | 0.01 | loqo | 3 | long |" in report
     assert "| supervised | vol | - | - | loqo | 3 | long |" in report
     assert str(run) in capsys.readouterr().out
+
+
+SPLIT = {
+    "a": ('["full"]', "[3, 4]", "[2]"),
+    "b": ('["full"]', "[3, 4]", "[3]"),
+    "c": ('["vol"]', "[3]", "[2, 3]"),
+    "d": ('["vol"]', "[4]", "[2, 3]"),
+}
+
+
+def split_plan(variants: str, seeds: str, folds: str) -> str:
+    text = PLAN.replace('schemes = ["loqo", "forward"]', 'schemes = ["forward"]')
+    text = text.replace('variants = ["vol"]', f"variants = {variants}")
+    return text.replace("seeds = [3]", f"seeds = {seeds}").replace(
+        "folds = [1, 3]", f"folds = {folds}"
+    )
+
+
+@pytest.fixture(scope="module")
+def split(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    data = tmp_path_factory.mktemp("split")
+    values, grid = world()
+    run_inputs = write_runs(data, values, grid)
+    runs = {"inputs": run_inputs, "data": data}
+    full = split_plan('["full", "vol"]', "[3, 4]", "[2, 3]")
+    for name, text in ({"full": full} | {k: split_plan(*v) for k, v in SPLIT.items()}).items():
+        runs[name], _ = sequence.run(run_inputs, data, plans(data / "plans" / name, text), name)
+    return runs
+
+
+def without_seconds(path: Path) -> str:
+    return json.dumps(pq.read_table(path).drop_columns(["seconds"]).to_pylist())
+
+
+def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
+    data, full = split["data"], split["full"]
+    full_params = json.loads((full / "manifest.json").read_text(encoding="utf-8"))["params"]
+    full_folds = pq.read_table(full / "folds.parquet").to_pylist()
+    for name in SPLIT:
+        piece = split[name]
+        params = json.loads((piece / "manifest.json").read_text(encoding="utf-8"))["params"]
+        assert params["encoders"] and all(
+            full_params["encoders"][k] == v for k, v in params["encoders"].items()
+        )
+        rows = [
+            r for r in pq.read_table(piece / "folds.parquet").to_pylist() if r["model"] != "rung"
+        ]
+        cells = {(r["variant"], r["fold"], r["seed"]) for r in rows}
+        same = [r for r in full_folds if (r["variant"], r["fold"], r["seed"]) in cells]
+        assert json.dumps(rows) == json.dumps([r for r in same if r["model"] != "rung"])
+    order = [split[k] for k in ("d", "a", "c", "b")]
+    assert main(["merge", "--runs", *map(str, order), "--data-dir", str(data)]) == 0
+    (merged,) = (data / "panel-sequence").glob("*-merged")
+    params = json.loads((merged / "manifest.json").read_text(encoding="utf-8"))["params"]
+    assert params["encoders"] == full_params["encoders"]
+    for key in params["encoders"]:
+        assert (merged / key).read_bytes() == (full / key).read_bytes()
+    for name in ("folds", "curves", "rows"):
+        assert pq.read_table(merged / f"{name}.parquet").equals(
+            pq.read_table(full / f"{name}.parquet")
+        ), name
+    assert without_seconds(merged / "diagnostics.parquet") == without_seconds(
+        full / "diagnostics.parquet"
+    )
+    plan = sequence.load(merged / "plan.toml", merged / "ladder.toml")
+    assert plan == replace(sequence.load(full / "plan.toml"), ladder_path=plan.ladder_path)
+    assert [s["run"] for s in params["sources"]] == [d.name for d in order]
+    assert all(
+        s["manifest_sha256"] == store.sha256(d / "manifest.json")
+        for s, d in zip(params["sources"], order, strict=True)
+    )
+    for k in ("inputs_run", "inputs", "labels_run", "labels_grid", "ladder_plan", "torch", "numpy"):
+        assert params[k] == full_params[k], k
+    complete = json.loads((merged / "complete.json").read_text(encoding="utf-8"))
+    assert complete["clean"] and params["plan"]["sha256"] == store.sha256(merged / "plan.toml")
+    for model, variant in (("jepa", "full"), ("supervised", "vol")):
+        one, _ = sequence.scores_run(full, data, model, variant, f"full-{model}")
+        two, _ = sequence.scores_run(merged, data, model, variant, f"merged-{model}")
+        assert pq.read_table(one / "forward.parquet").equals(pq.read_table(two / "forward.parquet"))
+        picked = [
+            {
+                k: v
+                for k, v in json.loads((d / "manifest.json").read_text("utf-8"))["params"].items()
+                if k in ("readout", "c", "selection")
+            }
+            for d in (one, two)
+        ]
+        assert picked[0] == picked[1]
+
+
+def test_the_merge_refuses_runs_that_do_not_make_one_plan(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    data = split["data"]
+    pieces = [split[k] for k in SPLIT]
+
+    def altered(name: str, change: Callable[[Path], None], piece: str = "d") -> list[Path]:
+        copy = tmp_path / name / split[piece].name
+        shutil.copytree(split[piece], copy)
+        change(copy)
+        return [copy if d == split[piece] else d for d in pieces]
+
+    def manifest(change: Callable[[dict], None]) -> Callable[[Path], None]:
+        def edit(copy: Path) -> None:
+            record = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
+            change(record)
+            (copy / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+
+        return edit
+
+    def params(key: str, value: object) -> Callable[[Path], None]:
+        return manifest(lambda m: m["params"].__setitem__(key, value))
+
+    def complete(change: Callable[[dict, Path], None]) -> Callable[[Path], None]:
+        def edit(copy: Path) -> None:
+            record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+            change(record, copy)
+            (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
+
+        return edit
+
+    def replan(record: dict, copy: Path) -> None:
+        text = (copy / "plan.toml").read_text(encoding="utf-8")
+        (copy / "plan.toml").write_text(
+            text.replace("steps = 4\nbatch = 16\nlr", "steps = 5\nbatch = 16\nlr", 1), "utf-8"
+        )
+        record["files"]["plan.toml"] = store.sha256(copy / "plan.toml")
+
+    def grow(copy: Path) -> None:
+        key = next(
+            iter(json.loads((copy / "manifest.json").read_text("utf-8"))["params"]["encoders"])
+        )
+        (copy / key).write_bytes((copy / key).read_bytes() + b"0")
+
+    zero = {"file": "x", "sha256": "0" * 64}
+    cases = {
+        "plan": (
+            altered("plan", complete(replan)),
+            "plans differ in more than variants, seeds, folds",
+        ),
+        "inputs": (altered("inputs", params("inputs", zero)), "different inputs tables"),
+        "grid": (altered("grid", params("labels_grid", zero)), "different labels grids"),
+        "ladder": (altered("ladder", params("ladder_plan", zero)), "different ladder plans"),
+        "twice": ([*pieces, altered("twice", lambda d: None)[-1]], "is in both"),
+        "missing": (pieces[:3], "no run fitted 6 cells"),
+        "unclean": (
+            altered("unclean", complete(lambda r, d: r.update(clean=False))),
+            "does not mark the run clean",
+        ),
+        "absent": (altered("absent", lambda d: (d / "complete.json").unlink()), "no complete.json"),
+        "encoder": (altered("encoder", grow), "sha256 differs from complete.json's"),
+        "torch": (altered("torch", params("torch", "0.0")), "ran different torch"),
+        "numpy": (altered("numpy", params("numpy", "0.0")), "ran different numpy"),
+        "code": (
+            altered("code", manifest(lambda m: m["producer"].update(git_sha="0" * 40))),
+            "ran different code",
+        ),
+    }
+    before = sorted((data / "panel-sequence").iterdir())
+    for name, (runs, message) in cases.items():
+        with pytest.raises(ValueError, match=message):
+            sequence.merge_run(runs, data, name)
+    assert sorted((data / "panel-sequence").iterdir()) == before
 
 
 def test_the_command_refuses_the_held_back_span(tmp_path: Path) -> None:

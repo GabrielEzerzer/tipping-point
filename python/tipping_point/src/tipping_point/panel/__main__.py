@@ -49,6 +49,9 @@ Command line: python -m tipping_point.panel <command> [options]
           the run's folds table by the selection rule, the mean over seeds of each row's logit, as
           a run in <data dir>/panel-scores/<run_id>/ with one table per scheme in the columns a
           ladder plan's [external] section reads
+  merge   one sequence run from several (--runs) whose plans differ only in variants, seeds and
+          folds and which together fit every cell of the merged plan once, as a run in
+          <data dir>/panel-sequence/<run_id>/ that scores reads like any sequence run
 
 Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
 data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
@@ -120,6 +123,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--tag", default="scores", help="the run id's tag (default scores)")
     p.set_defaults(command=_scores)
+
+    p = sub.add_parser("merge", help="one sequence run from runs that split a plan's cells")
+    p.add_argument("--runs", nargs="+", required=True, help="sequence run ids, or their folders")
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    p.add_argument("--tag", default="merged", help="the run id's tag (default merged)")
+    p.set_defaults(command=_merge)
     return parser
 
 
@@ -256,6 +265,20 @@ def _scores(args: argparse.Namespace) -> int:
     for scheme, table in out["tables"].items():
         print(f"{scheme}: {table.num_rows} rows")
     print(f"{out['seconds'] / 60:.1f} minutes")
+    print(run_dir)
+    return 0
+
+
+def _merge(args: argparse.Namespace) -> int:
+    from . import sequence
+
+    run_dir, out = sequence.merge_run(
+        [_run_dir(args.data_dir, "panel-sequence", name) for name in args.runs],
+        args.data_dir,
+        args.tag,
+        log=lambda line: print(line, flush=True),
+    )
+    print(f"{len(out['folds'])} fold rows")
     print(run_dir)
     return 0
 

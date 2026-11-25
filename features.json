@@ -290,6 +290,14 @@
       "test": "python/tipping_point/tests/panel/test_sequence.py"
     },
     {
+      "name": "Panel sequence merge",
+      "description": "Joins sequence runs whose plans differ only in variants, seeds and folds into one run that the scores command reads, after checking that they read the same inputs, labels grid, ladder plan, code and library versions and fitted every cell of the merged plan once.",
+      "command": "uv run python -m tipping_point.panel merge --runs <run id> <run id> ...",
+      "inputs": "two or more completed panel sequence runs",
+      "outputs": "<data dir>/panel-sequence/<run_id>/ holding the merged diagnostics, curves, folds and rows tables, report.md, the merged plan and every saved model, with the source runs and their manifests' sha256 in the manifest",
+      "test": "python/tipping_point/tests/panel/test_sequence.py"
+    },
+    {
       "name": "Book feature range",
       "description": "Imports and reduces the Bybit order-book days of a range into per-day feature files.",
       "command": "uv run python -m tipping_point.market book --range training",
