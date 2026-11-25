@@ -928,9 +928,10 @@ the order `last`, `means`, `spreads`) and then to the smaller c. The supervised 
 configuration to choose.
 
 The configuration is chosen on the development span's own out-of-fold scores, so the chosen
-configuration's development score is optimistic and is not evidence for it. The classical
-comparator is chosen the same way. A comparison between them counts only on data that neither
-side's choice has seen.
+configuration's development score is optimistic and is not evidence for it. Before any comparison
+on held-back data, the classical comparator has to be chosen by the same rule from a fixed grid of
+penalties; the ladder does not do this yet, since its rungs use one penalty (issue #224). A
+comparison between them counts only on data that neither side's choice has seen.
 
 `python -m tipping_point.panel scores --sequence <run> --model <jepa|twin|supervised> --variant <v>`
 writes the out-of-fold scores of one model and variant. For the JEPA and the twin it applies the

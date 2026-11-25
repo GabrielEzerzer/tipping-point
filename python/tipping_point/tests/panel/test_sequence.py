@@ -511,12 +511,12 @@ def test_the_refit_follows_the_selection_schedule_and_stops_at_the_chosen_step(
 
         return check
 
-    rates: dict[int, list[float]] = {}
+    rates: dict[torch.optim.Optimizer, list[float]] = {}
     schedule = sequence.schedule
 
     def recorded(opt: torch.optim.Optimizer, step: int, t: sequence.Training) -> None:
         schedule(opt, step, t)
-        rates.setdefault(id(opt), []).append(opt.param_groups[0]["lr"])
+        rates.setdefault(opt, []).append(opt.param_groups[0]["lr"])
 
     monkeypatch.setattr(sequence, "validation", validation)
     monkeypatch.setattr(sequence, "schedule", recorded)
