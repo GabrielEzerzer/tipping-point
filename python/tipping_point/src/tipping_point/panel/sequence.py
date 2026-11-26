@@ -1090,6 +1090,12 @@ def rung_folds(
 def read(
     inputs_dir: Path, data_dir: Path, plan: Plan
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]:
+    return read_columns(inputs_dir, data_dir, plan.ladder.columns)
+
+
+def read_columns(
+    inputs_dir: Path, data_dir: Path, columns: Sequence[str]
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]:
     manifest = io.read_json(inputs_dir / "manifest.json")
     params = manifest["params"]
     span.refuse(*(date.fromisoformat(params[k]) for k in ("start", "dev_start", "end")))
@@ -1107,7 +1113,6 @@ def read(
     if complete["files"].get(inputs_path.name) != inputs_sha:
         raise ValueError(f"{inputs_path}: its sha256 differs from complete.json's")
     grid_table = pq.read_table(grid_path)
-    columns = list(plan.ladder.columns)
     table = pq.read_table(inputs_path, columns=["ts_ns", "symbol", *columns])
     if not (
         table["ts_ns"].equals(grid_table["ts_ns"]) and table["symbol"].equals(grid_table["symbol"])

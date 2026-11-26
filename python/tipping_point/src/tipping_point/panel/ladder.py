@@ -524,12 +524,19 @@ def horizon_rows(
     return accounting, out
 
 
-def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dict], list[dict]]:
+def evaluate(
+    h: Horizon,
+    plan: Plan,
+    horizon: int,
+    names: Sequence[str] | None = None,
+    pairs: Sequence[tuple[str, str]] | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
     edges = bounds(plan)
     nblocks = blocks_per_fold(edges, plan.block_days)
     weights = draws(nblocks, plan.draws, plan.seed, horizon)
     quarters = range(h.first, len(nblocks))
-    names = plan.scored_names(h.scheme)
+    names = plan.scored_names(h.scheme) if names is None else tuple(names)
+    pairs = plan.comparisons if pairs is None else tuple(pairs)
     subsets = {"all": np.ones(len(h.ts), bool), "without": ~np.isin(h.symbol, plan.without)}
     score_rows, fold_rows, primary, boot = [], [], {}, {}
     complete: dict[str, float] = {}
@@ -591,7 +598,7 @@ def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dic
                     }
                 )
     comparisons = []
-    for first, second in plan.comparisons:
+    for first, second in pairs:
         if first not in names or second not in names:
             continue
         for side in plan.sides:
