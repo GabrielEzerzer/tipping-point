@@ -391,8 +391,8 @@ def scores_chain(
         )
     if recorded["sequence run's folds table"] != seq_complete["files"].get("folds.parquet"):
         raise ValueError(
-            f"{what}: {run_dir.name} read another folds table of sequence run {seq_dir.name} than "
-            f"the one its complete.json records"
+            f"{what}: {run_dir.name} read another folds table of sequence run {seq_dir.name}: its "
+            f"sha256 is not the one in that run's complete.json"
         )
     source = seq_manifest["params"]
     clean_code(seq_manifest.get("producer"), f"{link}, {seq_dir.name},")

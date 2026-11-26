@@ -1204,9 +1204,10 @@ manifest changed after its run was written, but a run folder whose `manifest.jso
 Each run made from another records what it read by sha256, and the command follows that chain from
 each arm to the comparison's own inputs table, labels grid and ladder plan. A sequence or classical
 run records the inputs table, labels grid, plan and ladder plan it read. A merged sequence run
-records the same values, which `merge` requires its runs to share, and each merged run's manifest
-sha256 (`sources`); the command reads the merged run's own records and does not open the runs it
-merged. A `scores` run records the sha256 of its sequence run's `manifest.json` as it read it, of
+records the inputs table, labels grid and ladder plan that `merge` requires its runs to share, the
+plan it was given, which the merged runs' own plans may differ from in variants, seeds and quarters,
+and each merged run's manifest sha256 (`sources`); the command reads the merged run's own records
+and does not open the runs it merged. A `scores` run records the sha256 of its sequence run's `manifest.json` as it read it, of
 that run's folds table, of each model it loaded and of the inputs table and labels grid it read. Its
 sequence run is named by run id and found under `<data dir>/panel-sequence/`, so a run of the same
 id could be another store's; the command therefore requires the `scores` run's recorded manifest

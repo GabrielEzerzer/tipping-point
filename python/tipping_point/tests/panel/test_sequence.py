@@ -1018,10 +1018,10 @@ def test_the_scores_command_refuses_a_changed_run_and_writes_nothing(tmp_path: P
         record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
         (copy / "complete.json").write_text(json.dumps(record | {"clean": clean}), "utf-8")
 
-    def relisted(copy: Path) -> None:
-        (copy / "ladder.toml").write_text(ladder_text() + "\n", "utf-8")
+    def relisted(copy: Path, name: str, content: str) -> None:
+        (copy / name).write_text(content + "\n", "utf-8")
         record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
-        record["files"]["ladder.toml"] = store.sha256(copy / "ladder.toml")
+        record["files"][name] = store.sha256(copy / name)
         (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
 
     encoder_file = sequence.encoder_name("vol", "forward", 2, 3, "jepa")
@@ -1050,7 +1050,14 @@ def test_the_scores_command_refuses_a_changed_run_and_writes_nothing(tmp_path: P
             lambda d: (d / "ladder.toml").write_text(ladder_text() + "\n", "utf-8"),
             "ladder.toml",
         ),
-        "recorded": (relisted, "ladder.toml: not the ladder.toml the run's manifest records"),
+        "replanned": (
+            lambda d: relisted(d, "plan.toml", text),
+            "plan.toml: not the plan.toml the run's manifest records",
+        ),
+        "recorded": (
+            lambda d: relisted(d, "ladder.toml", ladder_text()),
+            "ladder.toml: not the ladder.toml the run's manifest records",
+        ),
     }
     for name, (change, message) in cases.items():
         copy = tmp_path / "copies" / name
