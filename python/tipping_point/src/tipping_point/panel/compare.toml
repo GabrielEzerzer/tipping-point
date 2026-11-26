@@ -1,0 +1,71 @@
+ladder = "ladder.toml"
+
+[[arms]]
+name = "jepa"
+kind = "scores"
+model = "jepa"
+variant = "full"
+
+[[arms]]
+name = "twin"
+kind = "scores"
+model = "twin"
+variant = "full"
+
+[[arms]]
+name = "supervised"
+kind = "scores"
+model = "supervised"
+variant = "full"
+
+[[arms]]
+name = "classical"
+kind = "classical"
+export = "full"
+
+[[arms]]
+name = "jepa-vol"
+kind = "scores"
+model = "jepa"
+variant = "vol"
+
+[[arms]]
+name = "classical-vol"
+kind = "classical"
+export = "vol"
+
+[[arms]]
+name = "classic"
+kind = "classical"
+export = "classic"
+
+[[pairs]]
+first = "jepa"
+second = "classical"
+primary = true
+side = "any"
+horizon = 24
+
+[[pairs]]
+first = "jepa"
+second = "twin"
+
+[[pairs]]
+first = "jepa"
+second = "supervised"
+
+[[pairs]]
+first = "twin"
+second = "classical"
+
+[[pairs]]
+first = "supervised"
+second = "classical"
+
+[[pairs]]
+first = "jepa-vol"
+second = "classical-vol"
+
+[[pairs]]
+first = "jepa"
+second = "classic"
