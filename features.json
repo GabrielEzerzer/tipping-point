@@ -298,6 +298,14 @@
       "test": "python/tipping_point/tests/panel/test_sequence.py"
     },
     {
+      "name": "Panel classical comparators",
+      "description": "Fits the ladder's rungs over the sequence plan's penalty grid and a logistic on plain statistics of the 336-hour window a sequence model reads, on the sequence probes' folds, rows and scales, chooses one configuration per rung and variant by the sequence models' selection rule (or takes a fixed one) and exports its out-of-fold scores for a ladder plan's external entry.",
+      "command": "uv run python -m tipping_point.panel classical --inputs <run id>",
+      "inputs": "a panel inputs run, its labels run and a sequence plan file (default panel/sequence.toml, which names its ladder plan)",
+      "outputs": "<data dir>/panel-classical/<run_id>/ holding the per-fold AUC table, row accounting, report.md, both plans and one Parquet table per exported name and scheme with the columns coin, hour, horizon, side, score, fold and scheme",
+      "test": "python/tipping_point/tests/panel/test_classical.py"
+    },
+    {
       "name": "Book feature range",
       "description": "Imports and reduces the Bybit order-book days of a range into per-day feature files.",
       "command": "uv run python -m tipping_point.market book --range training",

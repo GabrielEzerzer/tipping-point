@@ -52,6 +52,15 @@ Command line: python -m tipping_point.panel <command> [options]
   merge   one sequence run from several (--runs) whose plans differ only in variants, seeds and
           folds and which together fit every cell of the merged plan once, as a run in
           <data dir>/panel-sequence/<run_id>/ that scores reads like any sequence run
+  classical
+          the classical comparators of a sequence plan (--plan, default panel/sequence.toml) on an
+          inputs run (--inputs), on the sequence models' folds and rows: the plan's rungs at every
+          probe penalty, and a logistic on the last value, means and spreads of each variant's
+          336-hour window at every readout and penalty. Picks one configuration per rung and
+          variant name by the sequence models' selection rule, or takes one given with --fixed
+          MODEL VARIANT READOUT C (READOUT - for a rung), and writes its out-of-fold scores, as a
+          run in <data dir>/panel-classical/<run_id>/ with the tables folds, rows and
+          <name>-<scheme> in the columns a ladder plan's [external] section reads, and report.md
 
 Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
 data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
@@ -135,6 +144,19 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--tag", default="merged", help="the run id's tag (default merged)")
     p.set_defaults(command=_merge)
+
+    p = sub.add_parser("classical", help="fit, choose and score a sequence plan's classical side")
+    p.add_argument("--inputs", required=True, help="an inputs run id, or its folder")
+    p.add_argument("--plan", type=Path, default=None, help="default panel/sequence.toml")
+    p.add_argument(
+        "--fixed",
+        nargs=4,
+        metavar=("MODEL", "VARIANT", "READOUT", "C"),
+        help="fit and score this configuration only, without choosing (READOUT - for a rung)",
+    )
+    p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    p.add_argument("--tag", default="classical", help="the run id's tag (default classical)")
+    p.set_defaults(command=_classical)
     return parser
 
 
@@ -286,6 +308,28 @@ def _merge(args: argparse.Namespace) -> int:
         log=lambda line: print(line, flush=True),
     )
     print(f"{len(out['folds'])} fold rows")
+    print(run_dir)
+    return 0
+
+
+def _classical(args: argparse.Namespace) -> int:
+    from . import classical, sequence
+
+    fixed = None
+    if args.fixed is not None:
+        model, variant, readout, c = args.fixed
+        fixed = classical.Config(model, variant, None if readout == "-" else readout, float(c))
+    run_dir, out = classical.run(
+        _run_dir(args.data_dir, "panel-inputs", args.inputs),
+        args.data_dir,
+        args.plan or sequence.PLAN,
+        args.tag,
+        fixed,
+        log=lambda line: print(line, flush=True),
+    )
+    for name, config in out["exported"].items():
+        print(f"{name}: {config.model} {config.variant} {config.readout or '-'} c {config.c:g}")
+    print(f"{out['seconds'] / 60:.1f} minutes")
     print(run_dir)
     return 0
 

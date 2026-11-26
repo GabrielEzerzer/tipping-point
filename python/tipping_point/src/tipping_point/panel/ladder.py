@@ -339,9 +339,27 @@ def out_of_fold(
     horizon: int,
     log: Callable[[str], None],
 ) -> dict[str, dict[str, np.ndarray]]:
+    configs = [(r.name, plan.c) for r in plan.rungs]
+    scored = penalised(x, y, ts, fold, edges, plan, scheme, horizon, log, configs)
+    return {name: sides for (name, _), sides in scored.items()}
+
+
+def penalised(
+    x: np.ndarray,
+    y: Mapping[str, np.ndarray],
+    ts: np.ndarray,
+    fold: np.ndarray,
+    edges: np.ndarray,
+    plan: Plan,
+    scheme: str,
+    horizon: int,
+    log: Callable[[str], None],
+    configs: Sequence[tuple[str, float]],
+) -> dict[tuple[str, float], dict[str, np.ndarray]]:
     index = {name: i for i, name in enumerate(plan.columns)}
+    rungs = {r.name: r for r in plan.rungs}
     first = plan.first_fold(scheme)
-    out = {r.name: {s: np.full(len(ts), np.nan) for s in ("long", "short")} for r in plan.rungs}
+    out = {k: {s: np.full(len(ts), np.nan) for s in ("long", "short")} for k in configs}
     for f in range(first, len(edges) - 1):
         test = fold == f
         if not test.any():
@@ -358,14 +376,14 @@ def out_of_fold(
                     f"hold {'no' if share == 0.0 else 'only'} positives"
                 )
         z_train, z_test = standardise(x[train], x[test], plan.clip)
-        for rung in plan.rungs:
-            cols = [index[c] for c in rung.columns]
+        for name, c in configs:
+            cols = [index[column] for column in rungs[name].columns]
             for side in ("long", "short"):
-                beta = fit(z_train[:, cols], y[side][train].astype(np.float64), plan.c)
-                out[rung.name][side][test] = predict(z_test[:, cols], beta)
+                beta = fit(z_train[:, cols], y[side][train].astype(np.float64), c)
+                out[(name, c)][side][test] = predict(z_test[:, cols], beta)
         log(f"  {scheme} fold {f + 1}: {int(train.sum())} training rows, {int(test.sum())} scored")
     scored = fold >= first
-    for name, sides in out.items():
+    for (name, _), sides in out.items():
         for side in ("long", "short"):
             sides[side] = sides[side][scored]
             if not np.isfinite(sides[side]).all():

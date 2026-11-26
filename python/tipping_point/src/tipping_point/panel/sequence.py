@@ -623,10 +623,11 @@ def probe(
     plan: Plan,
     fitted: Any,
     configs: Sequence[tuple[str, float]],
+    width: int | None = None,
 ) -> dict[tuple[str, float], dict[str, np.ndarray]]:
     out = {}
     for name in dict.fromkeys(n for n, _ in configs):
-        k = READOUTS[name] * plan.shape.width
+        k = READOUTS[name] * (plan.shape.width if width is None else width)
         a, b = ladder.standardise(
             train[:, :k].astype(np.float64), test[:, :k].astype(np.float64), plan.ladder.clip
         )
@@ -847,36 +848,53 @@ def sequence(
     }
 
 
+def ranked(
+    folds: Sequence[Mapping[str, Any]], key: Callable[[Mapping[str, Any]], Any]
+) -> list[tuple[Any, float]]:
+    cells: dict[Any, dict[str, dict[int, list[float]]]] = {}
+    for r in folds:
+        if (r["scheme"], r["horizon"]) != ("forward", 24):
+            continue
+        k = key(r)
+        if k is not None:
+            per = cells.setdefault(k, {}).setdefault(r["side"], {})
+            per.setdefault(r["fold"], []).append(r["auc"])
+    out = []
+    for k in sorted(cells):
+        means = []
+        for side in ("long", "short"):
+            per_fold = [float(np.mean(v)) for v in cells[k].get(side, {}).values()]
+            finite = [v for v in per_fold if np.isfinite(v)]
+            means.append(float(np.mean(finite)) if finite else float("nan"))
+        out.append((k, float(np.mean(means))))
+    return out
+
+
+def best(candidates: Sequence[tuple[Any, float]]) -> tuple[Any, float] | None:
+    found: tuple[Any, float] | None = None
+    for k, score in candidates:
+        if np.isfinite(score) and (found is None or score > found[1]):
+            found = (k, score)
+    return found
+
+
 def choose(
     folds: Sequence[Mapping[str, Any]], model: str, variant: str
 ) -> tuple[str, float, float]:
     if model not in ("jepa", "twin"):
         raise ValueError(f"the {model} model has no readout or c to choose")
-    cells: dict[tuple[str, float], dict[str, dict[int, list[float]]]] = {}
-    for r in folds:
-        mine = (r["model"], r["variant"], r["scheme"], r["horizon"]) == (
-            model,
-            variant,
-            "forward",
-            24,
-        )
-        if mine:
-            per = cells.setdefault((r["readout"], r["c"]), {}).setdefault(r["side"], {})
-            per.setdefault(r["fold"], []).append(r["auc"])
     order = list(READOUTS)
-    best: tuple[str, float, float] | None = None
-    for name, c in sorted(cells, key=lambda k: (order.index(k[0]), k[1])):
-        means = []
-        for side in ("long", "short"):
-            per_fold = [float(np.mean(v)) for v in cells[(name, c)].get(side, {}).values()]
-            finite = [v for v in per_fold if np.isfinite(v)]
-            means.append(float(np.mean(finite)) if finite else float("nan"))
-        score = float(np.mean(means))
-        if np.isfinite(score) and (best is None or score > best[2]):
-            best = (name, c, score)
-    if best is None:
+
+    def key(r: Mapping[str, Any]) -> tuple[int, float] | None:
+        if (r["model"], r["variant"]) != (model, variant):
+            return None
+        return order.index(r["readout"]), r["c"]
+
+    found = best(ranked(folds, key))
+    if found is None:
         raise ValueError(f"no forward 24 h fold scores of {model} on {variant} to choose from")
-    return best
+    (index, c), score = found
+    return order[index], c, score
 
 
 def external(
@@ -958,25 +976,38 @@ def external(
             mean = total[h][scored] / len(plan.seeds)
             sides = {"long": mean[:, 0], "short": mean[:, 1]}
             sides["any"] = either(sides["long"], sides["short"])
-            n = int(scored.sum())
             for side in plan.ladder.sides:
                 if not np.isfinite(sides[side]).all():
                     raise RuntimeError(f"{scheme} {h} h {side}: a score is not finite")
                 parts.append(
-                    pa.table(
-                        {
-                            "coin": pa.array(symbol[r.keep][scored]),
-                            "hour": pa.array(ts[r.keep][scored], pa.int64()),
-                            "horizon": pa.array(np.full(n, h), pa.int16()),
-                            "side": pa.array(np.full(n, side)),
-                            "score": pa.array(sides[side], pa.float64()),
-                            "fold": pa.array(r.fold[scored], pa.int16()),
-                            "scheme": pa.array(np.full(n, scheme)),
-                        }
-                    )
+                    scores_part(symbol[r.keep], ts[r.keep], r.fold, scored, h, side, sides, scheme)
                 )
         out[scheme] = pa.concat_tables(parts)
     return out
+
+
+def scores_part(
+    symbol: np.ndarray,
+    ts: np.ndarray,
+    fold: np.ndarray,
+    scored: np.ndarray,
+    h: int,
+    side: str,
+    sides: Mapping[str, np.ndarray],
+    scheme: str,
+) -> pa.Table:
+    n = int(scored.sum())
+    return pa.table(
+        {
+            "coin": pa.array(symbol[scored]),
+            "hour": pa.array(ts[scored], pa.int64()),
+            "horizon": pa.array(np.full(n, h), pa.int16()),
+            "side": pa.array(np.full(n, side)),
+            "score": pa.array(sides[side], pa.float64()),
+            "fold": pa.array(fold[scored], pa.int16()),
+            "scheme": pa.array(np.full(n, scheme)),
+        }
+    )
 
 
 def _coin_hour(mask: np.ndarray, ncoins: int) -> tuple[np.ndarray, np.ndarray]:
