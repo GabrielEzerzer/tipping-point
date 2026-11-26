@@ -122,7 +122,8 @@ def parse(path: Path, ladder_path: Path, texts: tuple[str, str]) -> Plan:
             )
     if problems:
         raise ValueError(f"{path}: unknown or invalid: {', '.join(problems)}")
-    return Plan(base, tuple(arms), tuple(pairs), primary, str(side), int(horizon))
+    assert isinstance(horizon, int)
+    return Plan(base, tuple(arms), tuple(pairs), primary, str(side), horizon)
 
 
 def snapshot(path: Path = PLAN) -> tuple[Plan, dict[str, Any], tuple[str, str]]:
