@@ -1122,6 +1122,7 @@ configuration by its rule, false when it was exported with `--fixed`). Either ki
 open, such as the pretraining steps or the window length. Each pair is first minus second, and
 exactly one pair is marked primary, with the side and horizon it is read on. Every arm in the plan
 needs exactly one `--arm`, given as a run id or a run folder, and two arms may name the same run.
+A folder is named by its absolute path, so `.` given from inside a run folder names that run.
 
 For every horizon and every scheme all the arms hold, each arm's scores are aligned to the ladder's
 common rows of that scheme. Each arm is scored, and each pair compared, by the ladder's own code: the
@@ -1130,25 +1131,25 @@ same draws for every arm and side. Comparing an arm with a copy of itself gives 
 pair flips the sign of its estimate. Two rungs exported by `classical --fixed` at the ladder plan's c
 give the ladder's own comparison of those rungs.
 
-Besides the ladder's sides, each pair gets a `long+short` row, the mean of its long and short sides
-on their common quarters: those whose original difference is finite on both sides. Its estimate is
-the mean of the two sides' estimates over those quarters, which equals the mean of its per-quarter
-differences. In each draw, each side's value is the ladder's rule restricted to the same quarters,
-and the composite's value is the mean of the two. The sides share the draws, so the composite is
-paired, and its standard error, quantiles, share above zero and per-quarter differences come from
-those values in the same columns. When both sides score the same quarters, as they normally do, its
-estimate, its per-quarter differences and each of its draws are the means of the long and short
-rows' own; its other statistics are computed from those draws, and are not the means of the two
-rows' statistics. With no common quarter the row holds no number, and its `complete_draws` is
-empty too. For a classical arm, at 24 h on `forward`, the composite's estimate and the quantity its
-selection rule maximises (the mean of the long and short fold-mean AUCs) coincide when both sides
-are scored on the same quarters. Otherwise they differ: if one quarter scores long only and another
-both, the rule averages long over both quarters and short over the second, while the composite uses
-the second for both. For a `scores` arm they differ even then: the sequence rule averages the seeds'
-AUCs in each quarter, and this command scores the seeds' mean score. The shipped plan reads its
-primary pair on `long+short` at 24 h rather than on `any`, because `any` depends on how a model's
-long and short heads are calibrated against each other: an arm can win on long and on short and lose
-on `any`. The `any` rows are kept as they are.
+When the ladder plan has both `long` and `short` sides, each pair also gets a `long+short` row, the
+mean of its long and short sides on their common quarters: those whose original difference is finite
+on both sides. Its estimate is the mean of the two sides' estimates over those quarters, which
+equals the mean of its per-quarter differences. In each draw, each side's value is the ladder's rule
+restricted to the same quarters, and the composite's value is the mean of the two. The sides share
+the draws, so the composite is paired, and its standard error, quantiles, share above zero and
+per-quarter differences come from those values in the same columns. When both sides score the same
+quarters, as they normally do, its estimate, its per-quarter differences and each of its draws are
+the means of the long and short rows' own; its other statistics are computed from those draws, and
+are not the means of the two rows' statistics. With no common quarter the row holds no number, and
+its `complete_draws` is empty too. For a classical arm, at 24 h on `forward`, the composite's
+estimate and the quantity its selection rule maximises (the mean of the long and short fold-mean
+AUCs) coincide when both sides are scored on the same quarters. Otherwise they differ: if one
+quarter scores long only and another both, the rule averages long over both quarters and short over
+the second, while the composite uses the second for both. For a `scores` arm they differ even then:
+the sequence rule averages the seeds' AUCs in each quarter, and this command scores the seeds' mean
+score. The shipped plan reads its primary pair on `long+short` at 24 h rather than on `any`, because
+`any` depends on how a model's long and short heads are calibrated against each other: an arm can
+win on long and on short and lose on `any`. The `any` rows are kept as they are.
 
 A quarter is scored when its original difference is finite, that is when it has both classes. Every
 comparison row carries `quarters_scheduled`, the number of quarters its scheme schedules, and
@@ -1196,19 +1197,25 @@ Before reading any score the command checks that each arm comes from the inputs 
 ladder plan of the comparison. It refuses:
 
 - an arm the plan lacks, one given twice and one not given, and an inputs run that is missing;
-- a run that is missing, has no `complete.json` or is not marked clean, whose manifest differs from
-  the sha256 its `complete.json` records, whose manifest gives another run id than its folder's
-  name, or that is of another kind;
+- a run (an arm's run, a `scores` arm's sequence run or the inputs run) that is missing, has no
+  `complete.json` or is not marked clean, whose manifest differs from the sha256 its
+  `complete.json` records, whose manifest gives another run id than its folder's name, or that is
+  of another kind;
 - without `--unbound`, a run, `scores` run's sequence run or inputs run whose `complete.json`
   records no manifest sha256, and a merged sequence run that does not record that every run it
   merged was bound;
-- a run made by code with no recorded commit or with uncommitted changes; for a `scores` arm, also
-  its sequence run, and for a merged sequence run, the runs it merged. Different clean commits
-  across arms are allowed: the manifest records each, and the report names them;
+- a run made by code with no recorded commit or with uncommitted changes: the arm's run, the inputs
+  run, for a `scores` arm its sequence run, and for a merged sequence run the runs it merged.
+  Different clean commits across arms are allowed: the manifest records each, and the report names
+  them;
 - a `scores` run of another model or variant, one whose sequence run is not a plain run id in
-  `<data dir>/panel-sequence/`, is missing, is not clean or records another run id, and one whose
-  models are not exactly that model and variant for every scheme, scored quarter and seed of the
-  sequence run's plan, no fewer and no others;
+  `<data dir>/panel-sequence/`, is missing, is not clean or records another run id, one whose model
+  or variant the sequence run's plan lacks, and one whose models are not whole quarters of that
+  model and variant in the sequence run's plan: for every scheme it holds scores for, at least one
+  quarter, every seed of the plan for each quarter it holds, and no other models. A quarter the plan
+  schedules that has no scored row has no models in the `scores` run; a quarter with rows cannot
+  lack them, because `scores` refuses to leave a quarter with rows unscored and the comparison
+  requires a score for every ladder row;
 - a model file the `scores` run used that differs from the sha256 the sequence run's manifest and
   `complete.json` record, or that is missing;
 - a `classical` run that did not export the arm's `export`;
@@ -1218,7 +1225,7 @@ ladder plan of the comparison. It refuses:
   is not the comparison's ladder plan by its `complete.json`, whose `plan.toml` or `ladder.toml`
   differs on disk from its `complete.json`, or whose manifest records another;
 - a run without `forward` scores, and a run that differs from a pin;
-- an inputs run whose `complete.json`, inputs table or labels grid file is missing;
+- an inputs run whose inputs table or labels grid file is missing;
 - a score file that is missing, that reaches the held-back span, or whose sha256 differs from its
   run's `complete.json`. Each file is read once: the held-back check reads the metadata of the bytes
   read, those bytes are hashed, and the table is parsed from the same bytes;
@@ -1235,12 +1242,15 @@ in the chain ends as a refusal that names the file.
 
 The command reads the plan and its ladder plan once each, recording their sha256 and copying both
 into the run. The manifest records the primary pair, whether unbound runs were allowed, whether the
-inputs run was bound and, for each arm, its run, kind, model, variant, readout, c, seeds, whether it
-was chosen by the rule, its selection, its source run's `plan.toml` sha256, whether its chain was
-bound, the run it was made from, its files' sha256 and the code that made it (commit, state and
-`uv.lock`). For a `scores` arm it also records its sequence run's code and the code that trained the
-models, which for a merged sequence run is the merged runs' commit. Two runs on the same arms, given
-in any order, write identical tables.
+inputs run was bound, the code that made the inputs run (commit, state and `uv.lock`), which the
+report names, and, for each arm, its run, kind, model, variant, readout, c, whether it was chosen by
+the rule, its selection, its source run's `plan.toml` sha256, whether its chain was bound, the run
+it was made from, its files' sha256 and the code that made it (commit, state and `uv.lock`). For a
+`scores` arm it also records the sequence plan's seeds, its sequence run's code and the code that
+trained the models, which for a merged sequence run is the merged runs' commit, state and
+`uv.lock`; a merged run's own code is the merging commit and state with no `uv.lock`, since `merge`
+copies the merged runs' `uv.lock` rather than its own, and the report shows a missing `uv.lock` as
+`-`. Two runs on the same arms, given in any order, write identical tables.
 
 The interval has limits. The paired bootstrap measures how much the difference moves when the
 observed 14-day blocks of each quarter are reweighted, for the fitted scoring rules, with the
@@ -1248,13 +1258,22 @@ observed quarters held fixed. A `scores` arm scores the mean of its plan's seeds
 against one classical fit compares two fixed scoring rules. When a quarter's positives sit in few
 blocks, a lower bound above zero is not a calibrated 5 % claim: with seven blocks and the positives
 in one, about a third of draws lose that block, and every complete draw reuses the same episode.
-Dependence across blocks and across quarters is not in the draws. The interval says nothing about
+Statistics on complete draws are conditional on every scored quarter keeping both classes, which
+weights a quarter's few positive blocks more heavily than the plain draws do: in a seven-block
+quarter a block that must appear has expected weight 1 / (1 - (6/7)^7), about 1.5. Under weak block
+support neither the all-draws nor the complete-draws interval is unbiased, and both are
+diagnostics. Each quarter is cut into 14-day blocks with a shorter last block of 6 to 8 days, which
+the draws sample with the same probability as a full block. Dependence across blocks and across
+quarters is not in the draws. Under `forward` the quarters' models share nested training data, so
+`se_quarters` describes the spread across quarters and is not a standard error of independent
+draws. The interval says nothing about
 retraining, and nothing about how much of a difference is owed to pretraining, which is read from
 JEPA against its twin. The per-quarter differences and their standard error are in the same row
 because the interval carries no quarter-to-quarter variation. `above_zero` is the share of draws
-above zero, not a p-value. A lower bound above zero is evidence for this panel's ranking difference
-under the block assumption; the decision rule, with an inconclusive outcome when block support is
-weak, is for the written plan (issue #231).
+above zero, not a p-value. The labels grid is checked by its sha256 against the inputs run's
+verified record; the labels run's own manifest is not read. A lower bound above zero is evidence for
+this panel's ranking difference under the block assumption; the decision rule, with an inconclusive
+outcome when block support is weak, is for the written plan (issue #231).
 
 The primary pair, its side and its horizon must be fixed in the study's written plan before any
 held-back day is opened, and the frozen plan pins every arm's configuration. The shipped

@@ -8,6 +8,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import os
 import re
 import time
 import tomllib
@@ -235,8 +236,12 @@ def given(plan: Plan, arms: Sequence[tuple[str, str]], data_dir: Path) -> dict[s
     out = {}
     for name, run in arms:
         path = Path(run)
-        out[name] = path if path.is_dir() else data_dir / KINDS[kinds[name]] / run
+        out[name] = absolute(path if path.is_dir() else data_dir / KINDS[kinds[name]] / run)
     return out
+
+
+def absolute(path: Path) -> Path:
+    return Path(os.path.abspath(path))
 
 
 def _read(path: Path, what: str) -> bytes:
@@ -306,11 +311,13 @@ def clean_code(producer: Any, what: str) -> None:
         raise ValueError(f"{what} was made by code with uncommitted changes")
 
 
-def _code(producer: Mapping[str, Any], params: Mapping[str, Any]) -> dict[str, Any]:
+def _code(producer: Mapping[str, Any], params: Mapping[str, Any] | None) -> dict[str, Any]:
     return {
         "git_sha": producer.get("git_sha"),
         "dirty": producer.get("dirty"),
-        "uv_lock_sha256": (params.get("code") or {}).get("uv_lock_sha256"),
+        "uv_lock_sha256": None
+        if params is None
+        else (params.get("code") or {}).get("uv_lock_sha256"),
     }
 
 
@@ -356,19 +363,22 @@ def scores_chain(
     what: str,
     unbound: bool,
     seen: Held,
+    scored: Sequence[str],
 ) -> tuple[dict[str, Any], Path, dict[str, Any], bool]:
     model, variant = params.get("model"), params.get("variant")
     if (model, variant) != (arm.model, arm.variant):
         raise ValueError(
             f"{what}: {run_dir.name} scores {model} on {variant}, not {arm.model} on {arm.variant}"
         )
+    assert isinstance(model, str) and isinstance(variant, str)
     seq_dir = sequence_dir(params.get("sequence_run"), data_dir, what)
     link = f"{what}: the sequence run of {run_dir.name}"
     seq_manifest, seq_complete, bound = finished(seq_dir, link, "panel-sequence", unbound, seen)
     source = seq_manifest["params"]
     clean_code(seq_manifest.get("producer"), f"{link}, {seq_dir.name},")
     trained = seq_manifest.get("producer")
-    if "sources" in source or "pieces_producer" in source:
+    merged = "sources" in source or "pieces_producer" in source
+    if merged:
         trained = source.get("pieces_producer")
         clean_code(trained, f"{link}: the runs merged into {seq_dir.name}")
         if source.get("pieces_bound") is not True:
@@ -380,14 +390,12 @@ def scores_chain(
                 )
     plan_text, ladder_text = plans_of(seq_dir, seq_complete, source, ladder_sha, link)
     plan = sequence.load(seq_dir / "plan.toml", seq_dir / "ladder.toml", (plan_text, ladder_text))
-    expected = sequence.cells(dataclasses.replace(plan, variants=(variant,), models=(model,)))
+    if model not in plan.models or variant not in plan.variants:
+        raise ValueError(f"{link}: {seq_dir.name}'s plan fits no {model} on {variant}")
     saved, used = source.get("encoders") or {}, params.get("encoders") or {}
-    if set(used) != expected:
-        raise ValueError(
-            f"{what}: the models {run_dir.name} scored are not every {model} on {variant} of "
-            f"sequence run {seq_dir.name}'s plan: {len(set(used) - expected)} others, "
-            f"{len(expected - set(used))} missing"
-        )
+    models_used(
+        plan, model, variant, set(used), scored, f"{what}: the models {run_dir.name} scored"
+    )
     for key, digest in sorted(used.items()):
         if saved.get(key) != digest or seq_complete["files"].get(key) != digest:
             raise ValueError(
@@ -406,10 +414,37 @@ def scores_chain(
         "selection": params.get("selection"),
         "plan_sha256": seq_complete["files"]["plan.toml"],
         "sequence_run": seq_manifest["run_id"],
-        "sequence_code": _code(seq_manifest.get("producer") or {}, source),
+        "sequence_code": _code(seq_manifest.get("producer") or {}, None if merged else source),
         "trained_by": _code(trained or {}, source),
     }
     return record, seq_dir, source, bound
+
+
+def models_used(
+    plan: sequence.Plan, model: str, variant: str, used: set[str], scored: Sequence[str], what: str
+) -> None:
+    single = dataclasses.replace(plan, variants=(variant,), models=(model,))
+    others = used - sequence.cells(single)
+    partial, empty = [], []
+    for scheme in scored:
+        quarters = [f for f in plan.folds if f >= plan.ladder.first_fold(scheme)]
+        found = 0
+        for f in quarters if scheme in plan.schemes else []:
+            seeds = {sequence.encoder_name(variant, scheme, f, s, model) for s in plan.seeds}
+            held = len(seeds & used)
+            found += held
+            if 0 < held < len(seeds):
+                partial.append(f"{scheme} quarter {f + 1}")
+        if not found:
+            empty.append(scheme)
+    problems = [f"{len(others)} not {model} on {variant} of the plan"] if others else []
+    problems += [f"not every seed for {', '.join(partial)}"] if partial else []
+    problems += [f"none for {', '.join(empty)}"] if empty else []
+    if problems:
+        raise ValueError(
+            f"{what} are not whole quarters of every seed of the sequence run's {model} on "
+            f"{variant}: {'; '.join(problems)}"
+        )
 
 
 def classical_chain(
@@ -457,8 +492,9 @@ def provenance(
     record: dict[str, Any] = {"run": manifest["run_id"], "kind": arm.kind}
     chain = [(run_dir.name, params)]
     if arm.kind == "scores":
+        scored = [s for s in ladder.SCHEMES if arm.file(s) in complete["files"]]
         found, seq_dir, source, seq_bound = scores_chain(
-            arm, run_dir, params, data_dir, ladder_sha, what, unbound, seen
+            arm, run_dir, params, data_dir, ladder_sha, what, unbound, seen, scored
         )
         record |= found
         bound = bound and seq_bound
@@ -701,17 +737,19 @@ def run(
     plan, records, (plan_text, ladder_text) = snapshot(plan_path)
     ladder_sha = records["ladder_plan"]["sha256"]
     dirs = given(plan, arms, data_dir)
+    inputs_dir = absolute(inputs_dir)
     if not (inputs_dir / "manifest.json").is_file():
         raise ValueError(f"no inputs run at {inputs_dir}")
-    inputs_complete = json.loads(_read(inputs_dir / "complete.json", "inputs run").decode("utf-8"))
-    inputs_manifest, inputs_bound = bound_manifest(inputs_dir, inputs_complete, "inputs run")
-    if not (inputs_bound or unbound):
-        raise unbound_refused(inputs_dir, "inputs run")
+    seen: Held = {}
+    inputs_manifest, inputs_complete, inputs_bound = finished(
+        inputs_dir, "inputs run", "panel-inputs", unbound, seen
+    )
+    clean_code(inputs_manifest.get("producer"), f"inputs run: {inputs_dir.name}")
+    inputs_code = _code(inputs_manifest["producer"], inputs_manifest["params"])
     made = {
         "inputs_run": inputs_manifest["run_id"],
-        "labels_run": inputs_manifest["params"]["labels_run"],
+        "labels_run": inputs_manifest["params"].get("labels_run"),
     }
-    seen: Held = {}
     found = {
         arm.name: provenance(arm, dirs[arm.name], data_dir, made, ladder_sha, unbound, seen)
         for arm in plan.arms
@@ -759,6 +797,7 @@ def run(
         **records,
         "unbound_allowed": unbound,
         "inputs_bound": inputs_bound,
+        "inputs_code": inputs_code,
         "schemes": schemes,
         "primary": primary,
         "pairs": [list(p) for p in plan.pairs],
@@ -774,7 +813,9 @@ def run(
         ),
     }
     texts = {
-        "report.md": report(out, plan, source, records, found, seconds, inputs_bound, unbound),
+        "report.md": report(
+            out, plan, source, records, found, seconds, inputs_bound, unbound, inputs_code
+        ),
         "plan.toml": plan_text,
         "ladder.toml": ladder_text,
     }
@@ -820,6 +861,10 @@ def code_states(found: Mapping[str, Mapping[str, Any]]) -> dict[str, tuple[Any, 
     return out
 
 
+def _lock(value: Any) -> str:
+    return "-" if value is None else str(value)
+
+
 def _configuration(record: Mapping[str, Any]) -> str:
     return {True: "chosen by the rule", False: "fixed"}.get(record["chosen"], "none to choose")
 
@@ -833,6 +878,7 @@ def report(
     seconds: float,
     inputs_bound: bool,
     unbound: bool = False,
+    inputs_code: Mapping[str, Any] | None = None,
 ) -> str:
     base = plan.ladder
     lines = [
@@ -894,7 +940,7 @@ def report(
             f"| {name} | `{r['run']}` | {r['kind']} | {r['model']} | {r['variant']} | "
             f"{_configuration(r)} | {r['readout'] or '-'} | {c} | {r['plan_sha256'][:12]} | "
             f"{str(code['git_sha'])[:12]} ({_state(code['dirty'])}) | "
-            f"{str(code['uv_lock_sha256'])[:12]} | {'yes' if r['bound'] else 'no'} |"
+            f"{_lock(code['uv_lock_sha256'])[:12]} | {'yes' if r['bound'] else 'no'} |"
         )
     states = code_states(found)
     lines += [
@@ -905,10 +951,16 @@ def report(
         "unseen. The inputs run is " + ("bound." if inputs_bound else "not bound."),
         "",
     ]
+    if inputs_code is not None:
+        lines += [
+            f"The inputs run was made by commit {inputs_code['git_sha']} "
+            f"({_state(inputs_code['dirty'])}), uv.lock {_lock(inputs_code['uv_lock_sha256'])}.",
+            "",
+        ]
     if len(set(states.values())) > 1:
         lines.append(
             "The arms' runs were not all made by the same code (commit, state, uv.lock): "
-            + "; ".join(f"{k} {v[0]}, {_state(v[1])}, {v[2]}" for k, v in states.items())
+            + "; ".join(f"{k} {v[0]}, {_state(v[1])}, {_lock(v[2])}" for k, v in states.items())
             + "."
         )
     else:

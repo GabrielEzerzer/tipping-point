@@ -588,11 +588,42 @@ def test_complete_draw_statistics_leave_out_draws_that_lose_a_quarter(tmp_path: 
     h = ladder.Horizon("forward", first, ts, symbol, y, fold, block, scores)
     _, _, rows = compare.evaluated(h, base, 24, ("a", "b"), (("a", "b"),))
     by = {r["side"]: r for r in rows}
+    kept: dict[str, Any] = {}
+    ladder.evaluate(h, base, 24, ("a", "b"), (("a", "b"),), kept)
+    folds, boot, booted, whole = kept["folds"], kept["boot"], kept["booted"], kept["complete"]
+    common = np.isfinite(
+        (folds[("a", "long")] + folds[("a", "short")]) / 2
+        - (folds[("b", "long")] + folds[("b", "short")]) / 2
+    )
+
+    def on_common(values: np.ndarray) -> np.ndarray:
+        values = np.where(common, values, np.nan)
+        count = np.isfinite(values).sum(axis=1)
+        return np.where(count > 0, np.nansum(values, axis=1) / np.maximum(count, 1), np.nan)
+
+    def gap(side: str) -> np.ndarray:
+        return on_common(booted[("a", side)]) - on_common(booted[("b", side)])
+
+    lose = [np.isfinite(booted[("a", side)][:, common]).all(axis=1) for side in ("long", "short")]
+    draws = {
+        side: (boot[("a", side)] - boot[("b", side)], whole[side]) for side in ("long", "short")
+    }
+    draws["long+short"] = ((gap("long") + gap("short")) / 2, lose[0] & lose[1])
     for side in ("long", "short", "long+short"):
         row = by[side]
         assert 0 < row["complete_draws"] < 1
         assert row["draws_complete"] == round(row["complete_draws"] * base.draws)
         assert row["draws_complete"] < row["draws"] <= base.draws
+        difference, complete = draws[side]
+        kept_draws = difference[complete]
+        kept_draws = kept_draws[np.isfinite(kept_draws)]
+        q = np.quantile(kept_draws, [0.025, 0.05, 0.975])
+        assert row["draws_complete"] == kept_draws.size
+        assert row["se_complete"] == pytest.approx(float(np.std(kept_draws, ddof=1)), abs=1e-15)
+        assert row["q025_complete"] == pytest.approx(float(q[0]), abs=1e-15)
+        assert row["q05_complete"] == pytest.approx(float(q[1]), abs=1e-15)
+        assert row["q975_complete"] == pytest.approx(float(q[2]), abs=1e-15)
+        assert row["above_zero_complete"] == float(np.mean(kept_draws > 0))
         assert row["se_complete"] != row["se"]
     sides = (by["long"]["complete_draws"], by["short"]["complete_draws"])
     assert by["long+short"]["complete_draws"] < min(sides)
@@ -680,6 +711,9 @@ def test_a_sequence_arm_and_a_window_arm_compare_end_to_end(small: dict[str, Any
     assert "| jepa | vol | chosen by the rule |" in report and "| window | vol | fixed |" in report
     assert report.count(" | yes |") == 2 and "The inputs run is bound." in report
     assert params(run_dir)["unbound_allowed"] is False and "--unbound" not in text
+    code = params(run_dir)["inputs_code"]
+    assert code == {"git_sha": "c" * 40, "dirty": False, "uv_lock_sha256": None}
+    assert f"The inputs run was made by commit {'c' * 40} (clean), uv.lock -." in report
     file = (scores / "forward.parquet").as_posix()
     external = f'\n[external]\nname = "jepa"\npath = "{file}"\nscheme = "forward"\n'
     (data / "ladder-ext.toml").write_text(LADDER + external, encoding="utf-8")
@@ -744,18 +778,24 @@ def test_a_scores_arm_that_is_not_its_sequence_runs_models_is_refused(
     twin = {
         k.replace("-jepa.pt", "-twin.pt"): saved[k.replace("-jepa.pt", "-twin.pt")] for k in used
     }
-    refused(lambda d: edit(d, "manifest.json", {"encoders": twin}), "are not every jepa on vol")
+    refused(lambda d: edit(d, "manifest.json", {"encoders": twin}), "2 not jepa on vol of the plan")
     first = sorted(used)[0]
     partial = {k: v for k, v in used.items() if k != first}
-    refused(lambda d: edit(d, "manifest.json", {"encoders": partial}), "0 others, 1 missing")
+    refused(
+        lambda d: edit(d, "manifest.json", {"encoders": partial}),
+        "not every seed for forward quarter 3$",
+    )
+    refused(lambda d: edit(d, "manifest.json", {"encoders": {}}), ": none for forward$")
     extra = first.replace("-jepa.pt", "-supervised.pt")
     more = {**used, extra: saved[extra]}
-    refused(lambda d: edit(d, "manifest.json", {"encoders": more}), "1 others, 0 missing")
+    refused(
+        lambda d: edit(d, "manifest.json", {"encoders": more}), ": 1 not jepa on vol of the plan$"
+    )
     full = path.read_text(encoding="utf-8").replace('variant = "vol"', 'variant = "full"')
     relabelled = plan_file(tmp_path / "plans", full)
     refused(
         lambda d: edit(d, "manifest.json", {"variant": "full"}),
-        "not every jepa on full",
+        "plan fits no jepa on full",
         relabelled,
     )
     missing = sequence_copy("missing", lambda d: (d / first).unlink())
@@ -839,11 +879,28 @@ def test_a_scores_arm_that_is_not_its_sequence_runs_models_is_refused(
         "merged",
     )
     jepa = params(run_dir)["arms"]["jepa"]
-    assert (
-        jepa["trained_by"]["git_sha"] == "e" * 40 and jepa["sequence_code"]["git_sha"] == "c" * 40
-    )
+    lock = params(seq)["code"]["uv_lock_sha256"]
+    assert jepa["trained_by"] == {"git_sha": "e" * 40, "dirty": False, "uv_lock_sha256": lock}
+    assert jepa["sequence_code"] == {"git_sha": "c" * 40, "dirty": False, "uv_lock_sha256": None}
     report = (run_dir / "report.md").read_text(encoding="utf-8")
-    assert f"jepa (trained by) {'e' * 40}, clean" in report
+    assert f"jepa (trained by) {'e' * 40}, clean, {lock}" in report
+    assert f"jepa (sequence run) {'c' * 40}, clean, -;" in report and "None" not in report
+
+
+def test_a_scores_arm_whose_plan_schedules_a_quarter_with_no_scored_row_is_compared(
+    small: dict[str, Any],
+) -> None:
+    data = small["data"]
+    text = small["plan"].read_text(encoding="utf-8").replace("folds = [2]", "folds = [2, 3]")
+    where = folder(data / "plan-unscored", {"ladder.toml": LADDER, "sequence.toml": text})
+    seq, _ = sequence.run(small["inputs"], data, where / "sequence.toml", "unscored")
+    scores, _ = sequence.scores_run(seq, data, "jepa", "vol", "unscored-jepa")
+    used, saved = params(scores)["encoders"], params(seq)["encoders"]
+    unscored = {k for k in saved if "-fold3-" in k and k.endswith("-jepa.pt")}
+    assert len(unscored) == len(used) == 2 and not unscored & set(used)
+    arms = [("jepa", str(scores)), ("window", str(small["window"]))]
+    run_dir, _ = compare.run(arms, small["inputs"], data, small["paired"], "unscored")
+    assert params(run_dir)["arms"]["jepa"]["sequence_run"] == seq.name
 
 
 def test_pinned_configurations_and_a_classical_arm_chosen_by_the_rule(
@@ -912,7 +969,16 @@ def test_pinned_configurations_and_a_classical_arm_chosen_by_the_rule(
     only = SMALL.replace('export = "vol"\n', 'export = "vol"\nchosen = true\n')
     with pytest.raises(ValueError, match="has chosen False, not the plan's True"):
         compare.run(fixed_arms, small["inputs"], data, plan_file(tmp_path, only), "x")
+    for pin, message in (
+        ('readout = "means"', "has readout last, not the plan's means"),
+        ("c = 0.5", "has c 0.01, not the plan's 0.5"),
+    ):
+        mismatched = SMALL.replace('export = "vol"\n', f'export = "vol"\n{pin}\n')
+        with pytest.raises(ValueError, match=message):
+            compare.run(fixed_arms, small["inputs"], data, plan_file(tmp_path, mismatched), "x")
     assert not tag_runs(data, "x")
+    matched = SMALL.replace('export = "vol"\n', 'export = "vol"\nreadout = "last"\nc = 0.01\n')
+    compare.run(fixed_arms, small["inputs"], data, plan_file(tmp_path, matched), "window-pins")
 
 
 def test_an_arm_from_another_inputs_run_labels_grid_or_ladder_plan_is_refused(
@@ -1250,7 +1316,7 @@ def test_an_inputs_run_with_a_missing_file_is_refused_by_name(
         with pytest.raises(ValueError, match=message):
             compare.run(arms, copy, panel["data"], panel["paired"], "x")
 
-    refused(lambda d: (d / "complete.json").unlink(), "inputs run: .*complete.json is missing")
+    refused(lambda d: (d / "complete.json").unlink(), "inputs run: .* has no complete.json")
     refused(
         lambda d: edit(d, "manifest.json", {"labels_grid": {"file": "grid/9.parquet"}}),
         "inputs run: .*9.parquet is missing",
@@ -1265,6 +1331,137 @@ def _domain(run: Path) -> None:
 
 def _drop(run: Path, name: str) -> None:
     rewrite(run, "complete.json", lambda r: r["files"].pop(name))
+
+
+def test_an_inputs_run_that_is_not_a_clean_inputs_run_is_refused(
+    panel: dict[str, Any], tmp_path: Path
+) -> None:
+    arms = [("full", str(panel["full"])), ("vol", str(panel["vol"]))]
+
+    def refused(change: Callable[[Path], Any], message: str) -> None:
+        copy = copied(panel["inputs"], tmp_path / "inputs")
+        change(copy)
+        with pytest.raises(ValueError, match=message):
+            compare.run(arms, copy, panel["data"], panel["paired"], "x")
+
+    name = panel["inputs"].name
+    refused(lambda d: producer(d, {"dirty": True}), f"inputs run: {name} was made by code with")
+    refused(lambda d: producer(d, {"git_sha": None}), f"inputs run: {name} records no commit")
+    refused(
+        lambda d: rewrite(d, "manifest.json", lambda r: r.update(domain="panel-ladder")),
+        f"inputs run: {name} is a panel-ladder run, not a panel-inputs run",
+    )
+    refused(lambda d: edit(d, "complete.json", {"clean": False}), "does not mark .* clean")
+    renamed = tmp_path / "renamed" / "20260101T000000Z-renamed"
+    shutil.copytree(panel["inputs"], renamed)
+    with pytest.raises(ValueError, match=f"records run id {name}, not its folder's"):
+        compare.run(arms, renamed, panel["data"], panel["paired"], "x")
+    assert not tag_runs(panel["data"], "x")
+
+
+def test_an_arm_given_as_the_current_folder_is_its_run(
+    panel: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(panel["vol"])
+    argv = run_args(panel, panel["paired"], "dot", full=panel["full"], vol=Path("."))
+    assert main(argv) == 0
+    (run_dir,) = tag_runs(panel["data"], "dot")
+    assert params(run_dir)["arms"]["vol"]["run"] == panel["vol"].name
+
+
+def test_malformed_arms_and_a_composite_side_without_short_are_refused(
+    panel: dict[str, Any], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    head = ["compare", "--inputs", str(panel["inputs"]), "--plan", str(panel["paired"])]
+    tail = ["--arm", f"full={panel['full']}", "--data-dir", str(panel["data"]), "--tag", "x"]
+    for given in ("bad", "=run", "vol="):
+        assert main([*head, "--arm", given, *tail]) == 1
+        assert f"error: --arm {given}: expected NAME=RUN" in capsys.readouterr().err
+    sides = LADDER.replace('sides = ["long", "short", "any"]', 'sides = ["long", "any"]')
+    text = PAIRED.replace('side = "long"', 'side = "long+short"')
+    plan = folder(tmp_path / "plan", {"ladder.toml": sides, "compare.toml": text})
+    argv = [*head[:-1], str(plan / "compare.toml"), "--arm", f"vol={panel['vol']}", *tail]
+    assert main(argv) == 1
+    assert "primary side long+short (one of ['long', 'any'])" in capsys.readouterr().err
+    assert not tag_runs(panel["data"], "x")
+
+
+E2E = """
+ladder = "ladder.toml"
+
+[[arms]]
+name = "jepa"
+kind = "scores"
+model = "jepa"
+variant = "vol"
+
+[[arms]]
+name = "sup"
+kind = "scores"
+model = "supervised"
+variant = "vol"
+
+[[arms]]
+name = "window"
+kind = "classical"
+export = "vol"
+
+[[pairs]]
+first = "jepa"
+second = "window"
+primary = true
+side = "long+short"
+horizon = 24
+
+[[pairs]]
+first = "sup"
+second = "window"
+"""
+
+
+def test_merged_pieces_scored_and_compared_equal_the_unmerged_run(
+    small: dict[str, Any], tmp_path: Path
+) -> None:
+    data, seq, plan = small["data"], small["seq"], small["plan"]
+    text = plan.read_text(encoding="utf-8")
+    pieces = []
+    for seed in (3, 4):
+        piece = text.replace("seeds = [3, 4]", f"seeds = [{seed}]")
+        where = folder(data / f"piece-{seed}", {"ladder.toml": LADDER, "sequence.toml": piece})
+        run_dir, _ = sequence.run(small["inputs"], data, where / "sequence.toml", f"seed{seed}")
+        pieces.append(run_dir)
+    merged, _ = sequence.merge_run(pieces, plan, data, "merged-real")
+    assert params(merged)["pieces_bound"] is True
+    window = str(small["window"])
+    runs = {}
+    for name, source in (("merged", merged), ("single", seq)):
+        jepa, _ = sequence.scores_run(source, data, "jepa", "vol", f"{name}-jepa")
+        sup, _ = sequence.scores_run(source, data, "supervised", "vol", f"{name}-sup")
+        arms = [("jepa", str(jepa)), ("sup", str(sup)), ("window", window)]
+        compared = plan_file(tmp_path / "plans", E2E)
+        runs[name], _ = compare.run(arms, small["inputs"], data, compared, f"e2e-{name}")
+    for name in ("comparisons", "folds", "scores"):
+        one, two = (pq.read_table(runs[k] / f"{name}.parquet") for k in ("merged", "single"))
+        assert one.num_rows and same(one.to_pylist(), two.to_pylist()), name
+    recorded = params(runs["merged"])["arms"]
+    lock = params(seq)["code"]["uv_lock_sha256"]
+    for name in ("jepa", "sup"):
+        arm = recorded[name]
+        assert arm["bound"] is True and arm["sequence_run"] == merged.name
+        assert arm["sequence_code"] == {"git_sha": "c" * 40, "dirty": False, "uv_lock_sha256": None}
+        assert arm["trained_by"] == {"git_sha": "c" * 40, "dirty": False, "uv_lock_sha256": lock}
+    sup = recorded["sup"]
+    assert (sup["readout"], sup["c"], sup["chosen"], sup["selection"]) == (None, None, None, None)
+    assert recorded["jepa"]["chosen"] is True and recorded["jepa"]["readout"]
+    single = params(runs["single"])["arms"]["jepa"]
+    assert single["sequence_code"]["uv_lock_sha256"] == lock
+    report = (runs["merged"] / "report.md").read_text(encoding="utf-8")
+    arms_table = report.split("## Arms")[1]
+    assert "| sup | supervised | vol | none to choose | - | - |" in arms_table.replace(
+        f"`{recorded['sup']['run']}` | scores | ", ""
+    )
+    assert "| jepa | " in arms_table and "| chosen by the rule |" in arms_table
+    assert f"jepa (sequence run) {'c' * 40}, clean, -" in report and "None" not in report
 
 
 def test_rows_that_are_not_exactly_the_ladders_are_refused(
