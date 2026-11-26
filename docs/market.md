@@ -1172,8 +1172,8 @@ code that made it, and whether it is bound.
 
 A panel run's `complete.json` records the sha256 of the `manifest.json` written with it
 (`manifest_sha256`); a run with that record is bound. The command reads the `manifest.json` and
-`complete.json` of every run it relies on once: each arm's run, a `scores` arm's sequence run and
-the inputs run. It checks each manifest against its recorded sha256 before taking anything from it,
+`complete.json` of every run it relies on once, however many arms name that run: each arm's run, a
+`scores` arm's sequence run and the inputs run. It checks each manifest against its recorded sha256 before taking anything from it,
 and every later use (the checks below, loading the inputs table and labels grid, the comparison's
 own manifest and the report) takes those checked records, never a second read from disk. A manifest
 that differs from its recorded sha256 is always refused.
@@ -1187,8 +1187,8 @@ rather than merged into a newly bound manifest. `--unbound` accepts unbound runs
 comparison of runs written before binding existed. The comparison's manifest then records that
 unbound runs were allowed (`unbound_allowed`), and, as always, whether every run in each arm's chain
 was bound (`bound`) and whether the inputs run was (`inputs_bound`). The report says, in a line of
-its own above the primary row, that the comparison accepted runs whose manifests are not bound and
-is therefore not a test. The frozen test (issue #231) must not use `--unbound`. Binding catches a
+its own above the primary row, that the comparison ran with `--unbound`, which accepts runs whose
+manifests are not bound, and is therefore not a test, whether or not any run was in fact unbound. The frozen test (issue #231) must not use `--unbound`. Binding catches a
 manifest changed after its run was written, but a run folder whose `manifest.json` and
 `complete.json` were both rewritten still passes, since the store is not signed.
 

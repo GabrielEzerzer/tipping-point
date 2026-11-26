@@ -261,6 +261,9 @@ def bound_manifest(
     return json.loads(data.decode("utf-8")), recorded is not None
 
 
+Held = dict[Path, tuple[dict[str, Any], dict[str, Any], bool]]
+
+
 def unbound_refused(run_dir: Path, what: str) -> ValueError:
     return ValueError(
         f"{what}: {run_dir.name} records no manifest sha256 in its complete.json (written before "
@@ -269,16 +272,19 @@ def unbound_refused(run_dir: Path, what: str) -> ValueError:
 
 
 def finished(
-    run_dir: Path, what: str, domain: str, unbound: bool
+    run_dir: Path, what: str, domain: str, unbound: bool, seen: Held
 ) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    if not (run_dir / "manifest.json").is_file():
-        raise ValueError(f"{what}: no run at {run_dir}")
-    if not (run_dir / "complete.json").is_file():
-        raise ValueError(f"{what}: {run_dir.name} has no complete.json")
-    complete = io.read_json(run_dir / "complete.json")
+    key = run_dir.resolve()
+    if key not in seen:
+        if not (run_dir / "manifest.json").is_file():
+            raise ValueError(f"{what}: no run at {run_dir}")
+        if not (run_dir / "complete.json").is_file():
+            raise ValueError(f"{what}: {run_dir.name} has no complete.json")
+        complete = io.read_json(run_dir / "complete.json")
+        seen[key] = (complete, *bound_manifest(run_dir, complete, what))
+    complete, manifest, bound = seen[key]
     if complete.get("clean") is not True:
         raise ValueError(f"{what}: complete.json does not mark {run_dir.name} clean")
-    manifest, bound = bound_manifest(run_dir, complete, what)
     if manifest.get("run_id") != run_dir.name:
         raise ValueError(
             f"{what}: {run_dir.name} records run id {manifest.get('run_id')}, not its folder's"
@@ -349,6 +355,7 @@ def scores_chain(
     ladder_sha: str,
     what: str,
     unbound: bool,
+    seen: Held,
 ) -> tuple[dict[str, Any], Path, dict[str, Any], bool]:
     model, variant = params.get("model"), params.get("variant")
     if (model, variant) != (arm.model, arm.variant):
@@ -357,7 +364,7 @@ def scores_chain(
         )
     seq_dir = sequence_dir(params.get("sequence_run"), data_dir, what)
     link = f"{what}: the sequence run of {run_dir.name}"
-    seq_manifest, seq_complete, bound = finished(seq_dir, link, "panel-sequence", unbound)
+    seq_manifest, seq_complete, bound = finished(seq_dir, link, "panel-sequence", unbound, seen)
     source = seq_manifest["params"]
     clean_code(seq_manifest.get("producer"), f"{link}, {seq_dir.name},")
     trained = seq_manifest.get("producer")
@@ -440,17 +447,18 @@ def provenance(
     data_dir: Path,
     made: Mapping[str, str],
     ladder_sha: str,
-    unbound: bool = False,
+    unbound: bool,
+    seen: Held,
 ) -> dict[str, Any]:
     what = f"arm {arm.name}"
-    manifest, complete, bound = finished(run_dir, what, KINDS[arm.kind], unbound)
+    manifest, complete, bound = finished(run_dir, what, KINDS[arm.kind], unbound, seen)
     clean_code(manifest.get("producer"), f"{what}: {run_dir.name}")
     params = manifest["params"]
     record: dict[str, Any] = {"run": manifest["run_id"], "kind": arm.kind}
     chain = [(run_dir.name, params)]
     if arm.kind == "scores":
         found, seq_dir, source, seq_bound = scores_chain(
-            arm, run_dir, params, data_dir, ladder_sha, what, unbound
+            arm, run_dir, params, data_dir, ladder_sha, what, unbound, seen
         )
         record |= found
         bound = bound and seq_bound
@@ -703,8 +711,9 @@ def run(
         "inputs_run": inputs_manifest["run_id"],
         "labels_run": inputs_manifest["params"]["labels_run"],
     }
+    seen: Held = {}
     found = {
-        arm.name: provenance(arm, dirs[arm.name], data_dir, made, ladder_sha, unbound)
+        arm.name: provenance(arm, dirs[arm.name], data_dir, made, ladder_sha, unbound, seen)
         for arm in plan.arms
     }
     schemes = [s for s in ladder.SCHEMES if all(s in r["files"] for r in found.values())]
@@ -853,8 +862,8 @@ def report(
     lines += ["", "## Primary", ""]
     if unbound:
         lines += [
-            "This comparison accepted runs whose manifests are not bound (--unbound), so it is "
-            "not a test.",
+            "This comparison ran with --unbound, which accepts runs whose manifests are not "
+            "bound, so it is not a test.",
             "",
         ]
     lines += [

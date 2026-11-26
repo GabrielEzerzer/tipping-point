@@ -1176,8 +1176,8 @@ def test_runs_whose_manifests_are_not_bound_are_refused_unless_allowed(
     text = (run_dir / "report.md").read_text(encoding="utf-8")
     primary = text.split("## Primary")[1].split("## Secondary")[0].splitlines()
     line = (
-        "This comparison accepted runs whose manifests are not bound (--unbound), so it is not "
-        "a test."
+        "This comparison ran with --unbound, which accepts runs whose manifests are not bound, "
+        "so it is not a test."
     )
     row = next(i for i, x in enumerate(primary) if x.startswith("| full - vol |"))
     assert line in primary and primary.index(line) < row
@@ -1224,11 +1224,16 @@ def test_each_runs_records_are_read_once_and_the_verified_copy_is_used(
     run_dir, _ = compare.run(arms, moved, panel["data"], panel["paired"], "once")
     jepa = [("jepa", str(small["scores"])), ("window", str(small["window"]))]
     compare.run(jepa, small["inputs"], small["data"], small["paired"], "once")
+    shared = copied(panel["full"], tmp_path / "shared")
+    twice = plan_file(tmp_path / "plans", PAIRED.replace('export = "vol"', 'export = "full"'))
+    both = [("full", str(shared)), ("vol", str(shared))]
+    compare.run(both, panel["inputs"], panel["data"], twice, "once")
     monkeypatch.undo()
     assert record(moved, "manifest.json")["run_id"] != first
     assert params(run_dir)["inputs_run"] == first
     assert f"Inputs run `{first}`" in (run_dir / "report.md").read_text(encoding="utf-8")
     runs = [panel["full"], panel["vol"], moved, small["scores"], small["seq"], small["window"]]
+    runs.append(shared)
     for run in [*runs, small["inputs"]]:
         for name in ("manifest.json", "complete.json"):
             assert reads.get((run / name).resolve()) == 1, (run.name, name)
