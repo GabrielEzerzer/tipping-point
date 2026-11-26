@@ -632,6 +632,9 @@ def run(
     schemes = [s for s in ladder.SCHEMES if all(s in r["files"] for r in found.values())]
     for record in found.values():
         record["files"] = {s: record["files"][s] for s in schemes}
+    values, grid, source = sequence.read_columns(inputs_dir, data_dir, plan.ladder.columns)
+    for arm in plan.arms:
+        same_sources(arm, found[arm.name], source, ladder_sha)
     held = {
         name: {
             s: score_bytes(name, dirs[name] / r["files"][s]["file"], r["files"][s]["sha256"])
@@ -639,9 +642,6 @@ def run(
         }
         for name, r in found.items()
     }
-    values, grid, source = sequence.read_columns(inputs_dir, data_dir, plan.ladder.columns)
-    for arm in plan.arms:
-        same_sources(arm, found[arm.name], source, ladder_sha)
     tables = {
         name: {
             s: ladder.external_table(dirs[name] / found[name]["files"][s]["file"], data)

@@ -1125,9 +1125,11 @@ pair flips the sign of its estimate. Two rungs exported by `classical --fixed` a
 give the ladder's own comparison of those rungs.
 
 Besides the ladder's sides, each pair gets a `long+short` row, the mean of its long and short sides.
-Its estimate is the mean of the two sides' estimates, which is the quantity both selection rules
-maximise (the mean of the long and short fold-mean AUCs). Its bootstrap value in each draw is the mean
-of the two sides' differences in that draw. The sides share the draws, so the composite is paired, and
+Its estimate is the mean of the two sides' estimates. For a classical arm that is the quantity its
+selection rule maximises (the mean of the long and short fold-mean AUCs). For a `scores` arm it is
+not quite: the sequence rule averages the seeds' AUCs in each quarter, and this command scores the
+seeds' mean score. Its bootstrap value in each draw is the mean of the two sides' differences in that
+draw. The sides share the draws, so the composite is paired, and
 its standard error, quantiles, share above zero and per-quarter differences come from those values in
 the same columns. The shipped plan reads its primary pair on `long+short` at 24 h rather than on
 `any`, because `any` depends on how a model's long and short heads are calibrated against each other:

@@ -853,6 +853,7 @@ def test_an_arm_from_another_inputs_run_labels_grid_or_ladder_plan_is_refused(
         data, panel["inputs"], other_plan, "from-seeded", Config("rung", "vol", None, 0.01)
     )
     monkeypatch.setattr(ladder, "external_table", lambda *a: pytest.fail("read an arm's scores"))
+    monkeypatch.setattr(compare, "score_bytes", lambda *a: pytest.fail("read an arm's score file"))
     ours = params(panel["vol"])
 
     def refused(run: Path, change: dict[str, Any], message: str) -> None:
@@ -1072,20 +1073,22 @@ def test_the_file_checked_is_the_file_scored(
     plain, _ = compare.run(arms, panel["inputs"], data, panel["paired"], "plain")
     table = pq.read_table(copy / "vol-forward.parquet")
     other = np.random.default_rng(5).normal(size=table.num_rows)
-    read = sequence.read_columns
+    read = compare.score_bytes
 
-    def swapping(*args: Any) -> Any:
-        pq.write_table(table.set_column(4, "score", pa.array(other)), copy / "vol-forward.parquet")
-        return read(*args)
+    def swapping(name: str, path: Path, digest: str) -> bytes:
+        checked = read(name, path, digest)
+        if path == copy / "vol-forward.parquet":
+            pq.write_table(table.set_column(4, "score", pa.array(other)), path)
+        return checked
 
-    monkeypatch.setattr(sequence, "read_columns", swapping)
+    monkeypatch.setattr(compare, "score_bytes", swapping)
     swapped, _ = compare.run(arms, panel["inputs"], data, panel["paired"], "swapped-file")
     assert pq.read_table(copy / "vol-forward.parquet")["score"].to_pylist() == list(other)
     for name in ("scores", "folds", "comparisons", "rows"):
         assert (plain / f"{name}.parquet").read_bytes() == (
             swapped / f"{name}.parquet"
         ).read_bytes()
-    monkeypatch.setattr(sequence, "read_columns", read)
+    monkeypatch.setattr(compare, "score_bytes", read)
     late = table.set_column(
         1, "hour", pa.array(np.full(table.num_rows, labels.ns(date(2024, 1, 2))))
     )
