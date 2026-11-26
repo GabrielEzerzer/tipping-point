@@ -1148,14 +1148,21 @@ per-quarter differences come from those values in the same columns. When both si
 quarters, as they normally do, its estimate, its per-quarter differences and each of its draws are
 the means of the long and short rows' own; its other statistics are computed from those draws, and
 are not the means of the two rows' statistics. With no common quarter the row holds no number, and
-its `complete_draws` is empty too. For a classical arm, or a `scores` arm whose sequence plan has
-one seed, at 24 h on `forward`, the composite's estimate and the quantity its selection rule
-maximises (the mean of the long and short fold-mean AUCs) coincide when both sides are scored on the
-same quarters. Otherwise they differ: if one quarter scores long only and another both, the rule
-averages long over both quarters and short over the second, while the composite uses the second for
-both. For a `scores` arm whose plan has more than one seed they can differ even then, because the
-sequence rule averages the seeds' AUCs in each quarter and this command scores the seeds' mean
-score. The shipped plan reads its primary pair on `long+short` at 24 h rather than on `any`, because
+its `complete_draws` is empty too.
+
+The estimate is a difference between two arms, and each arm enters it as the mean of its long and
+short fold-mean AUCs over the pair's common quarters. An arm compared with a copy of itself gives
+zero whatever its own level. For an arm whose configuration the selection rule chose (a JEPA or twin
+`scores` arm, or a classical arm made without `--fixed`), that term at 24 h on `forward` is defined
+like the quantity the rule maximised, the mean of the long and short fold-mean AUCs, but need not
+equal it. The rule averages each side over the quarters that side scores: if one quarter scores long
+only and another both, the rule averages long over both quarters and short over the second, while
+the composite uses the second for both. For a `scores` arm whose plan has more than one seed the two
+can differ on equal quarters too, because the sequence rule averages the seeds' AUCs in each quarter
+and this command scores the seeds' mean score. A supervised `scores` arm and a `classical --fixed`
+arm were not chosen by the rule and have no such quantity.
+
+The shipped plan reads its primary pair on `long+short` at 24 h rather than on `any`, because
 `any` depends on how a model's long and short heads are calibrated against each other: an arm can
 win on long and on short and lose on `any`. The `any` rows are kept as they are.
 
@@ -1201,9 +1208,10 @@ manifests are not bound, and is therefore not a test, whether or not any run was
 manifest changed after its run was written, but a run folder whose `manifest.json` and
 `complete.json` were both rewritten still passes, since the store is not signed.
 
-Each run made from another records what it read by sha256, and the command follows that chain from
-each arm to the comparison's own inputs table, labels grid and ladder plan. A sequence or classical
-run records the inputs table, labels grid, plan and ladder plan it read. A merged sequence run
+The runs in an arm's chain record by sha256 the files named in this paragraph, not everything they
+read, and the command follows those records from each arm to the comparison's own inputs table,
+labels grid and ladder plan. A sequence or classical run records the inputs table, labels grid, plan
+and ladder plan it read. A merged sequence run
 records the inputs table, labels grid and ladder plan that `merge` requires its runs to share, the
 plan it was given, which the merged runs' own plans may differ from in variants, seeds and quarters,
 and each merged run's manifest sha256 (`sources`); the command reads the merged run's own records
@@ -1215,8 +1223,10 @@ sha256 to equal that of the sequence run's `manifest.json` it read and checked, 
 sha256 to equal the one the sequence run's `complete.json` records, and its inputs table and labels
 grid sha256, like its sequence run's, to equal the comparison's. A `scores` run without these
 records is refused, with or without `--unbound`. The inputs run records the labels grid and
-thresholds by sha256; the command checks the grid's bytes against that record and does not read the
-labels run's manifest.
+thresholds by sha256. It takes its dates and symbols from the labels run's manifest, which it names
+by run id and of which it records no sha256; the command checks the grid's bytes against the inputs
+run's record and the inputs table's rows against the grid's, and does not read the labels run's
+manifest.
 
 Before reading any score the command checks that each arm comes from the inputs run, labels grid and
 ladder plan of the comparison. It refuses:
