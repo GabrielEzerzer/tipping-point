@@ -571,7 +571,9 @@ def evaluated(
             "side": COMPOSITE,
             "first": first,
             "second": second,
-            **ladder.comparison(estimate, a, b, difference, float(np.mean(both))),
+            **ladder.comparison(
+                estimate, a, b, difference, float(np.mean(both)) if common.any() else np.nan
+            ),
             "quarters_scheduled": len(common),
         }
         out.append(row | on_complete(difference, both))

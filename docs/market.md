@@ -1132,8 +1132,11 @@ the mean of the two sides' estimates over those quarters, which equals the mean 
 differences. In each draw, each side's value is the ladder's rule restricted to the same quarters,
 and the composite's value is the mean of the two. The sides share the draws, so the composite is
 paired, and its standard error, quantiles, share above zero and per-quarter differences come from
-those values in the same columns. When both sides score the same quarters, as they normally do, the
-row is the mean of the long and short rows. For a classical arm its estimate is then the quantity
+those values in the same columns. When both sides score the same quarters, as they normally do, its
+estimate, its per-quarter differences and each of its draws are the means of the long and short
+rows' own; its other statistics are computed from those draws, and are not the means of the two
+rows' statistics. With no common quarter the row holds no number, and its `complete_draws` is
+empty too. For a classical arm its estimate is then the quantity
 its selection rule maximises (the mean of the long and short fold-mean AUCs). For a `scores` arm it
 is not quite: the sequence rule averages the seeds' AUCs in each quarter, and this command scores
 the seeds' mean score. The shipped plan reads its primary pair on `long+short` at 24 h rather than

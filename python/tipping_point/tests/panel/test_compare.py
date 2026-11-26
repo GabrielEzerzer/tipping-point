@@ -637,6 +637,14 @@ def test_the_composite_scores_only_the_quarters_both_sides_score(tmp_path: Path)
     assert composite["q05"] == pytest.approx(float(np.quantile(d, 0.05)), rel=1e-12)
     both = np.isfinite(booted[("a", "long")][:, 1]) & np.isfinite(booted[("a", "short")][:, 1])
     assert composite["complete_draws"] == float(both.mean())
+    apart = {"long": long & (fold == quarters[0]), "short": short}
+    apart["any"] = apart["long"] | apart["short"]
+    noise = {n: {s: rng.normal(size=ts.size) for s in apart} for n in lift}
+    h = ladder.Horizon("forward", first, ts, symbol, apart, fold, block, noise)
+    _, _, rows = compare.evaluated(h, base, 24, ("a", "b"), (("a", "b"),))
+    (none,) = [r for r in rows if r["side"] == "long+short"]
+    assert (none["folds"], none["draws"], none["draws_complete"]) == (0, 0, 0)
+    assert all(math.isnan(none[k]) for k in ("estimate", "se", "q05", "complete_draws"))
 
 
 def test_a_sequence_arm_and_a_window_arm_compare_end_to_end(small: dict[str, Any]) -> None:
