@@ -542,7 +542,7 @@ def evaluate(
     names = plan.scored_names(h.scheme) if names is None else tuple(names)
     pairs = plan.comparisons if pairs is None else tuple(pairs)
     subsets = {"all": np.ones(len(h.ts), bool), "without": ~np.isin(h.symbol, plan.without)}
-    score_rows, fold_rows, primary, boot = [], [], {}, {}
+    score_rows, fold_rows, primary, boot, drawn = [], [], {}, {}, {}
     complete: dict[str, float] = {}
     whole: dict[str, np.ndarray] = {}
     key = {"horizon": horizon, "scheme": h.scheme}
@@ -575,7 +575,8 @@ def evaluate(
                 finite = np.isfinite(per_fold)
                 if subset == "all":
                     primary[(name, side)] = per_fold
-                    boot[(name, side)] = _nanmean_rows(booted)
+                    boot[(name, side)] = nanmean_rows(booted)
+                    drawn[(name, side)] = booted
                     if name == names[0]:
                         whole[side] = np.isfinite(booted[:, finite]).all(axis=1) & finite.any()
                         complete[side] = float(whole[side].mean()) if finite.any() else np.nan
@@ -621,7 +622,7 @@ def evaluate(
                 }
             )
     if kept is not None:
-        kept |= {"folds": primary, "boot": boot, "complete": whole}
+        kept |= {"folds": primary, "boot": boot, "booted": drawn, "complete": whole}
     return score_rows, fold_rows, comparisons
 
 
@@ -651,7 +652,7 @@ def comparison(
     }
 
 
-def _nanmean_rows(values: np.ndarray) -> np.ndarray:
+def nanmean_rows(values: np.ndarray) -> np.ndarray:
     count = np.isfinite(values).sum(axis=1)
     total = np.where(np.isfinite(values), values, 0.0).sum(axis=1)
     return np.where(count > 0, total / np.maximum(count, 1), np.nan)

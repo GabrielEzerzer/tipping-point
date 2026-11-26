@@ -204,10 +204,24 @@ def record(run: Path, name: str) -> dict[str, Any]:
     return json.loads((run / name).read_text(encoding="utf-8"))
 
 
+def tamper(run: Path, change: dict[str, Any]) -> None:
+    found = record(run, "manifest.json")
+    found["params"].update(change)
+    (run / "manifest.json").write_text(json.dumps(found), encoding="utf-8")
+
+
 def rewrite(run: Path, name: str, change: Callable[[dict[str, Any]], Any]) -> None:
     found = record(run, name)
     change(found)
     (run / name).write_text(json.dumps(found), encoding="utf-8")
+    done = record(run, "complete.json")
+    if name == "manifest.json" and "manifest_sha256" in done:
+        done["manifest_sha256"] = store.sha256(run / name)
+        (run / "complete.json").write_text(json.dumps(done), encoding="utf-8")
+
+
+def unbind(run: Path) -> None:
+    rewrite(run, "complete.json", lambda r: r.pop("manifest_sha256"))
 
 
 def edit(run: Path, name: str, change: dict[str, Any]) -> None:
@@ -462,7 +476,8 @@ def test_the_pairs_equal_the_ladders_own_comparison_of_two_rungs(panel: dict[str
     assert primary.count("| full - vol (complete draws) | forward | 24 h | long |") == 1
     assert "| full - vol | forward | 24 h | long |" not in report.split("## Secondary")[1]
     arms_table = report.split("## Arms")[1]
-    assert arms_table.count("| fixed | - | 0.01 | cccccccccccc (clean) |") == 2
+    planned = record(panel["full"], "complete.json")["files"]["plan.toml"][:12]
+    assert arms_table.count(f"| fixed | - | 0.01 | {planned} | cccccccccccc (clean) |") == 2
     assert "Every arm's runs were made by the same commit and uv.lock." in arms_table
 
 
@@ -583,6 +598,47 @@ def test_complete_draw_statistics_leave_out_draws_that_lose_a_quarter(tmp_path: 
     assert by["long+short"]["complete_draws"] < min(sides)
 
 
+def test_the_composite_scores_only_the_quarters_both_sides_score(tmp_path: Path) -> None:
+    base = ladder.load(tmp_path / "ladder.toml", LADDER)
+    hours = labels.ns(date(2022, 1, 1)) + HOUR * np.arange(365 * 24, dtype=np.int64)
+    fold, block = ladder.folds(hours, ladder.bounds(base), base.block_days)
+    first = base.first_fold("forward")
+    mine = fold >= first
+    ts, fold, block = hours[mine], fold[mine], block[mine]
+    quarters = np.unique(fold)
+    assert len(quarters) == 2
+    rng = np.random.default_rng(5)
+    long = rng.random(ts.size) < 0.05
+    short = (rng.random(ts.size) < 0.05) & (fold != quarters[0])
+    y = {"long": long, "short": short, "any": long | short}
+    lift = {"a": np.where(fold == quarters[0], 3.0, 0.3), "b": np.zeros(ts.size)}
+    scores = {n: {s: rng.normal(size=ts.size) + lift[n] * y[s] for s in y} for n in lift}
+    symbol = np.full(ts.size, "AAAUSDT", dtype=object)
+    h = ladder.Horizon("forward", first, ts, symbol, y, fold, block, scores)
+    kept: dict[str, Any] = {}
+    ladder.evaluate(h, base, 24, ("a", "b"), (("a", "b"),), kept)
+    _, _, rows = compare.evaluated(h, base, 24, ("a", "b"), (("a", "b"),))
+    by = {r["side"]: r for r in rows}
+    counts = {side: (r["folds"], r["quarters_scheduled"]) for side, r in by.items()}
+    assert counts == {"long": (2, 2), "short": (1, 2), "any": (2, 2), "long+short": (1, 2)}
+    assert by["short"]["complete_draws"] == 1.0
+    composite = by["long+short"]
+    (only,) = [d for d in composite["fold_differences"] if math.isfinite(d)]
+    assert composite["estimate"] == pytest.approx(only, rel=1e-12)
+    halves = (by["long"]["estimate"] + by["short"]["estimate"]) / 2
+    assert abs(composite["estimate"] - halves) > 0.05
+    booted = kept["booted"]
+    long_d = booted[("a", "long")][:, 1] - booted[("b", "long")][:, 1]
+    short_d = booted[("a", "short")][:, 1] - booted[("b", "short")][:, 1]
+    d = (long_d + short_d) / 2
+    d = d[np.isfinite(d)]
+    assert composite["draws"] == d.size
+    assert composite["se"] == pytest.approx(float(np.std(d, ddof=1)), rel=1e-12)
+    assert composite["q05"] == pytest.approx(float(np.quantile(d, 0.05)), rel=1e-12)
+    both = np.isfinite(booted[("a", "long")][:, 1]) & np.isfinite(booted[("a", "short")][:, 1])
+    assert composite["complete_draws"] == float(both.mean())
+
+
 def test_a_sequence_arm_and_a_window_arm_compare_end_to_end(small: dict[str, Any]) -> None:
     data, scores, seq = small["data"], small["scores"], small["seq"]
     arms = {"jepa": Path(scores.name), "window": small["window"]}
@@ -608,8 +664,13 @@ def test_a_sequence_arm_and_a_window_arm_compare_end_to_end(small: dict[str, Any
         }
     )
     assert recorded["window"]["model"] == "window" and recorded["window"]["chosen"] is False
-    report = (run_dir / "report.md").read_text(encoding="utf-8").split("## Arms")[1]
+    assert jepa["bound"] is recorded["window"]["bound"] is params(run_dir)["inputs_bound"] is True
+    assert (primary["folds"], primary["quarters_scheduled"]) == (1, 2)
+    text = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "scores 1 of the 2 quarters scheduled for forward" in text.split("## Secondary")[0]
+    report = text.split("## Arms")[1]
     assert "| jepa | vol | chosen by the rule |" in report and "| window | vol | fixed |" in report
+    assert report.count(" | yes |") == 2 and "The inputs run is bound." in report
     file = (scores / "forward.parquet").as_posix()
     external = f'\n[external]\nname = "jepa"\npath = "{file}"\nscheme = "forward"\n'
     (data / "ladder-ext.toml").write_text(LADDER + external, encoding="utf-8")
@@ -779,8 +840,10 @@ def test_pinned_configurations_and_a_classical_arm_chosen_by_the_rule(
     data, scores, chosen = small["data"], small["scores"], small["chosen"]
     readout, c = params(scores)["readout"], params(scores)["c"]
     config = params(chosen)["exported"]["vol"]
-    pins = f'readout = "{readout}"\nc = {c!r}\nseeds = [4, 3]\n'
-    window = f'model = "{config["model"]}"\nchosen = true\n'
+    planned = record(small["seq"], "complete.json")["files"]["plan.toml"]
+    fitted = record(chosen, "complete.json")["files"]["plan.toml"]
+    pins = f'readout = "{readout}"\nc = {c!r}\nseeds = [4, 3]\nplan_sha256 = "{planned}"\n'
+    window = f'model = "{config["model"]}"\nchosen = true\nplan_sha256 = "{fitted}"\n'
     if config["readout"]:
         window += f'readout = "{config["readout"]}"\nc = {config["c"]!r}\n'
     text = SMALL.replace('variant = "vol"\n', f'variant = "vol"\n{pins}').replace(
@@ -797,9 +860,23 @@ def test_pinned_configurations_and_a_classical_arm_chosen_by_the_rule(
         config["readout"],
         config["c"],
     )
+    assert params(run_dir)["arms"]["jepa"]["plan_sha256"] == planned
+    assert recorded["plan_sha256"] == fitted
     report = (run_dir / "report.md").read_text(encoding="utf-8").split("## Arms")[1]
     assert report.count("| chosen by the rule |") == 2
+    assert f"| {planned[:12]} |" in report and f"| {fitted[:12]} |" in report
+    other = "0" * 64
     for old, new, message in (
+        (
+            f'seeds = [4, 3]\nplan_sha256 = "{planned}"',
+            f'seeds = [4, 3]\nplan_sha256 = "{other}"',
+            f"jepa: {small['scores'].name} has plan_sha256 {planned}, not the plan's {other}",
+        ),
+        (
+            f'chosen = true\nplan_sha256 = "{fitted}"',
+            f'chosen = true\nplan_sha256 = "{other}"',
+            f"window: {chosen.name} has plan_sha256 {fitted}, not the plan's {other}",
+        ),
         (
             f'readout = "{readout}"\nc = {c!r}\nseeds',
             f'readout = "other"\nc = {c!r}\nseeds',
@@ -977,6 +1054,98 @@ def test_arms_made_by_different_clean_code_are_compared_and_reported(
     assert "dddddddddddd (clean)" in report
     states = [compare._state(v) for v in (False, True, None, "no")]
     assert states == ["clean", "uncommitted changes", "unknown", "unknown"]
+
+
+def test_a_manifest_changed_after_its_run_was_written_is_refused(
+    panel: dict[str, Any], small: dict[str, Any], tmp_path: Path
+) -> None:
+    data, values, grid = panel["data"], panel["values"], panel["grid"]
+    for run in (panel["full"], panel["vol"], panel["inputs"], small["seq"], small["scores"]):
+        assert record(run, "complete.json")["manifest_sha256"] == store.sha256(
+            run / "manifest.json"
+        )
+    flipped = dict(grid, long_24=grid["long_24"].copy())
+    flipped["long_24"][1000] = ~flipped["long_24"][1000]
+    write_labels(data, flipped, "20260101T000000Z-bound")
+    other = write_inputs(data, values, flipped, "20260101T000000Z-bound", "bound")
+    fitted = fixed(data, other, panel["plan"], "from-bound", Config("rung", "vol", None, 0.01))
+    ours = params(panel["vol"])
+    forged = copied(fitted, tmp_path / "copies")
+    tamper(forged, {k: ours[k] for k in ("inputs_run", "labels_run", "inputs", "labels_grid")})
+
+    def arms(vol: Path) -> list[tuple[str, str]]:
+        return [("full", str(panel["full"])), ("vol", str(vol))]
+
+    with pytest.raises(ValueError, match=r"arm vol: .*manifest\.json: its sha256 differs"):
+        compare.run(arms(forged), panel["inputs"], data, panel["paired"], "x")
+    moved = copied(panel["inputs"], tmp_path / "inputs")
+    tamper(moved, {"note": 1})
+    with pytest.raises(ValueError, match=r"inputs run: .*manifest\.json: its sha256 differs"):
+        compare.run(arms(panel["vol"]), moved, data, panel["paired"], "x")
+    seq, path, data_small = small["seq"], small["paired"], small["data"]
+
+    def sequence_copy(suffix: str, change: Callable[[Path], Any]) -> Path:
+        dest = data_small / "panel-sequence" / f"{seq.name}-{suffix}"
+        shutil.copytree(seq, dest)
+        relabel(dest)
+        change(dest)
+        scores = copied(small["scores"], tmp_path / "scores")
+        edit(scores, "manifest.json", {"sequence_run": dest.name})
+        return scores
+
+    changed = sequence_copy("changed", lambda d: tamper(d, {"threads": 2}))
+    with pytest.raises(
+        ValueError, match=r"the sequence run of .*manifest\.json: its sha256 differs"
+    ):
+        compare.run(
+            [("jepa", str(changed)), ("window", str(small["window"]))],
+            small["inputs"],
+            data_small,
+            path,
+            "x",
+        )
+    assert not tag_runs(data, "x") and not tag_runs(data_small, "x")
+    old = copied(panel["vol"], tmp_path / "copies")
+    unbind(old)
+    unbound_inputs = copied(panel["inputs"], tmp_path / "inputs")
+    unbind(unbound_inputs)
+    run_dir, _ = compare.run(arms(old), unbound_inputs, data, panel["paired"], "unbound")
+    recorded = params(run_dir)
+    assert recorded["arms"]["full"]["bound"] is True and recorded["arms"]["vol"]["bound"] is False
+    assert recorded["inputs_bound"] is False
+    report = (run_dir / "report.md").read_text(encoding="utf-8").split("## Arms")[1]
+    assert report.count(" | yes |") == report.count(" | no |") == 1
+    assert "The inputs run is not bound." in report
+    unbound = sequence_copy("unbound", unbind)
+    run_dir, _ = compare.run(
+        [("jepa", str(unbound)), ("window", str(small["window"]))],
+        small["inputs"],
+        data_small,
+        path,
+        "unbound",
+    )
+    recorded = params(run_dir)["arms"]
+    assert recorded["jepa"]["bound"] is False and recorded["window"]["bound"] is True
+
+
+def test_an_inputs_run_with_a_missing_file_is_refused_by_name(
+    panel: dict[str, Any], tmp_path: Path
+) -> None:
+    arms = [("full", str(panel["full"])), ("vol", str(panel["vol"]))]
+
+    def refused(change: Callable[[Path], Any], message: str) -> None:
+        copy = copied(panel["inputs"], tmp_path / "inputs")
+        change(copy)
+        with pytest.raises(ValueError, match=message):
+            compare.run(arms, copy, panel["data"], panel["paired"], "x")
+
+    refused(lambda d: (d / "complete.json").unlink(), "inputs run: .*complete.json is missing")
+    refused(
+        lambda d: edit(d, "manifest.json", {"labels_grid": {"file": "grid/9.parquet"}}),
+        "inputs run: .*9.parquet is missing",
+    )
+    refused(lambda d: (d / "inputs.parquet").unlink(), "inputs run: .*inputs.parquet is missing")
+    assert not tag_runs(panel["data"], "x")
 
 
 def _domain(run: Path) -> None:
@@ -1187,6 +1356,14 @@ def test_a_plan_without_one_primary_pair_or_with_an_unknown_arm_is_refused(
         "bool seeds": (
             scores.replace('variant = "vol"', 'variant = "vol"\nseeds = [true]'),
             "arm vol: seeds must be",
+        ),
+        "plan sha256": (
+            PAIRED.replace('export = "vol"', 'export = "vol"\nplan_sha256 = "' + "A" * 64 + '"'),
+            "arm vol: plan_sha256 must be",
+        ),
+        "short plan sha256": (
+            scores.replace('variant = "vol"', 'variant = "vol"\nplan_sha256 = "abc"'),
+            "arm vol: plan_sha256 must be",
         ),
         "arms": (
             PAIRED.split("[[arms]]")[0] + "arms = 1\n" + "[[pairs]]" + PAIRED.split("[[pairs]]")[1],

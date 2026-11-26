@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import math
 import re
 import time
@@ -26,9 +27,10 @@ KINDS = {"scores": "panel-scores", "classical": "panel-classical"}
 PRIMARY_SCHEME = "forward"
 COMPOSITE = "long+short"
 RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
 ARM_KEYS = {
-    "scores": ({"model", "variant"}, {"readout", "c", "seeds"}),
-    "classical": ({"export"}, {"model", "readout", "c", "chosen"}),
+    "scores": ({"model", "variant"}, {"readout", "c", "seeds", "plan_sha256"}),
+    "classical": ({"export"}, {"model", "readout", "c", "chosen", "plan_sha256"}),
 }
 COMPLETE = ("se", "q025", "q05", "q975", "above_zero", "draws")
 LOG = Callable[[str], None]
@@ -89,6 +91,8 @@ def _pin(kind: str, key: str, value: Any) -> str | None:
         return "rung or window"
     if key == "chosen" and not isinstance(value, bool):
         return "true or false"
+    if key == "plan_sha256" and not (isinstance(value, str) and SHA256.fullmatch(value)):
+        return "a sha256 in 64 lowercase hex digits"
     return None
 
 
@@ -245,7 +249,19 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def finished(run_dir: Path, what: str, domain: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def bound_manifest(
+    run_dir: Path, complete: Mapping[str, Any], what: str
+) -> tuple[dict[str, Any], bool]:
+    data = _read(run_dir / "manifest.json", what)
+    recorded = complete.get("manifest_sha256")
+    if recorded is not None and _digest(data) != recorded:
+        raise ValueError(
+            f"{what}: {run_dir / 'manifest.json'}: its sha256 differs from complete.json's"
+        )
+    return json.loads(data.decode("utf-8")), recorded is not None
+
+
+def finished(run_dir: Path, what: str, domain: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
     if not (run_dir / "manifest.json").is_file():
         raise ValueError(f"{what}: no run at {run_dir}")
     if not (run_dir / "complete.json").is_file():
@@ -253,7 +269,7 @@ def finished(run_dir: Path, what: str, domain: str) -> tuple[dict[str, Any], dic
     complete = io.read_json(run_dir / "complete.json")
     if complete.get("clean") is not True:
         raise ValueError(f"{what}: complete.json does not mark {run_dir.name} clean")
-    manifest = io.read_json(run_dir / "manifest.json")
+    manifest, bound = bound_manifest(run_dir, complete, what)
     if manifest.get("run_id") != run_dir.name:
         raise ValueError(
             f"{what}: {run_dir.name} records run id {manifest.get('run_id')}, not its folder's"
@@ -262,7 +278,7 @@ def finished(run_dir: Path, what: str, domain: str) -> tuple[dict[str, Any], dic
         raise ValueError(
             f"{what}: {run_dir.name} is a {manifest.get('domain')} run, not a {domain} run"
         )
-    return manifest, complete
+    return manifest, complete, bound
 
 
 def clean_code(producer: Any, what: str) -> None:
@@ -316,7 +332,7 @@ def sequence_dir(value: Any, data_dir: Path, what: str) -> Path:
 
 def scores_chain(
     arm: Arm, run_dir: Path, params: Mapping[str, Any], data_dir: Path, ladder_sha: str, what: str
-) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+) -> tuple[dict[str, Any], Path, dict[str, Any], bool]:
     model, variant = params.get("model"), params.get("variant")
     if (model, variant) != (arm.model, arm.variant):
         raise ValueError(
@@ -324,7 +340,7 @@ def scores_chain(
         )
     seq_dir = sequence_dir(params.get("sequence_run"), data_dir, what)
     link = f"{what}: the sequence run of {run_dir.name}"
-    seq_manifest, seq_complete = finished(seq_dir, link, "panel-sequence")
+    seq_manifest, seq_complete, bound = finished(seq_dir, link, "panel-sequence")
     source = seq_manifest["params"]
     clean_code(seq_manifest.get("producer"), f"{link}, {seq_dir.name},")
     trained = seq_manifest.get("producer")
@@ -357,11 +373,12 @@ def scores_chain(
         "seeds": sorted(plan.seeds),
         "chosen": None if params.get("selection") is None else True,
         "selection": params.get("selection"),
+        "plan_sha256": seq_complete["files"]["plan.toml"],
         "sequence_run": seq_manifest["run_id"],
         "sequence_code": _code(seq_manifest.get("producer") or {}, source),
         "trained_by": _code(trained or {}, source),
     }
-    return record, seq_dir, source
+    return record, seq_dir, source, bound
 
 
 def classical_chain(
@@ -389,6 +406,7 @@ def classical_chain(
         if selection is None
         else {"metric": selection["metric"], **selection["chosen"][arm.export]},
         "fixed": params.get("fixed"),
+        "plan_sha256": complete["files"]["plan.toml"],
     }
 
 
@@ -396,17 +414,21 @@ def provenance(
     arm: Arm, run_dir: Path, data_dir: Path, made: Mapping[str, str], ladder_sha: str
 ) -> dict[str, Any]:
     what = f"arm {arm.name}"
-    manifest, complete = finished(run_dir, what, KINDS[arm.kind])
+    manifest, complete, bound = finished(run_dir, what, KINDS[arm.kind])
     clean_code(manifest.get("producer"), f"{what}: {run_dir.name}")
     params = manifest["params"]
     record: dict[str, Any] = {"run": manifest["run_id"], "kind": arm.kind}
     chain = [(run_dir.name, params)]
     if arm.kind == "scores":
-        found, seq_dir, source = scores_chain(arm, run_dir, params, data_dir, ladder_sha, what)
+        found, seq_dir, source, seq_bound = scores_chain(
+            arm, run_dir, params, data_dir, ladder_sha, what
+        )
         record |= found
+        bound = bound and seq_bound
         chain.append((seq_dir.name, source))
     else:
         record |= classical_chain(arm, run_dir, params, complete, ladder_sha, what)
+    record["bound"] = bound
     for name, p in chain:
         for key in ("inputs_run", "labels_run"):
             if p.get(key) != made[key]:
@@ -496,6 +518,22 @@ def on_complete(difference: np.ndarray, whole: np.ndarray) -> dict[str, Any]:
     return {f"{k}_complete": stats[k] for k in COMPLETE}
 
 
+def on_common(
+    folds: Mapping[tuple[str, str], np.ndarray],
+    booted: Mapping[tuple[str, str], np.ndarray],
+    first: str,
+    second: str,
+    side: str,
+    common: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    a, b = (np.where(common, folds[(n, side)], np.nan) for n in (first, second))
+    estimate = float(np.nanmean(a) - np.nanmean(b)) if common.any() else np.nan
+    drawn = [
+        ladder.nanmean_rows(np.where(common, booted[(n, side)], np.nan)) for n in (first, second)
+    ]
+    return estimate, drawn[0] - drawn[1]
+
+
 def evaluated(
     h: ladder.Horizon,
     base: ladder.Plan,
@@ -505,32 +543,36 @@ def evaluated(
 ) -> tuple[list[dict], list[dict], list[dict]]:
     kept: dict[str, Any] = {}
     score_rows, fold_rows, rows = ladder.evaluate(h, base, horizon, names, pairs, kept)
-    folds, boot, whole = kept["folds"], kept["boot"], kept["complete"]
-    out = []
+    folds, boot, booted, whole = kept["folds"], kept["boot"], kept["booted"], kept["complete"]
+    out, sides = [], ("long", "short")
     for first, second in pairs:
         mine = [r for r in rows if (r["first"], r["second"]) == (first, second)]
         for row in mine:
             side = row["side"]
             difference = boot[(first, side)] - boot[(second, side)]
-            out.append(row | on_complete(difference, whole[side]))
-        if not {"long", "short"} <= set(base.sides):
+            scheduled = {"quarters_scheduled": len(folds[(first, side)])}
+            out.append(row | scheduled | on_complete(difference, whole[side]))
+        if not set(sides) <= set(base.sides):
             continue
-        by_side = {r["side"]: r for r in mine}
         a = (folds[(first, "long")] + folds[(first, "short")]) / 2
         b = (folds[(second, "long")] + folds[(second, "short")]) / 2
-        difference = (
-            (boot[(first, "long")] - boot[(second, "long")])
-            + (boot[(first, "short")] - boot[(second, "short")])
-        ) / 2
-        both = whole["long"] & whole["short"]
-        estimate = (by_side["long"]["estimate"] + by_side["short"]["estimate"]) / 2
+        common = np.isfinite(a - b)
+        long, short = (on_common(folds, booted, first, second, side, common) for side in sides)
+        difference = (long[1] + short[1]) / 2
+        estimate = (long[0] + short[0]) / 2
+        both = (
+            common.any()
+            & np.isfinite(booted[(first, "long")][:, common]).all(axis=1)
+            & np.isfinite(booted[(first, "short")][:, common]).all(axis=1)
+        )
         row = {
             "horizon": horizon,
             "scheme": h.scheme,
             "side": COMPOSITE,
             "first": first,
             "second": second,
-            **ladder.comparison(estimate, a, b, difference, float(both.mean())),
+            **ladder.comparison(estimate, a, b, difference, float(np.mean(both))),
+            "quarters_scheduled": len(common),
         }
         out.append(row | on_complete(difference, both))
     return score_rows, fold_rows, out
@@ -621,7 +663,8 @@ def run(
     dirs = given(plan, arms, data_dir)
     if not (inputs_dir / "manifest.json").is_file():
         raise ValueError(f"no inputs run at {inputs_dir}")
-    inputs_manifest = io.read_json(inputs_dir / "manifest.json")
+    inputs_complete = json.loads(_read(inputs_dir / "complete.json", "inputs run").decode("utf-8"))
+    inputs_manifest, inputs_bound = bound_manifest(inputs_dir, inputs_complete, "inputs run")
     made = {
         "inputs_run": inputs_manifest["run_id"],
         "labels_run": inputs_manifest["params"]["labels_run"],
@@ -632,6 +675,13 @@ def run(
     schemes = [s for s in ladder.SCHEMES if all(s in r["files"] for r in found.values())]
     for record in found.values():
         record["files"] = {s: record["files"][s] for s in schemes}
+    held_in = inputs_manifest["params"]
+    for path in (
+        data_dir / "labels" / held_in["labels_run"] / held_in["labels_grid"]["file"],
+        inputs_dir / "inputs.parquet",
+    ):
+        if not path.is_file():
+            raise ValueError(f"inputs run: {path} is missing")
     values, grid, source = sequence.read_columns(inputs_dir, data_dir, plan.ladder.columns)
     for arm in plan.arms:
         same_sources(arm, found[arm.name], source, ladder_sha)
@@ -661,6 +711,7 @@ def run(
     run_params = {
         **source,
         **records,
+        "inputs_bound": inputs_bound,
         "schemes": schemes,
         "primary": primary,
         "pairs": [list(p) for p in plan.pairs],
@@ -676,7 +727,7 @@ def run(
         ),
     }
     texts = {
-        "report.md": report(out, plan, source, records, found, seconds),
+        "report.md": report(out, plan, source, records, found, seconds, inputs_bound),
         "plan.toml": plan_text,
         "ladder.toml": ladder_text,
     }
@@ -733,6 +784,7 @@ def report(
     records: Mapping[str, Any],
     found: Mapping[str, Mapping[str, Any]],
     seconds: float,
+    inputs_bound: bool,
 ) -> str:
     base = plan.ladder
     lines = [
@@ -742,13 +794,15 @@ def report(
         f"plan `{records['plan']['file']}`, ladder plan `{records['ladder_plan']['file']}`. Every "
         f"arm's out-of-fold scores are scored on the ladder's rows of each scheme, horizon and "
         f"side; each pair is first minus second in the mean over quarters of the AUC inside each "
-        f"quarter. `{COMPOSITE}` is the mean of the long and short sides, draw by draw. The "
+        f"quarter. `{COMPOSITE}` is the mean of the long and short sides, draw by draw, on the "
+        f"quarters both sides score. The "
         f"interval is the ladder's joint block bootstrap ({base.block_days}-day blocks within "
         f"quarters, {base.draws} draws, seed {base.seed}) with the same draws for every arm and "
         f"side, conditional on the fitted models and the observed quarters, so it carries no "
         f"quarter-to-quarter or refitting variation; `se q` is the standard error over quarters. "
         f"`> 0` is the share of draws above zero, not a p-value. `complete` is the share of draws "
-        f"in which every quarter has both classes; `draws` counts the draws used.",
+        f"in which every quarter scored in the original has both classes; `draws` counts the draws "
+        f"used.",
         "",
         f"Wall time {_f(seconds / 60)} minutes.",
     ]
@@ -765,27 +819,38 @@ def report(
         "",
         *header,
     ]
-    for c in out["comparisons"]:
-        if c["primary"]:
-            lines += [_row(c), _row(c, "_complete", " (complete draws)")]
+    (top,) = [c for c in out["comparisons"] if c["primary"]]
+    lines += [_row(top), _row(top, "_complete", " (complete draws)"), ""]
+    lines.append(
+        f"The primary row scores {top['folds']} of the {top['quarters_scheduled']} quarters "
+        f"scheduled for {PRIMARY_SCHEME}."
+    )
     lines += ["", "## Secondary", "", *header]
     lines += [_row(c) for c in out["comparisons"] if not c["primary"]]
     lines += ["", "## Arms", ""]
     lines += [
-        "| arm | run | kind | model | variant | configuration | readout | c | commit | uv.lock |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| arm | run | kind | model | variant | configuration | readout | c | plan | commit | "
+        "uv.lock | bound |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, r in found.items():
         code = r["code"]
         c = "-" if r["c"] is None else f"{r['c']:g}"
         lines.append(
             f"| {name} | `{r['run']}` | {r['kind']} | {r['model']} | {r['variant']} | "
-            f"{_configuration(r)} | {r['readout'] or '-'} | {c} | "
+            f"{_configuration(r)} | {r['readout'] or '-'} | {c} | {r['plan_sha256'][:12]} | "
             f"{str(code['git_sha'])[:12]} ({_state(code['dirty'])}) | "
-            f"{str(code['uv_lock_sha256'])[:12]} |"
+            f"{str(code['uv_lock_sha256'])[:12]} | {'yes' if r['bound'] else 'no'} |"
         )
     states = code_states(found)
-    lines.append("")
+    lines += [
+        "",
+        "`plan` is the sha256 of the plan.toml the arm's source run was made under. `bound` says "
+        "whether every run in the arm's chain records its manifest's sha256 in complete.json; a "
+        "run written before that record existed is not bound, and its manifest could have changed "
+        "unseen. The inputs run is " + ("bound." if inputs_bound else "not bound."),
+        "",
+    ]
     if len(set(states.values())) > 1:
         lines.append(
             "The arms' runs were not all made by the same code (commit, state, uv.lock): "

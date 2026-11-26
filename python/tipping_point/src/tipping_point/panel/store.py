@@ -63,6 +63,7 @@ def write(
         "ended_ns": time.time_ns(),
         "rows": {name: table.num_rows for name, table in tables.items()},
         "clean": True,
+        "manifest_sha256": sha256(run_dir / "manifest.json"),
         "files": files,
         "checks": checks,
     }
