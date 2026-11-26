@@ -430,15 +430,18 @@ def hour_ns(hours: pa.ChunkedArray) -> pa.ChunkedArray:
     return hours.cast(pa.int64())
 
 
-def external_table(path: Path) -> pa.Table:
-    external_columns(pq.read_schema(path))
-    hours = pq.read_table(path, columns=["hour"])["hour"]
+def external_table(path: Path, data: bytes | None = None) -> pa.Table:
+    def source() -> Any:
+        return path if data is None else pa.BufferReader(data)
+
+    external_columns(pq.read_schema(source()))
+    hours = pq.read_table(source(), columns=["hour"])["hour"]
     if hours.null_count:
         raise ValueError(f"the external scores leave {hours.null_count} hours null")
     ns = hour_ns(hours).to_numpy()
     if ns.size and int(ns.max()) >= labels.ns(span.HELD_BACK):
         raise span.HeldBackError("the external scores hold an hour in the held-back test span")
-    return pq.read_table(path)
+    return pq.read_table(source())
 
 
 def external_scores(
@@ -524,15 +527,24 @@ def horizon_rows(
     return accounting, out
 
 
-def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dict], list[dict]]:
+def evaluate(
+    h: Horizon,
+    plan: Plan,
+    horizon: int,
+    names: Sequence[str] | None = None,
+    pairs: Sequence[tuple[str, str]] | None = None,
+    kept: dict[str, Any] | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
     edges = bounds(plan)
     nblocks = blocks_per_fold(edges, plan.block_days)
     weights = draws(nblocks, plan.draws, plan.seed, horizon)
     quarters = range(h.first, len(nblocks))
-    names = plan.scored_names(h.scheme)
+    names = plan.scored_names(h.scheme) if names is None else tuple(names)
+    pairs = plan.comparisons if pairs is None else tuple(pairs)
     subsets = {"all": np.ones(len(h.ts), bool), "without": ~np.isin(h.symbol, plan.without)}
-    score_rows, fold_rows, primary, boot = [], [], {}, {}
+    score_rows, fold_rows, primary, boot, drawn = [], [], {}, {}, {}
     complete: dict[str, float] = {}
+    whole: dict[str, np.ndarray] = {}
     key = {"horizon": horizon, "scheme": h.scheme}
     for name in names:
         for side in plan.sides:
@@ -563,13 +575,11 @@ def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dic
                 finite = np.isfinite(per_fold)
                 if subset == "all":
                     primary[(name, side)] = per_fold
-                    boot[(name, side)] = _nanmean_rows(booted)
+                    boot[(name, side)] = nanmean_rows(booted)
+                    drawn[(name, side)] = booted
                     if name == names[0]:
-                        complete[side] = (
-                            float(np.isfinite(booted[:, finite]).all(axis=1).mean())
-                            if finite.any()
-                            else np.nan
-                        )
+                        whole[side] = np.isfinite(booted[:, finite]).all(axis=1) & finite.any()
+                        complete[side] = float(whole[side].mean()) if finite.any() else np.nan
                 weight = positives[finite].sum()
                 score_rows.append(
                     {
@@ -591,43 +601,58 @@ def evaluate(h: Horizon, plan: Plan, horizon: int) -> tuple[list[dict], list[dic
                     }
                 )
     comparisons = []
-    for first, second in plan.comparisons:
+    for first, second in pairs:
         if first not in names or second not in names:
             continue
         for side in plan.sides:
             a, b = primary[(first, side)], primary[(second, side)]
-            difference = boot[(first, side)] - boot[(second, side)]
-            difference = difference[np.isfinite(difference)]
-            both = np.isfinite(a) & np.isfinite(b)
-            per_fold = a - b
-            q = np.quantile(difference, QUANTILES) if difference.size else [np.nan] * 3
-            spread = per_fold[both]
             comparisons.append(
                 {
                     **key,
                     "side": side,
                     "first": first,
                     "second": second,
-                    "estimate": float(np.nanmean(a) - np.nanmean(b)),
-                    "se": float(np.std(difference, ddof=1)) if difference.size > 1 else np.nan,
-                    "se_quarters": float(np.std(spread, ddof=1) / np.sqrt(spread.size))
-                    if spread.size > 1
-                    else np.nan,
-                    "q025": float(q[0]),
-                    "q05": float(q[1]),
-                    "q975": float(q[2]),
-                    "above_zero": float(np.mean(difference > 0)) if difference.size else np.nan,
-                    "draws": int(difference.size),
-                    "complete_draws": complete[side],
-                    "fold_differences": [float(v) for v in per_fold],
-                    "folds_above_zero": int(np.sum(spread > 0)),
-                    "folds": int(both.sum()),
+                    **comparison(
+                        float(np.nanmean(a) - np.nanmean(b)),
+                        a,
+                        b,
+                        boot[(first, side)] - boot[(second, side)],
+                        complete[side],
+                    ),
                 }
             )
+    if kept is not None:
+        kept |= {"folds": primary, "boot": boot, "booted": drawn, "complete": whole}
     return score_rows, fold_rows, comparisons
 
 
-def _nanmean_rows(values: np.ndarray) -> np.ndarray:
+def comparison(
+    estimate: float, a: np.ndarray, b: np.ndarray, difference: np.ndarray, complete: float
+) -> dict[str, Any]:
+    difference = difference[np.isfinite(difference)]
+    both = np.isfinite(a) & np.isfinite(b)
+    per_fold = a - b
+    q = np.quantile(difference, QUANTILES) if difference.size else [np.nan] * 3
+    spread = per_fold[both]
+    return {
+        "estimate": estimate,
+        "se": float(np.std(difference, ddof=1)) if difference.size > 1 else np.nan,
+        "se_quarters": float(np.std(spread, ddof=1) / np.sqrt(spread.size))
+        if spread.size > 1
+        else np.nan,
+        "q025": float(q[0]),
+        "q05": float(q[1]),
+        "q975": float(q[2]),
+        "above_zero": float(np.mean(difference > 0)) if difference.size else np.nan,
+        "draws": int(difference.size),
+        "complete_draws": complete,
+        "fold_differences": [float(v) for v in per_fold],
+        "folds_above_zero": int(np.sum(spread > 0)),
+        "folds": int(both.sum()),
+    }
+
+
+def nanmean_rows(values: np.ndarray) -> np.ndarray:
     count = np.isfinite(values).sum(axis=1)
     total = np.where(np.isfinite(values), values, 0.0).sum(axis=1)
     return np.where(count > 0, total / np.maximum(count, 1), np.nan)

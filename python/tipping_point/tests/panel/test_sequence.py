@@ -899,6 +899,14 @@ def test_the_scores_command_writes_a_file_the_ladder_scores_on_its_rows(tmp_path
         (out,) = (tmp_path / "panel-scores").glob(f"*-{model}")
         params = json.loads((out / "manifest.json").read_text(encoding="utf-8"))["params"]
         assert params["sequence_run"] == run.name and len(params["encoders"]) == 4
+        source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))["params"]
+        assert params["sequence_manifest_sha256"] == store.sha256(run / "manifest.json")
+        assert params["sequence_folds"] == {
+            "file": "folds.parquet",
+            "sha256": store.sha256(run / "folds.parquet"),
+        }
+        assert params["inputs"] == source["inputs"]
+        assert params["labels_grid"] == source["labels_grid"]
         if model == "supervised":
             assert (params["readout"], params["c"], params["selection"]) == (None, None, None)
         else:
@@ -996,15 +1004,25 @@ def test_the_scores_command_refuses_a_changed_run_and_writes_nothing(tmp_path: P
     shift = labels.ns(date(2024, 1, 1)) - labels.ns(date(2022, 1, 1)) - 5 * 24 * HOUR
     late = write_runs(tmp_path / "late", values, dict(grid, ts_ns=grid["ts_ns"] + shift))
 
-    def params(copy: Path, change: dict) -> None:
+    def params(copy: Path, change: dict, bound: bool = True) -> None:
         manifest = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
         for key, value in change.items():
             manifest["params"][key] = value
         (copy / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        if bound:
+            record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+            record["manifest_sha256"] = store.sha256(copy / "manifest.json")
+            (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
 
     def complete(copy: Path, clean: bool) -> None:
         record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
         (copy / "complete.json").write_text(json.dumps(record | {"clean": clean}), "utf-8")
+
+    def relisted(copy: Path, name: str, content: str) -> None:
+        (copy / name).write_text(content + "\n", "utf-8")
+        record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+        record["files"][name] = store.sha256(copy / name)
+        (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
 
     encoder_file = sequence.encoder_name("vol", "forward", 2, 3, "jepa")
     zero = "0" * 64
@@ -1022,11 +1040,23 @@ def test_the_scores_command_refuses_a_changed_run_and_writes_nothing(tmp_path: P
             "labels grid differs",
         ),
         "missing": (lambda d: (d / "complete.json").unlink(), "no complete.json"),
+        "manifest": (
+            lambda d: params(d, {"threads": 2}, bound=False),
+            "manifest.json: its sha256 differs from complete.json's",
+        ),
         "unclean": (lambda d: complete(d, False), "does not mark the run clean"),
         "plan": (lambda d: (d / "plan.toml").write_text(text + "\n", "utf-8"), "plan.toml"),
         "ladder": (
             lambda d: (d / "ladder.toml").write_text(ladder_text() + "\n", "utf-8"),
             "ladder.toml",
+        ),
+        "replanned": (
+            lambda d: relisted(d, "plan.toml", text),
+            "plan.toml: not the plan.toml the run's manifest records",
+        ),
+        "recorded": (
+            lambda d: relisted(d, "ladder.toml", ladder_text()),
+            "ladder.toml: not the ladder.toml the run's manifest records",
         ),
     }
     for name, (change, message) in cases.items():
@@ -1246,6 +1276,14 @@ def split(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     return runs
 
 
+def rebound(run: Path, manifest: dict) -> None:
+    (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    complete = json.loads((run / "complete.json").read_text(encoding="utf-8"))
+    if "manifest_sha256" in complete:
+        complete["manifest_sha256"] = store.sha256(run / "manifest.json")
+        (run / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+
+
 def without_seconds(path: Path) -> str:
     return json.dumps(pq.read_table(path).drop_columns(["seconds"]).to_pylist())
 
@@ -1325,6 +1363,7 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
     )
     for k in ("inputs_run", "inputs", "labels_run", "labels_grid", "ladder_plan", "torch", "numpy"):
         assert params[k] == full_params[k], k
+    assert params["pieces_bound"] is True
     complete = json.loads((merged / "complete.json").read_text(encoding="utf-8"))
     assert complete["clean"]
     for model, variant in (("jepa", "full"), ("supervised", "vol")):
@@ -1371,7 +1410,7 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
         def edit(copy: Path) -> None:
             record = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
             change(record)
-            (copy / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+            rebound(copy, record)
 
         return edit
 
@@ -1542,6 +1581,41 @@ def test_the_merge_takes_a_nan_auc_in_a_shared_rung_row(
     assert np.isnan(row["auc"])
 
 
+def test_a_piece_whose_manifest_changed_is_refused_and_unbound_pieces_are_recorded(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    def copies(root: str) -> list[Path]:
+        out = []
+        for name in SPLIT:
+            copy = tmp_path / root / split[name].name
+            shutil.copytree(split[name], copy)
+            out.append(copy)
+        return out
+
+    edited = copies("edited")
+    for piece in edited:
+        record = json.loads((piece / "manifest.json").read_text(encoding="utf-8"))
+        record["params"]["inputs_run"] = "20250101T000000Z-other"
+        (piece / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(
+        ValueError, match=r"manifest\.json: its sha256 differs from complete\.json's"
+    ):
+        sequence.merge_run(edited, split["parent"], tmp_path, "edited")
+    assert not (tmp_path / "panel-sequence").exists()
+    old = copies("old")
+    complete = json.loads((old[2] / "complete.json").read_text(encoding="utf-8"))
+    complete.pop("manifest_sha256")
+    (old[2] / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+    run_dir, _ = sequence.merge_run(old, split["parent"], tmp_path, "old")
+    params = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["params"]
+    assert params["pieces_bound"] is False
+    assert [s["manifest_sha256"] for s in params["sources"]] == [
+        store.sha256(d / "manifest.json") for d in old
+    ]
+    merged = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
+    assert merged["manifest_sha256"] == store.sha256(run_dir / "manifest.json")
+
+
 def test_pieces_from_different_cpu_models_merge_and_list_them(
     split: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -1552,7 +1626,7 @@ def test_pieces_from_different_cpu_models_merge_and_list_them(
         if name == "c":
             record = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
             record["params"]["runtime"]["cpu"] = "Another CPU"
-            (copy / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+            rebound(copy, record)
         pieces.append(copy)
     run_dir, _ = sequence.merge_run(pieces, split["parent"], tmp_path, "cpus")
     params = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["params"]

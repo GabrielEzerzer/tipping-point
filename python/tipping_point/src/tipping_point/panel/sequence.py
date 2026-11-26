@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import math
 import os
 import platform
@@ -1090,10 +1091,19 @@ def rung_folds(
 def read(
     inputs_dir: Path, data_dir: Path, plan: Plan
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]:
-    manifest = io.read_json(inputs_dir / "manifest.json")
+    return read_columns(inputs_dir, data_dir, plan.ladder.columns)
+
+
+def read_columns(
+    inputs_dir: Path,
+    data_dir: Path,
+    columns: Sequence[str],
+    records: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, Any]]:
+    manifest = io.read_json(inputs_dir / "manifest.json") if records is None else records[0]
     params = manifest["params"]
     span.refuse(*(date.fromisoformat(params[k]) for k in ("start", "dev_start", "end")))
-    complete = io.read_json(inputs_dir / "complete.json")
+    complete = io.read_json(inputs_dir / "complete.json") if records is None else records[1]
     if complete.get("clean") is not True:
         raise ValueError(f"{inputs_dir}: complete.json does not mark the run clean")
     labels_dir = data_dir / "labels" / params["labels_run"]
@@ -1107,7 +1117,6 @@ def read(
     if complete["files"].get(inputs_path.name) != inputs_sha:
         raise ValueError(f"{inputs_path}: its sha256 differs from complete.json's")
     grid_table = pq.read_table(grid_path)
-    columns = list(plan.ladder.columns)
     table = pq.read_table(inputs_path, columns=["ts_ns", "symbol", *columns])
     if not (
         table["ts_ns"].equals(grid_table["ts_ns"]) and table["symbol"].equals(grid_table["symbol"])
@@ -1212,16 +1221,25 @@ def scores_run(
     log: LOG = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
-    manifest = io.read_json(sequence_dir / "manifest.json")
+    data = (sequence_dir / "manifest.json").read_bytes()
+    manifest_sha = hashlib.sha256(data).hexdigest()
     if not (sequence_dir / "complete.json").is_file():
         raise ValueError(f"{sequence_dir}: the run has no complete.json")
     complete = io.read_json(sequence_dir / "complete.json")
     if complete.get("clean") is not True:
         raise ValueError(f"{sequence_dir}: complete.json does not mark the run clean")
+    if "manifest_sha256" in complete and complete["manifest_sha256"] != manifest_sha:
+        raise ValueError(
+            f"{sequence_dir / 'manifest.json'}: its sha256 differs from complete.json's"
+        )
+    manifest = json.loads(data.decode("utf-8"))
     files = complete["files"]
     for name in ("plan.toml", "ladder.toml", "folds.parquet"):
         if store.sha256(sequence_dir / name) != files.get(name):
             raise ValueError(f"{sequence_dir / name}: its sha256 differs from complete.json's")
+    for name, key in (("plan.toml", "plan"), ("ladder.toml", "ladder_plan")):
+        if (manifest["params"].get(key) or {}).get("sha256") != files[name]:
+            raise ValueError(f"{sequence_dir / name}: not the {name} the run's manifest records")
     plan = load(sequence_dir / "plan.toml", sequence_dir / "ladder.toml")
     torch.set_num_threads(plan.threads)
     if model not in plan.models or variant not in plan.variants:
@@ -1261,13 +1279,17 @@ def scores_run(
     seconds = time.perf_counter() - began
     run_params = {
         "sequence_run": manifest["run_id"],
+        "sequence_manifest_sha256": manifest_sha,
+        "sequence_folds": {"file": "folds.parquet", "sha256": files["folds.parquet"]},
         "model": model,
         "variant": variant,
         "readout": name,
         "c": c,
         "selection": selection,
         "inputs_run": source["inputs_run"],
+        "inputs": source["inputs"],
         "labels_run": source["labels_run"],
+        "labels_grid": source["labels_grid"],
         "encoders": used,
         "code": {"uv_lock_sha256": labels.uv_lock()},
     }
@@ -1326,13 +1348,17 @@ def _same(a: object, b: object) -> bool:
     return a == b
 
 
-def _piece(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Plan]:
+def _piece(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Plan, str]:
     if not (run_dir / "complete.json").is_file():
         raise ValueError(f"{run_dir}: the run has no complete.json")
     complete = io.read_json(run_dir / "complete.json")
     if complete.get("clean") is not True:
         raise ValueError(f"{run_dir}: complete.json does not mark the run clean")
-    manifest = io.read_json(run_dir / "manifest.json")
+    data = (run_dir / "manifest.json").read_bytes()
+    manifest_sha = hashlib.sha256(data).hexdigest()
+    if "manifest_sha256" in complete and complete["manifest_sha256"] != manifest_sha:
+        raise ValueError(f"{run_dir / 'manifest.json'}: its sha256 differs from complete.json's")
+    manifest = json.loads(data.decode("utf-8"))
     if manifest.get("domain") != "panel-sequence":
         raise ValueError(f"{run_dir}: not a sequence run")
     if "sources" in manifest.get("params", {}):
@@ -1359,7 +1385,7 @@ def _piece(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], Plan]:
     plan = load(run_dir / "plan.toml", run_dir / "ladder.toml")
     if not cells(plan):
         raise ValueError(f"{run_dir}: fits no cell of its plan")
-    return manifest, complete, plan
+    return manifest, complete, plan, manifest_sha
 
 
 def _bare(plan: Plan) -> Plan:
@@ -1379,14 +1405,14 @@ def merge_run(
     parent, records, (plan_text, ladder_text) = snapshot(parent_path)
     loaded = [(run_dir, *_piece(run_dir)) for run_dir in pieces]
     seen: set[object] = set()
-    for run_dir, manifest, _, _ in loaded:
+    for run_dir, manifest, _, _, _ in loaded:
         for key in (run_dir.resolve(), manifest["run_id"]):
             if key in seen:
                 raise ValueError(f"{run_dir.name} is listed twice")
             seen.add(key)
-    first_dir, first, _, _ = loaded[0]
+    first_dir, first, _, _, _ = loaded[0]
     head = first["params"]
-    for run_dir, manifest, _, _ in loaded[1:]:
+    for run_dir, manifest, _, _, _ in loaded[1:]:
         params = manifest["params"]
         for what, keys in SHARED.items():
             if any(params[k] != head[k] for k in keys):
@@ -1408,7 +1434,7 @@ def merge_run(
     if head["ladder_plan"] != records["ladder_plan"]:
         raise ValueError(f"{first_dir.name} read a different ladder plan from the parent plan's")
     owner: dict[str, Path] = {}
-    for run_dir, manifest, _, plan in loaded:
+    for run_dir, manifest, _, plan, _ in loaded:
         if _bare(plan) != _bare(parent):
             raise ValueError(
                 f"{run_dir.name}: its plan differs from the parent plan in more than "
@@ -1439,7 +1465,7 @@ def merge_run(
     rungs: dict[tuple[Any, ...], dict[str, Any]] = {}
     accounting: list[dict[str, Any]] | None = None
     skipped: list[str] = []
-    for run_dir, _, complete, _ in loaded:
+    for run_dir, _, complete, _, _ in loaded:
         tables = {n: pq.read_table(run_dir / f"{n}.parquet").to_pylist() for n in (*merged, "rows")}
         for name in ("diagnostics", "curves"):
             merged[name] += tables[name]
@@ -1458,7 +1484,7 @@ def merge_run(
     merged["folds"] += [rungs[k] for k in sorted(rungs)]
     encoders = {key: (owner[key] / key).read_bytes() for key in sorted(owner)}
     source = {k: head[k] for k in ("inputs_run", "inputs", "labels_run", "labels_grid")}
-    piece_seconds = sum(c["checks"]["seconds"] for _, _, c, _ in loaded)
+    piece_seconds = sum(c["checks"]["seconds"] for _, _, c, _, _ in loaded)
     run_params = {
         **source,
         **records,
@@ -1468,18 +1494,19 @@ def merge_run(
         "threads": head["threads"],
         "code": head["code"],
         "pieces_producer": first["producer"],
+        "pieces_bound": all("manifest_sha256" in c for _, _, c, _, _ in loaded),
         "encoders": {k: hashlib.sha256(v).hexdigest() for k, v in encoders.items()},
         "sources": [
             {
                 "run": m["run_id"],
-                "manifest_sha256": store.sha256(d / "manifest.json"),
+                "manifest_sha256": digest,
                 "cpu": m["params"]["runtime"]["cpu"],
             }
-            for d, m, _, _ in loaded
+            for _, m, _, _, digest in loaded
         ],
     }
     out = {**merged, "skipped": skipped}
-    names = ", ".join(f"`{m['run_id']}`" for _, m, _, _ in loaded)
+    names = ", ".join(f"`{m['run_id']}`" for _, m, _, _, _ in loaded)
     texts = {
         "report.md": report(out, parent, source, piece_seconds)
         + f"\nMerged from {names}; the wall time is the sum of theirs.\n",
