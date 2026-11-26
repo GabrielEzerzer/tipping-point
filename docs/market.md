@@ -1152,7 +1152,8 @@ its `complete_draws` is empty too.
 
 The estimate is a difference between two arms, and each arm enters it as the mean of its long and
 short fold-mean AUCs over the pair's common quarters. An arm compared with a copy of itself gives
-zero whatever its own level. For an arm whose configuration the selection rule chose (a JEPA or twin
+zero whatever its own level, whenever the estimate is defined, that is when the pair has a common
+quarter. For an arm whose configuration the selection rule chose (a JEPA or twin
 `scores` arm, or a classical arm made without `--fixed`), that term at 24 h on `forward` is defined
 like the quantity the rule maximised, the mean of the long and short fold-mean AUCs, but need not
 equal it. The rule averages each side over the quarters that side scores: if one quarter scores long
