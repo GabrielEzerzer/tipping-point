@@ -1221,16 +1221,25 @@ def scores_run(
     log: LOG = lambda line: None,
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
-    manifest = io.read_json(sequence_dir / "manifest.json")
+    data = (sequence_dir / "manifest.json").read_bytes()
+    manifest_sha = hashlib.sha256(data).hexdigest()
     if not (sequence_dir / "complete.json").is_file():
         raise ValueError(f"{sequence_dir}: the run has no complete.json")
     complete = io.read_json(sequence_dir / "complete.json")
     if complete.get("clean") is not True:
         raise ValueError(f"{sequence_dir}: complete.json does not mark the run clean")
+    if "manifest_sha256" in complete and complete["manifest_sha256"] != manifest_sha:
+        raise ValueError(
+            f"{sequence_dir / 'manifest.json'}: its sha256 differs from complete.json's"
+        )
+    manifest = json.loads(data.decode("utf-8"))
     files = complete["files"]
     for name in ("plan.toml", "ladder.toml", "folds.parquet"):
         if store.sha256(sequence_dir / name) != files.get(name):
             raise ValueError(f"{sequence_dir / name}: its sha256 differs from complete.json's")
+    for name, key in (("plan.toml", "plan"), ("ladder.toml", "ladder_plan")):
+        if (manifest["params"].get(key) or {}).get("sha256") != files[name]:
+            raise ValueError(f"{sequence_dir / name}: not the {name} the run's manifest records")
     plan = load(sequence_dir / "plan.toml", sequence_dir / "ladder.toml")
     torch.set_num_threads(plan.threads)
     if model not in plan.models or variant not in plan.variants:
@@ -1270,13 +1279,17 @@ def scores_run(
     seconds = time.perf_counter() - began
     run_params = {
         "sequence_run": manifest["run_id"],
+        "sequence_manifest_sha256": manifest_sha,
+        "sequence_folds": {"file": "folds.parquet", "sha256": files["folds.parquet"]},
         "model": model,
         "variant": variant,
         "readout": name,
         "c": c,
         "selection": selection,
         "inputs_run": source["inputs_run"],
+        "inputs": source["inputs"],
         "labels_run": source["labels_run"],
+        "labels_grid": source["labels_grid"],
         "encoders": used,
         "code": {"uv_lock_sha256": labels.uv_lock()},
     }

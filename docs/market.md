@@ -967,11 +967,16 @@ training rows, and writes one Parquet file per scheme to `<data dir>/panel-score
 columns an `[external]` entry reads. A row's score is the mean over seeds of the probe's logit (for
 the supervised model, of its own logit), and its `any` score is the logit of
 1 - (1 - p_long)(1 - p_short) from those means. The file covers every scored row of the scheme with
-the ladder's folds. The command refuses a sequence run without `complete.json` or that it does not
-mark clean, a plan, ladder plan or folds table whose sha256 differs from `complete.json`'s, a model
-or variant the run did not fit, a plan whose folds leave a scored quarter unfitted, a missing or
-changed model for any seed, and an inputs table or labels grid other than the one the sequence run
-read. It writes nothing when it refuses. Like `ladder`,
+the ladder's folds. It reads the sequence run's `manifest.json` once and records the sha256 of
+those bytes (`sequence_manifest_sha256`), with the sha256 of the run's folds table
+(`sequence_folds`), of each model it loaded (`encoders`) and of the inputs table and labels grid it
+read (`inputs`, `labels_grid`); `compare` follows these records. The command refuses a sequence run
+without `complete.json` or that it does not mark clean, a sequence run whose `manifest.json`
+differs from the sha256 its `complete.json` records, a plan, ladder plan or folds table whose sha256
+differs from `complete.json`'s, a plan or ladder plan other than the one the run's manifest records,
+a model or variant the run did not fit, a plan whose folds leave a
+scored quarter unfitted, a missing or changed model for any seed, and an inputs table or labels grid
+other than the one the sequence run read. It writes nothing when it refuses. Like `ladder`,
 both commands check the grid's and the inputs' time bounds from their Parquet metadata before
 hashing or reading them.
 
@@ -1122,7 +1127,9 @@ configuration by its rule, false when it was exported with `--fixed`). Either ki
 open, such as the pretraining steps or the window length. Each pair is first minus second, and
 exactly one pair is marked primary, with the side and horizon it is read on. Every arm in the plan
 needs exactly one `--arm`, given as a run id or a run folder, and two arms may name the same run.
-A folder is named by its absolute path, so `.` given from inside a run folder names that run.
+A folder, an arm's or the inputs run's, is named by the path the filesystem resolves it to, so `.`
+given from inside a run folder names that run and a link to a run folder names the folder it points
+to.
 
 For every horizon and every scheme all the arms hold, each arm's scores are aligned to the ladder's
 common rows of that scheme. Each arm is scored, and each pair compared, by the ladder's own code: the
@@ -1141,12 +1148,13 @@ per-quarter differences come from those values in the same columns. When both si
 quarters, as they normally do, its estimate, its per-quarter differences and each of its draws are
 the means of the long and short rows' own; its other statistics are computed from those draws, and
 are not the means of the two rows' statistics. With no common quarter the row holds no number, and
-its `complete_draws` is empty too. For a classical arm, at 24 h on `forward`, the composite's
-estimate and the quantity its selection rule maximises (the mean of the long and short fold-mean
-AUCs) coincide when both sides are scored on the same quarters. Otherwise they differ: if one
-quarter scores long only and another both, the rule averages long over both quarters and short over
-the second, while the composite uses the second for both. For a `scores` arm they differ even then:
-the sequence rule averages the seeds' AUCs in each quarter, and this command scores the seeds' mean
+its `complete_draws` is empty too. For a classical arm, or a `scores` arm whose sequence plan has
+one seed, at 24 h on `forward`, the composite's estimate and the quantity its selection rule
+maximises (the mean of the long and short fold-mean AUCs) coincide when both sides are scored on the
+same quarters. Otherwise they differ: if one quarter scores long only and another both, the rule
+averages long over both quarters and short over the second, while the composite uses the second for
+both. For a `scores` arm whose plan has more than one seed they can differ even then, because the
+sequence rule averages the seeds' AUCs in each quarter and this command scores the seeds' mean
 score. The shipped plan reads its primary pair on `long+short` at 24 h rather than on `any`, because
 `any` depends on how a model's long and short heads are calibrated against each other: an arm can
 win on long and on short and lose on `any`. The `any` rows are kept as they are.
@@ -1193,6 +1201,22 @@ manifests are not bound, and is therefore not a test, whether or not any run was
 manifest changed after its run was written, but a run folder whose `manifest.json` and
 `complete.json` were both rewritten still passes, since the store is not signed.
 
+Each run made from another records what it read by sha256, and the command follows that chain from
+each arm to the comparison's own inputs table, labels grid and ladder plan. A sequence or classical
+run records the inputs table, labels grid, plan and ladder plan it read. A merged sequence run
+records the same values, which `merge` requires its runs to share, and each merged run's manifest
+sha256 (`sources`); the command reads the merged run's own records and does not open the runs it
+merged. A `scores` run records the sha256 of its sequence run's `manifest.json` as it read it, of
+that run's folds table, of each model it loaded and of the inputs table and labels grid it read. Its
+sequence run is named by run id and found under `<data dir>/panel-sequence/`, so a run of the same
+id could be another store's; the command therefore requires the `scores` run's recorded manifest
+sha256 to equal that of the sequence run's `manifest.json` it read and checked, its folds table
+sha256 to equal the one the sequence run's `complete.json` records, and its inputs table and labels
+grid sha256, like its sequence run's, to equal the comparison's. A `scores` run without these
+records is refused, with or without `--unbound`. The inputs run records the labels grid and
+thresholds by sha256; the command checks the grid's bytes against that record and does not read the
+labels run's manifest.
+
 Before reading any score the command checks that each arm comes from the inputs run, labels grid and
 ladder plan of the comparison. It refuses:
 
@@ -1216,11 +1240,17 @@ ladder plan of the comparison. It refuses:
   schedules that has no scored row has no models in the `scores` run; a quarter with rows cannot
   lack them, because `scores` refuses to leave a quarter with rows unscored and the comparison
   requires a score for every ladder row;
+- a `scores` run that records no sha256 of its sequence run's manifest, of that run's folds table,
+  or of the inputs table or labels grid it read, with or without `--unbound`; one whose recorded
+  sequence manifest sha256 differs from that of the sequence run's `manifest.json` the command read,
+  and one whose recorded folds table sha256 differs from the one the sequence run's `complete.json`
+  records;
 - a model file the `scores` run used that differs from the sha256 the sequence run's manifest and
   `complete.json` record, or that is missing;
 - a `classical` run that did not export the arm's `export`;
 - a run, or a `scores` run's sequence run, made from another inputs run or labels run;
-- a run whose recorded inputs table or labels grid has another sha256 than the comparison's;
+- a run whose recorded inputs table or labels grid has another sha256 than the comparison's: a
+  `classical` run, and both a `scores` run and its sequence run;
 - a source run (the `classical` run, or the sequence run behind a `scores` run) whose `ladder.toml`
   is not the comparison's ladder plan by its `complete.json`, whose `plan.toml` or `ladder.toml`
   differs on disk from its `complete.json`, or whose manifest records another;
@@ -1242,15 +1272,21 @@ in the chain ends as a refusal that names the file.
 
 The command reads the plan and its ladder plan once each, recording their sha256 and copying both
 into the run. The manifest records the primary pair, whether unbound runs were allowed, whether the
-inputs run was bound, the code that made the inputs run (commit, state and `uv.lock`), which the
-report names, and, for each arm, its run, kind, model, variant, readout, c, whether it was chosen by
-the rule, its selection, its source run's `plan.toml` sha256, whether its chain was bound, the run
-it was made from, its files' sha256 and the code that made it (commit, state and `uv.lock`). For a
-`scores` arm it also records the sequence plan's seeds, its sequence run's code and the code that
-trained the models, which for a merged sequence run is the merged runs' commit, state and
-`uv.lock`; a merged run's own code is the merging commit and state with no `uv.lock`, since `merge`
-copies the merged runs' `uv.lock` rather than its own, and the report shows a missing `uv.lock` as
-`-` and does not count it as different code. Two runs on the same arms, given in any order, write identical tables.
+inputs run was bound, the sha256 of the inputs run's manifest as read (`inputs_manifest_sha256`),
+the code that made the inputs run (commit, state and `uv.lock`), which the report names, and, for
+each arm, its run, the sha256 of its manifest as read (`manifest_sha256`), kind, model, variant,
+readout, c, whether it was chosen by the rule, its selection, its source run's `plan.toml` sha256,
+whether its chain was bound, the run it was made from with the inputs table, labels grid and ladder
+plan that run records, its files' sha256 and the code that made it (commit, state and `uv.lock`).
+For a `scores` arm it also records the sha256 of its sequence run's manifest as read
+(`sequence_manifest_sha256`), the inputs table and labels grid the `scores` run records
+(`scores_read`), the sequence plan's seeds, its sequence run's code and the code that trained the
+models, which for a merged sequence run is the merged runs' commit, state and `uv.lock`; a merged
+run's own code is the merging commit and state with no `uv.lock`, since `merge` copies the merged
+runs' `uv.lock` rather than its own, and the report shows a missing `uv.lock` as `-` and does not
+count it as different code. When the recorded commits agree and the recorded `uv.lock` sha256 values
+agree, the report says so and names the runs that record no `uv.lock`. Two runs on the same arms,
+given in any order, write identical tables.
 
 The interval has limits. The paired bootstrap measures how much the difference moves when the
 observed 14-day blocks of each quarter are reweighted, for the fitted scoring rules, with the

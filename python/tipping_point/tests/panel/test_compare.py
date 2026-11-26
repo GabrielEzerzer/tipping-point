@@ -232,6 +232,11 @@ def relabel(run: Path) -> None:
     rewrite(run, "manifest.json", lambda r: r.update(run_id=run.name))
 
 
+def point(scores: Path, seq: Path) -> None:
+    digest = store.sha256(seq / "manifest.json")
+    edit(scores, "manifest.json", {"sequence_run": seq.name, "sequence_manifest_sha256": digest})
+
+
 def producer(run: Path, change: dict[str, Any]) -> None:
     rewrite(run, "manifest.json", lambda r: r["producer"].update(change))
 
@@ -754,7 +759,7 @@ def test_a_scores_arm_that_is_not_its_sequence_runs_models_is_refused(
             )
 
     def via(run: Path) -> Callable[[Path], Any]:
-        return lambda d: edit(d, "manifest.json", {"sequence_run": run.name})
+        return lambda d: point(d, run)
 
     gone = "20260101T000000Z-gone"
     refused(lambda d: edit(d, "manifest.json", {"sequence_run": gone}), f"no run at .*{gone}")
@@ -1205,7 +1210,7 @@ def test_runs_whose_manifests_are_not_bound_are_refused_unless_allowed(
         relabel(dest)
         change(dest)
         scores = copied(small["scores"], tmp_path / "scores")
-        edit(scores, "manifest.json", {"sequence_run": dest.name})
+        point(scores, dest)
         return [("jepa", str(scores)), ("window", str(small["window"]))]
 
     clean = {"name": "tipping_point.panel", "git_sha": "e" * 40, "dirty": False}
@@ -1461,8 +1466,108 @@ def test_merged_pieces_scored_and_compared_equal_the_unmerged_run(
         f"`{recorded['sup']['run']}` | scores | ", ""
     )
     assert "| jepa | " in arms_table and "| chosen by the rule |" in arms_table
-    assert "Every arm's runs were made by the same commit and uv.lock." in report
+    assert (
+        "Every arm's runs record the same commit, and every recorded uv.lock is the same; "
+        "jepa (sequence run), sup (sequence run) record no uv.lock." in report
+    )
+    assert "made by the same commit and uv.lock" not in report
+    single_report = (runs["single"] / "report.md").read_text(encoding="utf-8")
+    assert "Every arm's runs were made by the same commit and uv.lock." in single_report
     assert "None" not in report
+
+
+def test_a_scores_run_is_tied_by_digest_to_the_sequence_run_and_inputs_it_read(
+    small: dict[str, Any], tmp_path: Path
+) -> None:
+    data, seq, scores = small["data"], small["seq"], small["scores"]
+    other = tmp_path / "other"
+    for domain in ("labels", "panel-inputs"):
+        shutil.copytree(data / domain, other / domain)
+    twin = other / "panel-sequence" / seq.name
+    shutil.copytree(seq, twin)
+    clipped = LADDER.replace("clip = 5.0", "clip = 4.0")
+    assert clipped != LADDER
+    (twin / "ladder.toml").write_bytes(clipped.encode("utf-8"))
+    digest = store.sha256(twin / "ladder.toml")
+    rewrite(twin, "complete.json", lambda r: r["files"].update({"ladder.toml": digest}))
+    edit(twin, "manifest.json", {"ladder_plan": {"file": "ladder.toml", "sha256": digest}})
+    elsewhere, _ = sequence.scores_run(twin, other, "jepa", "vol", "jepa")
+    assert params(elsewhere)["sequence_run"] == seq.name
+    assert params(elsewhere)["encoders"] == params(scores)["encoders"]
+    window = ("window", str(small["window"]))
+    with pytest.raises(
+        ValueError, match=f"{elsewhere.name} read another manifest.json of sequence run {seq.name}"
+    ):
+        compare.run([("jepa", str(elsewhere)), window], small["inputs"], data, small["paired"], "x")
+
+    def refused(change: Callable[[Path], Any], message: str, unbound: bool = False) -> None:
+        copy = copied(scores, tmp_path / "copies")
+        change(copy)
+        with pytest.raises(ValueError, match=message):
+            compare.run(
+                [("jepa", str(copy)), window],
+                small["inputs"],
+                data,
+                small["paired"],
+                "x",
+                unbound=unbound,
+            )
+
+    def drop(key: str, bound: bool = True) -> Callable[[Path], Any]:
+        def change(d: Path) -> None:
+            rewrite(d, "manifest.json", lambda r: r["params"].pop(key))
+            if not bound:
+                unbind(d)
+
+        return change
+
+    for key, what in (
+        ("sequence_manifest_sha256", "sequence run's manifest"),
+        ("sequence_folds", "sequence run's folds table"),
+        ("inputs", "inputs table"),
+        ("labels_grid", "labels grid"),
+    ):
+        refused(drop(key), f"{scores.name} records no sha256 of the {what} it read")
+        refused(drop(key, False), f"records no sha256 of the {what} it read", unbound=True)
+    zero = "0" * 64
+    refused(
+        lambda d: edit(d, "manifest.json", {"sequence_manifest_sha256": zero}),
+        f"read another manifest.json of sequence run {seq.name}",
+    )
+    refused(
+        lambda d: edit(
+            d, "manifest.json", {"sequence_folds": {"file": "folds.parquet", "sha256": zero}}
+        ),
+        f"read another folds table of sequence run {seq.name}",
+    )
+    refused(
+        lambda d: edit(d, "manifest.json", {"inputs": {"file": "inputs.parquet", "sha256": zero}}),
+        f"arm jepa: {scores.name} read another inputs table than inputs run",
+    )
+    refused(
+        lambda d: edit(
+            d, "manifest.json", {"labels_grid": {"file": "grid/0.parquet", "sha256": zero}}
+        ),
+        f"arm jepa: {scores.name} read another labels grid than labels run",
+    )
+    assert not tag_runs(data, "x")
+    run_dir, _ = compare.run(
+        [("jepa", str(scores)), window], small["inputs"], data, small["paired"], "tied"
+    )
+    got = params(run_dir)
+    jepa = got["arms"]["jepa"]
+    assert jepa["sequence_manifest_sha256"] == store.sha256(seq / "manifest.json")
+    assert jepa["sequence_manifest_sha256"] == params(scores)["sequence_manifest_sha256"]
+    assert jepa["manifest_sha256"] == store.sha256(scores / "manifest.json")
+    assert got["arms"]["window"]["manifest_sha256"] == store.sha256(
+        small["window"] / "manifest.json"
+    )
+    assert got["inputs_manifest_sha256"] == store.sha256(small["inputs"] / "manifest.json")
+    assert jepa["scores_read"] == {
+        "run": scores.name,
+        "inputs": got["inputs"],
+        "labels_grid": got["labels_grid"],
+    }
 
 
 def test_rows_that_are_not_exactly_the_ladders_are_refused(

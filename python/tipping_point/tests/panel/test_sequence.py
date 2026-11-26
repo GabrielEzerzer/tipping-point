@@ -899,6 +899,14 @@ def test_the_scores_command_writes_a_file_the_ladder_scores_on_its_rows(tmp_path
         (out,) = (tmp_path / "panel-scores").glob(f"*-{model}")
         params = json.loads((out / "manifest.json").read_text(encoding="utf-8"))["params"]
         assert params["sequence_run"] == run.name and len(params["encoders"]) == 4
+        source = json.loads((run / "manifest.json").read_text(encoding="utf-8"))["params"]
+        assert params["sequence_manifest_sha256"] == store.sha256(run / "manifest.json")
+        assert params["sequence_folds"] == {
+            "file": "folds.parquet",
+            "sha256": store.sha256(run / "folds.parquet"),
+        }
+        assert params["inputs"] == source["inputs"]
+        assert params["labels_grid"] == source["labels_grid"]
         if model == "supervised":
             assert (params["readout"], params["c"], params["selection"]) == (None, None, None)
         else:
@@ -996,15 +1004,25 @@ def test_the_scores_command_refuses_a_changed_run_and_writes_nothing(tmp_path: P
     shift = labels.ns(date(2024, 1, 1)) - labels.ns(date(2022, 1, 1)) - 5 * 24 * HOUR
     late = write_runs(tmp_path / "late", values, dict(grid, ts_ns=grid["ts_ns"] + shift))
 
-    def params(copy: Path, change: dict) -> None:
+    def params(copy: Path, change: dict, bound: bool = True) -> None:
         manifest = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
         for key, value in change.items():
             manifest["params"][key] = value
         (copy / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        if bound:
+            record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+            record["manifest_sha256"] = store.sha256(copy / "manifest.json")
+            (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
 
     def complete(copy: Path, clean: bool) -> None:
         record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
         (copy / "complete.json").write_text(json.dumps(record | {"clean": clean}), "utf-8")
+
+    def relisted(copy: Path) -> None:
+        (copy / "ladder.toml").write_text(ladder_text() + "\n", "utf-8")
+        record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+        record["files"]["ladder.toml"] = store.sha256(copy / "ladder.toml")
+        (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
 
     encoder_file = sequence.encoder_name("vol", "forward", 2, 3, "jepa")
     zero = "0" * 64
@@ -1022,12 +1040,17 @@ def test_the_scores_command_refuses_a_changed_run_and_writes_nothing(tmp_path: P
             "labels grid differs",
         ),
         "missing": (lambda d: (d / "complete.json").unlink(), "no complete.json"),
+        "manifest": (
+            lambda d: params(d, {"threads": 2}, bound=False),
+            "manifest.json: its sha256 differs from complete.json's",
+        ),
         "unclean": (lambda d: complete(d, False), "does not mark the run clean"),
         "plan": (lambda d: (d / "plan.toml").write_text(text + "\n", "utf-8"), "plan.toml"),
         "ladder": (
             lambda d: (d / "ladder.toml").write_text(ladder_text() + "\n", "utf-8"),
             "ladder.toml",
         ),
+        "recorded": (relisted, "ladder.toml: not the ladder.toml the run's manifest records"),
     }
     for name, (change, message) in cases.items():
         copy = tmp_path / "copies" / name

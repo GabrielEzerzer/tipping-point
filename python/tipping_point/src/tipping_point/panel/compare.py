@@ -8,7 +8,6 @@ import dataclasses
 import hashlib
 import json
 import math
-import os
 import re
 import time
 import tomllib
@@ -236,12 +235,8 @@ def given(plan: Plan, arms: Sequence[tuple[str, str]], data_dir: Path) -> dict[s
     out = {}
     for name, run in arms:
         path = Path(run)
-        out[name] = absolute(path if path.is_dir() else data_dir / KINDS[kinds[name]] / run)
+        out[name] = (path if path.is_dir() else data_dir / KINDS[kinds[name]] / run).resolve()
     return out
-
-
-def absolute(path: Path) -> Path:
-    return Path(os.path.abspath(path))
 
 
 def _read(path: Path, what: str) -> bytes:
@@ -256,17 +251,18 @@ def _digest(data: bytes) -> str:
 
 def bound_manifest(
     run_dir: Path, complete: Mapping[str, Any], what: str
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool, str]:
     data = _read(run_dir / "manifest.json", what)
+    digest = _digest(data)
     recorded = complete.get("manifest_sha256")
-    if recorded is not None and _digest(data) != recorded:
+    if recorded is not None and digest != recorded:
         raise ValueError(
             f"{what}: {run_dir / 'manifest.json'}: its sha256 differs from complete.json's"
         )
-    return json.loads(data.decode("utf-8")), recorded is not None
+    return json.loads(data.decode("utf-8")), recorded is not None, digest
 
 
-Held = dict[Path, tuple[dict[str, Any], dict[str, Any], bool]]
+Held = dict[Path, tuple[dict[str, Any], dict[str, Any], bool, str]]
 
 
 def unbound_refused(run_dir: Path, what: str) -> ValueError:
@@ -278,7 +274,7 @@ def unbound_refused(run_dir: Path, what: str) -> ValueError:
 
 def finished(
     run_dir: Path, what: str, domain: str, unbound: bool, seen: Held
-) -> tuple[dict[str, Any], dict[str, Any], bool]:
+) -> tuple[dict[str, Any], dict[str, Any], bool, str]:
     key = run_dir.resolve()
     if key not in seen:
         if not (run_dir / "manifest.json").is_file():
@@ -287,7 +283,7 @@ def finished(
             raise ValueError(f"{what}: {run_dir.name} has no complete.json")
         complete = io.read_json(run_dir / "complete.json")
         seen[key] = (complete, *bound_manifest(run_dir, complete, what))
-    complete, manifest, bound = seen[key]
+    complete, manifest, bound, digest = seen[key]
     if complete.get("clean") is not True:
         raise ValueError(f"{what}: complete.json does not mark {run_dir.name} clean")
     if manifest.get("run_id") != run_dir.name:
@@ -300,7 +296,7 @@ def finished(
         )
     if not (bound or unbound):
         raise unbound_refused(run_dir, what)
-    return manifest, complete, bound
+    return manifest, complete, bound, digest
 
 
 def clean_code(producer: Any, what: str) -> None:
@@ -371,9 +367,33 @@ def scores_chain(
             f"{what}: {run_dir.name} scores {model} on {variant}, not {arm.model} on {arm.variant}"
         )
     assert isinstance(model, str) and isinstance(variant, str)
+    recorded = {
+        "sequence run's manifest": params.get("sequence_manifest_sha256"),
+        "sequence run's folds table": _sha(params.get("sequence_folds")),
+        "inputs table": _sha(params.get("inputs")),
+        "labels grid": _sha(params.get("labels_grid")),
+    }
+    absent = [k for k, v in recorded.items() if not (isinstance(v, str) and SHA256.fullmatch(v))]
+    if absent:
+        raise ValueError(
+            f"{what}: {run_dir.name} records no sha256 of the {', '.join(absent)} it read, so it "
+            f"cannot be tied to them"
+        )
     seq_dir = sequence_dir(params.get("sequence_run"), data_dir, what)
     link = f"{what}: the sequence run of {run_dir.name}"
-    seq_manifest, seq_complete, bound = finished(seq_dir, link, "panel-sequence", unbound, seen)
+    seq_manifest, seq_complete, bound, seq_digest = finished(
+        seq_dir, link, "panel-sequence", unbound, seen
+    )
+    if recorded["sequence run's manifest"] != seq_digest:
+        raise ValueError(
+            f"{what}: {run_dir.name} read another manifest.json of sequence run {seq_dir.name} "
+            f"than the one at {seq_dir}"
+        )
+    if recorded["sequence run's folds table"] != seq_complete["files"].get("folds.parquet"):
+        raise ValueError(
+            f"{what}: {run_dir.name} read another folds table of sequence run {seq_dir.name} than "
+            f"the one its complete.json records"
+        )
     source = seq_manifest["params"]
     clean_code(seq_manifest.get("producer"), f"{link}, {seq_dir.name},")
     trained = seq_manifest.get("producer")
@@ -414,6 +434,7 @@ def scores_chain(
         "selection": params.get("selection"),
         "plan_sha256": seq_complete["files"]["plan.toml"],
         "sequence_run": seq_manifest["run_id"],
+        "sequence_manifest_sha256": seq_digest,
         "sequence_code": _code(seq_manifest.get("producer") or {}, None if merged else source),
         "trained_by": _code(trained or {}, source),
     }
@@ -486,10 +507,14 @@ def provenance(
     seen: Held,
 ) -> dict[str, Any]:
     what = f"arm {arm.name}"
-    manifest, complete, bound = finished(run_dir, what, KINDS[arm.kind], unbound, seen)
+    manifest, complete, bound, digest = finished(run_dir, what, KINDS[arm.kind], unbound, seen)
     clean_code(manifest.get("producer"), f"{what}: {run_dir.name}")
     params = manifest["params"]
-    record: dict[str, Any] = {"run": manifest["run_id"], "kind": arm.kind}
+    record: dict[str, Any] = {
+        "run": manifest["run_id"],
+        "kind": arm.kind,
+        "manifest_sha256": digest,
+    }
     chain = [(run_dir.name, params)]
     if arm.kind == "scores":
         scored = [s for s in ladder.SCHEMES if arm.file(s) in complete["files"]]
@@ -520,6 +545,11 @@ def provenance(
         "run": holder,
         **{k: held.get(k) for k in ("inputs", "labels_grid", "ladder_plan")},
     }
+    if arm.kind == "scores":
+        record["scores_read"] = {
+            "run": run_dir.name,
+            **{k: params.get(k) for k in ("inputs", "labels_grid")},
+        }
     record["code"] = _code(manifest.get("producer") or {}, params)
     record["files"] = {
         s: {"file": arm.file(s), "sha256": complete["files"][arm.file(s)]}
@@ -541,13 +571,20 @@ def same_sources(
     arm: Arm, record: Mapping[str, Any], source: Mapping[str, Any], ladder_sha: str
 ) -> None:
     held = record["made_from"]
-    what = f"arm {arm.name}: {held['run']}"
-    if _sha(held["inputs"]) != source["inputs"]["sha256"]:
-        raise ValueError(f"{what} read another inputs table than inputs run {source['inputs_run']}")
-    if _sha(held["labels_grid"]) != source["labels_grid"]["sha256"]:
-        raise ValueError(f"{what} read another labels grid than labels run {source['labels_run']}")
+    for read in (held, record.get("scores_read")):
+        if read is None:
+            continue
+        what = f"arm {arm.name}: {read['run']}"
+        if _sha(read["inputs"]) != source["inputs"]["sha256"]:
+            raise ValueError(
+                f"{what} read another inputs table than inputs run {source['inputs_run']}"
+            )
+        if _sha(read["labels_grid"]) != source["labels_grid"]["sha256"]:
+            raise ValueError(
+                f"{what} read another labels grid than labels run {source['labels_run']}"
+            )
     if _sha(held["ladder_plan"]) != ladder_sha:
-        raise ValueError(f"{what} was made under another ladder plan")
+        raise ValueError(f"arm {arm.name}: {held['run']} was made under another ladder plan")
 
 
 def score_bytes(name: str, path: Path, digest: str) -> bytes:
@@ -737,11 +774,11 @@ def run(
     plan, records, (plan_text, ladder_text) = snapshot(plan_path)
     ladder_sha = records["ladder_plan"]["sha256"]
     dirs = given(plan, arms, data_dir)
-    inputs_dir = absolute(inputs_dir)
+    inputs_dir = inputs_dir.resolve()
     if not (inputs_dir / "manifest.json").is_file():
         raise ValueError(f"no inputs run at {inputs_dir}")
     seen: Held = {}
-    inputs_manifest, inputs_complete, inputs_bound = finished(
+    inputs_manifest, inputs_complete, inputs_bound, inputs_digest = finished(
         inputs_dir, "inputs run", "panel-inputs", unbound, seen
     )
     clean_code(inputs_manifest.get("producer"), f"inputs run: {inputs_dir.name}")
@@ -797,6 +834,7 @@ def run(
         **records,
         "unbound_allowed": unbound,
         "inputs_bound": inputs_bound,
+        "inputs_manifest_sha256": inputs_digest,
         "inputs_code": inputs_code,
         "schemes": schemes,
         "primary": primary,
@@ -959,11 +997,19 @@ def report(
         ]
     commits = {v[:2] for v in states.values()}
     locks = {v[2] for v in states.values() if v[2] is not None}
+    unlocked = [k for k, v in states.items() if v[2] is None]
     if len(commits) > 1 or len(locks) > 1:
         lines.append(
             "The arms' runs were not all made by the same code (commit, state, uv.lock): "
             + "; ".join(f"{k} {v[0]}, {_state(v[1])}, {_lock(v[2])}" for k, v in states.items())
             + "."
+        )
+    elif unlocked:
+        lines.append(
+            "Every arm's runs record the same commit, and every recorded uv.lock is the same; "
+            + ", ".join(unlocked)
+            + (" records" if len(unlocked) == 1 else " record")
+            + " no uv.lock."
         )
     else:
         lines.append("Every arm's runs were made by the same commit and uv.lock.")
