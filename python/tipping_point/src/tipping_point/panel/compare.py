@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import math
+import re
 import time
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +24,13 @@ from . import labels, ladder, sequence, store
 PLAN = Path(__file__).with_name("compare.toml")
 KINDS = {"scores": "panel-scores", "classical": "panel-classical"}
 PRIMARY_SCHEME = "forward"
+COMPOSITE = "long+short"
+RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+ARM_KEYS = {
+    "scores": ({"model", "variant"}, {"readout", "c", "seeds"}),
+    "classical": ({"export"}, {"model", "readout", "c", "chosen"}),
+}
+COMPLETE = ("se", "q025", "q05", "q975", "above_zero", "draws")
 LOG = Callable[[str], None]
 
 
@@ -31,6 +41,7 @@ class Arm:
     model: str | None = None
     variant: str | None = None
     export: str | None = None
+    pins: Mapping[str, Any] = field(default_factory=dict)
 
     def file(self, scheme: str) -> str:
         return f"{scheme}.parquet" if self.kind == "scores" else f"{self.export}-{scheme}.parquet"
@@ -50,41 +61,102 @@ class Plan:
         return tuple(arm.name for arm in self.arms)
 
 
-def _arm(raw: Mapping[str, Any], problems: list[str]) -> Arm | None:
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _integer(value: Any) -> bool:
+    return type(value) is int
+
+
+def _number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def _pin(kind: str, key: str, value: Any) -> str | None:
+    if key == "readout" and not _text(value):
+        return "a readout name"
+    if key == "c" and not _number(value):
+        return "a finite number above 0"
+    if key == "seeds" and not (
+        isinstance(value, list)
+        and value
+        and all(_integer(s) and s >= 0 for s in value)
+        and len(set(value)) == len(value)
+    ):
+        return "a list of distinct seeds"
+    if key == "model" and kind == "classical" and value not in ("rung", "window"):
+        return "rung or window"
+    if key == "chosen" and not isinstance(value, bool):
+        return "true or false"
+    return None
+
+
+def _arm(raw: Any, problems: list[str]) -> Arm | None:
+    if not isinstance(raw, Mapping):
+        problems.append("an arm that is not a table")
+        return None
     name, kind = raw.get("name"), raw.get("kind")
-    fields = set(raw) - {"name", "kind"}
-    if not isinstance(name, str) or not name:
+    if not _text(name):
         problems.append("an arm without a name")
         return None
+    if kind not in ARM_KEYS:
+        problems.append(f"arm {name}: kind {kind} (scores or classical)")
+        return None
+    required, optional = ARM_KEYS[kind]
+    fields = set(raw) - {"name", "kind"}
+    before = len(problems)
+    problems += [f"arm {name}: unknown key {k}" for k in sorted(fields - required - optional)]
+    problems += [f"arm {name}: no {k}" for k in sorted(required - fields)]
     if kind == "scores":
-        model = raw.get("model")
-        if fields != {"model", "variant"} or model not in sequence.MODELS:
-            problems.append(
-                f"arm {name}: a scores arm takes a model of {sequence.MODELS} and a variant"
-            )
-            return None
-        return Arm(name, kind, model=str(model), variant=str(raw["variant"]))
-    if kind == "classical":
-        if fields != {"export"} or not isinstance(raw["export"], str):
-            problems.append(f"arm {name}: a classical arm takes the name it was exported under")
-            return None
-        return Arm(name, kind, export=raw["export"])
-    problems.append(f"arm {name}: kind {kind} (scores or classical)")
-    return None
+        if "model" in raw and raw["model"] not in sequence.MODELS:
+            problems.append(f"arm {name}: model {raw['model']} (one of {sequence.MODELS})")
+        if "variant" in raw and not _text(raw["variant"]):
+            problems.append(f"arm {name}: variant must be a rung's name")
+    elif "export" in raw and not _text(raw["export"]):
+        problems.append(f"arm {name}: export must be the name the classical run exported")
+    pins = {k: raw[k] for k in sorted(fields & optional)}
+    for key, value in pins.items():
+        wanted = _pin(kind, key, value)
+        if wanted:
+            problems.append(f"arm {name}: {key} must be {wanted}")
+    if len(problems) > before:
+        return None
+    if "c" in pins:
+        pins["c"] = float(pins["c"])
+    if kind == "scores":
+        return Arm(str(name), kind, model=raw["model"], variant=raw["variant"], pins=pins)
+    return Arm(str(name), kind, export=raw["export"], pins=pins)
+
+
+def _tables(raw: Mapping[str, Any], key: str, problems: list[str]) -> list[Any]:
+    value = raw.get(key, [])
+    if not isinstance(value, list):
+        problems.append(f"{key} must be a list of tables")
+        return []
+    return value
 
 
 def parse(path: Path, ladder_path: Path, texts: tuple[str, str]) -> Plan:
     raw = tomllib.loads(texts[0])
     base = ladder.load(ladder_path, texts[1])
-    problems: list[str] = []
-    arms = [a for a in (_arm(r, problems) for r in raw.get("arms", ())) if a is not None]
+    problems: list[str] = [
+        f"unknown key {k}" for k in sorted(set(raw) - {"ladder", "arms", "pairs"})
+    ]
+    arms = [a for a in (_arm(r, problems) for r in _tables(raw, "arms", problems)) if a]
     names = [a.name for a in arms]
     if not arms and not problems:
         problems.append("no arms")
     problems += [f"arm {n} named twice" for n in sorted({n for n in names if names.count(n) > 1})]
+    sides = list(base.sides)
+    if {"long", "short"} <= set(base.sides):
+        sides.append(COMPOSITE)
     pairs: list[tuple[str, str]] = []
     primaries: list[Mapping[str, Any]] = []
-    for p in raw.get("pairs", ()):
+    for p in _tables(raw, "pairs", problems):
+        if not isinstance(p, Mapping):
+            problems.append("a pair that is not a table")
+            continue
         first, second = p.get("first"), p.get("second")
         if first not in names or second not in names:
             problems.append(f"pair {first} - {second} names an unknown arm")
@@ -96,7 +168,7 @@ def parse(path: Path, ladder_path: Path, texts: tuple[str, str]) -> Plan:
         pairs.append((first, second))
         extra = set(p) - {"first", "second", "primary", "side", "horizon"}
         if extra:
-            problems.append(f"pair {first} - {second}: unknown {', '.join(sorted(extra))}")
+            problems.append(f"pair {first} - {second}: unknown key {', '.join(sorted(extra))}")
         if p.get("primary", False) is True:
             primaries.append(p)
         elif p.get("primary", False) is not False:
@@ -114,11 +186,12 @@ def parse(path: Path, ladder_path: Path, texts: tuple[str, str]) -> Plan:
         found = primaries[0]
         primary = (found["first"], found["second"])
         side, horizon = found.get("side"), found.get("horizon")
-        if side not in base.sides:
-            problems.append(f"primary side {side} (one of the ladder plan's {list(base.sides)})")
-        if not isinstance(horizon, int) or horizon not in base.horizons:
+        if side not in sides:
+            problems.append(f"primary side {side} (one of {sides})")
+        if not _integer(horizon) or horizon not in base.horizons:
             problems.append(
-                f"primary horizon {horizon} (one of the ladder plan's {list(base.horizons)})"
+                f"primary horizon {horizon} (an integer, one of the ladder plan's "
+                f"{list(base.horizons)})"
             )
     if problems:
         raise ValueError(f"{path}: unknown or invalid: {', '.join(problems)}")
@@ -128,7 +201,12 @@ def parse(path: Path, ladder_path: Path, texts: tuple[str, str]) -> Plan:
 
 def snapshot(path: Path = PLAN) -> tuple[Plan, dict[str, Any], tuple[str, str]]:
     text = path.read_text(encoding="utf-8")
-    ladder_path = (path.parent / str(tomllib.loads(text)["ladder"])).resolve()
+    named = tomllib.loads(text).get("ladder")
+    if not _text(named):
+        raise ValueError(f"{path}: unknown or invalid: ladder must name the ladder plan's file")
+    ladder_path = (path.parent / str(named)).resolve()
+    if not ladder_path.is_file():
+        raise ValueError(f"{path}: unknown or invalid: ladder: no file {ladder_path}")
     texts = (text, ladder_path.read_text(encoding="utf-8"))
     plan = parse(path, ladder_path, texts)
     records = [
@@ -157,7 +235,17 @@ def given(plan: Plan, arms: Sequence[tuple[str, str]], data_dir: Path) -> dict[s
     return out
 
 
-def finished(run_dir: Path, what: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _read(path: Path, what: str) -> bytes:
+    if not path.is_file():
+        raise ValueError(f"{what}: {path} is missing")
+    return path.read_bytes()
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def finished(run_dir: Path, what: str, domain: str) -> tuple[dict[str, Any], dict[str, Any]]:
     if not (run_dir / "manifest.json").is_file():
         raise ValueError(f"{what}: no run at {run_dir}")
     if not (run_dir / "complete.json").is_file():
@@ -165,76 +253,160 @@ def finished(run_dir: Path, what: str) -> tuple[dict[str, Any], dict[str, Any]]:
     complete = io.read_json(run_dir / "complete.json")
     if complete.get("clean") is not True:
         raise ValueError(f"{what}: complete.json does not mark {run_dir.name} clean")
-    return io.read_json(run_dir / "manifest.json"), complete
+    manifest = io.read_json(run_dir / "manifest.json")
+    if manifest.get("run_id") != run_dir.name:
+        raise ValueError(
+            f"{what}: {run_dir.name} records run id {manifest.get('run_id')}, not its folder's"
+        )
+    if manifest.get("domain") != domain:
+        raise ValueError(
+            f"{what}: {run_dir.name} is a {manifest.get('domain')} run, not a {domain} run"
+        )
+    return manifest, complete
 
 
-def _code(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    producer = manifest.get("producer") or {}
+def clean_code(producer: Any, what: str) -> None:
+    producer = producer if isinstance(producer, Mapping) else {}
+    if not producer.get("git_sha"):
+        raise ValueError(f"{what} records no commit for its code")
+    if producer.get("dirty") is not False:
+        raise ValueError(f"{what} was made by code with uncommitted changes")
+
+
+def _code(producer: Mapping[str, Any], params: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "git_sha": producer.get("git_sha"),
         "dirty": producer.get("dirty"),
-        "uv_lock_sha256": (manifest["params"].get("code") or {}).get("uv_lock_sha256"),
+        "uv_lock_sha256": (params.get("code") or {}).get("uv_lock_sha256"),
     }
 
 
-def provenance(arm: Arm, run_dir: Path, data_dir: Path, made: Mapping[str, str]) -> dict[str, Any]:
-    what = f"arm {arm.name}"
-    manifest, complete = finished(run_dir, what)
-    domain = manifest.get("domain")
-    if domain != KINDS[arm.kind]:
-        raise ValueError(f"{what}: {run_dir.name} is a {domain} run, not a {KINDS[arm.kind]} run")
-    params = manifest["params"]
-    record: dict[str, Any] = {"run": manifest["run_id"], "kind": arm.kind}
-    if arm.kind == "scores":
-        model, variant = params.get("model"), params.get("variant")
-        if (model, variant) != (arm.model, arm.variant):
-            raise ValueError(
-                f"{what}: {run_dir.name} scores {model} on {variant}, not {arm.model} on "
-                f"{arm.variant}"
-            )
-        seq_dir = data_dir / "panel-sequence" / str(params.get("sequence_run"))
-        seq_manifest, seq_complete = finished(
-            seq_dir, f"{what}: the sequence run of {run_dir.name}"
+def plans_of(
+    run_dir: Path,
+    complete: Mapping[str, Any],
+    params: Mapping[str, Any],
+    ladder_sha: str,
+    what: str,
+) -> tuple[str, str]:
+    files = complete["files"]
+    texts = []
+    for name, key in (("plan.toml", "plan"), ("ladder.toml", "ladder_plan")):
+        data = _read(run_dir / name, what)
+        if name not in files or _digest(data) != files[name]:
+            raise ValueError(f"{what}: {run_dir / name}: its sha256 differs from complete.json's")
+        if (params.get(key) or {}).get("sha256") != files[name]:
+            raise ValueError(f"{what}: {run_dir.name}'s manifest records another {name}")
+        texts.append(data.decode("utf-8"))
+    if files["ladder.toml"] != ladder_sha:
+        raise ValueError(
+            f"{what}: {run_dir.name}'s ladder.toml is not the comparison's ladder plan"
         )
-        if seq_manifest.get("domain") != "panel-sequence":
-            raise ValueError(f"{what}: {seq_dir.name} is not a sequence run")
-        source = seq_manifest["params"]
-        saved, used = source.get("encoders") or {}, params.get("encoders") or {}
-        if not used or any(
-            saved.get(k) != v or seq_complete["files"].get(k) != v for k, v in used.items()
-        ):
+    return texts[0], texts[1]
+
+
+def sequence_dir(value: Any, data_dir: Path, what: str) -> Path:
+    base = (data_dir / "panel-sequence").resolve()
+    if not (isinstance(value, str) and RUN_ID.fullmatch(value)):
+        raise ValueError(f"{what}: sequence run {value!r} is not a run id")
+    path = base / value
+    if path.resolve().parent != base:
+        raise ValueError(f"{what}: sequence run {value!r} lies outside {base}")
+    return path
+
+
+def scores_chain(
+    arm: Arm, run_dir: Path, params: Mapping[str, Any], data_dir: Path, ladder_sha: str, what: str
+) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    model, variant = params.get("model"), params.get("variant")
+    if (model, variant) != (arm.model, arm.variant):
+        raise ValueError(
+            f"{what}: {run_dir.name} scores {model} on {variant}, not {arm.model} on {arm.variant}"
+        )
+    seq_dir = sequence_dir(params.get("sequence_run"), data_dir, what)
+    link = f"{what}: the sequence run of {run_dir.name}"
+    seq_manifest, seq_complete = finished(seq_dir, link, "panel-sequence")
+    source = seq_manifest["params"]
+    clean_code(seq_manifest.get("producer"), f"{link}, {seq_dir.name},")
+    trained = seq_manifest.get("producer")
+    if "sources" in source or "pieces_producer" in source:
+        trained = source.get("pieces_producer")
+        clean_code(trained, f"{link}: the runs merged into {seq_dir.name}")
+    plan_text, ladder_text = plans_of(seq_dir, seq_complete, source, ladder_sha, link)
+    plan = sequence.load(seq_dir / "plan.toml", seq_dir / "ladder.toml", (plan_text, ladder_text))
+    expected = sequence.cells(dataclasses.replace(plan, variants=(variant,), models=(model,)))
+    saved, used = source.get("encoders") or {}, params.get("encoders") or {}
+    if set(used) != expected:
+        raise ValueError(
+            f"{what}: the models {run_dir.name} scored are not every {model} on {variant} of "
+            f"sequence run {seq_dir.name}'s plan: {len(set(used) - expected)} others, "
+            f"{len(expected - set(used))} missing"
+        )
+    for key, digest in sorted(used.items()):
+        if saved.get(key) != digest or seq_complete["files"].get(key) != digest:
             raise ValueError(
                 f"{what}: the models {run_dir.name} scored are not those of sequence run "
                 f"{seq_dir.name}"
             )
-        record |= {
-            "model": model,
-            "variant": variant,
-            "readout": params.get("readout"),
-            "c": params.get("c"),
-            "selection": params.get("selection"),
-            "sequence_run": seq_manifest["run_id"],
-            "sequence_code": _code(seq_manifest),
-        }
-        chain = [(run_dir.name, params), (seq_dir.name, source)]
+        if _digest(_read(seq_dir / key, link)) != digest:
+            raise ValueError(f"{link}: {seq_dir / key}: its sha256 differs from complete.json's")
+    record = {
+        "model": model,
+        "variant": variant,
+        "readout": params.get("readout"),
+        "c": params.get("c"),
+        "seeds": sorted(plan.seeds),
+        "chosen": None if params.get("selection") is None else True,
+        "selection": params.get("selection"),
+        "sequence_run": seq_manifest["run_id"],
+        "sequence_code": _code(seq_manifest.get("producer") or {}, source),
+        "trained_by": _code(trained or {}, source),
+    }
+    return record, seq_dir, source
+
+
+def classical_chain(
+    arm: Arm,
+    run_dir: Path,
+    params: Mapping[str, Any],
+    complete: Mapping[str, Any],
+    ladder_sha: str,
+    what: str,
+) -> dict[str, Any]:
+    exported = params.get("exported") or {}
+    if arm.export not in exported:
+        raise ValueError(f"{what}: {run_dir.name} exported no {arm.export}")
+    plans_of(run_dir, complete, params, ladder_sha, what)
+    config = exported[arm.export]
+    selection = params.get("selection")
+    return {
+        "export": arm.export,
+        "model": config["model"],
+        "variant": config["variant"],
+        "readout": config["readout"],
+        "c": config["c"],
+        "chosen": selection is not None,
+        "selection": None
+        if selection is None
+        else {"metric": selection["metric"], **selection["chosen"][arm.export]},
+        "fixed": params.get("fixed"),
+    }
+
+
+def provenance(
+    arm: Arm, run_dir: Path, data_dir: Path, made: Mapping[str, str], ladder_sha: str
+) -> dict[str, Any]:
+    what = f"arm {arm.name}"
+    manifest, complete = finished(run_dir, what, KINDS[arm.kind])
+    clean_code(manifest.get("producer"), f"{what}: {run_dir.name}")
+    params = manifest["params"]
+    record: dict[str, Any] = {"run": manifest["run_id"], "kind": arm.kind}
+    chain = [(run_dir.name, params)]
+    if arm.kind == "scores":
+        found, seq_dir, source = scores_chain(arm, run_dir, params, data_dir, ladder_sha, what)
+        record |= found
+        chain.append((seq_dir.name, source))
     else:
-        exported = params.get("exported") or {}
-        if arm.export not in exported:
-            raise ValueError(f"{what}: {run_dir.name} exported no {arm.export}")
-        config = exported[arm.export]
-        selection = params.get("selection")
-        record |= {
-            "export": arm.export,
-            "model": config["model"],
-            "variant": config["variant"],
-            "readout": config["readout"],
-            "c": config["c"],
-            "selection": None
-            if selection is None
-            else {"metric": selection["metric"], **selection["chosen"][arm.export]},
-            "fixed": params.get("fixed"),
-        }
-        chain = [(run_dir.name, params)]
+        record |= classical_chain(arm, run_dir, params, complete, ladder_sha, what)
     for name, p in chain:
         for key in ("inputs_run", "labels_run"):
             if p.get(key) != made[key]:
@@ -242,12 +414,18 @@ def provenance(arm: Arm, run_dir: Path, data_dir: Path, made: Mapping[str, str])
                     f"{what}: {name} was made from {key.replace('_', ' ')} {p.get(key)}, not "
                     f"{made[key]}"
                 )
+    for key, want in arm.pins.items():
+        got = record.get(key)
+        if (sorted(got) if key == "seeds" and isinstance(got, list) else got) != (
+            sorted(want) if key == "seeds" else want
+        ):
+            raise ValueError(f"{what}: {run_dir.name} has {key} {got}, not the plan's {want}")
     holder, held = chain[-1]
     record["made_from"] = {
         "run": holder,
         **{k: held.get(k) for k in ("inputs", "labels_grid", "ladder_plan")},
     }
-    record["code"] = _code(manifest)
+    record["code"] = _code(manifest.get("producer") or {}, params)
     record["files"] = {
         s: {"file": arm.file(s), "sha256": complete["files"][arm.file(s)]}
         for s in ladder.SCHEMES
@@ -277,6 +455,14 @@ def same_sources(
         raise ValueError(f"{what} was made under another ladder plan")
 
 
+def score_bytes(name: str, path: Path, digest: str) -> bytes:
+    data = _read(path, f"arm {name}")
+    store.refuse_held_back(path, "hour", data)
+    if _digest(data) != digest:
+        raise ValueError(f"arm {name}: {path}: its sha256 differs from complete.json's")
+    return data
+
+
 def aligned(
     table: pa.Table,
     name: str,
@@ -302,6 +488,52 @@ def aligned(
                 f"{given - len(ts)} rows that are not the ladder's"
             )
     return scores
+
+
+def on_complete(difference: np.ndarray, whole: np.ndarray) -> dict[str, Any]:
+    nan = np.full(1, np.nan)
+    stats = ladder.comparison(np.nan, nan, nan, difference[whole], np.nan)
+    return {f"{k}_complete": stats[k] for k in COMPLETE}
+
+
+def evaluated(
+    h: ladder.Horizon,
+    base: ladder.Plan,
+    horizon: int,
+    names: Sequence[str],
+    pairs: Sequence[tuple[str, str]],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    kept: dict[str, Any] = {}
+    score_rows, fold_rows, rows = ladder.evaluate(h, base, horizon, names, pairs, kept)
+    folds, boot, whole = kept["folds"], kept["boot"], kept["complete"]
+    out = []
+    for first, second in pairs:
+        mine = [r for r in rows if (r["first"], r["second"]) == (first, second)]
+        for row in mine:
+            side = row["side"]
+            difference = boot[(first, side)] - boot[(second, side)]
+            out.append(row | on_complete(difference, whole[side]))
+        if not {"long", "short"} <= set(base.sides):
+            continue
+        by_side = {r["side"]: r for r in mine}
+        a = (folds[(first, "long")] + folds[(first, "short")]) / 2
+        b = (folds[(second, "long")] + folds[(second, "short")]) / 2
+        difference = (
+            (boot[(first, "long")] - boot[(second, "long")])
+            + (boot[(first, "short")] - boot[(second, "short")])
+        ) / 2
+        both = whole["long"] & whole["short"]
+        estimate = (by_side["long"]["estimate"] + by_side["short"]["estimate"]) / 2
+        row = {
+            "horizon": horizon,
+            "scheme": h.scheme,
+            "side": COMPOSITE,
+            "first": first,
+            "second": second,
+            **ladder.comparison(estimate, a, b, difference, float(both.mean())),
+        }
+        out.append(row | on_complete(difference, both))
+    return score_rows, fold_rows, out
 
 
 def compare(
@@ -350,7 +582,7 @@ def compare(
                 block[mine],
                 scores,
             )
-            score_rows, fold_rows, pairs = ladder.evaluate(h, base, horizon, plan.names, plan.pairs)
+            score_rows, fold_rows, pairs = evaluated(h, base, horizon, plan.names, plan.pairs)
             for row in pairs:
                 row["primary_pair"] = (row["first"], row["second"]) == plan.primary
                 row["primary"] = row["primary_pair"] and (scheme, row["side"], horizon) == (
@@ -385,32 +617,37 @@ def run(
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
     plan, records, (plan_text, ladder_text) = snapshot(plan_path)
+    ladder_sha = records["ladder_plan"]["sha256"]
     dirs = given(plan, arms, data_dir)
+    if not (inputs_dir / "manifest.json").is_file():
+        raise ValueError(f"no inputs run at {inputs_dir}")
     inputs_manifest = io.read_json(inputs_dir / "manifest.json")
     made = {
         "inputs_run": inputs_manifest["run_id"],
         "labels_run": inputs_manifest["params"]["labels_run"],
     }
-    found = {arm.name: provenance(arm, dirs[arm.name], data_dir, made) for arm in plan.arms}
+    found = {
+        arm.name: provenance(arm, dirs[arm.name], data_dir, made, ladder_sha) for arm in plan.arms
+    }
     schemes = [s for s in ladder.SCHEMES if all(s in r["files"] for r in found.values())]
     for record in found.values():
         record["files"] = {s: record["files"][s] for s in schemes}
-    paths = {
-        name: {s: dirs[name] / r["files"][s]["file"] for s in schemes} for name, r in found.items()
+    held = {
+        name: {
+            s: score_bytes(name, dirs[name] / r["files"][s]["file"], r["files"][s]["sha256"])
+            for s in schemes
+        }
+        for name, r in found.items()
     }
-    for per in paths.values():
-        for path in per.values():
-            store.refuse_held_back(path, "hour")
     values, grid, source = sequence.read_columns(inputs_dir, data_dir, plan.ladder.columns)
     for arm in plan.arms:
-        same_sources(arm, found[arm.name], source, records["ladder_plan"]["sha256"])
-    for name, per in paths.items():
-        for scheme, path in per.items():
-            if store.sha256(path) != found[name]["files"][scheme]["sha256"]:
-                raise ValueError(f"arm {name}: {path}: its sha256 differs from complete.json's")
+        same_sources(arm, found[arm.name], source, ladder_sha)
     tables = {
-        name: {s: ladder.external_table(path) for s, path in per.items()}
-        for name, per in paths.items()
+        name: {
+            s: ladder.external_table(dirs[name] / found[name]["files"][s]["file"], data)
+            for s, data in per.items()
+        }
+        for name, per in held.items()
     }
     out = compare(values, grid, plan, tables, schemes, log)
     seconds = time.perf_counter() - began
@@ -454,24 +691,39 @@ def _f(value: float, signed: bool = False) -> str:
     return f"{value:+.3f}" if signed else f"{value:.3f}"
 
 
-def _row(c: Mapping[str, Any]) -> str:
+def _row(c: Mapping[str, Any], suffix: str = "", label: str = "") -> str:
     return (
-        f"| {c['first']} - {c['second']} | {c['scheme']} | {c['horizon']} h | {c['side']} | "
-        f"{_f(c['estimate'], True)} | {_f(c['se'])} | {_f(c['se_quarters'])} | "
-        f"{_f(c['q025'], True)} | {_f(c['q05'], True)} | {_f(c['q975'], True)} | "
-        f"{_f(c['above_zero'])} | {_f(c['complete_draws'])} | "
+        f"| {c['first']} - {c['second']}{label} | {c['scheme']} | {c['horizon']} h | {c['side']} | "
+        f"{_f(c['estimate'], True)} | {_f(c['se' + suffix])} | {_f(c['se_quarters'])} | "
+        f"{_f(c['q025' + suffix], True)} | {_f(c['q05' + suffix], True)} | "
+        f"{_f(c['q975' + suffix], True)} | {_f(c['above_zero' + suffix])} | "
+        f"{_f(c['complete_draws'])} | {c['draws' + suffix]} | "
         f"{c['folds_above_zero']} of {c['folds']} |"
     )
+
+
+def _state(dirty: Any) -> str:
+    if dirty is False:
+        return "clean"
+    return "uncommitted changes" if dirty is True else "unknown"
 
 
 def code_states(found: Mapping[str, Mapping[str, Any]]) -> dict[str, tuple[Any, ...]]:
     out = {}
     for name, record in found.items():
-        for label, key in (("", "code"), (" (sequence run)", "sequence_code")):
+        for label, key in (
+            ("", "code"),
+            (" (sequence run)", "sequence_code"),
+            (" (trained by)", "trained_by"),
+        ):
             if key in record:
                 code = record[key]
                 out[f"{name}{label}"] = (code["git_sha"], code["dirty"], code["uv_lock_sha256"])
     return out
+
+
+def _configuration(record: Mapping[str, Any]) -> str:
+    return {True: "chosen by the rule", False: "fixed"}.get(record["chosen"], "none to choose")
 
 
 def report(
@@ -490,57 +742,58 @@ def report(
         f"plan `{records['plan']['file']}`, ladder plan `{records['ladder_plan']['file']}`. Every "
         f"arm's out-of-fold scores are scored on the ladder's rows of each scheme, horizon and "
         f"side; each pair is first minus second in the mean over quarters of the AUC inside each "
-        f"quarter. The interval is the ladder's joint block bootstrap ({base.block_days}-day "
-        f"blocks, {base.draws} draws, seed {base.seed}) with the same draws for every arm, "
-        f"conditional on the fitted models and the observed quarters. Columns as in the ladder's "
-        f"report.",
+        f"quarter. `{COMPOSITE}` is the mean of the long and short sides, draw by draw. The "
+        f"interval is the ladder's joint block bootstrap ({base.block_days}-day blocks within "
+        f"quarters, {base.draws} draws, seed {base.seed}) with the same draws for every arm and "
+        f"side, conditional on the fitted models and the observed quarters, so it carries no "
+        f"quarter-to-quarter or refitting variation; `se q` is the standard error over quarters. "
+        f"`> 0` is the share of draws above zero, not a p-value. `complete` is the share of draws "
+        f"in which every quarter has both classes; `draws` counts the draws used.",
         "",
         f"Wall time {_f(seconds / 60)} minutes.",
     ]
     header = [
         "| pair | scheme | horizon | side | estimate | se | se q | q2.5 | q5 | q97.5 | > 0 | "
-        "complete | folds > 0 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "complete | draws | folds > 0 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     lines += ["", "## Primary", ""]
     lines += [
         f"{plan.primary[0]} - {plan.primary[1]}, {PRIMARY_SCHEME}, {plan.side}, {plan.horizon} h, "
-        "as this plan names it. A development comparison between configurations chosen on the "
-        "development span is not evidence.",
+        "as this plan names it, then the same row on complete draws only. A development "
+        "comparison between configurations chosen on the development span is not evidence.",
         "",
         *header,
     ]
-    lines += [_row(c) for c in out["comparisons"] if c["primary"]]
+    for c in out["comparisons"]:
+        if c["primary"]:
+            lines += [_row(c), _row(c, "_complete", " (complete draws)")]
     lines += ["", "## Secondary", "", *header]
     lines += [_row(c) for c in out["comparisons"] if not c["primary"]]
     lines += ["", "## Arms", ""]
     lines += [
-        "| arm | run | kind | model | variant | readout | c | commit | uv.lock |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| arm | run | kind | model | variant | configuration | readout | c | commit | uv.lock |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, r in found.items():
         code = r["code"]
-        commit = f"{str(code['git_sha'])[:12]}{' (uncommitted changes)' if code['dirty'] else ''}"
         c = "-" if r["c"] is None else f"{r['c']:g}"
         lines.append(
             f"| {name} | `{r['run']}` | {r['kind']} | {r['model']} | {r['variant']} | "
-            f"{r['readout'] or '-'} | {c} | {commit} | {str(code['uv_lock_sha256'])[:12]} |"
+            f"{_configuration(r)} | {r['readout'] or '-'} | {c} | "
+            f"{str(code['git_sha'])[:12]} ({_state(code['dirty'])}) | "
+            f"{str(code['uv_lock_sha256'])[:12]} |"
         )
     states = code_states(found)
     lines.append("")
     if len(set(states.values())) > 1:
         lines.append(
-            "The arms' runs were not all made by the same code (commit, uncommitted changes, "
-            "uv.lock): "
-            + "; ".join(
-                f"{k} {v[0]}, {'dirty' if v[1] else 'clean'}, {v[2]}" for k, v in states.items()
-            )
+            "The arms' runs were not all made by the same code (commit, state, uv.lock): "
+            + "; ".join(f"{k} {v[0]}, {_state(v[1])}, {v[2]}" for k, v in states.items())
             + "."
         )
     else:
         lines.append("Every arm's runs were made by the same commit and uv.lock.")
-    if any(v[1] is not False for v in states.values()):
-        lines.append("Some were made by code with uncommitted changes or no recorded commit.")
     lines += ["", "## Fold-mean AUC", ""]
     lines += ["| arm | scheme | horizon | side | fold mean | folds |", "|---|---|---|---|---|---|"]
     for s in out["scores"]:

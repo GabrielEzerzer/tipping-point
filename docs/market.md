@@ -1107,53 +1107,101 @@ lacks. It writes nothing when it refuses. Two runs on the same inputs write iden
 
 `python -m tipping_point.panel compare --inputs <run> --arm <name>=<run> ...` scores exported
 out-of-fold score files as pairs. Its plan (`--plan`, default `panel/compare.toml`) names a ladder
-plan, the arms and the pairs. An arm is a `scores` run, given by its model and variant, or a
-`classical` run, given by the name it was exported under. Each pair is first minus second, and
-exactly one pair is marked primary, with the side and horizon it is read on. Every arm in the plan
-needs exactly one `--arm`, given as a run id or a run folder, and two arms may name the same run.
+plan, the arms and the pairs. An arm is a `scores` run, given by its `model` and `variant`, or a
+`classical` run, given by its `export`, the name the run exported its scores under. An arm may also
+pin its configuration, and the run is refused when the arm's run differs from a pin: a `scores` arm
+may pin `readout`, `c` and `seeds` (the sequence plan's seeds, as a list), and a `classical` arm may
+pin `model` (`rung` or `window`), `readout`, `c` and `chosen` (true when the classical run chose the
+configuration by its rule, false when it was exported with `--fixed`). Each pair is first minus
+second, and exactly one pair is marked primary, with the side and horizon it is read on. Every arm in
+the plan needs exactly one `--arm`, given as a run id or a run folder, and two arms may name the same
+run.
 
 For every horizon and every scheme all the arms hold, each arm's scores are aligned to the ladder's
 common rows of that scheme. Each arm is scored, and each pair compared, by the ladder's own code: the
 mean over quarters of the AUC inside each quarter, and the ladder's joint block bootstrap, with the
-same draws for every arm. Comparing an arm with a copy of itself gives zero, and swapping a pair
-flips the sign of its estimate. Two rungs exported by `classical --fixed` at the ladder plan's c
-give the ladder's own comparison of those rungs. The run writes the tables `scores`, `folds`,
-`comparisons` and `rows` in the ladder's columns, with `primary_pair` and `primary` added to the
-comparisons. Only the primary pair on the `forward` scheme, at the primary side and horizon, is
-marked `primary`, and the report leads with that row.
+same draws for every arm and side. Comparing an arm with a copy of itself gives zero, and swapping a
+pair flips the sign of its estimate. Two rungs exported by `classical --fixed` at the ladder plan's c
+give the ladder's own comparison of those rungs.
+
+Besides the ladder's sides, each pair gets a `long+short` row, the mean of its long and short sides.
+Its estimate is the mean of the two sides' estimates, which is the quantity both selection rules
+maximise (the mean of the long and short fold-mean AUCs). Its bootstrap value in each draw is the mean
+of the two sides' differences in that draw. The sides share the draws, so the composite is paired, and
+its standard error, quantiles, share above zero and per-quarter differences come from those values in
+the same columns. The shipped plan reads its primary pair on `long+short` at 24 h rather than on
+`any`, because `any` depends on how a model's long and short heads are calibrated against each other:
+an arm can win on long and on short and lose on `any`. The `any` rows are kept as they are.
+
+The ladder averages each draw over the quarters that have both classes in that draw, so a draw that
+loses a quarter estimates a different quantity. `complete_draws` is the share of draws that lose no
+quarter, and for `long+short` a draw counts as complete only when it is complete on both sides. Every
+comparison row also carries `se_complete`, `q025_complete`, `q05_complete`, `q975_complete`,
+`above_zero_complete` and `draws_complete`, the same statistics on complete draws only. The report
+puts the primary row on complete draws right under the primary row, so a reader sees whether
+incomplete draws moved the interval.
+
+The run writes the tables `scores`, `folds`, `comparisons` and `rows` in the ladder's columns, with
+these columns and `primary_pair` and `primary` added to the comparisons. Only the primary pair on the
+`forward` scheme, at the primary side and horizon, is marked `primary`, and the report leads with
+that row. The report's arm table gives every arm's run, model, variant, readout, c, whether the
+configuration was chosen by the rule or fixed, and the code that made it.
 
 Before reading any score the command checks that each arm comes from the inputs run, labels grid and
 ladder plan of the comparison. It refuses:
 
-- an arm the plan lacks, one given twice and one not given;
-- a run that is missing, has no `complete.json` or is not marked clean, and a run of another kind;
-- a `scores` run of another model or variant, one whose sequence run is missing or not clean, and
-  one whose recorded models are not those its sequence run saved;
-- a `classical` run that did not export the arm's name;
+- an arm the plan lacks, one given twice and one not given, and an inputs run that is missing;
+- a run that is missing, has no `complete.json` or is not marked clean, whose manifest gives another
+  run id than its folder's name, or that is of another kind;
+- a run made by code with no recorded commit or with uncommitted changes; for a `scores` arm, also
+  its sequence run, and for a merged sequence run, the runs it merged. Different clean commits
+  across arms are allowed: the manifest records each, and the report names them;
+- a `scores` run of another model or variant, one whose sequence run is not a plain run id in
+  `<data dir>/panel-sequence/`, is missing, is not clean or records another run id, and one whose
+  models are not exactly that model and variant for every scheme, scored quarter and seed of the
+  sequence run's plan, no fewer and no others;
+- a model file the `scores` run used that differs from the sha256 the sequence run's manifest and
+  `complete.json` record, or that is missing;
+- a `classical` run that did not export the arm's `export`;
 - a run, or a `scores` run's sequence run, made from another inputs run or labels run;
-- a run whose recorded inputs table or labels grid has another sha256 than the comparison's, and one
-  made under a ladder plan with another sha256 than the plan's ladder plan;
-- a run without `forward` scores;
-- a score file that reaches the held-back span (read from its Parquet metadata before it is hashed)
-  or whose sha256 differs from its run's `complete.json`;
+- a run whose recorded inputs table or labels grid has another sha256 than the comparison's;
+- a source run (the `classical` run, or the sequence run behind a `scores` run) whose `ladder.toml`
+  is not the comparison's ladder plan by its `complete.json`, whose `plan.toml` or `ladder.toml`
+  differs on disk from its `complete.json`, or whose manifest records another;
+- a run without `forward` scores, and a run that differs from a pin;
+- a score file that is missing, that reaches the held-back span, or whose sha256 differs from its
+  run's `complete.json`. Each file is read once: the held-back check reads the metadata of the bytes
+  read, those bytes are hashed, and the table is parsed from the same bytes;
 - a file that fails the ladder's checks of an `[external]` file, and one holding any row that is not
   one of the ladder's: another coin or hour, a horizon or side the ladder plan lacks, or a row given
   twice.
 
-It also refuses a plan with no arms, no pairs, an arm named twice, a pair that names an unknown arm,
-pairs an arm with itself or is listed twice in either order, a number of primary pairs other than
-one, or a primary side or horizon the ladder plan lacks. It writes nothing when it refuses.
+It also refuses a plan with an unknown key at any level, a value of the wrong type (a horizon must
+be an integer, so `true` is refused), an empty export, no `ladder`, no arms, no pairs, an arm named
+twice, a pair that names an unknown arm, pairs an arm with itself or is listed twice in either order,
+a number of primary pairs other than one, or a primary side or horizon the ladder plan lacks. It
+writes nothing when it refuses. A missing file in the chain ends as a refusal that names the file.
 
 The command reads the plan and its ladder plan once each, recording their sha256 and copying both
-into the run. The manifest records the primary pair and, for each arm, its run, kind, model, variant,
-readout, c, selection, the run it was made from, its files' sha256 and the code that made it (commit,
-uncommitted changes and `uv.lock`, and for a `scores` run its sequence run's too). Arms made by
-different code are compared, and the report says so. Two runs on the same arms write identical
-tables.
+into the run. The manifest records the primary pair and, for each arm, its run, kind, model,
+variant, readout, c, seeds, whether it was chosen by the rule, its selection, the run it was made
+from, its files' sha256 and the code that made it (commit, state and `uv.lock`). For a `scores` arm
+it also records its sequence run's code and the code that trained the models, which for a merged
+sequence run is the merged runs' commit. Two runs on the same arms, given in any order, write
+identical tables.
+
+The interval has limits. The bootstrap resamples 14-day blocks within quarters with the fitted models
+and the observed quarters held fixed, so its interval carries no quarter-to-quarter or refitting
+variation; the per-quarter differences and their standard error are in the same row for that
+reason. `above_zero` is the share of draws above zero, not a p-value. The checks guard against runs
+mixed up by accident and against a run folder that changed after it was written. They cannot catch
+a run folder whose `manifest.json` and `complete.json` were both rewritten, since the store is not
+signed.
 
 The primary pair, its side and its horizon must be fixed in the study's written plan before any
-held-back day is opened. The shipped `compare.toml` is the development comparison: `jepa` against
-`classical` on `full`, `any` side, 24 h, as a placeholder, with JEPA against its twin and the
-supervised model, each against the classical arm, the `vol` variant, and `classic` as secondary
-pairs. It is not the frozen test. A development comparison between configurations chosen on the
-development span is not evidence.
+held-back day is opened, and the frozen plan pins every arm's configuration. The shipped
+`compare.toml` is the development comparison, without pins: `jepa` against `classical` on `full`,
+`long+short`, 24 h, as a placeholder, with JEPA against its twin and the supervised model, each
+against the classical arm, the `vol` variant, and `classic` as secondary pairs. It is not the frozen
+test. A development comparison between configurations chosen on the development span is not
+evidence.

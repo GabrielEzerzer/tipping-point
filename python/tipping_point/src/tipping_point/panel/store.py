@@ -73,8 +73,8 @@ def write(
 UNIT_NS = {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}
 
 
-def refuse_held_back(path: Path, column: str = "ts_ns") -> None:
-    file = pq.ParquetFile(path)
+def refuse_held_back(path: Path, column: str = "ts_ns", data: bytes | None = None) -> None:
+    file = pq.ParquetFile(path if data is None else pa.BufferReader(data))
     schema = file.schema_arrow
     if column not in schema.names:
         raise span.HeldBackError(f"{path}: it has no {column} column")

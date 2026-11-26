@@ -43,7 +43,7 @@ export = "classic"
 first = "jepa"
 second = "classical"
 primary = true
-side = "any"
+side = "long+short"
 horizon = 24
 
 [[pairs]]
