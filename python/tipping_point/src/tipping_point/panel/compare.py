@@ -261,7 +261,16 @@ def bound_manifest(
     return json.loads(data.decode("utf-8")), recorded is not None
 
 
-def finished(run_dir: Path, what: str, domain: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
+def unbound_refused(run_dir: Path, what: str) -> ValueError:
+    return ValueError(
+        f"{what}: {run_dir.name} records no manifest sha256 in its complete.json (written before "
+        f"runs were bound); --unbound accepts it for a development comparison, never a test"
+    )
+
+
+def finished(
+    run_dir: Path, what: str, domain: str, unbound: bool
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
     if not (run_dir / "manifest.json").is_file():
         raise ValueError(f"{what}: no run at {run_dir}")
     if not (run_dir / "complete.json").is_file():
@@ -278,6 +287,8 @@ def finished(run_dir: Path, what: str, domain: str) -> tuple[dict[str, Any], dic
         raise ValueError(
             f"{what}: {run_dir.name} is a {manifest.get('domain')} run, not a {domain} run"
         )
+    if not (bound or unbound):
+        raise unbound_refused(run_dir, what)
     return manifest, complete, bound
 
 
@@ -331,7 +342,13 @@ def sequence_dir(value: Any, data_dir: Path, what: str) -> Path:
 
 
 def scores_chain(
-    arm: Arm, run_dir: Path, params: Mapping[str, Any], data_dir: Path, ladder_sha: str, what: str
+    arm: Arm,
+    run_dir: Path,
+    params: Mapping[str, Any],
+    data_dir: Path,
+    ladder_sha: str,
+    what: str,
+    unbound: bool,
 ) -> tuple[dict[str, Any], Path, dict[str, Any], bool]:
     model, variant = params.get("model"), params.get("variant")
     if (model, variant) != (arm.model, arm.variant):
@@ -340,13 +357,20 @@ def scores_chain(
         )
     seq_dir = sequence_dir(params.get("sequence_run"), data_dir, what)
     link = f"{what}: the sequence run of {run_dir.name}"
-    seq_manifest, seq_complete, bound = finished(seq_dir, link, "panel-sequence")
+    seq_manifest, seq_complete, bound = finished(seq_dir, link, "panel-sequence", unbound)
     source = seq_manifest["params"]
     clean_code(seq_manifest.get("producer"), f"{link}, {seq_dir.name},")
     trained = seq_manifest.get("producer")
     if "sources" in source or "pieces_producer" in source:
         trained = source.get("pieces_producer")
         clean_code(trained, f"{link}: the runs merged into {seq_dir.name}")
+        if source.get("pieces_bound") is not True:
+            bound = False
+            if not unbound:
+                raise ValueError(
+                    f"{link}: the runs merged into {seq_dir.name} were not all bound; "
+                    f"--unbound accepts it for a development comparison, never a test"
+                )
     plan_text, ladder_text = plans_of(seq_dir, seq_complete, source, ladder_sha, link)
     plan = sequence.load(seq_dir / "plan.toml", seq_dir / "ladder.toml", (plan_text, ladder_text))
     expected = sequence.cells(dataclasses.replace(plan, variants=(variant,), models=(model,)))
@@ -411,17 +435,22 @@ def classical_chain(
 
 
 def provenance(
-    arm: Arm, run_dir: Path, data_dir: Path, made: Mapping[str, str], ladder_sha: str
+    arm: Arm,
+    run_dir: Path,
+    data_dir: Path,
+    made: Mapping[str, str],
+    ladder_sha: str,
+    unbound: bool = False,
 ) -> dict[str, Any]:
     what = f"arm {arm.name}"
-    manifest, complete, bound = finished(run_dir, what, KINDS[arm.kind])
+    manifest, complete, bound = finished(run_dir, what, KINDS[arm.kind], unbound)
     clean_code(manifest.get("producer"), f"{what}: {run_dir.name}")
     params = manifest["params"]
     record: dict[str, Any] = {"run": manifest["run_id"], "kind": arm.kind}
     chain = [(run_dir.name, params)]
     if arm.kind == "scores":
         found, seq_dir, source, seq_bound = scores_chain(
-            arm, run_dir, params, data_dir, ladder_sha, what
+            arm, run_dir, params, data_dir, ladder_sha, what, unbound
         )
         record |= found
         bound = bound and seq_bound
@@ -658,6 +687,7 @@ def run(
     plan_path: Path,
     tag: str,
     log: LOG = lambda line: None,
+    unbound: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
     plan, records, (plan_text, ladder_text) = snapshot(plan_path)
@@ -667,12 +697,15 @@ def run(
         raise ValueError(f"no inputs run at {inputs_dir}")
     inputs_complete = json.loads(_read(inputs_dir / "complete.json", "inputs run").decode("utf-8"))
     inputs_manifest, inputs_bound = bound_manifest(inputs_dir, inputs_complete, "inputs run")
+    if not (inputs_bound or unbound):
+        raise unbound_refused(inputs_dir, "inputs run")
     made = {
         "inputs_run": inputs_manifest["run_id"],
         "labels_run": inputs_manifest["params"]["labels_run"],
     }
     found = {
-        arm.name: provenance(arm, dirs[arm.name], data_dir, made, ladder_sha) for arm in plan.arms
+        arm.name: provenance(arm, dirs[arm.name], data_dir, made, ladder_sha, unbound)
+        for arm in plan.arms
     }
     schemes = [s for s in ladder.SCHEMES if all(s in r["files"] for r in found.values())]
     for record in found.values():
@@ -684,7 +717,9 @@ def run(
     ):
         if not path.is_file():
             raise ValueError(f"inputs run: {path} is missing")
-    values, grid, source = sequence.read_columns(inputs_dir, data_dir, plan.ladder.columns)
+    values, grid, source = sequence.read_columns(
+        inputs_dir, data_dir, plan.ladder.columns, (inputs_manifest, inputs_complete)
+    )
     for arm in plan.arms:
         same_sources(arm, found[arm.name], source, ladder_sha)
     held = {
@@ -713,6 +748,7 @@ def run(
     run_params = {
         **source,
         **records,
+        "unbound_allowed": unbound,
         "inputs_bound": inputs_bound,
         "schemes": schemes,
         "primary": primary,
@@ -729,7 +765,7 @@ def run(
         ),
     }
     texts = {
-        "report.md": report(out, plan, source, records, found, seconds, inputs_bound),
+        "report.md": report(out, plan, source, records, found, seconds, inputs_bound, unbound),
         "plan.toml": plan_text,
         "ladder.toml": ladder_text,
     }
@@ -787,6 +823,7 @@ def report(
     found: Mapping[str, Mapping[str, Any]],
     seconds: float,
     inputs_bound: bool,
+    unbound: bool = False,
 ) -> str:
     base = plan.ladder
     lines = [
@@ -814,6 +851,12 @@ def report(
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     lines += ["", "## Primary", ""]
+    if unbound:
+        lines += [
+            "This comparison accepted runs whose manifests are not bound (--unbound), so it is "
+            "not a test.",
+            "",
+        ]
     lines += [
         f"{plan.primary[0]} - {plan.primary[1]}, {PRIMARY_SCHEME}, {plan.side}, {plan.horizon} h, "
         "as this plan names it, then the same row on complete draws only. A development "

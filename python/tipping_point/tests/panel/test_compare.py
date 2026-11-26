@@ -679,6 +679,7 @@ def test_a_sequence_arm_and_a_window_arm_compare_end_to_end(small: dict[str, Any
     report = text.split("## Arms")[1]
     assert "| jepa | vol | chosen by the rule |" in report and "| window | vol | fixed |" in report
     assert report.count(" | yes |") == 2 and "The inputs run is bound." in report
+    assert params(run_dir)["unbound_allowed"] is False and "--unbound" not in text
     file = (scores / "forward.parquet").as_posix()
     external = f'\n[external]\nname = "jepa"\npath = "{file}"\nscheme = "forward"\n'
     (data / "ladder-ext.toml").write_text(LADDER + external, encoding="utf-8")
@@ -823,7 +824,10 @@ def test_a_scores_arm_that_is_not_its_sequence_runs_models_is_refused(
     assert not tag_runs(data, "x")
     clean = {"name": "tipping_point.panel", "git_sha": "e" * 40, "dirty": False}
     trained = sequence_copy(
-        "trained", lambda d: edit(d, "manifest.json", {"sources": [], "pieces_producer": clean})
+        "trained",
+        lambda d: edit(
+            d, "manifest.json", {"sources": [], "pieces_producer": clean, "pieces_bound": True}
+        ),
     )
     copy = copied(scores, tmp_path / "copies")
     via(trained)(copy)
@@ -1084,56 +1088,150 @@ def test_a_manifest_changed_after_its_run_was_written_is_refused(
     def arms(vol: Path) -> list[tuple[str, str]]:
         return [("full", str(panel["full"])), ("vol", str(vol))]
 
-    with pytest.raises(ValueError, match=r"arm vol: .*manifest\.json: its sha256 differs"):
-        compare.run(arms(forged), panel["inputs"], data, panel["paired"], "x")
     moved = copied(panel["inputs"], tmp_path / "inputs")
     tamper(moved, {"note": 1})
-    with pytest.raises(ValueError, match=r"inputs run: .*manifest\.json: its sha256 differs"):
-        compare.run(arms(panel["vol"]), moved, data, panel["paired"], "x")
+    seq, path, data_small = small["seq"], small["paired"], small["data"]
+    dest = data_small / "panel-sequence" / f"{seq.name}-changed"
+    shutil.copytree(seq, dest)
+    relabel(dest)
+    tamper(dest, {"threads": 2})
+    changed = copied(small["scores"], tmp_path / "scores")
+    edit(changed, "manifest.json", {"sequence_run": dest.name})
+    for allowed in (False, True):
+        with pytest.raises(ValueError, match=r"arm vol: .*manifest\.json: its sha256 differs"):
+            compare.run(arms(forged), panel["inputs"], data, panel["paired"], "x", unbound=allowed)
+        with pytest.raises(ValueError, match=r"inputs run: .*manifest\.json: its sha256 differs"):
+            compare.run(arms(panel["vol"]), moved, data, panel["paired"], "x", unbound=allowed)
+        with pytest.raises(
+            ValueError, match=r"the sequence run of .*manifest\.json: its sha256 differs"
+        ):
+            compare.run(
+                [("jepa", str(changed)), ("window", str(small["window"]))],
+                small["inputs"],
+                data_small,
+                path,
+                "x",
+                unbound=allowed,
+            )
+    assert not tag_runs(data, "x") and not tag_runs(data_small, "x")
+
+
+def test_runs_whose_manifests_are_not_bound_are_refused_unless_allowed(
+    panel: dict[str, Any], small: dict[str, Any], tmp_path: Path
+) -> None:
+    data = panel["data"]
+    old = copied(panel["vol"], tmp_path / "copies")
+    unbind(old)
+    old_inputs = copied(panel["inputs"], tmp_path / "inputs")
+    unbind(old_inputs)
+    arms = [("full", str(panel["full"])), ("vol", str(old))]
+    bound = [("full", str(panel["full"])), ("vol", str(panel["vol"]))]
+    not_bound = "records no manifest sha256 in its complete.json"
+    with pytest.raises(ValueError, match=f"arm vol: {old.name} {not_bound}"):
+        compare.run(arms, panel["inputs"], data, panel["paired"], "x")
+    with pytest.raises(ValueError, match=f"inputs run: {old_inputs.name} {not_bound}"):
+        compare.run(bound, old_inputs, data, panel["paired"], "x")
     seq, path, data_small = small["seq"], small["paired"], small["data"]
 
-    def sequence_copy(suffix: str, change: Callable[[Path], Any]) -> Path:
+    def via(suffix: str, change: Callable[[Path], Any]) -> list[tuple[str, str]]:
         dest = data_small / "panel-sequence" / f"{seq.name}-{suffix}"
         shutil.copytree(seq, dest)
         relabel(dest)
         change(dest)
         scores = copied(small["scores"], tmp_path / "scores")
         edit(scores, "manifest.json", {"sequence_run": dest.name})
-        return scores
+        return [("jepa", str(scores)), ("window", str(small["window"]))]
 
-    changed = sequence_copy("changed", lambda d: tamper(d, {"threads": 2}))
-    with pytest.raises(
-        ValueError, match=r"the sequence run of .*manifest\.json: its sha256 differs"
-    ):
-        compare.run(
-            [("jepa", str(changed)), ("window", str(small["window"]))],
-            small["inputs"],
-            data_small,
-            path,
-            "x",
-        )
+    clean = {"name": "tipping_point.panel", "git_sha": "e" * 40, "dirty": False}
+    merged = {"sources": [], "pieces_producer": clean}
+
+    def merged_unbound(d: Path) -> None:
+        edit(d, "manifest.json", merged | {"pieces_bound": True})
+        unbind(d)
+
+    chains = {
+        "unbound": (via("unbound", unbind), f"the sequence run of .*: .* {not_bound}"),
+        "pieces": (
+            via("pieces", lambda d: edit(d, "manifest.json", merged)),
+            "the runs merged into .* were not all bound",
+        ),
+        "old pieces": (
+            via("old-pieces", lambda d: edit(d, "manifest.json", merged | {"pieces_bound": False})),
+            "the runs merged into .* were not all bound",
+        ),
+        "merged unbound": (via("merged-unbound", merged_unbound), not_bound),
+    }
+    for runs, message in chains.values():
+        with pytest.raises(ValueError, match=message):
+            compare.run(runs, small["inputs"], data_small, path, "x")
     assert not tag_runs(data, "x") and not tag_runs(data_small, "x")
-    old = copied(panel["vol"], tmp_path / "copies")
-    unbind(old)
-    unbound_inputs = copied(panel["inputs"], tmp_path / "inputs")
-    unbind(unbound_inputs)
-    run_dir, _ = compare.run(arms(old), unbound_inputs, data, panel["paired"], "unbound")
+    argv = ["compare", "--inputs", str(old_inputs), "--plan", str(panel["paired"])]
+    for name, run in arms:
+        argv += ["--arm", f"{name}={run}"]
+    assert main([*argv, "--data-dir", str(data), "--tag", "unbound", "--unbound"]) == 0
+    (run_dir,) = tag_runs(data, "unbound")
     recorded = params(run_dir)
+    assert recorded["unbound_allowed"] is True and recorded["inputs_bound"] is False
     assert recorded["arms"]["full"]["bound"] is True and recorded["arms"]["vol"]["bound"] is False
-    assert recorded["inputs_bound"] is False
-    report = (run_dir / "report.md").read_text(encoding="utf-8").split("## Arms")[1]
+    text = (run_dir / "report.md").read_text(encoding="utf-8")
+    primary = text.split("## Primary")[1].split("## Secondary")[0].splitlines()
+    line = (
+        "This comparison accepted runs whose manifests are not bound (--unbound), so it is not "
+        "a test."
+    )
+    row = next(i for i, x in enumerate(primary) if x.startswith("| full - vol |"))
+    assert line in primary and primary.index(line) < row
+    report = text.split("## Arms")[1]
     assert report.count(" | yes |") == report.count(" | no |") == 1
     assert "The inputs run is not bound." in report
-    unbound = sequence_copy("unbound", unbind)
-    run_dir, _ = compare.run(
-        [("jepa", str(unbound)), ("window", str(small["window"]))],
-        small["inputs"],
-        data_small,
-        path,
-        "unbound",
-    )
-    recorded = params(run_dir)["arms"]
-    assert recorded["jepa"]["bound"] is False and recorded["window"]["bound"] is True
+    for name, (runs, _) in chains.items():
+        tag = name.replace(" ", "-")
+        run_dir, _ = compare.run(runs, small["inputs"], data_small, path, tag, unbound=True)
+        recorded = params(run_dir)
+        assert recorded["unbound_allowed"] is True and recorded["inputs_bound"] is True
+        assert recorded["arms"]["jepa"]["bound"] is False, name
+        assert recorded["arms"]["window"]["bound"] is True
+
+
+def test_each_runs_records_are_read_once_and_the_verified_copy_is_used(
+    panel: dict[str, Any], small: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    moved = copied(panel["inputs"], tmp_path / "inputs")
+    first = record(moved, "manifest.json")["run_id"]
+    read_columns = sequence.read_columns
+    reads: dict[Path, int] = {}
+    counting = [True]
+
+    def counted(original: Callable[..., Any]) -> Callable[..., Any]:
+        def read(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if counting[0] and self.name in ("manifest.json", "complete.json"):
+                key = self.resolve()
+                reads[key] = reads.get(key, 0) + 1
+            return original(self, *args, **kwargs)
+
+        return read
+
+    def swapped(*args: Any, **kwargs: Any) -> Any:
+        counting[0] = False
+        rewrite(moved, "manifest.json", lambda r: r.update(run_id="20230101T000000Z-swapped"))
+        counting[0] = True
+        return read_columns(*args, **kwargs)
+
+    monkeypatch.setattr(sequence, "read_columns", swapped)
+    monkeypatch.setattr(Path, "read_text", counted(Path.read_text))
+    monkeypatch.setattr(Path, "read_bytes", counted(Path.read_bytes))
+    arms = [("full", str(panel["full"])), ("vol", str(panel["vol"]))]
+    run_dir, _ = compare.run(arms, moved, panel["data"], panel["paired"], "once")
+    jepa = [("jepa", str(small["scores"])), ("window", str(small["window"]))]
+    compare.run(jepa, small["inputs"], small["data"], small["paired"], "once")
+    monkeypatch.undo()
+    assert record(moved, "manifest.json")["run_id"] != first
+    assert params(run_dir)["inputs_run"] == first
+    assert f"Inputs run `{first}`" in (run_dir / "report.md").read_text(encoding="utf-8")
+    runs = [panel["full"], panel["vol"], moved, small["scores"], small["seq"], small["window"]]
+    for run in [*runs, small["inputs"]]:
+        for name in ("manifest.json", "complete.json"):
+            assert reads.get((run / name).resolve()) == 1, (run.name, name)
 
 
 def test_an_inputs_run_with_a_missing_file_is_refused_by_name(

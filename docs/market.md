@@ -989,14 +989,18 @@ different torch or numpy versions, or torch at a different CPU capability or und
 instruction-set pins, which every sequence run records with its CPU model; that were made by code
 with uncommitted changes or no recorded commit; whose saved models are not exactly their own plan's
 cells, or whose manifest's model sha256 values differ from `complete.json`'s; that `complete.json`
-does not mark clean; and any file whose sha256 differs from its run's `complete.json`. A sequence
-run writes its rows ordered by variant name, then scheme, fold and seed, and its rung rows by
-horizon, scheme, rung, side and fold. Variants, seeds and folds take a fixed order whatever order
-the plan lists them in; schemes and rungs follow the plan's lists, which the parent fixes. So the
-merged run's tables equal those of the single run of the parent plan. The merged run holds one copy
-of the rung rows and row accounting, which every source run must agree on (a missing AUC agrees
-with a missing AUC), the parent plan and every saved model. Its manifest lists the source runs with
-their manifests' sha256 and CPU models.
+does not mark clean; whose manifest differs from the sha256 its `complete.json` records; and any
+file whose sha256 differs from its run's `complete.json`. A sequence run writes its rows ordered by
+variant name, then scheme, fold and seed, and its rung rows by horizon, scheme, rung, side and fold.
+Variants, seeds and folds take a fixed order whatever order the plan lists them in; schemes and
+rungs follow the plan's lists, which the parent fixes. So the merged run's tables equal those of the
+single run of the parent plan. The merged run holds one copy of the rung rows and row accounting,
+which every source run must agree on (a missing AUC agrees with a missing AUC), the parent plan and
+every saved model. Its manifest lists the source runs with their manifests' sha256 and CPU models.
+Each source run's manifest is read once and, when its `complete.json` records the manifest's sha256,
+checked against it before anything is taken from it; the sha256 listed is that of the bytes checked.
+The merged run records `pieces_bound`, true when every source run recorded its manifest's sha256.
+Runs written before that record existed still merge, with `pieces_bound` false.
 
 `merge` takes sequence runs only and refuses a merged run, a run whose plan fits no cell, and a
 run listed twice (by folder or run id). A merged run equals the single run on one machine, except
@@ -1136,12 +1140,15 @@ those values in the same columns. When both sides score the same quarters, as th
 estimate, its per-quarter differences and each of its draws are the means of the long and short
 rows' own; its other statistics are computed from those draws, and are not the means of the two
 rows' statistics. With no common quarter the row holds no number, and its `complete_draws` is
-empty too. For a classical arm its estimate is then the quantity
-its selection rule maximises (the mean of the long and short fold-mean AUCs). For a `scores` arm it
-is not quite: the sequence rule averages the seeds' AUCs in each quarter, and this command scores
-the seeds' mean score. The shipped plan reads its primary pair on `long+short` at 24 h rather than
-on `any`, because `any` depends on how a model's long and short heads are calibrated against each
-other: an arm can win on long and on short and lose on `any`. The `any` rows are kept as they are.
+empty too. For a classical arm, at 24 h on `forward`, the composite's estimate and the quantity its
+selection rule maximises (the mean of the long and short fold-mean AUCs) coincide when both sides
+are scored on the same quarters. Otherwise they differ: if one quarter scores long only and another
+both, the rule averages long over both quarters and short over the second, while the composite uses
+the second for both. For a `scores` arm they differ even then: the sequence rule averages the seeds'
+AUCs in each quarter, and this command scores the seeds' mean score. The shipped plan reads its
+primary pair on `long+short` at 24 h rather than on `any`, because `any` depends on how a model's
+long and short heads are calibrated against each other: an arm can win on long and on short and lose
+on `any`. The `any` rows are kept as they are.
 
 A quarter is scored when its original difference is finite, that is when it has both classes. Every
 comparison row carries `quarters_scheduled`, the number of quarters its scheme schedules, and
@@ -1164,15 +1171,26 @@ configuration was chosen by the rule or fixed, its source run's `plan.toml` sha2
 code that made it, and whether it is bound.
 
 A panel run's `complete.json` records the sha256 of the `manifest.json` written with it
-(`manifest_sha256`). The command checks that record before it takes anything from a manifest, for
-the arm's run, a `scores` arm's sequence run and the inputs run, and refuses a manifest that differs
-from it. A run whose `complete.json` holds no manifest sha256 was written before that record
-existed. It is not refused, but its manifest could have changed unseen: the comparison's manifest
-records, per arm, whether every run in its chain was bound (`bound`), and whether the inputs run
-was (`inputs_bound`), and the report shows both. A frozen test must use bound runs only; that
-requirement belongs to the frozen test's command (issue #231) and is not built here. A run folder
-whose `manifest.json` and `complete.json` were both rewritten still passes, since the store is not
-signed.
+(`manifest_sha256`); a run with that record is bound. The command reads the `manifest.json` and
+`complete.json` of every run it relies on once: each arm's run, a `scores` arm's sequence run and
+the inputs run. It checks each manifest against its recorded sha256 before taking anything from it,
+and every later use (the checks below, loading the inputs table and labels grid, the comparison's
+own manifest and the report) takes those checked records, never a second read from disk. A manifest
+that differs from its recorded sha256 is always refused.
+
+Binding is required by default. A run in the chain whose `complete.json` records no manifest sha256
+(written before that record existed) is refused, naming the run. So is a merged sequence run unless
+its own manifest is bound and it records that every run it merged was bound (`pieces_bound`); a run
+merged before that record existed counts as unbound. `merge` checks each source run's manifest the
+same way before taking anything from it, so a source run whose manifest was edited is refused
+rather than merged into a newly bound manifest. `--unbound` accepts unbound runs for a development
+comparison of runs written before binding existed. The comparison's manifest then records that
+unbound runs were allowed (`unbound_allowed`), and, as always, whether every run in each arm's chain
+was bound (`bound`) and whether the inputs run was (`inputs_bound`). The report says, in a line of
+its own above the primary row, that the comparison accepted runs whose manifests are not bound and
+is therefore not a test. The frozen test (issue #231) must not use `--unbound`. Binding catches a
+manifest changed after its run was written, but a run folder whose `manifest.json` and
+`complete.json` were both rewritten still passes, since the store is not signed.
 
 Before reading any score the command checks that each arm comes from the inputs run, labels grid and
 ladder plan of the comparison. It refuses:
@@ -1181,6 +1199,9 @@ ladder plan of the comparison. It refuses:
 - a run that is missing, has no `complete.json` or is not marked clean, whose manifest differs from
   the sha256 its `complete.json` records, whose manifest gives another run id than its folder's
   name, or that is of another kind;
+- without `--unbound`, a run, `scores` run's sequence run or inputs run whose `complete.json`
+  records no manifest sha256, and a merged sequence run that does not record that every run it
+  merged was bound;
 - a run made by code with no recorded commit or with uncommitted changes; for a `scores` arm, also
   its sequence run, and for a merged sequence run, the runs it merged. Different clean commits
   across arms are allowed: the manifest records each, and the report names them;
@@ -1213,13 +1234,13 @@ a primary side or horizon the ladder plan lacks. It writes nothing when it refus
 in the chain ends as a refusal that names the file.
 
 The command reads the plan and its ladder plan once each, recording their sha256 and copying both
-into the run. The manifest records the primary pair, whether the inputs run was bound and, for each
-arm, its run, kind, model, variant, readout, c, seeds, whether it was chosen by the rule, its
-selection, its source run's `plan.toml` sha256, whether its chain was bound, the run it was made
-from, its files' sha256 and the code that made it (commit, state and `uv.lock`). For a `scores` arm
-it also records its sequence run's code and the code that trained the models, which for a merged
-sequence run is the merged runs' commit. Two runs on the same arms, given in any order, write
-identical tables.
+into the run. The manifest records the primary pair, whether unbound runs were allowed, whether the
+inputs run was bound and, for each arm, its run, kind, model, variant, readout, c, seeds, whether it
+was chosen by the rule, its selection, its source run's `plan.toml` sha256, whether its chain was
+bound, the run it was made from, its files' sha256 and the code that made it (commit, state and
+`uv.lock`). For a `scores` arm it also records its sequence run's code and the code that trained the
+models, which for a merged sequence run is the merged runs' commit. Two runs on the same arms, given
+in any order, write identical tables.
 
 The interval has limits. The paired bootstrap measures how much the difference moves when the
 observed 14-day blocks of each quarter are reweighted, for the fitted scoring rules, with the

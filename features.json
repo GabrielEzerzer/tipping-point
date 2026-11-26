@@ -308,7 +308,7 @@
     {
       "name": "Panel paired comparison",
       "description": "Scores the exported out-of-fold score files of a comparison plan's arms as pairs on the ladder's rows with the ladder's own block-bootstrap draws, adds a paired long+short row per pair and the same statistics on draws that lose no quarter, marks one pair primary, and refuses any arm that does not come, by committed code and on-disk hashes, from the inputs run, labels grid and ladder plan of the comparison or that differs from a configuration the plan pins.",
-      "command": "uv run python -m tipping_point.panel compare --inputs <run id> --arm <name>=<run id> ...",
+      "command": "uv run python -m tipping_point.panel compare --inputs <run id> --arm <name>=<run id> ... [--unbound]",
       "inputs": "a panel inputs run, its labels run, one panel scores or panel classical run per arm and a comparison plan (default panel/compare.toml, which names its ladder plan)",
       "outputs": "<data dir>/panel-compare/<run_id>/ holding the scores, folds, comparisons and rows tables, report.md led by the primary row, both plans, and each arm's provenance in the manifest",
       "test": "python/tipping_point/tests/panel/test_compare.py"

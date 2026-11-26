@@ -66,8 +66,11 @@ Command line: python -m tipping_point.panel <command> [options]
           (a scores run or a classical run, id or folder): each run must come from that inputs
           run, its labels grid and the plan's ladder plan, and each arm's rows must be exactly the
           ladder's. Every arm takes the ladder's bootstrap draws; one pair, side and horizon is
-          primary. Writes a run in <data dir>/panel-compare/<run_id>/ with the tables scores,
-          folds, comparisons and rows, and report.md
+          primary. Every run in each arm's chain and the inputs run must record its manifest's
+          sha256 in complete.json; --unbound accepts runs written before that record existed, for
+          a development comparison marked as not a test. Writes a run in
+          <data dir>/panel-compare/<run_id>/ with the tables scores, folds, comparisons and rows,
+          and report.md
 
 Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
 data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
@@ -177,6 +180,11 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--plan", type=Path, default=None, help="default panel/compare.toml")
     p.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
     p.add_argument("--tag", default="compare", help="the run id's tag (default compare)")
+    p.add_argument(
+        "--unbound",
+        action="store_true",
+        help="accept runs whose manifests are not bound: a development comparison, never a test",
+    )
     p.set_defaults(command=_compare)
     return parser
 
@@ -371,6 +379,7 @@ def _compare(args: argparse.Namespace) -> int:
         args.plan or compare.PLAN,
         args.tag,
         log=lambda line: print(line, flush=True),
+        unbound=args.unbound,
     )
     print(f"{len(out['comparisons'])} comparison rows, schemes {', '.join(out['schemes'])}")
     print(run_dir)

@@ -1246,6 +1246,14 @@ def split(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     return runs
 
 
+def rebound(run: Path, manifest: dict) -> None:
+    (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    complete = json.loads((run / "complete.json").read_text(encoding="utf-8"))
+    if "manifest_sha256" in complete:
+        complete["manifest_sha256"] = store.sha256(run / "manifest.json")
+        (run / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+
+
 def without_seconds(path: Path) -> str:
     return json.dumps(pq.read_table(path).drop_columns(["seconds"]).to_pylist())
 
@@ -1325,6 +1333,7 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
     )
     for k in ("inputs_run", "inputs", "labels_run", "labels_grid", "ladder_plan", "torch", "numpy"):
         assert params[k] == full_params[k], k
+    assert params["pieces_bound"] is True
     complete = json.loads((merged / "complete.json").read_text(encoding="utf-8"))
     assert complete["clean"]
     for model, variant in (("jepa", "full"), ("supervised", "vol")):
@@ -1371,7 +1380,7 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
         def edit(copy: Path) -> None:
             record = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
             change(record)
-            (copy / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+            rebound(copy, record)
 
         return edit
 
@@ -1542,6 +1551,41 @@ def test_the_merge_takes_a_nan_auc_in_a_shared_rung_row(
     assert np.isnan(row["auc"])
 
 
+def test_a_piece_whose_manifest_changed_is_refused_and_unbound_pieces_are_recorded(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    def copies(root: str) -> list[Path]:
+        out = []
+        for name in SPLIT:
+            copy = tmp_path / root / split[name].name
+            shutil.copytree(split[name], copy)
+            out.append(copy)
+        return out
+
+    edited = copies("edited")
+    for piece in edited:
+        record = json.loads((piece / "manifest.json").read_text(encoding="utf-8"))
+        record["params"]["inputs_run"] = "20250101T000000Z-other"
+        (piece / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(
+        ValueError, match=r"manifest\.json: its sha256 differs from complete\.json's"
+    ):
+        sequence.merge_run(edited, split["parent"], tmp_path, "edited")
+    assert not (tmp_path / "panel-sequence").exists()
+    old = copies("old")
+    complete = json.loads((old[2] / "complete.json").read_text(encoding="utf-8"))
+    complete.pop("manifest_sha256")
+    (old[2] / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+    run_dir, _ = sequence.merge_run(old, split["parent"], tmp_path, "old")
+    params = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["params"]
+    assert params["pieces_bound"] is False
+    assert [s["manifest_sha256"] for s in params["sources"]] == [
+        store.sha256(d / "manifest.json") for d in old
+    ]
+    merged = json.loads((run_dir / "complete.json").read_text(encoding="utf-8"))
+    assert merged["manifest_sha256"] == store.sha256(run_dir / "manifest.json")
+
+
 def test_pieces_from_different_cpu_models_merge_and_list_them(
     split: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -1552,7 +1596,7 @@ def test_pieces_from_different_cpu_models_merge_and_list_them(
         if name == "c":
             record = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
             record["params"]["runtime"]["cpu"] = "Another CPU"
-            (copy / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+            rebound(copy, record)
         pieces.append(copy)
     run_dir, _ = sequence.merge_run(pieces, split["parent"], tmp_path, "cpus")
     params = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["params"]
