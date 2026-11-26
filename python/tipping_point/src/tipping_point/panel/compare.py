@@ -957,7 +957,9 @@ def report(
             f"({_state(inputs_code['dirty'])}), uv.lock {_lock(inputs_code['uv_lock_sha256'])}.",
             "",
         ]
-    if len(set(states.values())) > 1:
+    commits = {v[:2] for v in states.values()}
+    locks = {v[2] for v in states.values() if v[2] is not None}
+    if len(commits) > 1 or len(locks) > 1:
         lines.append(
             "The arms' runs were not all made by the same code (commit, state, uv.lock): "
             + "; ".join(f"{k} {v[0]}, {_state(v[1])}, {_lock(v[2])}" for k, v in states.items())

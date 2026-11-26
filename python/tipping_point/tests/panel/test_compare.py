@@ -1461,7 +1461,8 @@ def test_merged_pieces_scored_and_compared_equal_the_unmerged_run(
         f"`{recorded['sup']['run']}` | scores | ", ""
     )
     assert "| jepa | " in arms_table and "| chosen by the rule |" in arms_table
-    assert f"jepa (sequence run) {'c' * 40}, clean, -" in report and "None" not in report
+    assert "Every arm's runs were made by the same commit and uv.lock." in report
+    assert "None" not in report
 
 
 def test_rows_that_are_not_exactly_the_ladders_are_refused(

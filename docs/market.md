@@ -1250,7 +1250,7 @@ it was made from, its files' sha256 and the code that made it (commit, state and
 trained the models, which for a merged sequence run is the merged runs' commit, state and
 `uv.lock`; a merged run's own code is the merging commit and state with no `uv.lock`, since `merge`
 copies the merged runs' `uv.lock` rather than its own, and the report shows a missing `uv.lock` as
-`-`. Two runs on the same arms, given in any order, write identical tables.
+`-` and does not count it as different code. Two runs on the same arms, given in any order, write identical tables.
 
 The interval has limits. The paired bootstrap measures how much the difference moves when the
 observed 14-day blocks of each quarter are reweighted, for the fitted scoring rules, with the
