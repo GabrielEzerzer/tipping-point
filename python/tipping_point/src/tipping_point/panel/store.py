@@ -21,16 +21,7 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def write(
-    data_dir: Path,
-    domain: str,
-    tag: str,
-    tables: dict[str, pa.Table],
-    params: dict[str, Any],
-    checks: dict[str, Any],
-    texts: dict[str, str] | None = None,
-    blobs: dict[str, bytes] | None = None,
-) -> Path:
+def begin(data_dir: Path, domain: str, tag: str, tables: list[str], params: dict[str, Any]) -> Path:
     run_id = engine.run_id(tag)
     run_dir = Path(data_dir) / domain / run_id
     run_dir.mkdir(parents=True)
@@ -40,14 +31,23 @@ def write(
         "run_id": run_id,
         "producer": {"name": "tipping_point.panel", "version": __version__, **io.code_version()},
         "started_ns": time.time_ns(),
-        "tables": list(tables),
+        "tables": tables,
         "params": params,
         "licence": "CC BY-NC-SA 4.0",
         "attribution": "Binance Vision",
     }
     io.write_json(run_dir / "manifest.json", manifest)
-    files: dict[str, str] = {}
-    for name, table in tables.items():
+    return run_dir
+
+
+def put(
+    run_dir: Path,
+    files: dict[str, str],
+    tables: dict[str, pa.Table] | None = None,
+    texts: dict[str, str] | None = None,
+    blobs: dict[str, bytes] | None = None,
+) -> None:
+    for name, table in (tables or {}).items():
         path = run_dir / f"{name}.parquet"
         io.write_file(path, lambda f, table=table: pq.write_table(table, f, compression="zstd"))
         files[path.name] = sha256(path)
@@ -60,15 +60,34 @@ def write(
         path.parent.mkdir(parents=True, exist_ok=True)
         io.write_file(path, lambda f, data=data: f.write(data))
         files[name] = sha256(path)
+
+
+def end(run_dir: Path, rows: dict[str, int], files: dict[str, str], checks: dict[str, Any]) -> None:
     record = {
         "ended_ns": time.time_ns(),
-        "rows": {name: table.num_rows for name, table in tables.items()},
+        "rows": rows,
         "clean": True,
         "manifest_sha256": sha256(run_dir / "manifest.json"),
         "files": files,
         "checks": checks,
     }
     io.write_json(run_dir / "complete.json", record)
+
+
+def write(
+    data_dir: Path,
+    domain: str,
+    tag: str,
+    tables: dict[str, pa.Table],
+    params: dict[str, Any],
+    checks: dict[str, Any],
+    texts: dict[str, str] | None = None,
+    blobs: dict[str, bytes] | None = None,
+) -> Path:
+    run_dir = begin(data_dir, domain, tag, list(tables), params)
+    files: dict[str, str] = {}
+    put(run_dir, files, tables, texts, blobs)
+    end(run_dir, {name: table.num_rows for name, table in tables.items()}, files, checks)
     return run_dir
 
 

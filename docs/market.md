@@ -1574,3 +1574,164 @@ when it is not; there is no outcome for the other direction. The decision return
 the support's per-quarter counts and the primary row's estimate, bounds, shares and quarter counts,
 and refuses a primary row whose share of complete draws, quarters scored or scheduled, or counts of
 draws giving each bound differ from the support's.
+
+`panel test` runs the held-back test from a frozen plan, `panel/test.toml` beside the code
+(`python/tipping_point/src/tipping_point/panel/test.toml`). The path is fixed: no argument names
+another plan, and nothing is read from the environment. No plan ships, so both steps refuse until
+one is written and committed. The test has two steps, run from the same clean commit:
+
+```
+uv run python -m tipping_point.panel test data [--data-dir <dir>]
+uv run python -m tipping_point.panel test run [--data-dir <dir>]
+```
+
+The plan is strict TOML. An unknown, missing or mistyped key, or one given twice, is refused, with
+every problem named. Every key is required except an arm's `readout` and `c`, which only some arms
+take:
+
+```toml
+end = 2026-09-30
+approved = ["<40-hex commit>", "<40-hex commit>"]
+pairs = [["jepa", "window"], ["jepa", "vol"]]
+primary = ["jepa", "window"]
+side = "long"
+horizon = 6
+
+[runs.labels]
+run = "<development labels run id>"
+manifest_sha256 = "<sha256 of its manifest.json>"
+
+[runs.inputs]
+run = "<development inputs run id>"
+manifest_sha256 = "<sha256>"
+
+[runs.final]
+run = "<final sequence run id>"
+manifest_sha256 = "<sha256>"
+plan_sha256 = "<sha256 of its plan.toml>"
+ladder_sha256 = "<sha256 of its ladder.toml>"
+
+[[arms]]
+name = "jepa"
+kind = "sequence"
+model = "jepa"
+variant = "vol"
+readout = "means"
+c = 1.0
+seeds = [0, 1]
+encoders = { "encoders/vol-forward-fold<n>-seed0-jepa.pt" = "<sha256>", "encoders/vol-forward-fold<n>-seed1-jepa.pt" = "<sha256>" }
+
+[[arms]]
+name = "window"
+kind = "classical"
+model = "window"
+variant = "vol"
+readout = "means"
+c = 1.0
+
+[[arms]]
+name = "vol"
+kind = "rung"
+rung = "vol"
+
+[rule]
+bound = "q05"
+draws = "complete"
+min_quarters = 8
+min_complete = 0.9
+min_blocks = 3
+min_supported = 6
+```
+
+`end` is the test span's last day, from 2024-01-01 on. `approved` lists the commits whose runs the
+test may rely on. A sequence arm names its model, variant, seeds, a JEPA or twin arm also its readout
+and c, and `encoders` maps each saved model it reads to that file's sha256, one per seed, under the
+final run's fold `<n>`, the number of development quarters. A classical arm is `rung` with no
+readout or `window` with one, at c. A rung arm names a ladder rung. The six `rule` fields are the decision rule above.
+
+The data step is the only code that raises the held-back limit, to the first day of the month after
+`end`; the calls that raise it are in `panel/heldback.py`. It makes checks 1, 2, 3, 5 and 9 below,
+then works under `<data dir>/held-back/`. If there is no whole-span labels run there, it
+fetches the archive for the development labels run's coins from its start to `end` into
+`held-back/archives/binance`, refuses to go on if any file was refused, failed or unreadable, and
+writes a labels run with the development run's coins, start and development start. If there is no
+whole-span inputs run, it writes one from that labels run. It then checks both runs (checks 11 and 12)
+and runs the prefix check (13), printing the rows it compared. It is safe to run again. A finished run
+(one with `complete.json`) is reused, not rebuilt. An archive file already present that matches its
+checksum is kept. A run folder without `complete.json` was interrupted. The step refuses it by name
+and asks for it to be removed, as it does two runs of one kind. An inputs run with no labels run is
+refused too.
+
+The run step checks, in this order, and stops at the first failure:
+
+1. The plan loads (the rules above). Reads `panel/test.toml`.
+2. The running code is a commit with no uncommitted changes. Reads the git state and `uv.lock`.
+3. The data dir is not inside a `held-back` folder.
+4. No earlier test run ran this plan. Reads each `held-back/panel-test/*/manifest.json` and
+   `complete.json`, and refuses one whose `manifest.json` cannot be read. A run of this plan's sha256
+   is refused whether it finished or not.
+5. The development labels and inputs runs are finished, clean, of their own kind, and their
+   `manifest.json` sha256 is the plan's. The inputs run is bound, but the labels run need not be,
+   since its sha256 is pinned twice: by the plan and in the inputs run's manifest. Each was made by
+   a clean, approved commit, neither records a raised limit, and the inputs run records the pinned
+   labels run and its sha256. Reads both runs' `manifest.json` and `complete.json`.
+6. The final sequence run is finished, clean and bound, its `manifest.json` sha256 is the plan's,
+   and its commit is approved. For a merged run: the run records its merged runs as bound, their
+   producer commit is approved, and each merged run is finished and bound, has the sha256 recorded
+   for it, and was made by an approved commit. `plan.toml` and `ladder.toml` match the run's
+   records, `plan.toml` matches the plan's `plan_sha256` and `ladder.toml` its `ladder_sha256`. The
+   plan is fit-only, its ladder ends on 2023-12-31, and the final run and every merged run record
+   the pinned development inputs run (by its inputs table sha256) and labels grid. Reads those runs'
+   `manifest.json`, `complete.json`, `plan.toml` and `ladder.toml`.
+7. The evaluation plan, the arms, the pairs, the primary pair, the side and the horizon pass the
+   scoring core's own checks against the final run's plan.
+8. Each sequence arm's `encoders` are exactly the final run's model files for its seeds, each
+   sha256 is the one the final run's manifest and `complete.json` record, and each file hashes to
+   it. An arm then reads its models only from the final run. Reads the model files.
+9. `held-back/labels` and `held-back/panel-inputs` each hold exactly one run, finished. Lists those
+   folders.
+10. Both are present, otherwise the data step has not run.
+11. The whole-span labels run is finished and clean. It was made by the running commit at the
+    plan's limit, its grid ends on `end`, and its coins, start and development start are the
+    development run's. Reads its `manifest.json` and `complete.json`.
+12. The whole-span inputs run is finished, clean and bound, made by the running commit at the plan's
+    limit, and records the whole-span labels run and its `manifest.json` sha256. Reads its
+    `manifest.json` and `complete.json`.
+13. The prefix check above, on the whole-span and development runs. This is the first read of a
+    held-back table.
+14. The whole-span grid and inputs table are read once each. Their sha256 must be the recorded one,
+    and their rows the same rows. The scores use these same bytes.
+15. The grid covers every coin at every hour of the fit span.
+
+Every check is made before any file is written. Only then does the run step write one run under
+`<data dir>/held-back/panel-test/<run id>/`, in this order:
+
+1. `manifest.json`, which records the plan's sha256, the running commit and `uv.lock`, every run
+   with its sha256 and commit, the tables read, the prefix check's counts, earlier test runs, the
+   arms, pairs and rule;
+2. `test.toml`, the plan's text;
+3. `support.json`, computed from the labels alone, before any score;
+4. if the support meets the rule, the score, pair and decide steps, then `comparisons.parquet`,
+   `scores.parquet`, `folds.parquet`, `rows.parquet` and one `arm-<name>.parquet` for each arm;
+   if it does not, the outcome is `inconclusive`, nothing is scored, and none of these tables is
+   written;
+5. `decision.json` and `report.md`, the report in plain words: the outcome, the rule as read, the
+   support by quarter, the primary and other pairs, the earlier test runs and the provenance of
+   every input;
+6. `complete.json` last, with every file's sha256, the outcome and the models read.
+
+A run is finished only once `complete.json` exists. Each plan gets one test: a second run of the same
+plan is refused, finished or not, so an interrupted run cannot be re-run either; it stays on disk
+and is listed. A new plan has a new sha256, and every earlier test run under `held-back/panel-test`,
+with its plan's sha256 and outcome, goes into the new run's manifest and report.
+
+What the checks don't prove:
+
+- The store is not signed. A sha256 binds a file to a record, and a record to the plan, but anyone
+  who can write to the data dir can rewrite a run and its records together. The plan's pins catch
+  that only for the runs it pins, and only while the plan itself is trusted.
+- A clean, approved commit is not a reviewed commit. The checks show that a run was made by code in
+  the plan's list with no uncommitted changes, not that the code is right.
+- The plan names the commits of the runs it relies on. The commit that runs the test is recorded,
+  not constrained: it must be clean, and the data step and the run step must share it, but it need
+  not be in `approved`.

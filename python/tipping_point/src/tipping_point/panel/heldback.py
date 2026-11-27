@@ -10,12 +10,14 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pyarrow as pa
 
-from . import classical, compare, labels, ladder, sequence
+from ..market import archive
+from . import classical, compare, fetch, inputs, labels, ladder, sequence
 
 SCHEME = compare.PRIMARY_SCHEME
 FIT_FOLD = 1
@@ -76,6 +78,33 @@ class Rule:
             problems.append(f"min_complete = {share!r} (a share from 0 to 1)")
         if problems:
             raise ValueError(f"the decision rule: {', '.join(problems)}")
+
+
+def limit_after(end: date) -> date:
+    return date(end.year + end.month // 12, end.month % 12 + 1, 1)
+
+
+def fetch_whole(
+    symbols: Sequence[str], start: date, end: date, dest: Path, get: archive.Get, log: LOG
+) -> dict[str, Any]:
+    return fetch.fetch(symbols, start, end, dest, get, log=log, limit=limit_after(end))
+
+
+def labels_whole(
+    root: Path,
+    data_dir: Path,
+    symbols: Sequence[str],
+    start: date,
+    dev_start: date,
+    end: date,
+    log: LOG,
+) -> Path:
+    limit = limit_after(end)
+    return labels.run(root, data_dir, symbols, start, dev_start, end, "whole", log, limit=limit)[0]
+
+
+def inputs_whole(labels_dir: Path, root: Path, data_dir: Path, end: date, log: LOG) -> Path:
+    return inputs.run(labels_dir, root, data_dir, "whole", log, limit=limit_after(end))[0]
 
 
 def cut_of(dev: ladder.Plan, end: date) -> date:

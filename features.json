@@ -314,6 +314,14 @@
       "test": "python/tipping_point/tests/panel/test_compare.py"
     },
     {
+      "name": "Panel held-back test",
+      "description": "Runs the held-back test of the frozen plan panel/test.toml once: the data step makes the whole-span labels and inputs runs under the held-back folder and runs the prefix check; the run step refuses unless the code is a clean commit and every pinned run, commit, plan and model matches its record, writes the block support before any arm is scored, then scores the pinned arms on the test span and decides by the plan's rule, refusing a plan that already has a run.",
+      "command": "uv run python -m tipping_point.panel test data|run [--data-dir <dir>]",
+      "inputs": "panel/test.toml, the development labels, inputs and final sequence runs it pins, and for the run step the whole-span runs the data step made",
+      "outputs": "<data dir>/held-back/ holding the archive and the whole-span labels and inputs runs; <data dir>/held-back/panel-test/<run_id>/ holding test.toml, support.json, decision.json, the comparisons, scores, folds, rows and arm tables, and report.md",
+      "test": "python/tipping_point/tests/panel/test_frozen.py"
+    },
+    {
       "name": "Panel forward check",
       "description": "Says, reading no cascade label, whether a sequence run's trained JEPA embeddings carry next-day information about the inputs that their untrained twins do not, also beyond the input row at the same hour, and whether they keep the inputs, from ridge probes on every forward fold and seed, with two rules on vol_24h and oi_24h.",
       "command": "uv run python harness/panel_forward.py --sequence <sequence run folder> --inputs <inputs run folder> --out <new folder outside the repo>",
