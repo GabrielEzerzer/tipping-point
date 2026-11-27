@@ -53,8 +53,8 @@ Command line: python -m tipping_point.panel <command> [options]
           ladder plan's [external] section reads; refuses a fit-only run
   merge   one sequence run from several (--runs) whose plans differ only in variants, seeds and
           folds and which together fit every cell of the merged plan once, as a run in
-          <data dir>/panel-sequence/<run_id>/ that scores reads like any sequence run (--plan
-          panel/sequence-final.toml joins the fit-only pieces)
+          <data dir>/panel-sequence/<run_id>/ that scores reads like any scored sequence run
+          (--plan panel/sequence-final.toml joins the fit-only pieces, which scores refuses)
   classical
           the classical comparators of a sequence plan (--plan, default panel/sequence.toml) on an
           inputs run (--inputs), on the sequence models' folds and rows: the plan's rungs at every

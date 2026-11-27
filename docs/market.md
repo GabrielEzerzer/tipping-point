@@ -1029,9 +1029,9 @@ A plan's cells (variant, fold and seed, each fitting every model) draw their see
 alone, so a sequence run whose plan keeps only some variants, seeds and folds fits exactly those
 cells of the full run, and the run can be split across machines.
 `python -m tipping_point.panel merge --runs <run> <run> ... --plan <sequence.toml>` joins such
-runs into one sequence run that `scores` reads like any other. `--plan` is the parent plan, the
-plan the runs split (by default the shipped `panel/sequence.toml`), and the merged run's plan is
-that file. The merge refuses runs whose plans differ from the parent's in anything but `variants`,
+runs into one sequence run that `scores` reads like any other scored run. `--plan` is the parent
+plan, the plan the runs split (by default the shipped `panel/sequence.toml`), and the merged run's
+plan is that file. The merge refuses runs whose plans differ from the parent's in anything but `variants`,
 `seeds` and `folds`, or list a variant, seed or fold the parent lacks; that fit a cell twice or
 leave a cell of the parent unfitted; that read different inputs tables, labels grids or ladder
 plans, or a ladder plan other than the parent's; that ran different code (commit and `uv.lock`),
