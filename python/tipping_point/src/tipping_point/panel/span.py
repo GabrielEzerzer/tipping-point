@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from ..ising import io
-from ..market import archive
 
 START = date(2021, 10, 1)
 DEV_START = date(2022, 1, 1)
@@ -59,23 +58,25 @@ def refuse_names(root: Path, names: Iterable[str], how: str, *, limit: date = HE
             ) from None
 
 
-def unlinked(root: Path) -> list[Path]:
+def unlinked(root: Path, limit: date) -> list[Path]:
     found: list[Path] = []
-    folders = [(root, root.resolve())]
+    folders = [root]
     while folders:
-        folder, real = folders.pop()
+        folder = folders.pop()
         with os.scandir(folder) as entries:
-            names = sorted(entry.name for entry in entries)
-        for name in names:
-            path = folder / name
-            if path.resolve() != real / name:
+            listed = sorted(entries, key=lambda entry: entry.name)
+        for entry in listed:
+            path = folder / entry.name
+            if entry.is_symlink() or entry.is_junction():
                 raise HeldBackError(
                     f"{path} is a link: an archive root holds none, so that every file is read "
                     f"where its name says it is"
                 )
+            if entry.name.casefold() == HELD_BACK_DIR:
+                held_back_root(limit, path)
             found.append(path)
-            if path.is_dir():
-                folders.append((path, real / name))
+            if entry.is_dir(follow_symlinks=False):
+                folders.append(path)
     return found
 
 
@@ -83,7 +84,7 @@ def refuse_archive(root: Path, *, limit: date = HELD_BACK) -> None:
     paths: list[Path] = []
     if root.is_dir():
         held_back_root(limit, root)
-        paths = unlinked(root)
+        paths = unlinked(root, limit)
     names = (path.relative_to(root).as_posix() for path in paths)
     refuse_names(root, names, "holds", limit=limit)
 
@@ -94,10 +95,6 @@ def manifest_files(root: Path, *, limit: date = HELD_BACK) -> dict[str, Any]:
     files = io.read_json(path)["files"] if path.exists() else {}
     refuse_names(root, files, "lists in its manifest", limit=limit)
     return files
-
-
-def kind_folders(root: Path, symbols: Iterable[str]) -> list[Path]:
-    return [root / kind / symbol for kind in archive.KINDS for symbol in symbols]
 
 
 def held_back_root(limit: date, *paths: Path) -> None:

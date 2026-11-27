@@ -437,7 +437,7 @@ def run(
     for path in (grid_path, thresholds_path):
         if not path.resolve().is_relative_to(labels_dir.resolve()):
             raise span.HeldBackError(f"{path} is not inside the labels run {labels_dir}")
-    span.held_back_root(limit, grid_path, thresholds_path, *span.kind_folders(root, symbols))
+    span.held_back_root(limit, grid_path, thresholds_path)
     for path in (grid_path, thresholds_path):
         store.refuse_held_back(path, limit=limit)
     for path, key in ((grid_path, "grid_sha256"), (thresholds_path, "thresholds_sha256")):

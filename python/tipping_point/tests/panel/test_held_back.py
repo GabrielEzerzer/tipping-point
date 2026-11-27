@@ -334,11 +334,22 @@ def test_an_archive_root_refuses_a_directory_link_before_it_lists_it(
         scanned.append(Path(folder))
         return scandir(folder)
 
+    resolved: list[Path] = []
+    resolve = Path.resolve
+
+    def traced(self: Path, strict: bool = False) -> Path:
+        resolved.append(self)
+        return resolve(self, strict)
+
     monkeypatch.setattr(os, "scandir", recorded)
+    monkeypatch.setattr(Path, "resolve", traced)
+    linked(tmp_path / "alias", dev)
+    assert span.manifest_files(tmp_path / "alias") == {}
     linked(dev / "metrics", held / "klines")
     with pytest.raises(span.HeldBackError, match="metrics is a link"):
         span.manifest_files(dev)
     assert dev in scanned and dev / "metrics" not in scanned
+    assert dev in resolved and dev / "metrics" not in resolved
     linked(other / "klines" / "ETHUSDT", dev / "klines" / "BTCUSDT")
     with pytest.raises(span.HeldBackError, match="ETHUSDT is a link"):
         span.manifest_files(other)
@@ -346,6 +357,13 @@ def test_an_archive_root_refuses_a_directory_link_before_it_lists_it(
     linked(held / "metrics", dev / "klines")
     with pytest.raises(span.HeldBackError, match="metrics is a link"):
         span.manifest_files(held, limit=LIMIT)
+    plain = tmp_path / "plain"
+    planted(plain / "klines" / span.HELD_BACK_DIR.upper(), 27)
+    with pytest.raises(span.HeldBackError, match="is under a held-back folder"):
+        span.manifest_files(plain)
+    assert plain / "klines" in scanned
+    assert plain / "klines" / span.HELD_BACK_DIR.upper() not in scanned
+    assert span.manifest_files(held / "klines" / "BTCUSDT", limit=LIMIT) == {}
 
 
 def test_an_archive_root_refuses_a_file_link(tmp_path: Path) -> None:
@@ -372,7 +390,7 @@ def test_a_folder_reached_through_a_directory_link_is_checked_where_it_resolves(
         inputs.run(spans.held_labels, spans.held_root, held, "x", limit=LIMIT)
     archive_root = held / "archive"
     linked(archive_root / "klines" / "BTCUSDT", tmp_path / "dev" / "klines")
-    with pytest.raises(span.HeldBackError, match="not under a held-back folder"):
+    with pytest.raises(span.HeldBackError, match="BTCUSDT is a link"):
         fetch.fetch(SYMBOLS, START, LAST, archive_root, spans.fake.get, limit=LIMIT)
     run = copied(spans.held_labels, held / "copy")
     shutil.move(run / "grid", tmp_path / "dev" / "grid")
