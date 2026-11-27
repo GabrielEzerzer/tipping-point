@@ -431,7 +431,7 @@ def run(
     source = labels_run(labels_dir, limit=limit)
     if not source["clean"]:
         raise archive.ArchiveError(f"{labels_dir}: complete.json does not mark the run clean")
-    symbols = list(source["params"]["symbols"])
+    symbols = span.symbols_of(source["params"]["symbols"])
     grid_path = labels_dir / source["grid_file"]
     thresholds_path = labels_dir / source["thresholds_file"]
     for path in (grid_path, thresholds_path):

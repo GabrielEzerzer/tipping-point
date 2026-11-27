@@ -1440,7 +1440,9 @@ reads the entry's own type from the folder listing, without following it, and re
 link, a directory link and a junction alike, so what a link points to is neither listed nor
 opened. The root itself may be given through a link, since its resolved path is what is checked.
 With the default limit the walk also refuses an entry named `held-back` under the root before
-listing it. A hard link cannot be told from a file and is not caught. A
+listing it. A hard link cannot be told from a file, nor a mount (a Linux bind mount) from a folder, and
+neither is caught. A coin symbol names a folder under the root, so the three stages refuse one that
+is not capital letters and digits only, and no symbol can point outside the root. A
 run whose limit is not the default, raised or lowered, records it as `limit` in the archive's
 `manifest.json` and in the labels and inputs runs' manifest params; a run with the default records
 nothing new apart from `labels_manifest_sha256`. Its labels and archive are bit for bit those the

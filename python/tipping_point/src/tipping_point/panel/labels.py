@@ -306,7 +306,7 @@ def run(
     limit: date = span.HELD_BACK,
 ) -> tuple[Path, dict[str, Any]]:
     span.refuse(start, dev_start, end, limit=limit)
-    symbols = list(dict.fromkeys(symbols))
+    symbols = span.symbols_of(symbols)
     span.held_back_root(limit, root, data_dir, Path(data_dir) / "labels")
     files = span.manifest_files(root, limit=limit)
     if not start < dev_start <= end:

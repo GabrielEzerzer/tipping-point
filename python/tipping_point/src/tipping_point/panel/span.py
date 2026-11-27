@@ -20,6 +20,7 @@ END = date(2023, 12, 31)
 HELD_BACK = date(2024, 1, 1)
 HELD_BACK_DIR = "held-back"
 _DATE = re.compile(r"(?<!\d)(\d{4})-(?:(\d{2})(?:-(\d{2}))?(?!\d))?")
+_SYMBOL = re.compile(r"[A-Z0-9]+")
 
 
 class HeldBackError(ValueError):
@@ -56,6 +57,17 @@ def refuse_names(root: Path, names: Iterable[str], how: str, *, limit: date = HE
                 f"{root} {how} {name}, which names a day in the held-back test span: the panel "
                 f"reads no archive that holds one"
             ) from None
+
+
+def symbols_of(symbols: Iterable[str]) -> list[str]:
+    found = list(dict.fromkeys(symbols))
+    for symbol in found:
+        if not _SYMBOL.fullmatch(symbol):
+            raise ValueError(
+                f"{symbol!r} is not a coin symbol: capital letters and digits only, since it "
+                f"names a folder under the archive root"
+            )
+    return found
 
 
 def unlinked(root: Path, limit: date) -> list[Path]:

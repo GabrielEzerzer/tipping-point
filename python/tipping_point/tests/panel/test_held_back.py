@@ -366,6 +366,38 @@ def test_an_archive_root_refuses_a_directory_link_before_it_lists_it(
     assert span.manifest_files(held / "klines" / "BTCUSDT", limit=LIMIT) == {}
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are a Windows link")
+def test_an_archive_root_refuses_a_junction(tmp_path: Path) -> None:
+    import _winapi
+
+    held, dev = tmp_path / span.HELD_BACK_DIR / "archive", tmp_path / "dev"
+    planted(held, 30)
+    planted(dev, 29)
+    _winapi.CreateJunction(str(held / "klines"), str(dev / "metrics"))
+    with pytest.raises(span.HeldBackError, match="metrics is a link"):
+        span.manifest_files(dev)
+
+
+@pytest.mark.parametrize(
+    "symbol", ["../held-back/BTCUSDT", "..", "A/B", "A\\B", "", "btcusdt", "BTC USDT", "BTCUSDT\n"]
+)
+def test_a_symbol_that_is_not_one_folder_name_is_refused_by_every_stage(
+    spans: Spans, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symbol: str
+) -> None:
+    assert span.symbols_of(["BTCUSDT", "C00USDT", "BTCUSDT"]) == ["BTCUSDT", "C00USDT"]
+    bad = ["BTCUSDT", symbol]
+    with pytest.raises(ValueError, match="is not a coin symbol"):
+        fetch.fetch(bad, START, END, spans.dev_root, spans.fake.get)
+    with pytest.raises(ValueError, match="is not a coin symbol"):
+        labels.run(spans.dev_root, tmp_path, bad, START, DEV, END, "x")
+    source = inputs.labels_run(spans.dev_labels)
+    named = {**source, "params": {**source["params"], "symbols": bad}}
+    monkeypatch.setattr(inputs, "labels_run", lambda *args, **kwargs: named)
+    with pytest.raises(ValueError, match="is not a coin symbol"):
+        inputs.run(spans.dev_labels, spans.dev_root, tmp_path, "x")
+    assert spans.fake.requests == [] and list(tmp_path.iterdir()) == []
+
+
 def test_an_archive_root_refuses_a_file_link(tmp_path: Path) -> None:
     held, dev = tmp_path / span.HELD_BACK_DIR / "archive", tmp_path / "dev"
     target = planted(held, 30)

@@ -33,7 +33,7 @@ def fetch(
     limit: date = span.HELD_BACK,
 ) -> dict[str, Any]:
     span.refuse(start, end, limit=limit)
-    symbols = list(dict.fromkeys(symbols))
+    symbols = span.symbols_of(symbols)
     span.held_back_root(limit, dest)
     files = span.manifest_files(dest, limit=limit)
     manifest_path = dest / "manifest.json"
