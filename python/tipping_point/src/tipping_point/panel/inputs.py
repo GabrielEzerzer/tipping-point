@@ -411,7 +411,7 @@ def unfunded(got: archive.Span, symbol: str, start: date, end: date, last_ns: in
 def funding_capped(rate: np.ndarray, ts_ns: np.ndarray, calc_ms: np.ndarray) -> np.ndarray:
     settled = np.sort(calc_ms.astype(np.int64)) * 1_000_000
     if not settled.size:
-        return rate
+        return np.full(rate.shape, np.nan)
     at = np.searchsorted(settled, ts_ns, side="right") - 1
     age = ts_ns - settled[np.maximum(at, 0)]
     return np.where((at >= 0) & (age <= FUNDING_CAP_BARS * BAR_NS), rate, np.nan)

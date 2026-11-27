@@ -717,8 +717,9 @@ refuses a span with a funding file missing inside a coin's trading life (see Sto
   Open interest and the ratio are carried forward at most 12 bars (1 hour) across gaps, and zero or
   negative values count as missing. The funding rate read at a bar is the last settlement at or
   before it, and is missing when that settlement is more than 16 hours older than the bar
-  (`FUNDING_CAP_BARS`), for every gap alike; settlements come every 8 hours, so the cap survives one
-  missed settlement and only a gap longer than it changes a value. Binance's metrics files leave the ratio empty from 2021-12-30 to
+  (`FUNDING_CAP_BARS`), for every gap alike; settlements are at most 8 hours apart on every panel
+  coin in 2022-2023, so the cap survives one missed settlement and only a gap longer than it changes
+  a value. Binance's metrics files leave the ratio empty from 2021-12-30 to
   2022-01-19 on every panel coin, so `ls` is missing until 2022-01-19 14:00 UTC and `ls_rel` until
   its 28-day window holds 5/6 of its values again, at 2022-02-11 22:00 UTC.
 
@@ -1398,8 +1399,10 @@ flag, environment variable or plan field sets it; every command runs with the de
 refuses every day from 2024-01-01 on as before. `refuse_url` refuses a file name whose period, a
 day, month or year, has its last day on or after the limit, so a monthly file is refused when its
 month reaches the limit; with the default this is the same as testing the first day, since no
-period that begins before 2024-01-01 ends after it. A caller that raises the limit passes the day
-after the test span's last day, never a sentinel far in the future. Only a Python caller can raise
+period that begins before 2024-01-01 ends after it. A caller that raises the limit passes the first
+day after the month the test span ends in (the day after its last day when the span ends on a
+month's last day), never a sentinel far in the future; a nearer limit refuses that month's funding
+file. Only a Python caller can raise
 it, and the lint rule `tp-held-back-limit` (`tools/lint/rules/tipping-point-held-back.yml`) fails
 on any file other than `panel/heldback.py` and the tests that passes a `limit` to those functions,
 except a function that forwards its `limit` as `limit=limit` when the nearest enclosing function
@@ -1412,9 +1415,14 @@ what they point to, so a call through another name or attribute (`inputs.run(...
 a reassigned `limit` inside a forwarding function, a function named like a listed stage, an `int`
 annotation on a date, or a change to `span.HELD_BACK` itself passes them.
 
-A run whose limit is past 2024-01-01 reads and writes only under a folder named `held-back`, and a
-run with the default limit never reads or writes under one. `fetch.fetch`, `labels.run` and
-`inputs.run` resolve each path they read or write before they read anything, links and `..`
+A data stage whose limit is past 2024-01-01 reads and writes only under a folder named `held-back`,
+and one with the default limit never reads or writes under one. The data stages are the three that
+read the archive: `fetch.fetch`, `labels.run` and `inputs.run` (`inputs.ratios` and
+`inputs.labels_run` are covered when `inputs.run` calls them, not on a direct call). The commands
+after them (`ladder`, `sequence`, `scores`, `merge`, `classical`, `compare`) do not look at folder
+names: they refuse a held-back run by the span its manifest records and the time bounds of its
+tables, so they would read a development run that had been saved under a `held-back` folder. The
+three stages resolve each path they read or write before they read anything, links and `..`
 included, and refuse one whose resolved path has a `held-back` part when the limit is the default,
 or lacks one when it is raised: the archive root and each of its kind folders for the run's coins,
 the data folder and the `labels/` or `panel-inputs/` folder the run is written under, and for
@@ -1456,7 +1464,7 @@ the sha256 of its labels run's `manifest.json`; every table is checked against i
 `complete.json`, and where `complete.json` records the sha256 of `manifest.json` (inputs runs do),
 that too. The check refuses a comparison that would pass by being empty: the whole-span and
 development runs must be different folders once resolved, each run's `complete.json` must list
-exactly one file for each table it holds, every whole-span table must have rows both before and from
+exactly one file for each table it compares, every whole-span table must have rows both before and from
 2024-01-01, and the inputs tables must have as many rows as the grids before 2024-01-01 and in all.
 Each table's Arrow schema must equal the code's (`labels.THRESHOLDS`, `labels.GRID`,
 `inputs.SCHEMA`, metadata aside) and its rows be sorted by `ts_ns`, which has no nulls. Then, bit for
@@ -1473,7 +1481,7 @@ begins no earlier than 30 minutes before 2024-01-01, so it cannot begin in [t, t
 H hours the development run censors the windows past its end, which the whole-span run has.
 `skip` gets no window: a 2024 firing joins an instance only within 24 hours of its first firing,
 and an hour after that first firing is already skipped for 24 hours. Thresholds and inputs get no
-window, since a day's threshold reads only earlier days and an input at t only data before t.
+window, since a day's threshold reads only earlier days and an input at t only data stamped at or before t (open interest at t, everything else before t).
 Any other difference is refused with the column, the first row and the number of rows.
 
 `panel/heldback.py` is the scoring core of the held-back test; it has no command of its own. It

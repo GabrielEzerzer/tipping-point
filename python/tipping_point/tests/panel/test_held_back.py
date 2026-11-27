@@ -897,6 +897,7 @@ def test_the_funding_cap_keeps_a_settlement_for_16_hours_and_not_one_bar_more() 
     assert np.isnan(got[[0, 1]]).all() and np.isfinite(got[[2, 3]]).all() and np.isnan(got[4])
     later = np.array([settled // 1_000_000, (settled + cap) // 1_000_000 + 1])
     assert np.isfinite(inputs.funding_capped(rate, ts, later)[1:]).all()
+    assert np.isnan(inputs.funding_capped(rate, ts, np.empty(0, np.int64))).all()
 
 
 def test_a_funding_gap_longer_than_the_cap_is_missing_until_the_series_resumes(
