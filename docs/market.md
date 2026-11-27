@@ -893,10 +893,10 @@ hours (`vol_24h`, `near_24h`, `volume_24h`, `ret_24h`, `aret_24h`, `flow_24h`, `
 last, as its ordinary scaled value; before then its window still reaches into the context. A
 shown input keeps its units, so some of what it holds is older than the context's end:
 `vsurge_1h` and `volume_24h` divide the new volume by its 28-day median and mean, the `vol_`
-inputs and `near_24h` divide by the day's `sd_ret` and `b`, set from the 90 days before that day,
-and `near_24h`, the largest 30-minute move, counts moves that began up to 25 minutes before the
-context ended. A return and `oi_24h` start from the price and the open interest at the context's
-last hour. Three
+inputs and `near_24h` are scaled by the day's `sd_ret` and `b`, set from the 90 days before that
+day, and `near_24h`, the largest 30-minute move, counts moves that began up to 25 minutes before
+the context ended. In its first shown hour, a return, a `vol_` input and `oi_24h` start from the
+price or the open interest at the context's last hour. Three
 levels (`oi_vs_28d`, `funding`, `ls`) are shown at every hour as their change since the context's
 last hour, divided by the standard deviation of their 24-hour change over the fold's training hours
 and clipped like the inputs; the change is 0 when either end is missing, and the change of
