@@ -119,11 +119,16 @@ class Panel:
     kept: np.ndarray
 
 
+def scorable(plan: sequence.Plan) -> None:
+    sequence.check_folds(plan)
+    if sequence.fit_only(plan):
+        raise ValueError("the plan holds only the fit-only fold, which scores nothing")
+
+
 def panel(
     values: Mapping[str, np.ndarray], grid: Mapping[str, np.ndarray], plan: sequence.Plan
 ) -> Panel:
-    if sequence.fit_only(plan):
-        raise ValueError("the plan holds only the fit-only fold, which scores nothing")
+    scorable(plan)
     hours, coins = sequence.layout(grid)
     edges = ladder.bounds(plan.ladder)
     rows = sequence.common_rows(values, grid, plan)
@@ -423,6 +428,7 @@ def run(
 ) -> tuple[Path, dict[str, Any]]:
     began = time.perf_counter()
     plan, records, (plan_text, ladder_text) = sequence.snapshot(plan_path)
+    scorable(plan)
     if fixed is None:
         selectable(plan)
     else:

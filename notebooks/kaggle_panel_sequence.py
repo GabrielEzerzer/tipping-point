@@ -453,14 +453,15 @@ def piece_job(job: dict[str, Any], py: str, src: Path, tmp: Path, out: Path) -> 
     panel = src / "python" / "tipping_point" / "src" / "tipping_point" / "panel"
     plan_dir = tmp / "plan"
     plan_dir.mkdir()
-    (plan_dir / "sequence.toml").write_text(piece_plan(panel, job["piece"]), encoding="utf-8")
+    plan_path = plan_dir / job["piece"]["plan"]
+    plan_path.write_text(piece_plan(panel, job["piece"]), encoding="utf-8")
     shutil.copyfile(panel / "ladder.toml", plan_dir / "ladder.toml")
     began = time.time()
     argv = [py, "-m", "tipping_point.panel", "sequence", "--inputs", INPUTS_RUN]
-    argv += ["--plan", plan_dir / "sequence.toml", "--data-dir", store, "--tag", job["kernel"]]
+    argv += ["--plan", plan_path, "--data-dir", store, "--tag", job["kernel"]]
     run(argv, child_env(src), out / "logs" / "sequence.log")
     made = new_run(runs, set())
-    said = run([py, "-c", CELLS, plan_dir / "sequence.toml"], child_env(src))
+    said = run([py, "-c", CELLS, plan_path], child_env(src))
     cells = set(json.loads(said.strip().splitlines()[-1]))
     return {"seconds": round(time.time() - began, 1), **verify(made, job["commit"], cells)}
 

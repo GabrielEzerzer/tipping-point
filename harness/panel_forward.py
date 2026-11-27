@@ -232,8 +232,11 @@ def drawn(
 def row_hours(
     hours: np.ndarray, plan: sequence.Plan, f: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    edges = ladder.bounds(plan.ladder)
+    if not 0 <= f < len(edges) - 1:
+        raise ValueError(f"fold {f + 1} is not a scored fold, so it has no hour to judge")
     train = sequence.training(hours, plan, f, SCHEME)
-    fold, _ = ladder.folds(hours, ladder.bounds(plan.ladder), plan.ladder.block_days)
+    fold, _ = ladder.folds(hours, edges, plan.ladder.block_days)
     fit = sequence.eligible(train, plan.pad, AHEAD)
     evaluation = (fold == f) & (np.arange(len(hours)) + AHEAD < len(hours))
     return train, fit, evaluation

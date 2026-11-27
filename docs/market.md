@@ -948,7 +948,8 @@ variant and seed exactly as another fold does, with the seeds a fold of that ind
 scales, selection block and supervised step count all taken from those hours. It scores nothing:
 it has no test rows, fits no probe and writes no row to the folds table, which keeps its columns
 when empty. It exists because the one test on the held-back span will score models fitted once on
-the whole development span and never refitted, which none of the scored folds is. A plan may hold
+the development span's hours more than the gap before its end and never refitted, which none of
+the scored folds is. A plan may hold
 it only alone and only under `forward` (`panel/sequence-final.toml`, the shipped plan with
 `folds = [8]`, which a test keeps otherwise identical to it), so every run either scores all its
 folds or is a fit-only run. `scores` and `classical` refuse a fit-only run or plan, since it has
@@ -1081,7 +1082,9 @@ models the held-back test scores. Each piece carries the sha256 of the inputs
 table and the labels grid from the local store's records and refuses a dataset whose files differ,
 after first refusing, from the manifest and the Parquet metadata alone, one that reaches the
 held-back span. A piece is complete only if its saved models are exactly its plan's cells, each
-among its verified files, and it skipped nothing. Its `local-dry` runs the dry kernel's steps on
+among its verified files, and it skipped nothing. `write` makes all nineteen kernel folders at the
+given commit, but pushing a folder starts a new version of that kernel, so only the folders of the
+run being made are pushed. Its `local-dry` runs the dry kernel's steps on
 this machine and needs a clean checkout, since the merge refuses runs made from uncommitted code.
 The script's `--help` is its manual.
 

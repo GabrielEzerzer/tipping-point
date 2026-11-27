@@ -801,6 +801,25 @@ def test_a_plan_replaced_while_it_is_read_configures_and_records_one_text(
     assert params["ladder_plan"]["sha256"] == store.sha256(run_dir / "ladder.toml")
 
 
-def test_the_classical_side_refuses_a_plan_of_only_the_fit_only_fold() -> None:
+def test_the_classical_side_refuses_the_fit_only_fold_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     with pytest.raises(ValueError, match="only the fit-only fold"):
         classical.panel({}, {}, sequence.load(sequence.FINAL))
+    values, grid = world()
+    run_inputs = write_runs(tmp_path, values, grid)
+    final = plans(tmp_path / "final", FORWARD.replace("folds = []", "folds = [4]"))
+    plan = sequence.load(final)
+    assert sequence.fit_only(plan)
+    monkeypatch.setattr(sequence, "read", lambda *args: pytest.fail("read the inputs"))
+    for fixed in (None, Config("window", "vol", "last", plan.cs[0])):
+        with pytest.raises(ValueError, match="only the fit-only fold"):
+            classical.run(run_inputs, tmp_path, final, "x", fixed)
+    assert not (tmp_path / "panel-classical").exists()
+    for schemes, folds, refused in (
+        (("forward",), (3, 4), "fold 4 is fit-only"),
+        (("loqo",), (4,), "fold 4 is fit-only"),
+        (("forward",), (5,), "fold 5"),
+    ):
+        with pytest.raises(ValueError, match=refused):
+            classical.panel({}, {}, replace(plan, schemes=schemes, folds=folds))

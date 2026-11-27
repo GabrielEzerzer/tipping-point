@@ -275,7 +275,7 @@
     },
     {
       "name": "Panel sequence models",
-      "description": "Trains a JEPA, its untrained twin and a supervised model on the last 336 hours of a ladder rung's panel inputs inside each quarter fold, probes the JEPA's and twin's readouts over a grid of readouts and penalties on the ladder's common rows, and saves every fitted model, from a plan file; panel/sequence-final.toml fits every model once on the whole development span and scores nothing.",
+      "description": "Trains a JEPA, its untrained twin and a supervised model on the last 336 hours of a ladder rung's panel inputs inside each quarter fold, probes the JEPA's and twin's readouts over a grid of readouts and penalties on the ladder's common rows, and saves every fitted model, from a plan file; panel/sequence-final.toml fits every model once on the development span's hours more than the gap before its end and scores nothing.",
       "command": "uv run python -m tipping_point.panel sequence --inputs <run id>",
       "inputs": "a panel inputs run, its labels run and a plan file (default panel/sequence.toml, which names its ladder plan)",
       "outputs": "<data dir>/panel-sequence/<run_id>/ holding diagnostics, loss curves, the per-fold AUC table, row accounting, report.md and the saved models under encoders/",

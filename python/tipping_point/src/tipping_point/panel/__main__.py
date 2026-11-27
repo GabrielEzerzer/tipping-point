@@ -44,7 +44,8 @@ Command line: python -m tipping_point.panel <command> [options]
           the JEPA's and twin's readouts over a grid of readouts and penalties, as a run in
           <data dir>/panel-sequence/<run_id>/ with the tables diagnostics, curves, folds and rows,
           report.md and every fitted model under encoders/. panel/sequence-final.toml is the
-          fit-only fold: every model fitted once on the whole development span, nothing scored
+          fit-only fold: every model fitted once on the span's hours more than the gap before its
+          end, nothing scored
   scores  out-of-fold scores of one model and variant of a sequence run (--sequence, --model,
           --variant) from its saved models, the JEPA's and twin's readout and penalty chosen from
           the run's folds table by the selection rule, the mean over seeds of each row's logit, as

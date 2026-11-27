@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -2028,8 +2029,10 @@ def test_the_command_refuses_the_held_back_span(tmp_path: Path) -> None:
         assert not (tmp_path / folder / "panel-sequence").exists()
 
 
-FINAL = PLAN.replace('schemes = ["loqo", "forward"]', 'schemes = ["forward"]').replace(
-    "folds = [1, 3]", "folds = [4]"
+FINAL = (
+    FRESH.replace('schemes = ["loqo", "forward"]', 'schemes = ["forward"]')
+    .replace("folds = [1, 3]", "folds = [4]")
+    .replace('variants = ["vol"]', 'variants = ["full"]')
 )
 
 
@@ -2056,6 +2059,8 @@ def test_the_final_plan_is_the_shipped_plan_with_only_the_fit_only_fold() -> Non
         ('["forward"]', "[3, 4]", "fold 4 is fit-only"),
         ('["forward"]', "[5]", "fold 5"),
         ('["forward"]', "[-1]", "fold -1"),
+        ('["forward"]', "[4.0]", "fold 4.0 is not a whole number"),
+        ('["forward"]', "[true]", "fold True is not a whole number"),
     ],
 )
 def test_the_fit_only_fold_is_refused_outside_a_forward_plan_of_its_own(
@@ -2067,7 +2072,7 @@ def test_the_fit_only_fold_is_refused_outside_a_forward_plan_of_its_own(
 
 
 def test_the_fit_only_fold_trains_every_cell_on_the_span_before_its_end_and_scores_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     values, grid = world()
     run_inputs = write_runs(tmp_path, values, grid)
@@ -2090,13 +2095,15 @@ def test_the_fit_only_fold_trains_every_cell_on_the_span_before_its_end_and_scor
     expected = (hours >= edges[0]) & (hours < edges[-1] - plan.ladder.gap_days * 24 * HOUR)
     assert len(edges) == 5 and expected.any() and not expected.all()
     assert np.array_equal(sequence.training(hours, plan, 4, "forward"), expected)
-    assert len(seen) == 1 and np.array_equal(seen[0], expected)
+    changes = expected[plan.future :] & expected[: -plan.future]
+    assert len(seen) == 2 and np.array_equal(seen[0], expected)
+    assert np.array_equal(seen[1], changes)
 
     (run,) = (tmp_path / "panel-sequence").glob("*-whole")
     params = json.loads((run / "manifest.json").read_text(encoding="utf-8"))["params"]
     complete = json.loads((run / "complete.json").read_text(encoding="utf-8"))
     cells = {
-        sequence.encoder_name("vol", "forward", 4, s, m) for s in (3, 4) for m in sequence.MODELS
+        sequence.encoder_name("full", "forward", 4, s, m) for s in (3, 4) for m in sequence.MODELS
     }
     assert sequence.cells(plan) == cells == set(params["encoders"])
     for name in cells:
@@ -2115,17 +2122,21 @@ def test_the_fit_only_fold_trains_every_cell_on_the_span_before_its_end_and_scor
     assert "the fit-only fold 5" in report and "## 24 h" not in report
 
     with pytest.raises(ValueError, match="only the fit-only fold"):
-        sequence.scores_run(run, tmp_path, "jepa", "vol", "x")
-    argv = ["scores", "--sequence", str(run), "--model", "supervised", "--variant", "vol"]
+        sequence.scores_run(run, tmp_path, "jepa", "full", "x")
+    argv = ["scores", "--sequence", str(run), "--model", "supervised", "--variant", "full"]
+    capsys.readouterr()
     assert main([*argv, "--data-dir", str(tmp_path)]) == 1
+    assert "only the fit-only fold, which scores nothing" in capsys.readouterr().err
     assert not (tmp_path / "panel-scores").exists()
 
     pieces = []
     for seed in (3, 4):
-        path = plans(
-            tmp_path / "plans" / f"s{seed}", FINAL.replace("seeds = [3]", f"seeds = [{seed}]")
-        )
+        folder = tmp_path / "plans" / f"s{seed}"
+        path = plans(folder, FINAL.replace("seeds = [3]", f"seeds = [{seed}]"))
+        path = path.rename(folder / sequence.FINAL.name)
         pieces.append(sequence.run(run_inputs, tmp_path, path, f"s{seed}")[0])
+        piece = json.loads((pieces[-1] / "manifest.json").read_text(encoding="utf-8"))
+        assert piece["params"]["plan"]["file"] == sequence.FINAL.name
     argv = ["merge", "--runs", *map(str, pieces), "--plan", str(whole), "--data-dir", str(tmp_path)]
     assert main(argv) == 0
     (merged,) = (tmp_path / "panel-sequence").glob("*-merged")
@@ -2138,7 +2149,7 @@ def test_the_fit_only_fold_trains_every_cell_on_the_span_before_its_end_and_scor
         run / "diagnostics.parquet"
     )
     with pytest.raises(ValueError, match="only the fit-only fold"):
-        sequence.scores_run(merged, tmp_path, "twin", "vol", "x")
+        sequence.scores_run(merged, tmp_path, "twin", "full", "x")
     scored = plans(tmp_path / "plans" / "scored", FINAL.replace("folds = [4]", "folds = [3]"))
     with pytest.raises(ValueError, match="fitted folds the parent plan lacks: 4"):
         sequence.merge_run(pieces, scored, tmp_path, "x")
@@ -2164,3 +2175,135 @@ def test_the_fit_only_fold_trains_as_a_scored_fold_on_the_same_hours(tmp_path: P
         [{k: d[k] for k in same} for d in b["diagnostics"]],
     )
     assert sequence._same(a["curves"], b["curves"])
+
+
+@pytest.mark.parametrize(
+    ("schemes", "folds", "refused"),
+    [
+        (("forward",), (3, 4), "fold 4 is fit-only"),
+        (("loqo",), (4,), "fold 4 is fit-only"),
+        (("forward",), (5,), "fold 5"),
+    ],
+)
+def test_a_replaced_plan_meets_the_fold_rule_where_it_is_used(
+    tmp_path: Path, schemes: tuple[str, ...], folds: tuple[int, ...], refused: str
+) -> None:
+    plan = replace(tiny(tmp_path, FINAL), schemes=schemes, folds=folds)
+    assert not sequence.fit_only(plan)
+    with pytest.raises(ValueError, match=refused):
+        sequence.sequence({}, {}, plan)
+    with pytest.raises(ValueError, match=refused):
+        sequence.external({}, {}, plan, ("supervised", "full", None, None), lambda name: b"")
+
+
+def test_hours_from_the_gap_before_the_span_end_reach_no_fit_only_parameter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values, grid = world(days=365 + 30)
+    plan = tiny(tmp_path, FINAL)
+    assert sequence.fit_only(plan) and plan.target == "fresh"
+    assert set(plan.changes) & set(plan.rung("full").columns)
+    cut = ladder.bounds(plan.ladder)[-1] - plan.ladder.gap_days * 24 * HOUR
+    seen: dict[str, list[Any]] = {"statistics": [], "scales": [], "rows": []}
+    statistics, fresh, features = sequence.statistics, sequence.fresh, sequence.features
+
+    def spied_statistics(raw: np.ndarray, train: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        seen["statistics"].append(statistics(raw, train))
+        return seen["statistics"][-1]
+
+    def spied_fresh(
+        raw: np.ndarray, columns: Any, train: np.ndarray, plan: sequence.Plan
+    ) -> sequence.Fresh | None:
+        rules = fresh(raw, columns, train, plan)
+        assert rules is not None
+        seen["scales"].append(rules.scale.numpy().copy())
+        return rules
+
+    def spied_features(net: Any, x: Any, coin: np.ndarray, hour: np.ndarray, plan: Any) -> Any:
+        seen["rows"].append(len(coin))
+        return features(net, x, coin, hour, plan)
+
+    monkeypatch.setattr(sequence, "statistics", spied_statistics)
+    monkeypatch.setattr(sequence, "fresh", spied_fresh)
+    monkeypatch.setattr(sequence, "features", spied_features)
+    monkeypatch.setattr(sequence, "rung_folds", lambda *args: pytest.fail("fitted a rung"))
+
+    def once(values: dict, grid: dict) -> tuple[dict, dict[str, list[Any]]]:
+        for found in seen.values():
+            found.clear()
+        out = sequence.sequence(values, grid, plan)
+        return out, {k: list(v) for k, v in seen.items()}
+
+    first, a = once(values, grid)
+    moved, flipped = perturbed(values, grid, cut, int(grid["ts_ns"].max()) + 1)
+    region = grid["ts_ns"] >= cut
+    for name in ("skip", *(f"censored_{h}" for h in labels.HORIZONS)):
+        flipped[name] = np.where(region, ~grid[name], grid[name])
+    second, b = once(moved, flipped)
+    assert first["encoders"] and first["encoders"].keys() == second["encoders"].keys()
+    for key in first["encoders"]:
+        assert first["encoders"][key] == second["encoders"][key], key
+    assert len(a["statistics"]) == len(b["statistics"]) >= 2
+    for (mu, sd), (mu2, sd2) in zip(a["statistics"], b["statistics"], strict=True):
+        assert np.array_equal(mu, mu2) and np.array_equal(sd, sd2)
+    assert a["scales"] and a["scales"][0].size and not np.all(a["scales"][0] == 1)
+    for one, two in zip(a["scales"], b["scales"], strict=True):
+        assert np.array_equal(one, two)
+    steps = {k: d["steps"] for k, d in by_model(first).items() if k[-1] == "supervised"}
+    assert steps and steps == {k: d["steps"] for k, d in by_model(second).items() if k in steps}
+    assert fits(first) == fits(second)
+    assert first["folds"] == [] and a["rows"] and set(a["rows"]) == {0}
+    earlier = sequence.sequence(*perturbed(values, grid, cut - 7 * 24 * HOUR, cut), plan)
+    assert any(earlier["encoders"][k] != first["encoders"][k] for k in first["encoders"])
+
+
+def legacy_folds(rows: list[dict], shape: str) -> list[dict]:
+    if shape == "supervised":
+        return [r for r in rows if r["model"] in ("supervised", "rung")]
+    return rows
+
+
+@pytest.mark.parametrize("shape", ["shipped", "supervised", "empty"])
+def test_pieces_made_before_the_fold_schema_merge_with_it(
+    split: dict[str, Path], tmp_path: Path, shape: str
+) -> None:
+    made = {}
+    for typed in (False, True):
+        copies = []
+        for i, name in enumerate(SPLIT):
+            copy = tmp_path / str(typed) / split[name].name
+            shutil.copytree(split[name], copy)
+            path = copy / "folds.parquet"
+            rows = legacy_folds(pq.read_table(path).to_pylist(), shape)
+            if shape == "empty" and i == 0:
+                rows = []
+            if typed:
+                table = sequence.fold_table(rows)
+            else:
+                table = pa.Table.from_pylist(rows)
+                if shape == "supervised":
+                    assert table.schema.field("readout").type == pa.null()
+                if not rows:
+                    assert table.num_columns == 0
+            pq.write_table(table, path)
+            record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+            record["files"][path.name] = store.sha256(path)
+            (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
+            copies.append(copy)
+        merged, _ = sequence.merge_run(copies, split["parent"], tmp_path / "data", str(typed))
+        made[typed] = pq.read_table(merged / "folds.parquet")
+    assert made[False].schema == sequence.FOLDS and made[False].equals(made[True])
+    assert made[False].num_rows
+    if shape == "shipped":
+        assert made[False].equals(pq.read_table(split["full"] / "folds.parquet"))
+
+
+def test_the_merge_refuses_scored_pieces_under_the_final_parent_plan(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    parent = plans(tmp_path / "final", split_plan('["full", "vol"]', "[3, 4, 5]", "[4]"))
+    assert sequence.fit_only(sequence.load(parent))
+    pieces = [split[name] for name in SPLIT]
+    with pytest.raises(ValueError, match=r"fitted folds the parent plan lacks: 2"):
+        sequence.merge_run(pieces, parent, tmp_path / "data", "x")
+    assert not (tmp_path / "data").exists()

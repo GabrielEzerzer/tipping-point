@@ -227,6 +227,10 @@ def test_fit_rows_stay_in_training_and_evaluation_rows_in_the_left_out_quarter(
     assert np.array_equal(evaluation, quarter)
     _, _, last = panel_forward.row_hours(hours, plan, 3)
     assert last[-panel_forward.AHEAD - 1] and not last[-panel_forward.AHEAD :].any()
+    longer = labels.ns(date(2022, 1, 1)) + HOUR * np.arange(455 * 24, dtype=np.int64)
+    for f in (4, 5):
+        with pytest.raises(ValueError, match=f"fold {f + 1} is not a scored fold"):
+            panel_forward.row_hours(longer, plan, f)
     allowed = np.tile(fit, (2, 1))
     allowed[1, : len(fit) // 2] = False
     one = panel_forward.sample(allowed, 50, sequence.stream("full", 2, 3, "fit"))

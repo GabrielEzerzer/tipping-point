@@ -205,9 +205,7 @@ def load(
     problems += [f"rung {r}" for r in plan.rungs if r not in rungs]
     problems += [f"model {m}" for m in plan.models if m not in MODELS]
     problems += [f"scheme {s}" for s in plan.schemes if s not in ladder.SCHEMES]
-    problems += [f"fold {f}" for f in plan.folds if not 0 <= f <= nfolds]
-    if nfolds in plan.folds and (plan.schemes != ("forward",) or len(plan.folds) != 1):
-        problems.append(f'fold {nfolds} is fit-only: it takes schemes = ["forward"] and no other')
+    problems += fold_problems(plan.schemes, plan.folds, nfolds)
     problems += [f"readout {r}" for r in plan.readouts if r not in READOUTS]
     problems += [f"c {c}" for c in plan.cs if not (np.isfinite(c) and c > 0)]
     for name in ("variants", "rungs", "models", "schemes", "folds", "seeds", "readouts", "cs"):
@@ -270,8 +268,24 @@ def _fresh(table: object) -> tuple[dict[str, Any], list[str]]:
     return {"windowed": windowed, "changes": changes}, problems
 
 
+def fold_problems(schemes: tuple[str, ...], folds: tuple[int, ...], nfolds: int) -> list[str]:
+    whole = [f for f in folds if type(f) is int]
+    problems = [f"fold {f!r} is not a whole number" for f in folds if type(f) is not int]
+    problems += [f"fold {f}" for f in whole if not 0 <= f <= nfolds]
+    if nfolds in whole and (schemes != ("forward",) or len(folds) != 1):
+        problems.append(f'fold {nfolds} is fit-only: it takes schemes = ["forward"] and no other')
+    return problems
+
+
+def check_folds(plan: Plan) -> None:
+    problems = fold_problems(plan.schemes, plan.folds, len(ladder.bounds(plan.ladder)) - 1)
+    if problems:
+        raise ValueError(f"invalid folds: {', '.join(problems)}")
+
+
 def fit_only(plan: Plan) -> bool:
-    return plan.folds == (len(ladder.bounds(plan.ladder)) - 1,)
+    nfolds = len(ladder.bounds(plan.ladder)) - 1
+    return plan.schemes == ("forward",) and plan.folds == (nfolds,)
 
 
 def blind(plan: Plan) -> list[str]:
@@ -824,6 +838,7 @@ def sequence(
     plan: Plan,
     log: LOG = lambda line: None,
 ) -> dict[str, Any]:
+    check_folds(plan)
     if plan.target == "fresh" and blind(plan):
         raise ValueError(
             f"rungs {', '.join(blind(plan))} show the fresh target no windowed channel"
@@ -1036,6 +1051,7 @@ def external(
     fetch: Callable[[str], bytes],
     log: LOG = lambda line: None,
 ) -> dict[str, pa.Table]:
+    check_folds(plan)
     model, variant, name, c = choice
     configs: list[tuple[str, float]] = []
     if model != "supervised":
@@ -1656,10 +1672,12 @@ def merge_run(
         "plan.toml": plan_text,
         "ladder.toml": ladder_text,
     }
-    tables = {name: pa.Table.from_pylist(rows) for name, rows in merged.items()}
-    tables["curves"] = curve_table(merged["curves"])
-    tables["folds"] = fold_table(merged["folds"])
-    tables["rows"] = pa.Table.from_pylist(accounting or [])
+    tables = {
+        "diagnostics": pa.Table.from_pylist(merged["diagnostics"]),
+        "curves": curve_table(merged["curves"]),
+        "folds": fold_table(merged["folds"]),
+        "rows": pa.Table.from_pylist(accounting or []),
+    }
     seconds = time.perf_counter() - began
     checks = {"seconds": round(seconds, 1), "pieces_seconds": piece_seconds, "skipped": skipped}
     run_dir = store.write(
