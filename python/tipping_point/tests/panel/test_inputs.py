@@ -359,13 +359,18 @@ def test_the_ratio_reader_takes_duplicate_unsorted_null_and_missing_rows(tmp_pat
     for d in (days[0], days[2]):
         source = archive.Source("metrics", "XUSDT", f"{d:%Y-%m-%d}")
         metrics_file(root / source.path, [metrics_row(5, "2.0", d)])
-    with pytest.raises(archive.ArchiveError, match="not fetched"):
-        inputs.ratios(root, span.manifest_files(root), "XUSDT", days[0], days[2])
+    read = {
+        s.url: archive.verify(root / s.path)
+        for s in archive.sources(["XUSDT"], days[0], days[2])
+        if s.kind == "metrics" and (root / s.path).exists()
+    }
+    with pytest.raises(archive.ArchiveError, match="did not record this metrics file"):
+        inputs.ratios(root, span.manifest_files(root), "XUSDT", days[0], days[2], read)
     gone = archive.Source("metrics", "XUSDT", f"{days[1]:%Y-%m-%d}").path
     (root / "manifest.json").write_text(
         json.dumps({"files": {gone: {"status": "missing"}}}), encoding="utf-8"
     )
-    found = inputs.ratios(root, span.manifest_files(root), "XUSDT", days[0], days[2])
+    found = inputs.ratios(root, span.manifest_files(root), "XUSDT", days[0], days[2], read)
     grid = inputs.on_grid(found, archive.day_ms(days[0]), 3 * DAY)
     assert np.flatnonzero(np.isfinite(grid)).tolist() == [1, 2 * DAY + 1]
 
@@ -746,7 +751,14 @@ def test_the_command_writes_an_inputs_run_on_the_grids_rows(
         archive.day_ms(FIRST), 34, *(got.columns[("ETHUSDT", k)] for k in archive.KINDS)
     )
     ratio = inputs.on_grid(
-        inputs.ratios(dest, span.manifest_files(dest), "ETHUSDT", FIRST, date(2022, 12, 31)),
+        inputs.ratios(
+            dest,
+            span.manifest_files(dest),
+            "ETHUSDT",
+            FIRST,
+            date(2022, 12, 31),
+            {s["url"]: s["sha256"] for s in got.sources},
+        ),
         archive.day_ms(FIRST),
         34 * DAY,
     )
@@ -764,6 +776,29 @@ def test_the_command_writes_an_inputs_run_on_the_grids_rows(
     assert all(np.isnan(table[name].to_numpy()).all() for name in inputs.MARKET)
 
 
+def test_a_metrics_file_swapped_with_its_checksum_after_the_span_was_read_is_refused(
+    labelled: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest, labels_dir = labelled
+    root = tmp_path / "archive"
+    shutil.copytree(dest, root)
+    real = archive.collect
+    swapped: list[Path] = []
+
+    def collect(symbols: list[str], start: date, end: date, where: Path) -> archive.Span:
+        got = real(symbols, start, end, where)
+        source = archive.Source("metrics", symbols[0], f"{start + timedelta(days=3)}")
+        path = where / source.path
+        metrics_file(path, [metrics_row(5, "9.9", start + timedelta(days=3))])
+        swapped.append(path)
+        return got
+
+    monkeypatch.setattr(archive, "collect", collect)
+    with pytest.raises(archive.ArchiveError, match="recorded when the span was read") as caught:
+        inputs.run(labels_dir, root, tmp_path / "data", "t")
+    assert str(swapped[0]) in str(caught.value)
+
+
 def test_the_command_refuses_a_labels_run_reaching_the_held_back_span(tmp_path: Path) -> None:
     folder = tmp_path / "labels" / "x"
     folder.mkdir(parents=True)
@@ -773,7 +808,7 @@ def test_the_command_refuses_a_labels_run_reaching_the_held_back_span(tmp_path: 
     with pytest.raises(span.HeldBackError):
         inputs.labels_run(folder)
     with pytest.raises(span.HeldBackError):
-        inputs.ratios(tmp_path, {}, "BTCUSDT", date(2023, 12, 30), date(2024, 1, 1))
+        inputs.ratios(tmp_path, {}, "BTCUSDT", date(2023, 12, 30), date(2024, 1, 1), {})
     assert not (tmp_path / "panel-inputs").exists()
 
 

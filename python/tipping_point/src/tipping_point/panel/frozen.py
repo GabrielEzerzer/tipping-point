@@ -710,6 +710,27 @@ def _files_read(entries: Any, what: str) -> dict[str, str]:
     return files
 
 
+def archive_unchanged(
+    labels: Mapping[str, Any], root: Path, symbols: list[str], start: date, end: date
+) -> None:
+    read = _files_read(labels.get("sources"), "the whole-span labels run")
+    problems = []
+    for source in archive.sources(symbols, start, end):
+        path = root / source.path
+        if source.url not in read:
+            if path.exists():
+                problems.append(f"{source.url} on disk and not read by labels")
+        elif not path.is_file():
+            problems.append(f"{source.url} read by labels and not on disk")
+        elif (digest := store.sha256(path)) != read[source.url]:
+            problems.append(f"{source.url} read by labels as {read[source.url]}, on disk {digest}")
+    if problems:
+        raise ValueError(
+            f"the archive changed since the whole-span labels run read it ("
+            f"{'; '.join(problems)}): remove both whole-span runs and run the data step again"
+        )
+
+
 def same_archive(labels: Mapping[str, Any], inputs: Mapping[str, Any]) -> None:
     read = _files_read(labels.get("sources"), "the whole-span labels run")
     took = _files_read(inputs["params"].get("sources"), "the whole-span inputs run")
@@ -847,6 +868,8 @@ def data(
         made.append(labels_dir)
     labels, labels_sha, missing = whole_labels(labels_dir, test, dev, commit, seen)
     if inputs_dir is None:
+        if not made:
+            archive_unchanged(labels, root, symbols, start, test.end)
         inputs_dir = heldback.inputs_whole(labels_dir, root, held, test.end, log)
         made.append(inputs_dir)
     _, complete, inputs_sha = whole_inputs(

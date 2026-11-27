@@ -235,7 +235,7 @@ def test_a_raised_limit_reads_and_writes_only_under_held_back(spans: Spans, tmp_
             archive.Source("metrics", "BTCUSDT", str(LIMIT)).url
         )
     with pytest.raises(span.HeldBackError, match="from 2024-02-01 on"):
-        inputs.ratios(spans.held_root, {}, "BTCUSDT", START, LIMIT, limit=LIMIT)
+        inputs.ratios(spans.held_root, {}, "BTCUSDT", START, LIMIT, {}, limit=LIMIT)
     grid = next((spans.held_labels / "grid").glob("*.parquet"))
     with pytest.raises(span.HeldBackError, match="reaches"):
         store.refuse_held_back(grid)

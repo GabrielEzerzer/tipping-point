@@ -569,6 +569,66 @@ def test_both_steps_take_whole_span_runs_only_when_they_read_the_same_archive_fi
     assert not (data / HELD / frozen.DOMAIN).exists()
 
 
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        ("", None),
+        ("changed", "klines/.* read by labels as [0-9a-f]{64}, on disk [0-9a-f]{64}"),
+        ("added", "klines/.* on disk and not read by labels"),
+        ("removed", "klines/.* read by labels and not on disk"),
+    ],
+)
+def test_a_reused_labels_run_is_built_on_only_while_the_archive_is_as_it_read_it(
+    world: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    problem: str | None,
+) -> None:
+    data = copy(world, tmp_path)
+    shutil.rmtree(data / HELD / "panel-inputs")
+    root = data / HELD / "archives" / "binance"
+    shutil.copytree(world.base / HELD / "archives" / "binance", root)
+    labels_run = whole(data, world, "labels")
+    url = next(
+        s["url"] for s in record(labels_run / "manifest.json")["sources"] if "/klines/" in s["url"]
+    )
+    name = url.rsplit("/", 1)[1]
+    path = root / "klines" / name.split("-")[0] / name
+    assert path.is_file()
+    if change == "changed":
+        body = path.read_bytes() + b"\0"
+        path.write_bytes(body)
+        path.with_name(path.name + ".CHECKSUM").write_bytes(checksum(path.name, body))
+    elif change == "added":
+
+        def unread(m: dict[str, Any]) -> None:
+            m["sources"] = [s for s in m["sources"] if s["url"] != url]
+            m["missing_sources"].append(url)
+
+        edit(labels_run / "manifest.json", unread)
+    elif change == "removed":
+        path.unlink()
+        path.with_name(path.name + ".CHECKSUM").unlink()
+    built: list[str] = []
+
+    def inputs_whole(*args: Any) -> Path:
+        built.append("inputs")
+        raise RuntimeError("built")
+
+    monkeypatch.setattr(heldback, "inputs_whole", inputs_whole)
+    path = put(tmp_path / "test.toml", toml(world.plan))
+    if problem is None:
+        with pytest.raises(RuntimeError, match="built"):
+            frozen.data(data, lambda url: pytest.fail(url), path)
+        assert built == ["inputs"]
+        return
+    closing = ".*: remove both whole-span runs and run the data step again"
+    with pytest.raises(ValueError, match="the archive changed since .*" + problem + closing):
+        frozen.data(data, lambda url: pytest.fail(url), path)
+    assert built == []
+
+
 def test_the_data_step_refuses_an_inputs_run_with_no_labels_run(
     world: World, tmp_path: Path
 ) -> None:

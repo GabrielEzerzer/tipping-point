@@ -1473,7 +1473,10 @@ skipped as before, wherever it falls. Whether the run is valid is a separate che
 value: the coin's last complete bar over the whole span the run reads decides which monthly funding
 files it needs, and a funding file recorded as missing stops the run when its month starts before
 the end of that bar, and is ignored when the coin had stopped before the month began. A file that
-is absent and not recorded as missing is refused by the archive check, as before.
+is absent and not recorded as missing is refused by the archive check, as before. The long/short
+ratio is read from each metrics file a second time after the archive read has recorded it, and the
+run is refused when that file's sha256 is not the recorded one, or when it reads a metrics file the
+archive read did not record.
 
 **Prefix check.** `panel.prefix.check(labels_run, inputs_run, dev_labels, dev_inputs)` takes a labels
 and inputs run over a span that reaches past 2023 and the development labels and inputs runs, which
@@ -1679,7 +1682,10 @@ failed or unreadable, and says what a re-run does for each: a refused or failed 
 written, so a re-run fetches it again; an unreadable file matches its checksum and is kept, so a
 re-run reads it again and fails the same way, and the message names the file and its checksum file
 to remove before the data step fetches it again. If there is no whole-span inputs run, it writes one
-from the labels run. It then checks both runs (checks 11 and 12, so a labels and inputs run
+from the labels run. When that labels run was already there, it first checks the archive on disk
+against the labels run's record, hashing each raw file: every file the labels run read must be on
+disk with the sha256 it recorded, and every file of its coins and span on disk must be one it read.
+Otherwise it refuses, naming each file, before the inputs run is built. It then checks both runs (checks 11 and 12, so a labels and inputs run
 built from different archive states is refused) and runs the prefix check (13),
 printing the rows it compared. An inputs run with no labels run is refused.
 
@@ -1816,6 +1822,9 @@ What the checks don't prove:
   place of a module; a `git replace` ref, which changes what `HEAD`'s tree reads as; and
   `PYTHONPATH`, a `.pth` file, `sitecustomize` or the folder the command is started from when it
   lies outside the checkout, each of which can put other code ahead of the source tree.
+- The archive is assumed to have no writer while a step runs. The archive reader hashes a file and
+  parses it in separate opens, so a file swapped inside that window, or swapped and put back between
+  two reads, is not caught.
 - One test per plan is kept by the runs in one data dir only. A copy of the data dir, or another
   data dir, does not see them.
 - A plan is identified by the sha256 of its bytes, so a plan with a changed comment or spacing is a
