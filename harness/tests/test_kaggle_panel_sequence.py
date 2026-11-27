@@ -65,6 +65,16 @@ def test_the_pieces_are_every_cell_of_their_plan_once(
     assert all(k.slug(p).startswith(prefix) for p in made)
 
 
+def test_each_piece_is_cut_from_its_own_plan_file(tmp_path: Path) -> None:
+    k = runner()
+    for name in (k.PLAN, k.FINAL_PLAN):
+        text = f'variants = []\nseeds = []\nfolds = []\nfile = "{name}"\n'
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    for piece in k.pieces() + k.final_pieces():
+        text = k.piece_plan(tmp_path, piece)
+        assert f'file = "{piece["plan"]}"' in text and f"folds = {piece['folds']}" in text
+
+
 def test_the_kernel_folders_carry_their_commit_and_piece(tmp_path: Path) -> None:
     k = runner()
     out = tmp_path / "kernels"
