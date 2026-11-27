@@ -370,6 +370,22 @@ def test_the_data_step_refuses_a_half_written_or_second_whole_span_run(
     assert world.fake.requests == []
 
 
+def test_the_tables_read_for_scoring_are_the_recorded_bytes(world: World) -> None:
+    labels_dir, inputs_dir = world.made["labels"], world.made["inputs"]
+    manifest = record(inputs_dir / "manifest.json")
+    complete = record(inputs_dir / "complete.json")
+    values, _, read = frozen.read_tables(labels_dir, inputs_dir, manifest, complete, ["vol_1h"])
+    assert read["inputs"]["sha256"] == complete["files"]["inputs.parquet"]
+    assert len(values["vol_1h"]) > 0
+    grid = json.loads(json.dumps(manifest))
+    grid["params"]["labels_grid"]["sha256"] = ZERO
+    table = json.loads(json.dumps(complete))
+    table["files"]["inputs.parquet"] = ZERO
+    for m, c, what in ((grid, complete, "grid"), (manifest, table, "inputs table")):
+        with pytest.raises(ValueError, match=f"the whole-span {what}: its sha256 differs"):
+            frozen.read_tables(labels_dir, inputs_dir, m, c, ["vol_1h"])
+
+
 def test_the_run_step_writes_the_cores_decision_and_tables(world: World, tested: Done) -> None:
     decision = record(tested.run / "decision.json")
     want = json.loads(frozen._json(tested.expected["decision"]))
