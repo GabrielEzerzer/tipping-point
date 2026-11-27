@@ -1435,7 +1435,7 @@ the data folder and the `labels/` or `panel-inputs/` folder the run is written u
 A folder named, say, `binance-held-back` has no `held-back` part. Raised-limit runs therefore sit
 under `<data dir>/held-back/` (its `labels/` and `panel-inputs/` beside an archive root).
 `inputs.run` checks the paths it is given before it lists the archive or opens the labels run. An
-archive root holds no links: a stage walks the root before it reads any file, and for each entry it
+archive root holds no links, nor does the labels run `inputs.run` reads: a stage walks each before it reads any file in it, and for each entry it
 reads the entry's own type from the folder listing, without following it, and refuses a file
 link, a directory link and a junction alike, so what a link points to is neither listed nor
 opened. The root itself may be given through a link, since its resolved path is what is checked.

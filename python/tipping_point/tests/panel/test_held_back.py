@@ -21,6 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from market_planted import Vision, vision
+from tipping_point.ising import io
 from tipping_point.market import archive
 from tipping_point.panel import fetch, inputs, labels, prefix, sequence, span, store
 from tipping_point.panel.__main__ import main
@@ -410,6 +411,28 @@ def test_an_archive_root_refuses_a_file_link(tmp_path: Path) -> None:
         span.manifest_files(dev)
 
 
+def test_a_labels_run_whose_record_is_a_link_is_refused_before_it_is_read(
+    spans: Spans, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = copied(spans.dev_labels, tmp_path)
+    (run / "complete.json").unlink()
+    try:
+        (run / "complete.json").symlink_to(spans.held_labels / "complete.json")
+    except OSError:
+        pytest.skip("this platform does not let the test make a file link")
+    read: list[Path] = []
+    read_json = io.read_json
+
+    def recorded(path: Path) -> Any:
+        read.append(Path(path))
+        return read_json(path)
+
+    monkeypatch.setattr(io, "read_json", recorded)
+    with pytest.raises(span.HeldBackError, match="json is a link"):
+        inputs.run(run, spans.dev_root, tmp_path, "x")
+    assert not any(path.parent == run for path in read)
+
+
 def test_a_folder_reached_through_a_directory_link_is_checked_where_it_resolves(
     spans: Spans, tmp_path: Path
 ) -> None:
@@ -427,8 +450,17 @@ def test_a_folder_reached_through_a_directory_link_is_checked_where_it_resolves(
     run = copied(spans.held_labels, held / "copy")
     shutil.move(run / "grid", tmp_path / "dev" / "grid")
     linked(run / "grid", tmp_path / "dev" / "grid")
-    with pytest.raises(span.HeldBackError, match="is not inside the labels run"):
+    with pytest.raises(span.HeldBackError, match="grid is a link"):
         inputs.run(run, spans.held_root, held / "copy", "x", limit=LIMIT)
+    outside = copied(spans.held_labels, held / "other")
+
+    def escaped(record: dict[str, Any]) -> None:
+        name = next(f for f in record["files"] if f.startswith("grid/"))
+        record["files"]["grid/../../grid.parquet"] = record["files"].pop(name)
+
+    edit_json(outside / "complete.json", escaped)
+    with pytest.raises(span.HeldBackError, match="is not inside the labels run"):
+        inputs.run(outside, spans.held_root, held / "other", "x", limit=LIMIT)
     dev = tmp_path / "work"
     linked(dev / "labels", spans.base / span.HELD_BACK_DIR / "labels")
     with pytest.raises(span.HeldBackError, match="is under a held-back folder"):

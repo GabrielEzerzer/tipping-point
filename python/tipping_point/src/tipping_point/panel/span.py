@@ -81,8 +81,8 @@ def unlinked(root: Path, limit: date) -> list[Path]:
             path = folder / entry.name
             if entry.is_symlink() or entry.is_junction():
                 raise HeldBackError(
-                    f"{path} is a link: an archive root holds none, so that every file is read "
-                    f"where its name says it is"
+                    f"{path} is a link: an archive root and a labels run hold none, so that "
+                    f"every file is read where its name says it is"
                 )
             if entry.name.casefold() == HELD_BACK_DIR:
                 held_back_root(limit, path)

@@ -376,6 +376,7 @@ def on_grid(found: Mapping[str, np.ndarray], start_ms: int, n: int) -> np.ndarra
 
 
 def labels_run(path: Path, *, limit: date = span.HELD_BACK) -> dict[str, Any]:
+    span.unlinked(path, limit)
     params = io.read_json(path / "manifest.json")["params"]
     days = [date.fromisoformat(params[k]) for k in ("start", "dev_start", "end")]
     span.refuse(*days, limit=limit)
