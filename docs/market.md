@@ -902,8 +902,8 @@ last hour, divided by the standard deviation of their 24-hour change over the fo
 and clipped like the inputs; the change is 0 when either end is missing, and the change of
 `oi_vs_28d` is the move in open interest less the move of its 28-day median. A market mean follows its
 coin input. Every other input is 0, the scaled value of its training mean, and so is the share of
-inputs missing, which would otherwise tell the target which of the next day's inputs were missing,
-hidden ones included. The target is therefore not free of the context: a change is measured from
+inputs missing, which would otherwise carry into the target the fraction of the next day's inputs
+that were missing, hidden ones included. The target is therefore not free of the context: a change is measured from
 the context's last hour, and a batch can differ in its target through that hour's level or through
 which values are missing as well as through what the next day brings, so a `target_sd` above 0
 shows a target that varies, not one that has been learned. The plan's `[fresh]` table lists these
