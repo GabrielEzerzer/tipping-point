@@ -6,6 +6,7 @@ import calendar
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import sys
@@ -308,22 +309,55 @@ def linked(link: Path, target: Path) -> None:
             pytest.skip("this platform does not let the test make a directory link")
 
 
-def test_an_archive_file_that_is_a_link_is_checked_where_it_resolves(tmp_path: Path) -> None:
+ZIP = "klines/BTCUSDT/BTCUSDT-5m-2023-12-{}.zip"
+
+
+def planted(root: Path, day: int) -> Path:
+    path = root / ZIP.format(day)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"zip")
+    return path
+
+
+def test_an_archive_root_refuses_a_directory_link_before_it_lists_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     held, dev = tmp_path / span.HELD_BACK_DIR / "archive", tmp_path / "dev"
-    name = "klines/BTCUSDT/BTCUSDT-5m-2023-12-{}.zip"
-    for root, day in ((held, 30), (dev, 29)):
-        (root / name.format(day)).parent.mkdir(parents=True)
-        (root / name.format(day)).write_bytes(b"zip")
+    other = tmp_path / "other"
+    for root, day in ((held, 30), (dev, 29), (other, 28)):
+        planted(root, day)
     assert span.manifest_files(dev) == {} == span.manifest_files(held, limit=LIMIT)
+    scanned: list[Path] = []
+    scandir = os.scandir
+
+    def recorded(folder: Path) -> Any:
+        scanned.append(Path(folder))
+        return scandir(folder)
+
+    monkeypatch.setattr(os, "scandir", recorded)
+    linked(dev / "metrics", held / "klines")
+    with pytest.raises(span.HeldBackError, match="metrics is a link"):
+        span.manifest_files(dev)
+    assert dev in scanned and dev / "metrics" not in scanned
+    linked(other / "klines" / "ETHUSDT", dev / "klines" / "BTCUSDT")
+    with pytest.raises(span.HeldBackError, match="ETHUSDT is a link"):
+        span.manifest_files(other)
+    assert other / "klines" / "ETHUSDT" not in scanned
+    linked(held / "metrics", dev / "klines")
+    with pytest.raises(span.HeldBackError, match="metrics is a link"):
+        span.manifest_files(held, limit=LIMIT)
+
+
+def test_an_archive_root_refuses_a_file_link(tmp_path: Path) -> None:
+    held, dev = tmp_path / span.HELD_BACK_DIR / "archive", tmp_path / "dev"
+    target = planted(held, 30)
+    planted(dev, 29)
     try:
-        (dev / name.format(30)).symlink_to(held / name.format(30))
-        (held / name.format(29)).symlink_to(dev / name.format(29))
+        (dev / ZIP.format(30)).symlink_to(target)
     except OSError:
         pytest.skip("this platform does not let the test make a file link")
-    with pytest.raises(span.HeldBackError, match="is under a held-back folder"):
+    with pytest.raises(span.HeldBackError, match="zip is a link"):
         span.manifest_files(dev)
-    with pytest.raises(span.HeldBackError, match="is not under a held-back folder"):
-        span.manifest_files(held, limit=LIMIT)
 
 
 def test_a_folder_reached_through_a_directory_link_is_checked_where_it_resolves(

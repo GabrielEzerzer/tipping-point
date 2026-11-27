@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import calendar
+import os
 import re
 from collections.abc import Iterable
 from datetime import date
@@ -58,9 +59,31 @@ def refuse_names(root: Path, names: Iterable[str], how: str, *, limit: date = HE
             ) from None
 
 
+def unlinked(root: Path) -> list[Path]:
+    found: list[Path] = []
+    folders = [(root, root.resolve())]
+    while folders:
+        folder, real = folders.pop()
+        with os.scandir(folder) as entries:
+            names = sorted(entry.name for entry in entries)
+        for name in names:
+            path = folder / name
+            if path.resolve() != real / name:
+                raise HeldBackError(
+                    f"{path} is a link: an archive root holds none, so that every file is read "
+                    f"where its name says it is"
+                )
+            found.append(path)
+            if path.is_dir():
+                folders.append((path, real / name))
+    return found
+
+
 def refuse_archive(root: Path, *, limit: date = HELD_BACK) -> None:
-    paths = list(root.rglob("*")) if root.is_dir() else []
-    held_back_root(limit, *paths)
+    paths: list[Path] = []
+    if root.is_dir():
+        held_back_root(limit, root)
+        paths = unlinked(root)
     names = (path.relative_to(root).as_posix() for path in paths)
     refuse_names(root, names, "holds", limit=limit)
 

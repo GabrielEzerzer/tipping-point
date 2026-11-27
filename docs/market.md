@@ -1429,13 +1429,16 @@ names: they refuse a held-back run by the span its manifest records and the time
 tables, so they would read a development run that had been saved under a `held-back` folder. The
 three stages resolve each path they read or write before they read anything, links and `..`
 included, and refuse one whose resolved path has a `held-back` part when the limit is the default,
-or lacks one when it is raised: the archive root, each of its kind folders for the run's coins and
-every file and folder found under the root, so a file that is itself a link is checked too,
+or lacks one when it is raised: the archive root and each of its kind folders for the run's coins,
 the data folder and the `labels/` or `panel-inputs/` folder the run is written under, and for
 `inputs.run` the labels run, whose grid and thresholds must also resolve inside that run's folder.
 A folder named, say, `binance-held-back` has no `held-back` part. Raised-limit runs therefore sit
 under `<data dir>/held-back/` (its `labels/` and `panel-inputs/` beside an archive root).
-`inputs.run` checks the paths it is given before it lists the archive or opens the labels run. A
+`inputs.run` checks the paths it is given before it lists the archive or opens the labels run. An
+archive root holds no links: before a stage lists a folder under the root it resolves each entry
+and refuses one that resolves anywhere but its own place under the root, a file link, a directory
+link and a junction alike, without listing what it points to. A hard link cannot be told from a
+file and is not caught. A
 run whose limit is not the default, raised or lowered, records it as `limit` in the archive's
 `manifest.json` and in the labels and inputs runs' manifest params; a run with the default records
 nothing new apart from `labels_manifest_sha256`. Its labels and archive are bit for bit those the
@@ -1489,7 +1492,8 @@ H hours the development run censors the windows past its end, which the whole-sp
 and an hour after that first firing is already skipped for 24 hours. Thresholds and inputs get no
 window, since a day's threshold reads only earlier days and an input at t only data stamped at or before t (open interest at t, everything else before t).
 Any other difference is refused with the column, the first row and the number of rows. The check
-proves that the rows before 2024-01-01 are equal and nothing more. It says nothing about the rows
+proves that the cells it compares are equal, every row before 2024-01-01 less the label columns in
+their windows above, and nothing more. It says nothing about the rows
 from 2024-01-01 on, which could differ in any way and pass; that they were made by the committed
 code and configuration, and that the development runs compared are the ones the models were
 trained on, is for the test command to bind by commit and sha256.
