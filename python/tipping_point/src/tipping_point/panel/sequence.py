@@ -238,11 +238,11 @@ def _fresh(table: object) -> tuple[dict[str, Any], list[str]]:
     if not (isinstance(changes, list) and all(isinstance(c, str) for c in changes)):
         problems.append("fresh changes must be a list of channel names")
         changes = []
-    problems += [
-        f"fresh lookback {k}"
-        for k, v in windowed.items()
-        if isinstance(v, bool) or not isinstance(v, int) or v < 1
+    wrong = [
+        k for k, v in windowed.items() if isinstance(v, bool) or not isinstance(v, int) or v < 1
     ]
+    problems += [f"fresh lookback {k}" for k in wrong]
+    windowed = {k: v for k, v in windowed.items() if k not in wrong}
     if len(set(changes)) != len(changes):
         problems.append("fresh changes must be distinct")
     names = [*windowed, *changes]
@@ -252,7 +252,7 @@ def _fresh(table: object) -> tuple[dict[str, Any], list[str]]:
 
 
 def blind(plan: Plan) -> list[str]:
-    shown = dict(plan.windowed)
+    shown = {name for name, lookback in plan.windowed if lookback <= plan.future}
     rungs = {r.name: r for r in plan.ladder.rungs}
     return [
         v

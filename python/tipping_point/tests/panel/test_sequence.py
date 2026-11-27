@@ -268,6 +268,7 @@ CHANGES = 'changes = ["oi_vs_28d", "funding", "ls"]'
         ("vol_1h = 1\n", "vol_1h = 0\n", "fresh lookback vol_1h"),
         ("vol_1h = 1\n", "vol_1h = true\n", "fresh lookback vol_1h"),
         ("vol_1h = 1\n", "vol_1h = 1.0\n", "fresh lookback vol_1h"),
+        ("vol_1h = 1\n", 'vol_1h = "1"\n', "fresh lookback vol_1h"),
         (CHANGES, 'changes = ["ls", "ls"]', "fresh changes must be distinct"),
         (CHANGES, 'changes = "ls"', "fresh changes must be a list"),
     ],
@@ -282,18 +283,21 @@ def test_the_plan_refuses_unknown_or_doubled_fresh_channels(
 
 
 def test_a_rung_the_fresh_target_shows_nothing_of_is_refused(tmp_path: Path) -> None:
-    only_lev = FRESH.replace(SHOWN, "[fresh.windowed]\noi_24h = 24\n")
+    only_lev = FRESH.replace(SHOWN, "[fresh.windowed]\noi_24h = 4\n")
     with pytest.raises(ValueError, match="rung vol shows the fresh target no windowed channel"):
         tiny(tmp_path / "a", only_lev)
     both = only_lev.replace('variants = ["vol"]', 'variants = ["full", "vol"]')
     with pytest.raises(ValueError, match=r"invalid: rung vol shows .* channel$"):
         tiny(tmp_path / "b", both)
     assert tiny(tmp_path / "c", only_lev.replace('variants = ["vol"]', 'variants = ["full"]'))
-    future = tiny(tmp_path / "d", PLAN.replace(SHOWN, "[fresh.windowed]\noi_24h = 24\n"))
-    assert future.windowed == (("oi_24h", 24),) and sequence.blind(future) == ["vol"]
+    late = FRESH.replace(SHOWN, "[fresh.windowed]\nvol_1h = 99\n")
+    with pytest.raises(ValueError, match="rung vol shows the fresh target no windowed channel"):
+        tiny(tmp_path / "late", late)
+    future = tiny(tmp_path / "d", PLAN.replace(SHOWN, "[fresh.windowed]\noi_24h = 4\n"))
+    assert future.windowed == (("oi_24h", 4),) and sequence.blind(future) == ["vol"]
     plan = tiny(tmp_path / "e", FRESH.replace('variants = ["vol"]', 'variants = ["full", "vol"]'))
     with pytest.raises(ValueError, match="rungs vol show the fresh target no windowed channel"):
-        sequence.sequence({}, {}, replace(plan, windowed=(("oi_24h", 24),)))
+        sequence.sequence({}, {}, replace(plan, windowed=(("oi_24h", 4),)))
     with pytest.raises(ValueError, match="rungs full, vol show the fresh target"):
         sequence.sequence({}, {}, replace(plan, windowed=()))
     model = sequence.jepa(len(NAMES) + 1, plan, 0)
