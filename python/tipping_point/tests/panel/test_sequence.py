@@ -70,6 +70,24 @@ length = 36
 future = 4
 shifts = [2, 4]
 
+[fresh]
+changes = ["oi_vs_28d", "funding", "ls"]
+
+[fresh.windowed]
+vol_1h = 1
+ret_1h = 1
+flow_1h = 1
+vsurge_1h = 1
+vol_6h = 3
+ret_6h = 3
+vol_24h = 24
+near_24h = 24
+volume_24h = 24
+ret_24h = 24
+aret_24h = 24
+flow_24h = 24
+oi_24h = 24
+
 [encoder]
 patch = 2
 width = 8
@@ -156,6 +174,23 @@ def tiny(tmp_path: Path, plan: str = PLAN, base: str | None = None) -> sequence.
     return sequence.load(plans(tmp_path, plan, base))
 
 
+FRESH = PLAN.replace('target = "future"', 'target = "fresh"')
+NAMES = ("vol_1h", "vol_6h", "vol_7d", "ls", "m_vol_6h", "m_ls")
+VOL_1H, VOL_6H, VOL_7D, LS, M_VOL_6H, M_LS, MISSING = range(len(NAMES) + 1)
+
+
+def fresh_world(
+    plan: sequence.Plan, raw: np.ndarray | None = None, train: np.ndarray | None = None
+) -> tuple[np.ndarray, torch.Tensor, sequence.Fresh | None]:
+    if raw is None:
+        raw = np.random.default_rng(0).normal(size=(2, 100, len(NAMES)))
+    if train is None:
+        train = np.ones(raw.shape[1], bool)
+    mu, sd = sequence.statistics(raw, train)
+    x = torch.from_numpy(sequence.standardised(raw, mu, sd, plan.ladder.clip, plan.pad))
+    return raw, x, sequence.fresh(raw, NAMES, train, plan)
+
+
 def test_the_shipped_plan_is_the_scorers_plan() -> None:
     plan = sequence.load()
     assert plan.ladder_path.name == "ladder.toml" and plan.ladder == ladder.load()
@@ -165,7 +200,12 @@ def test_the_shipped_plan_is_the_scorers_plan() -> None:
     assert plan.seeds == (1, 2, 3) and plan.folds == tuple(range(8)) and plan.threads == 2
     assert (plan.window, plan.future, plan.pad, plan.reach) == (336, 24, 335, 24)
     assert plan.window // plan.shape.patch == 84 and plan.future // plan.shape.patch == 6
-    assert plan.target == "future" and plan.shape.width == 32
+    assert plan.target == "fresh" and plan.shape.width == 32
+    lookbacks = {1: ["vol_1h", "ret_1h", "flow_1h", "vsurge_1h"], 6: ["vol_6h", "ret_6h"]}
+    lookbacks[24] = ["vol_24h", "near_24h", "volume_24h", "ret_24h", "aret_24h", "flow_24h"]
+    lookbacks[24].append("oi_24h")
+    assert dict(plan.windowed) == {n: h for h, names in lookbacks.items() for n in names}
+    assert set(plan.changes) == {"oi_vs_28d", "funding", "ls"} and not sequence.blind(plan)
     s = plan.supervised
     assert (s.dropout, s.lr, s.weight_decay, plan.jepa.dropout) == (0.2, 3e-4, 0.1, 0.0)
     assert (plan.selection.share, plan.selection.every) == (0.2, 100)
@@ -211,6 +251,66 @@ def test_the_plan_refuses_repeats_and_empty_windows(
         text = text.replace(old, new, 1)
     with pytest.raises(ValueError, match="unknown or invalid"):
         tiny(tmp_path, text)
+
+
+SHOWN = PLAN[PLAN.index("[fresh.windowed]\n") : PLAN.index("\n[encoder]")]
+CHANGES = 'changes = ["oi_vs_28d", "funding", "ls"]'
+
+
+@pytest.mark.parametrize("target", ["future", "fresh"])
+@pytest.mark.parametrize(
+    "old, new, message",
+    [
+        ("vol_1h = 1\n", "vol_1h = 1\nm_vol_1h = 1\n", "fresh channel m_vol_1h"),
+        (CHANGES, CHANGES.replace('"ls"', '"ls", "oi"'), "fresh channel oi($|,)"),
+        ("vol_1h = 1\n", "vol_1h = 1\nls = 1\n", "fresh channel ls under both rules"),
+        ("[fresh]\n", "[fresh]\nextra = 1\n", "fresh key extra"),
+        ("vol_1h = 1\n", "vol_1h = 0\n", "fresh lookback vol_1h"),
+        ("vol_1h = 1\n", "vol_1h = true\n", "fresh lookback vol_1h"),
+        ("vol_1h = 1\n", "vol_1h = 1.0\n", "fresh lookback vol_1h"),
+        (CHANGES, 'changes = ["ls", "ls"]', "fresh changes must be distinct"),
+        (CHANGES, 'changes = "ls"', "fresh changes must be a list"),
+    ],
+)
+def test_the_plan_refuses_unknown_or_doubled_fresh_channels(
+    tmp_path: Path, target: str, old: str, new: str, message: str
+) -> None:
+    text = PLAN.replace('target = "future"', f'target = "{target}"')
+    assert old in text
+    with pytest.raises(ValueError, match=f"unknown or invalid: .*{message}"):
+        tiny(tmp_path, text.replace(old, new, 1))
+
+
+def test_a_rung_the_fresh_target_shows_nothing_of_is_refused(tmp_path: Path) -> None:
+    only_lev = FRESH.replace(SHOWN, "[fresh.windowed]\noi_24h = 24\n")
+    with pytest.raises(ValueError, match="rung vol shows the fresh target no windowed channel"):
+        tiny(tmp_path / "a", only_lev)
+    both = only_lev.replace('variants = ["vol"]', 'variants = ["full", "vol"]')
+    with pytest.raises(ValueError, match=r"invalid: rung vol shows .* channel$"):
+        tiny(tmp_path / "b", both)
+    assert tiny(tmp_path / "c", only_lev.replace('variants = ["vol"]', 'variants = ["full"]'))
+    future = tiny(tmp_path / "d", PLAN.replace(SHOWN, "[fresh.windowed]\noi_24h = 24\n"))
+    assert future.windowed == (("oi_24h", 24),) and sequence.blind(future) == ["vol"]
+    plan = tiny(tmp_path / "e", FRESH.replace('variants = ["vol"]', 'variants = ["full", "vol"]'))
+    with pytest.raises(ValueError, match="rungs vol show the fresh target no windowed channel"):
+        sequence.sequence({}, {}, replace(plan, windowed=(("oi_24h", 24),)))
+    with pytest.raises(ValueError, match="rungs full, vol show the fresh target"):
+        sequence.sequence({}, {}, replace(plan, windowed=()))
+    model = sequence.jepa(len(NAMES) + 1, plan, 0)
+    _, x, _ = fresh_world(plan)
+    with pytest.raises(ValueError, match="the fresh target needs its fold's rules"):
+        sequence.goal(model, x, torch.tensor([0]), torch.tensor([50]), plan)
+
+
+def test_a_plan_without_a_fresh_table_still_loads(tmp_path: Path) -> None:
+    old = PLAN.replace(PLAN[PLAN.index("[fresh]\n") : PLAN.index("[encoder]")], "")
+    assert "fresh" not in old
+    plan = tiny(tmp_path / "a", old)
+    assert plan.target == "future" and plan.windowed == () and plan.changes == ()
+    full = tiny(tmp_path / "b")
+    assert replace(full, windowed=(), changes=(), ladder_path=plan.ladder_path) == plan
+    with pytest.raises(ValueError, match="rung vol shows the fresh target no windowed channel"):
+        tiny(tmp_path / "c", old.replace('target = "future"', 'target = "fresh"'))
 
 
 def net_for(plan: sequence.Plan, trained: bool) -> encoder.Encoder:
@@ -272,11 +372,11 @@ def test_nothing_after_hour_t_reaches_z_or_a_score_at_t(tmp_path: Path) -> None:
 @pytest.mark.parametrize("target", sequence.TARGETS)
 def test_the_jepa_target_reads_exactly_its_hours(tmp_path: Path, target: str) -> None:
     plan = tiny(tmp_path, PLAN.replace('target = "future"', f'target = "{target}"'))
-    model = sequence.jepa(6, plan, 0)
-    x = torch.randn(1, plan.pad + 100, 6)
+    _, x, rules = fresh_world(plan)
+    model = sequence.jepa(x.shape[-1], plan, 0)
     coin, hour, t = torch.tensor([0]), torch.tensor([50]), 50
-    base = sequence.goal(model, x, coin, hour, plan)
-    if target == "future":
+    base = sequence.goal(model, x, coin, hour, plan, rules)
+    if target in ("future", "fresh"):
         first, last = t + 1, t + plan.future
     else:
         first, last = t + min(plan.shifts) - plan.window + 1, t + max(plan.shifts)
@@ -284,9 +384,129 @@ def test_the_jepa_target_reads_exactly_its_hours(tmp_path: Path, target: str) ->
     def moves(j: int) -> bool:
         y = x.clone()
         y[0, plan.pad + j] += 3.0
-        return not torch.equal(sequence.goal(model, y, coin, hour, plan), base)
+        return not torch.equal(sequence.goal(model, y, coin, hour, plan, rules), base)
 
     assert [moves(j) for j in (first - 1, first, last, last + 1)] == [False, True, True, False]
+    if rules is None:
+        return
+
+    def level_moves(j: int) -> bool:
+        levels = rules.levels.clone()
+        levels[0, plan.pad + j] += 3.0
+        y = replace(rules, levels=levels)
+        return not torch.equal(sequence.goal(model, x, coin, hour, plan, y), base)
+
+    hours = (t - 1, t, t + 1, last, last + 1)
+    assert [level_moves(j) for j in hours] == [False, True, True, True, False]
+
+
+def test_the_fresh_target_hides_what_the_context_already_holds(tmp_path: Path) -> None:
+    plan = tiny(tmp_path, FRESH)
+    _, x, rules = fresh_world(plan)
+    assert rules is not None
+    model = sequence.jepa(x.shape[-1], plan, 0)
+    coin, hour, t = torch.tensor([1]), torch.tensor([50]), 50
+    base = sequence.goal(model, x, coin, hour, plan, rules)
+
+    def moves(channel: int, k: int) -> bool:
+        y = x.clone()
+        y[1, plan.pad + t + k, channel] += 3.0
+        return not torch.equal(sequence.goal(model, y, coin, hour, plan, rules), base)
+
+    every = range(1, plan.future + 1)
+    hidden = [(c, k) for c in (VOL_7D, MISSING, LS, M_LS) for k in every]
+    hidden += [(c, k) for c in (VOL_6H, M_VOL_6H) for k in (1, 2)]
+    shown = [(VOL_1H, 1), (VOL_1H, 4), (VOL_6H, 3), (VOL_6H, 4), (M_VOL_6H, 3)]
+    assert [c for c in hidden if moves(*c)] == []
+    assert all(moves(*c) for c in shown)
+    window = sequence.unseen(x, coin, hour, plan, rules)[0]
+    ahead = x[1, plan.pad + t + 1 : plan.pad + t + 1 + plan.future]
+    assert (window[:, [VOL_7D, MISSING]] == 0).all() and (window[:2, [VOL_6H, M_VOL_6H]] == 0).all()
+    assert torch.equal(window[2:, [VOL_6H, M_VOL_6H]], ahead[2:, [VOL_6H, M_VOL_6H]])
+    assert torch.equal(window[:, VOL_1H], ahead[:, VOL_1H])
+
+
+def test_a_change_channel_is_its_move_since_the_context_ends(tmp_path: Path) -> None:
+    plan = tiny(tmp_path, FRESH)
+    rng = np.random.default_rng(5)
+    raw = rng.integers(-40, 40, size=(2, 120, len(NAMES))).astype(np.float64) / 8
+    _, x, rules = fresh_world(plan, raw)
+    assert rules is not None and rules.columns.tolist() == [LS, M_LS]
+    coin, hour, t, n = torch.tensor([0]), torch.tensor([60]), 60, plan.future
+
+    def window(r: sequence.Fresh | None) -> torch.Tensor:
+        assert r is not None
+        return sequence.unseen(x, coin, hour, plan, r)[0]
+
+    base = window(rules)
+    for j, c in enumerate((LS, M_LS)):
+        d = raw[:, n:, c] - raw[:, :-n, c]
+        assert rules.scale[j].item() == pytest.approx(d.std(), rel=1e-12)
+        hand = np.clip((raw[0, t + 1 : t + 1 + n, c] - raw[0, t, c]) / rules.scale[j].item(), -5, 5)
+        assert np.array_equal(base[:, c].numpy(), hand.astype(np.float32))
+    shifted = raw.copy()
+    shifted[..., [LS, M_LS]] += 2.5
+    moved = fresh_world(plan, shifted)[2]
+    assert moved is not None and torch.equal(moved.scale, rules.scale)
+    assert torch.equal(window(moved), base)
+
+    def at_scale(r: np.ndarray) -> torch.Tensor:
+        found = sequence.fresh(r, NAMES, np.ones(120, bool), plan)
+        assert found is not None and rules is not None
+        return window(replace(found, scale=rules.scale))
+
+    later = raw.copy()
+    later[0, t + 2, LS] += 1.0
+    assert torch.nonzero(at_scale(later) != base).tolist() == [[1, LS]]
+    far = later.copy()
+    far[0, t + 1, LS] += 1000.0
+    assert at_scale(far)[0, LS] == 5.0
+    model = sequence.jepa(x.shape[-1], plan, 0)
+    targets = [
+        sequence.goal(
+            model, x, coin, hour, plan, sequence.fresh(r, NAMES, np.ones(120, bool), plan)
+        )
+        for r in (raw, shifted, later)
+    ]
+    assert torch.equal(targets[0], targets[1]) and not torch.equal(targets[0], targets[2])
+    for gap, zeroed in ((t, list(range(n))), (t + 3, [2])):
+        holed = raw.copy()
+        holed[0, gap, LS] = np.nan
+        got = at_scale(holed)
+        keep = [k for k in range(n) if k not in zeroed]
+        assert (got[zeroed, LS] == 0).all() and torch.equal(got[keep, LS], base[keep, LS])
+        assert torch.equal(got[:, M_LS], base[:, M_LS])
+
+
+def test_a_change_channels_scale_reads_only_training_hours(tmp_path: Path) -> None:
+    plan = tiny(tmp_path, FRESH)
+    rng = np.random.default_rng(6)
+    raw = rng.normal(size=(2, 400, len(NAMES)))
+    raw[0, :20, LS] = np.nan
+    train = np.ones(400, bool)
+    train[150:230] = False
+    _, x, rules = fresh_world(plan, raw, train)
+    changed = raw.copy()
+    changed[:, ~train] = rng.normal(size=changed[:, ~train].shape) * 100 + 7
+    changed[1, 160:170, LS] = np.nan
+    _, y, other = fresh_world(plan, changed, train)
+    assert rules is not None and other is not None
+    assert torch.equal(rules.scale, other.scale)
+    n = plan.future
+    pairs = train[n:] & train[:-n]
+    d = (raw[:, n:, [LS, M_LS]] - raw[:, :-n, [LS, M_LS]])[:, pairs].reshape(-1, 2)
+    assert np.allclose(rules.scale.numpy(), np.nanstd(d, axis=0), rtol=1e-12)
+    ok = np.flatnonzero(sequence.eligible(train, plan.pad, plan.reach))
+    assert ok.size > 200
+    coin = torch.from_numpy(np.repeat([0, 1], ok.size))
+    hour = torch.from_numpy(np.tile(ok, 2))
+    model = sequence.jepa(x.shape[-1], plan, 0)
+    first = sequence.goal(model, x, coin, hour, plan, rules)
+    assert torch.equal(first, sequence.goal(model, y, coin, hour, plan, other))
+    inside = raw.copy()
+    inside[0, 300, LS] += 50.0
+    moved = sequence.fresh(inside, NAMES, train, plan)
+    assert moved is not None and not torch.equal(moved.scale, rules.scale)
 
 
 def test_a_precursor_48_hours_back_is_told_from_one_200_hours_back() -> None:
@@ -402,14 +622,18 @@ def test_the_standardisation_reads_only_training_hours() -> None:
 @pytest.mark.parametrize("target", sequence.TARGETS)
 def test_the_target_encoder_only_follows_the_moving_average(tmp_path: Path, target: str) -> None:
     plan = tiny(tmp_path, PLAN.replace('target = "future"', f'target = "{target}"'))
-    torch.manual_seed(0)
-    x = torch.randn(2, plan.pad + 100, 6)
-    model = sequence.jepa(6, plan, 5)
+    _, x, rules = fresh_world(plan)
+    model = sequence.jepa(x.shape[-1], plan, 5)
     assert not model.target.training
     opt = sequence.optimiser([model.online, model.predictor], plan.jepa)
     rows = torch.tensor([[0, 1, 0, 1], [10, 20, 30, 40]])
     old = [p.detach().clone() for p in model.target.parameters()]
-    sequence.jepa_step(model, opt, x, rows, 0, plan)
+    with torch.no_grad():
+        want = sequence.goal(model, x, rows[0], rows[1], plan, rules).double().numpy()
+    record = sequence.jepa_step(model, opt, x, rows, 0, plan, rules)
+    assert want.shape == (4, 2, 8)
+    assert record["target_sd"] == pytest.approx(float(np.median(want.std(axis=0))), rel=1e-5)
+    assert record["target_sd"] > 0
     m = momentum(0, plan.jepa.steps, plan.jepa.momentum_start, plan.jepa.momentum_end)
     assert m == plan.jepa.momentum_start < 1
     for t, o, s in zip(model.target.parameters(), old, model.online.parameters(), strict=True):
@@ -1114,9 +1338,16 @@ def fits(out: dict) -> dict:
     }
 
 
-def test_the_left_out_quarter_and_its_gaps_reach_no_fitted_parameter(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "text",
+    [PLAN, FRESH.replace('variants = ["vol"]', 'variants = ["full"]')],
+    ids=["future", "fresh"],
+)
+def test_the_left_out_quarter_and_its_gaps_reach_no_fitted_parameter(
+    tmp_path: Path, text: str
+) -> None:
     values, grid = world()
-    plan = tiny(tmp_path, PLAN.replace("folds = [1, 3]", "folds = [2]"))
+    plan = tiny(tmp_path, text.replace("folds = [1, 3]", "folds = [2]"))
     edges = ladder.bounds(plan.ladder)
     gap = plan.ladder.gap_days * 24 * HOUR
     first = sequence.sequence(values, grid, plan)
@@ -1249,7 +1480,7 @@ SPLIT = {
 
 
 def split_plan(variants: str, seeds: str, folds: str) -> str:
-    text = PLAN.replace('schemes = ["loqo", "forward"]', 'schemes = ["forward"]')
+    text = FRESH.replace('schemes = ["loqo", "forward"]', 'schemes = ["forward"]')
     text = text.replace('rungs = ["full", "vol"]', 'rungs = ["vol", "full"]')
     text = text.replace('variants = ["vol"]', f"variants = {variants}")
     return text.replace("seeds = [3]", f"seeds = {seeds}").replace(
@@ -1351,6 +1582,15 @@ def test_split_runs_merge_into_the_full_run(split: dict[str, Path]) -> None:
     for run in (full, reverse, merged):
         in_name_order(run)
         selection_metrics(run)
+        curves = pq.read_table(run / "curves.parquet").to_pylist()
+        assert all((r["target_sd"] is None) == (r["model"] != "jepa") for r in curves)
+        assert all(r["target_sd"] > 0 for r in curves if r["model"] == "jepa")
+        diagnostics = pq.read_table(run / "diagnostics.parquet").to_pylist()
+        assert {(d["model"], d["target"]) for d in diagnostics} == {
+            ("jepa", "fresh"),
+            ("twin", ""),
+            ("supervised", ""),
+        }
     runtime = full_params["runtime"]
     assert runtime["capability"] == torch.backends.cpu.get_cpu_capability()
     assert runtime["pins"] == {k: os.environ.get(k) for k in sequence.PINS} and runtime["cpu"]
@@ -1425,12 +1665,21 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
 
         return edit
 
-    def replan(record: dict, copy: Path) -> None:
-        text = (copy / "plan.toml").read_text(encoding="utf-8")
-        (copy / "plan.toml").write_text(
-            text.replace("steps = 4\nbatch = 16\nlr", "steps = 5\nbatch = 16\nlr", 1), "utf-8"
-        )
-        record["files"]["plan.toml"] = store.sha256(copy / "plan.toml")
+    def replan(old: str, new: str) -> Callable[[dict, Path], None]:
+        def edit(record: dict, copy: Path) -> None:
+            text = (copy / "plan.toml").read_text(encoding="utf-8")
+            assert old in text
+            (copy / "plan.toml").write_text(text.replace(old, new, 1), "utf-8")
+            record["files"]["plan.toml"] = store.sha256(copy / "plan.toml")
+
+        return edit
+
+    stepped_plan = replan("steps = 4\nbatch = 16\nlr", "steps = 5\nbatch = 16\nlr")
+    other_rules = {
+        "lookback": replan("vol_6h = 3\n", "vol_6h = 2\n"),
+        "changes": replan(CHANGES, 'changes = ["oi_vs_28d", "funding"]'),
+        "target": replan('target = "fresh"', 'target = "future"'),
+    }
 
     def retable(name: str, change: Callable[[list[dict]], None]) -> Callable[[Path], None]:
         def edit(copy: Path) -> None:
@@ -1473,7 +1722,7 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
     zero = {"file": "x", "sha256": "0" * 64}
     cases = {
         "plan": (
-            altered("plan", complete(replan)),
+            altered("plan", complete(stepped_plan)),
             "differs from the parent plan in more than variants, seeds, folds",
         ),
         "inputs": (altered("inputs", params("inputs", zero)), "different inputs tables"),
@@ -1501,6 +1750,8 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
             "ran different code",
         ),
     }
+    for name, edit in other_rules.items():
+        cases[name] = (altered(name, complete(edit)), "differs from the parent plan in more than")
     producer = {
         "dirty": ({"dirty": True}, "uncommitted changes"),
         "unknown": ({"git_sha": None}, "records no commit"),
@@ -1546,6 +1797,26 @@ def test_the_merge_refuses_runs_that_do_not_make_one_plan(
     with pytest.raises(ValueError, match="different ladder plan from the parent plan's"):
         sequence.merge_run(pieces, relaid, data, "relaid")
     assert sorted((data / "panel-sequence").iterdir()) == before
+
+
+def test_pieces_made_before_the_target_spread_merge_with_it_empty(
+    split: dict[str, Path], tmp_path: Path
+) -> None:
+    copies = []
+    for name in SPLIT:
+        copy = tmp_path / "pieces" / split[name].name
+        shutil.copytree(split[name], copy)
+        path = copy / "curves.parquet"
+        pq.write_table(pq.read_table(path).drop_columns(["target_sd"]), path)
+        record = json.loads((copy / "complete.json").read_text(encoding="utf-8"))
+        record["files"][path.name] = store.sha256(path)
+        (copy / "complete.json").write_text(json.dumps(record), encoding="utf-8")
+        copies.append(copy)
+    merged, _ = sequence.merge_run(copies, split["parent"], tmp_path / "data", "before")
+    curves = pq.read_table(merged / "curves.parquet")
+    assert curves.schema == sequence.CURVES and curves["target_sd"].null_count == len(curves)
+    full = pq.read_table(split["full"] / "curves.parquet")
+    assert curves.drop_columns(["target_sd"]).equals(full.drop_columns(["target_sd"]))
 
 
 def test_the_merge_takes_a_nan_auc_in_a_shared_rung_row(

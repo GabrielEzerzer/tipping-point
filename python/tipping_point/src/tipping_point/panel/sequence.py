@@ -31,7 +31,7 @@ from torch import Tensor, nn
 from ..ews.scoring import auc
 from ..ising import io
 from ..jepa.objective import ema, learning_rate, momentum
-from . import encoder, labels, ladder, span, store
+from . import encoder, inputs, labels, ladder, span, store
 
 PLAN = Path(__file__).with_name("sequence.toml")
 PINS = (
@@ -55,6 +55,7 @@ CURVES = pa.schema(
         ("prediction", pa.float64()),
         ("variance", pa.float64()),
         ("covariance", pa.float64()),
+        ("target_sd", pa.float64()),
         ("auc", pa.float64()),
         ("auc_long", pa.float64()),
         ("auc_short", pa.float64()),
@@ -62,7 +63,8 @@ CURVES = pa.schema(
     ]
 )
 MODELS = ("jepa", "twin", "supervised")
-TARGETS = ("future", "shifted")
+TARGETS = ("future", "shifted", "fresh")
+FRESH = ("windowed", "changes")
 OBJECTIVES = ("z", "predictor")
 LOG = Callable[[str], None]
 READOUTS = {"last": 1, "means": 4, "spreads": 7}
@@ -117,6 +119,8 @@ class Plan:
     encode_batch: int
     readouts: tuple[str, ...]
     cs: tuple[float, ...]
+    windowed: tuple[tuple[str, int], ...] = ()
+    changes: tuple[str, ...] = ()
 
     @property
     def pad(self) -> int:
@@ -145,6 +149,7 @@ def load(
     base = ladder.load(ladder_path, None if texts is None else texts[1])
     nfolds = len(ladder.bounds(base)) - 1
     e = raw["encoder"]
+    fresh, problems = _fresh(raw.get("fresh", {}))
     plan = Plan(
         ladder=base,
         ladder_path=ladder_path,
@@ -175,9 +180,11 @@ def load(
         encode_batch=int(raw["probe"]["batch"]),
         readouts=tuple(raw["probe"]["readouts"]),
         cs=tuple(float(c) for c in raw["probe"]["c"]),
+        windowed=tuple(sorted(fresh["windowed"].items())),
+        changes=tuple(sorted(fresh["changes"])),
     )
     rungs = {r.name for r in base.rungs}
-    problems = [f"variant {v}" for v in plan.variants if v not in rungs]
+    problems += [f"variant {v}" for v in plan.variants if v not in rungs]
     problems += [f"rung {r}" for r in plan.rungs if r not in rungs]
     problems += [f"model {m}" for m in plan.models if m not in MODELS]
     problems += [f"scheme {s}" for s in plan.schemes if s not in ladder.SCHEMES]
@@ -196,6 +203,8 @@ def load(
         problems.append("future and every shift must be above 0")
     if plan.target == "shifted" and not plan.shifts:
         problems.append("the shifted target needs shifts")
+    if plan.target == "fresh":
+        problems += [f"rung {r} shows the fresh target no windowed channel" for r in blind(plan)]
     if plan.jepa.batch < 2 or plan.supervised.batch < 2:
         problems.append("batches must hold at least 2 rows")
     if any(s < 0 for s in plan.seeds):
@@ -216,6 +225,40 @@ def load(
     if problems:
         raise ValueError(f"{path}: unknown or invalid: {', '.join(problems)}")
     return plan
+
+
+def _fresh(table: object) -> tuple[dict[str, Any], list[str]]:
+    if not isinstance(table, dict):
+        return {"windowed": {}, "changes": []}, ["fresh must be a table"]
+    problems = [f"fresh key {k}" for k in table if k not in FRESH]
+    windowed, changes = table.get("windowed", {}), table.get("changes", [])
+    if not isinstance(windowed, dict):
+        problems.append("fresh windowed must be a table of channel lookbacks")
+        windowed = {}
+    if not (isinstance(changes, list) and all(isinstance(c, str) for c in changes)):
+        problems.append("fresh changes must be a list of channel names")
+        changes = []
+    problems += [
+        f"fresh lookback {k}"
+        for k, v in windowed.items()
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1
+    ]
+    if len(set(changes)) != len(changes):
+        problems.append("fresh changes must be distinct")
+    names = [*windowed, *changes]
+    problems += [f"fresh channel {n}" for n in dict.fromkeys(names) if n not in inputs.OWN]
+    problems += [f"fresh channel {n} under both rules" for n in changes if n in windowed]
+    return {"windowed": windowed, "changes": changes}, problems
+
+
+def blind(plan: Plan) -> list[str]:
+    shown = dict(plan.windowed)
+    rungs = {r.name: r for r in plan.ladder.rungs}
+    return [
+        v
+        for v in plan.variants
+        if v in rungs and not any(c.removeprefix("m_") in shown for c in rungs[v].columns)
+    ]
 
 
 def training(ts: np.ndarray, plan: Plan, f: int, scheme: str) -> np.ndarray:
@@ -343,6 +386,51 @@ def weights(module: nn.Module) -> str:
     return h.hexdigest()
 
 
+@dataclass(frozen=True)
+class Fresh:
+    shown: Tensor
+    columns: Tensor
+    levels: Tensor
+    scale: Tensor
+
+
+def fresh(raw: np.ndarray, columns: Sequence[str], train: np.ndarray, plan: Plan) -> Fresh | None:
+    if plan.target != "fresh":
+        return None
+    lookback = dict(plan.windowed)
+    names = [c.removeprefix("m_") for c in columns]
+    shown = np.zeros((plan.future, len(names) + 1), bool)
+    ahead = np.arange(1, plan.future + 1)
+    for i, name in enumerate(names):
+        if name in lookback:
+            shown[:, i] = ahead >= lookback[name]
+    index = [i for i, name in enumerate(names) if name in plan.changes]
+    part = raw[..., index].astype(np.float64)
+    scale = np.ones(len(index))
+    if index:
+        n = plan.future
+        _, scale = statistics(part[:, n:] - part[:, :-n], train[n:] & train[:-n])
+    levels = np.full((raw.shape[0], plan.pad + raw.shape[1], len(index)), np.nan)
+    levels[:, plan.pad :] = part
+    return Fresh(
+        torch.from_numpy(shown),
+        torch.tensor(index, dtype=torch.long),
+        torch.from_numpy(levels),
+        torch.from_numpy(scale),
+    )
+
+
+def unseen(x: Tensor, coin: Tensor, hour: Tensor, plan: Plan, rules: Fresh) -> Tensor:
+    end = hour + plan.pad
+    out = torch.where(rules.shown, windows(x, coin, end + plan.future, plan.future), 0.0)
+    if len(rules.columns):
+        later = windows(rules.levels, coin, end + plan.future, plan.future)
+        change = (later - rules.levels[coin, end][:, None]) / rules.scale
+        change = torch.clamp(change, -plan.ladder.clip, plan.ladder.clip)
+        out[..., rules.columns] = torch.where(torch.isnan(change), 0.0, change).to(out.dtype)
+    return out
+
+
 @dataclass
 class Jepa:
     online: encoder.Encoder
@@ -353,13 +441,20 @@ class Jepa:
 def jepa(channels: int, plan: Plan, seed: int) -> Jepa:
     online = encoder.encoder(channels, plan.shape, seed)
     target = copy.deepcopy(online).requires_grad_(False).eval()
-    slots = plan.future // plan.shape.patch if plan.target == "future" else len(plan.shifts)
+    ahead = plan.target in ("future", "fresh")
+    slots = plan.future // plan.shape.patch if ahead else len(plan.shifts)
     return Jepa(online, target, encoder.Predictor(plan.shape.width, plan.predictor_hidden, slots))
 
 
-def goal(model: Jepa, x: Tensor, coin: Tensor, hour: Tensor, plan: Plan) -> Tensor:
+def goal(
+    model: Jepa, x: Tensor, coin: Tensor, hour: Tensor, plan: Plan, rules: Fresh | None = None
+) -> Tensor:
     if plan.target == "future":
         out = model.target.tokens(windows(x, coin, hour + plan.pad + plan.future, plan.future))
+    elif plan.target == "fresh":
+        if rules is None:
+            raise ValueError("the fresh target needs its fold's rules and levels")
+        out = model.target.tokens(unseen(x, coin, hour, plan, rules))
     else:
         out = torch.stack(
             [model.target(windows(x, coin, hour + plan.pad + s, plan.window)) for s in plan.shifts],
@@ -382,13 +477,14 @@ def jepa_step(
     rows: Tensor,
     step: int,
     plan: Plan,
+    rules: Fresh | None = None,
 ) -> dict[str, float]:
     t = plan.jepa
     schedule(opt, step, t)
     coin, hour = rows
     z = model.online(windows(x, coin, hour + plan.pad, plan.window))
     with torch.no_grad():
-        target = goal(model, x, coin, hour, plan)
+        target = goal(model, x, coin, hour, plan, rules)
     predicted = model.predictor(z)
     prediction = (predicted - target).pow(2).mean()
     variance, covariance = regulariser(z, predicted, t)
@@ -402,6 +498,7 @@ def jepa_step(
         "prediction": prediction.item(),
         "variance": variance.item(),
         "covariance": covariance.item(),
+        "target_sd": float(np.median(target.std(dim=0, unbiased=False).numpy())),
     }
 
 
@@ -412,6 +509,7 @@ def pretrain(
     init: int,
     feed_seed: np.random.SeedSequence,
     log: LOG,
+    rules: Fresh | None = None,
 ) -> tuple[encoder.Encoder, list[dict[str, Any]], str]:
     model = jepa(x.shape[-1], plan, init)
     initial = weights(model.online)
@@ -420,7 +518,7 @@ def pretrain(
     feed = batches(rows, len(fit_hours), plan.jepa.batch, feed_seed)
     curve = []
     for step in range(plan.jepa.steps):
-        record = jepa_step(model, opt, x, next(feed), step, plan)
+        record = jepa_step(model, opt, x, next(feed), step, plan, rules)
         if step % plan.jepa.curve_every == 0 or step == plan.jepa.steps - 1:
             curve.append({"step": step, **record})
             log(f"      jepa step {step}: " + ", ".join(f"{k} {v:.4f}" for k, v in record.items()))
@@ -703,6 +801,10 @@ def sequence(
     plan: Plan,
     log: LOG = lambda line: None,
 ) -> dict[str, Any]:
+    if plan.target == "fresh" and blind(plan):
+        raise ValueError(
+            f"rungs {', '.join(blind(plan))} show the fresh target no windowed channel"
+        )
     hours, coins = layout(grid)
     ncoins = len(coins)
     edges = ladder.bounds(plan.ladder)
@@ -734,6 +836,7 @@ def sequence(
                 fit_rows = np.repeat(fit_hours, ncoins)
                 mu, sd = statistics(raw, train_hours)
                 x = torch.from_numpy(standardised(raw, mu, sd, plan.ladder.clip, plan.pad))
+                rules = fresh(raw, plan.rung(variant).columns, train_hours, plan)
                 need_train, need_test = kept & fit_rows, kept & (row_fold == f)
                 at_train, at_test = np.cumsum(need_train) - 1, np.cumsum(need_test) - 1
                 test_coin, test_hour = _coin_hour(need_test, ncoins)
@@ -754,7 +857,9 @@ def sequence(
                             initial = weights(net)
                         else:
                             feed = stream(variant, f, seed, "jepa")
-                            net, curve, initial = pretrain(x, fit_hours, plan, init, feed, log)
+                            net, curve, initial = pretrain(
+                                x, fit_hours, plan, init, feed, log, rules
+                            )
                         train_f = features(net, x, *_coin_hour(need_train, ncoins), plan)
                         test_f = features(net, x, test_coin, test_hour, plan)
                         found[model_name] = (train_f, test_f)

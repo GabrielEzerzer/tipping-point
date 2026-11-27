@@ -5,13 +5,31 @@ models = ["jepa", "twin", "supervised"]
 schemes = ["forward"]
 seeds = [1, 2, 3]
 folds = []
-target = "future"
+target = "fresh"
 threads = 2
 
 [window]
 length = 336
 future = 24
 shifts = [6, 24]
+
+[fresh]
+changes = ["oi_vs_28d", "funding", "ls"]
+
+[fresh.windowed]
+vol_1h = 1
+ret_1h = 1
+flow_1h = 1
+vsurge_1h = 1
+vol_6h = 6
+ret_6h = 6
+vol_24h = 24
+near_24h = 24
+volume_24h = 24
+ret_24h = 24
+aret_24h = 24
+flow_24h = 24
+oi_24h = 24
 
 [encoder]
 patch = 4
