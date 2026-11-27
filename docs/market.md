@@ -1805,7 +1805,8 @@ What the checks don't prove:
   `.pyc` in `__pycache__` that no longer matches its source but that Python still loads (an
   unchecked hash-based one, or one whose recorded size and time match), or a sourceless `.pyc` in
   place of a module; a `git replace` ref, which changes what `HEAD`'s tree reads as; and
-  `PYTHONPATH`, a `.pth` file or `sitecustomize`, which can put other code ahead of the source tree.
+  `PYTHONPATH`, a `.pth` file, `sitecustomize` or the folder the command is started from when it
+  lies outside the checkout, each of which can put other code ahead of the source tree.
 - One test per plan is kept by the runs in one data dir only. A copy of the data dir, or another
   data dir, does not see them.
 - A plan is identified by the sha256 of its bytes, so a plan with a changed comment or spacing is a
