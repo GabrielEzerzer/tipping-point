@@ -391,12 +391,12 @@ def test_a_coin_with_a_wholly_missing_stretch_does_not_change_persistence(synthe
     slow = Pick(channels("vol_7d") * 8)
     two = setup(raw, plan)
     three = setup(np.concatenate([raw, gappy]), plan)
+    (expected,) = [r for r in two["measure"](slow) if r["kind"] == "persistence"]
+    (found,) = [r for r in three["measure"](slow) if r["kind"] == "persistence"]
+    assert found["value"] == pytest.approx(expected["value"], abs=1e-12)
+    assert found["eval_rows"] == expected["eval_rows"] == 2 * 700
     assert all(np.array_equal(a, b) for a, b in zip(two["fit"], three["fit"], strict=True))
     assert (three["eval"][0] == 2).sum() == 24 and (two["eval"][0] < 2).all()
-    expected = [r for r in two["measure"](slow) if r["kind"] == "persistence"]
-    found = [r for r in three["measure"](slow) if r["kind"] == "persistence"]
-    assert found[0]["eval_rows"] == expected[0]["eval_rows"] == 2 * 700
-    assert found[0]["value"] == pytest.approx(expected[0]["value"], abs=1e-12)
 
 
 QUARTERS = range(2, 8)
