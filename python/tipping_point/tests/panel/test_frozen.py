@@ -906,11 +906,12 @@ def test_the_support_is_on_disk_before_the_first_score(
 
 
 def test_one_test_per_plan_and_another_plan_lists_the_earlier_runs(
-    world: World, tested: Done, tmp_path: Path
+    world: World, tested: Done, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with pytest.raises(ValueError, match=r"already ran this plan .* finished: one test per plan"):
         frozen.run(tested.data, tested.path)
     other = put(tmp_path / "other.toml", toml(changed(world.plan, pairs=[["jepa", "full"]])))
+    monkeypatch.setattr("tipping_point.engine.run_id", lambda tag: f"20990101T000000Z-{tag}")
     run, out = frozen.run(tested.data, other)
     first = {
         "run": tested.run.name,
