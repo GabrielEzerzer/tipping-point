@@ -1365,7 +1365,9 @@ builds two plans in code from the development ladder plan and the test span's la
 the day after the development plan's last day, 2024-01-01 for the shipped plan, and cannot be given:
 the final sequence run saves its models under the fold index that follows the development quarters,
 trained on the hours before that same day, so the fit and the models it loads cannot disagree on the
-cut. A plan file cannot hold either plan: `ladder.load` refuses a file that names `cuts`, a span
+cut when the models were saved by a run of this same development plan. The core takes the record of
+saved models as given; binding that record to the plan's sha256 is the command's part. A plan file
+cannot hold either plan: `ladder.load` refuses a file that names `cuts`, a span
 reaching the held-back days and `forward_first = 0`.
 
 - The fit plan runs from the development start to the test span's last day, with fold edges cut by
