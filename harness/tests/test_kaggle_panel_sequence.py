@@ -1,4 +1,4 @@
-# notebooks/kaggle_panel_sequence.py: its twelve pieces are every cell of the shipped sequence plan
+# notebooks/kaggle_panel_sequence.py: its pieces are every cell of the shipped and the final plan
 # once, its kernel folders are private CPU kernels that carry their commit, piece and data digests,
 # and a kernel refuses a changed or held-back dataset and a run that is not exactly its cells.
 
@@ -43,20 +43,36 @@ def fake_store(root: Path, k, labels_run: str | None = None) -> Path:
     return root
 
 
-def test_the_pieces_are_every_cell_of_the_shipped_plan_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("final", "count"), [(False, 12), (True, 6)])
+def test_the_pieces_are_every_cell_of_their_plan_once(
+    tmp_path: Path, final: bool, count: int
+) -> None:
     k = runner()
-    shipped = sequence.load()
-    text = sequence.PLAN.read_text(encoding="utf-8")
-    shutil.copyfile(shipped.ladder_path, tmp_path / "ladder.toml")
+    parent = sequence.load(sequence.FINAL if final else sequence.PLAN)
+    shutil.copyfile(parent.ladder_path, tmp_path / "ladder.toml")
+    made = k.final_pieces() if final else k.pieces()
     seen: list[str] = []
-    for piece in k.pieces():
+    for piece in made:
         path = tmp_path / f"{k.slug(piece)}.toml"
-        path.write_text(k.cut(text, piece), encoding="utf-8")
+        path.write_text(k.piece_plan(sequence.PLAN.parent, piece), encoding="utf-8")
         plan = sequence.load(path)
-        assert sequence._bare(plan) == sequence._bare(shipped)
+        assert sequence._bare(plan) == sequence._bare(parent)
+        assert sequence.fit_only(plan) is final
         seen += sorted(sequence.cells(plan))
-    assert len(k.pieces()) == 12 and len({k.slug(p) for p in k.pieces()}) == 12
-    assert len(seen) == len(set(seen)) and set(seen) == sequence.cells(shipped)
+    assert len(made) == count and len({k.slug(p) for p in made}) == count
+    assert len(seen) == len(set(seen)) and set(seen) == sequence.cells(parent)
+    prefix = "tp-panel-final-" if final else "tp-panel-seq-"
+    assert all(k.slug(p).startswith(prefix) for p in made)
+
+
+def test_each_piece_is_cut_from_its_own_plan_file(tmp_path: Path) -> None:
+    k = runner()
+    for name in (k.PLAN, k.FINAL_PLAN):
+        text = f'variants = []\nseeds = []\nfolds = []\nfile = "{name}"\n'
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    for piece in k.pieces() + k.final_pieces():
+        text = k.piece_plan(tmp_path, piece)
+        assert f'file = "{piece["plan"]}"' in text and f"folds = {piece['folds']}" in text
 
 
 def test_the_kernel_folders_carry_their_commit_and_piece(tmp_path: Path) -> None:
@@ -70,7 +86,9 @@ def test_the_kernel_folders_carry_their_commit_and_piece(tmp_path: Path) -> None
         "sha256": {"inputs.parquet": "a" * 64, k.GRID_FILE: "b" * 64},
     }
     folders = sorted(p.name for p in out.iterdir())
-    assert folders == sorted(["tp-panel-seq-dry", *(k.slug(p) for p in k.pieces())])
+    made = k.pieces() + k.final_pieces()
+    assert folders == sorted(["tp-panel-seq-dry", *(k.slug(p) for p in made)])
+    assert sum(name.startswith("tp-panel-final-") for name in folders) == 6
     for name in folders:
         meta = json.loads((out / name / "kernel-metadata.json").read_text(encoding="utf-8"))
         assert meta["id"] == f"{k.OWNER}/{name}" and meta["code_file"] == f"{name}.py"
@@ -86,6 +104,8 @@ def test_the_kernel_folders_carry_their_commit_and_piece(tmp_path: Path) -> None
         assert job["mode"] == ("dry" if dry else "piece")
         if not dry:
             assert k.slug(job["piece"]) == name and job["data"] == data
+            final = name.startswith("tp-panel-final-")
+            assert job["piece"]["plan"] == (k.FINAL_PLAN if final else k.PLAN)
         else:
             assert "data" not in job
     env = k.child_env(None)
