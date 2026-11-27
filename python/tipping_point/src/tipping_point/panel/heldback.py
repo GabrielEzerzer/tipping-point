@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 
-from . import classical, compare, ladder, sequence, span
+from . import classical, compare, ladder, sequence
 
 SCHEME = compare.PRIMARY_SCHEME
 FIT_FOLD = 1
@@ -78,15 +78,20 @@ class Rule:
             raise ValueError(f"the decision rule: {', '.join(problems)}")
 
 
-def _spans(dev: ladder.Plan, end: date, cut: date) -> None:
+def cut_of(dev: ladder.Plan, end: date) -> date:
     if dev.cuts is not None:
         raise ValueError("the development plan is already cut")
-    if not dev.start < cut <= end:
-        raise ValueError(f"the cut {cut} must fall after {dev.start} and on or before {end}")
+    cut = dev.end + timedelta(days=1)
+    if end < cut:
+        raise ValueError(
+            f"the test span's last day {end} falls before {cut}, the day after the development "
+            "plan's last"
+        )
+    return cut
 
 
-def fit_plan(dev: ladder.Plan, end: date, cut: date = span.HELD_BACK) -> ladder.Plan:
-    _spans(dev, end, cut)
+def fit_plan(dev: ladder.Plan, end: date) -> ladder.Plan:
+    cut = cut_of(dev, end)
     return dataclasses.replace(
         dev,
         end=end,
@@ -96,14 +101,22 @@ def fit_plan(dev: ladder.Plan, end: date, cut: date = span.HELD_BACK) -> ladder.
     )
 
 
-def evaluation_plan(dev: ladder.Plan, end: date, cut: date = span.HELD_BACK) -> ladder.Plan:
-    _spans(dev, end, cut)
+def evaluation_plan(dev: ladder.Plan, end: date) -> ladder.Plan:
+    cut = cut_of(dev, end)
     return dataclasses.replace(dev, start=cut, end=end, forward_first=0, external=None)
 
 
-def fit_sequence(dev: sequence.Plan, end: date, cut: date = span.HELD_BACK) -> sequence.Plan:
+def evaluation_only(plan: ladder.Plan) -> None:
+    if plan.cuts is not None or plan.forward_first != 0:
+        raise ValueError(
+            "an evaluation plan is folded by calendar quarter, not cut, and scores from its first "
+            f"quarter (forward_first = 0, not {plan.forward_first})"
+        )
+
+
+def fit_sequence(dev: sequence.Plan, end: date) -> sequence.Plan:
     return dataclasses.replace(
-        dev, ladder=fit_plan(dev.ladder, end, cut), schemes=(SCHEME,), folds=(FIT_FOLD,)
+        dev, ladder=fit_plan(dev.ladder, end), schemes=(SCHEME,), folds=(FIT_FOLD,)
     )
 
 
@@ -119,6 +132,56 @@ def fit_only(plan: sequence.Plan) -> None:
 
 def final_fold(dev: sequence.Plan) -> int:
     return len(ladder.bounds(dev.ladder)) - 1
+
+
+def _pins(arm: SequenceArm, plan: sequence.Plan) -> list[str]:
+    what = f"arm {arm.name}:"
+    seeds = tuple(arm.seeds)
+    problems = []
+    if (
+        not seeds
+        or len(set(seeds)) != len(seeds)
+        or any(type(s) is not int or s < 0 for s in seeds)
+    ):
+        problems.append(f"{what} seeds {list(seeds)} (given, distinct, whole and not negative)")
+    if arm.model not in sequence.MODELS or arm.model not in plan.models:
+        problems.append(f"{what} model {arm.model} (one of the plan's {list(plan.models)})")
+    if arm.variant not in plan.variants:
+        problems.append(f"{what} variant {arm.variant} (one of the plan's {list(plan.variants)})")
+    if arm.model == "supervised":
+        if arm.readout is not None or arm.c is not None:
+            problems.append(f"{what} the supervised model takes no readout or c")
+        return problems
+    if arm.readout not in sequence.READOUTS or arm.readout not in plan.readouts:
+        problems.append(f"{what} readout {arm.readout} (one of the plan's {list(plan.readouts)})")
+    c = arm.c
+    number = isinstance(c, (int, float)) and not isinstance(c, bool)
+    if not (number and c is not None and math.isfinite(c) and c > 0 and c in plan.cs):
+        problems.append(f"{what} c {c!r} (finite, above 0 and one of the plan's {list(plan.cs)})")
+    return problems
+
+
+def arms_check(arms: Sequence[Arm], plan: sequence.Plan) -> None:
+    names = [getattr(arm, "name", None) for arm in arms]
+    problems = []
+    if not names or len(set(names)) != len(names):
+        problems.append(f"arms {names} must be given and distinct")
+    rungs = {r.name for r in plan.ladder.rungs}
+    for arm in arms:
+        if isinstance(arm, SequenceArm):
+            problems += _pins(arm, plan)
+        elif isinstance(arm, ClassicalArm):
+            try:
+                classical.check(arm.config, plan)
+            except ValueError as exc:
+                problems.append(f"arm {arm.name}: {exc}")
+        elif isinstance(arm, RungArm):
+            if arm.rung not in rungs:
+                problems.append(f"arm {arm.name}: the ladder plan has no rung {arm.rung}")
+        else:
+            problems.append(f"{arm!r} is not a sequence, classical or rung arm")
+    if problems:
+        raise ValueError(f"the arms: {', '.join(problems)}")
 
 
 def fetcher(arm: SequenceArm, final: int, used: dict[str, str]) -> Callable[[str], bytes]:
@@ -179,18 +242,13 @@ def scored(
     dev: sequence.Plan,
     end: date,
     arms: Sequence[Arm],
-    cut: date = span.HELD_BACK,
     log: LOG = lambda line: None,
 ) -> tuple[dict[str, pa.Table], dict[str, dict[str, str]]]:
-    plan = fit_sequence(dev, end, cut)
+    plan = fit_sequence(dev, end)
     fit_only(plan)
+    arms_check(arms, plan)
     names = [arm.name for arm in arms]
-    if not names or len(set(names)) != len(names):
-        raise ValueError(f"arms {names} must be given and distinct")
     rungs = [arm for arm in arms if isinstance(arm, RungArm)]
-    unknown = [arm.rung for arm in rungs if arm.rung not in {r.name for r in plan.ladder.rungs}]
-    if unknown:
-        raise ValueError(f"the ladder plan has no rung {', '.join(unknown)}")
     tables = rung_tables(values, grid, plan.ladder, rungs, log) if rungs else {}
     used: dict[str, dict[str, str]] = {}
     final = final_fold(dev)
@@ -207,6 +265,8 @@ def scored(
 
 
 def refold(table: pa.Table, evaluation: ladder.Plan) -> pa.Table:
+    if table["hour"].null_count or table["fold"].null_count:
+        raise ValueError("scores to pair hold a row with no hour or fold")
     if not (table["fold"].cast(pa.int64()).to_numpy() == FIT_FOLD).all():
         raise ValueError(f"scores to pair must all come from fit fold {FIT_FOLD}")
     hours = ladder.hour_ns(table["hour"]).to_numpy()
@@ -233,13 +293,19 @@ def check(
         problems.append("a pair is listed twice")
     if primary not in pairs:
         problems.append(f"primary {primary[0]} - {primary[1]} is not one of the pairs")
+    problems += _aimed(side, horizon, evaluation)
+    if problems:
+        raise ValueError(f"the paired evaluation: {', '.join(problems)}")
+
+
+def _aimed(side: str, horizon: int, evaluation: ladder.Plan) -> list[str]:
+    problems = []
     wanted = ("long", "short") if side == compare.COMPOSITE else (side,)
     if side not in SIDES or not set(wanted) <= set(evaluation.sides):
         problems.append(f"side {side} (one of {SIDES} the plan holds)")
-    if horizon not in evaluation.horizons:
-        problems.append(f"horizon {horizon} (one of {list(evaluation.horizons)})")
-    if problems:
-        raise ValueError(f"the paired evaluation: {', '.join(problems)}")
+    if type(horizon) is not int or horizon not in evaluation.horizons:
+        problems.append(f"horizon {horizon!r} (one of {list(evaluation.horizons)})")
+    return problems
 
 
 def paired(
@@ -253,6 +319,7 @@ def paired(
     horizon: int,
     log: LOG = lambda line: None,
 ) -> dict[str, Any]:
+    evaluation_only(evaluation)
     check(list(tables), pairs, primary, side, horizon, evaluation)
     arms = tuple(compare.Arm(name, "scores") for name in tables)
     plan = compare.Plan(evaluation, arms, tuple(pairs), primary, side, horizon)
@@ -264,6 +331,10 @@ def _quarter(edge: int) -> str:
     return str(np.datetime64(int(edge), "ns"))[:10]
 
 
+def _read(rule: Rule) -> str:
+    return rule.bound + ("_complete" if rule.draws == "complete" else "")
+
+
 def support(
     values: Mapping[str, np.ndarray],
     grid: Mapping[str, np.ndarray],
@@ -272,6 +343,10 @@ def support(
     horizon: int,
     rule: Rule,
 ) -> dict[str, Any]:
+    evaluation_only(evaluation)
+    problems = _aimed(side, horizon, evaluation)
+    if problems:
+        raise ValueError(f"the support: {', '.join(problems)}")
     keep, accounting = ladder.select(values, grid, evaluation, horizon)
     ts = grid["ts_ns"][keep]
     edges = ladder.bounds(evaluation)
@@ -300,6 +375,10 @@ def support(
     supported &= scoreable
     whole = scoreable.any() & np.all([held[s][:, scoreable].all(axis=1) for s in sides], axis=0)
     complete = float(whole.mean()) if scoreable.any() else math.nan
+    numbered = {
+        "all": int(np.all([held[s][:, scoreable].any(axis=1) for s in sides], axis=0).sum()),
+        "complete": int(whole.sum()),
+    }
     for f, q in enumerate(quarters):
         q |= {"scoreable": bool(scoreable[f]), "supported": bool(supported[f])}
     causes = []
@@ -312,6 +391,8 @@ def support(
             f"{int(supported.sum())} quarters with a positive in at least {rule.min_blocks} "
             f"blocks, fewer than {rule.min_supported}"
         )
+    if not numbered[rule.draws]:
+        causes.append(f"no draw gives the {_read(rule)} a number")
     return {
         "side": side,
         "horizon": horizon,
@@ -321,6 +402,7 @@ def support(
         "supported": int(supported.sum()),
         "complete_draws": complete,
         "draws": evaluation.draws,
+        "numbered_draws": numbered,
         "rows": accounting,
         "causes": causes,
     }
@@ -369,7 +451,15 @@ def decide(
         raise ValueError(f"the primary row is {named}, not the support's pair, side and horizon")
     if not _same(float(row["complete_draws"]), float(found["complete_draws"])):
         raise RuntimeError("the comparison's share of complete draws is not the support's")
-    key = rule.bound + ("_complete" if rule.draws == "complete" else "")
+    counted = tuple(int(row[k]) for k in ("folds", "quarters_scheduled", "draws", "draws_complete"))
+    numbered = found["numbered_draws"]
+    expected = (found["scoreable"], len(found["quarters"]), numbered["all"], numbered["complete"])
+    if counted != expected:
+        raise RuntimeError(
+            f"the comparison's quarters scored and scheduled and draws with a number {counted} "
+            f"are not the support's {expected}"
+        )
+    key = _read(rule)
     lower = float(row[key])
     if not math.isfinite(lower):
         raise ValueError(f"the primary row's {key} is not a number")
@@ -393,15 +483,15 @@ def run(
     side: str,
     horizon: int,
     rule: Rule,
-    cut: date = span.HELD_BACK,
     log: LOG = lambda line: None,
 ) -> dict[str, Any]:
-    evaluation = evaluation_plan(dev.ladder, end, cut)
+    evaluation = evaluation_plan(dev.ladder, end)
+    arms_check(arms, dev)
     check([arm.name for arm in arms], pairs, primary, side, horizon, evaluation)
     found = support(values, grid, evaluation, side, horizon, rule)
     if found["causes"]:
         return {"support": found, "decision": decide(found, (), primary, rule)}
-    tables, used = scored(values, grid, dev, end, arms, cut, log)
+    tables, used = scored(values, grid, dev, end, arms, log)
     out = paired(values, grid, evaluation, tables, pairs, primary, side, horizon, log)
     decision = decide(found, out["comparisons"], primary, rule)
     return out | {"support": found, "decision": decision, "tables": tables, "encoders": used}
