@@ -251,7 +251,7 @@ def test_the_plan_refuses_invalid_values(tmp_path: Path) -> None:
         ('sides = ["long", "short", "any"]', 'sides = ["long", "long"]', "sides"),
         ('groups = ["vol", "price"]', "groups = []", r"no groups in vol\+price"),
         ("gap_days = 31", "gap_days = -1", "negative"),
-        ("gap_days = 31", "gap_days = 30", "shorter than the 30.36 days"),
+        ("gap_days = 31", "gap_days = 30", "shorter than the 30.69 days"),
         ("block_days = 14", "block_days = 0", "block_days"),
         ("draws = 300", "draws = 0", "draws"),
         ('groups = ["vol", "price"]', 'groups = ["vol", "vol"]', "listed twice"),

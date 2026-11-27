@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -74,7 +75,9 @@ def write(
 UNIT_NS = {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}
 
 
-def refuse_held_back(path: Path, column: str = "ts_ns", data: bytes | None = None) -> None:
+def refuse_held_back(
+    path: Path, column: str = "ts_ns", data: bytes | None = None, *, limit: date = span.HELD_BACK
+) -> None:
     file = pq.ParquetFile(path if data is None else pa.BufferReader(data))
     schema = file.schema_arrow
     if column not in schema.names:
@@ -86,7 +89,7 @@ def refuse_held_back(path: Path, column: str = "ts_ns", data: bytes | None = Non
     index = [meta.schema.column(i).path for i in range(meta.num_columns)].index(column)
     stamped = pa.types.is_timestamp(kind)
     scale = UNIT_NS[kind.unit] if stamped else 1
-    first, held = labels.ns(span.START), labels.ns(span.HELD_BACK)
+    first, held = labels.ns(span.START), labels.ns(limit)
     for g in range(meta.num_row_groups):
         group = meta.row_group(g)
         if group.num_rows == 0:

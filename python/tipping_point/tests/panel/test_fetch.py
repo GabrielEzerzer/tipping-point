@@ -103,7 +103,7 @@ def test_a_held_back_day_is_refused_before_any_request(fake: Counted, tmp_path: 
 def test_each_request_is_refused_on_a_held_back_day_past_the_span_check(
     fake: Counted, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(span, "refuse", lambda *days: None)
+    monkeypatch.setattr(span, "refuse", lambda *days, limit=span.HELD_BACK: None)
     with pytest.raises(span.HeldBackError):
         fetch.fetch(SYMBOLS, date(2024, 1, 1), date(2024, 1, 1), tmp_path, fake.get, workers=4)
     assert fake.requests == []

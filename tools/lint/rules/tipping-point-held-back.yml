@@ -1,0 +1,83 @@
+id: tp-held-back-limit
+language: Python
+severity: error
+message: "Only panel/heldback.py and tests may pass a limit to the panel's held-back refusals or data stages (refuse, refuse_url, refuse_names, refuse_archive, manifest_files, refuse_held_back, guarded, fetch, run, ratios, labels_run). Elsewhere a limit may only be forwarded as limit=limit from a function whose own limit parameter defaults to span.HELD_BACK."
+files:
+  - "**/*.py"
+ignores:
+  - "python/tipping_point/src/tipping_point/panel/heldback.py"
+  - "python/tipping_point/tests/**"
+  - "harness/tests/**"
+rule:
+  kind: keyword_argument
+  has:
+    field: name
+    regex: '^limit$'
+  inside:
+    kind: argument_list
+    inside:
+      kind: call
+      has:
+        field: function
+        regex: '(?:^|\.)(?:refuse|refuse_url|refuse_names|refuse_archive|manifest_files|refuse_held_back|guarded|fetch|run|ratios|labels_run)$'
+  not:
+    all:
+      - has:
+          field: value
+          kind: identifier
+          regex: '^limit$'
+      - inside:
+          stopBy:
+            any:
+              - kind: function_definition
+              - kind: lambda
+            has:
+              field: parameters
+              has:
+                regex: '^limit\b'
+          kind: function_definition
+          has:
+            field: parameters
+            has:
+              kind: typed_default_parameter
+              all:
+                - has:
+                    field: name
+                    regex: '^limit$'
+                - has:
+                    field: value
+                    regex: '^(?:span\.)?HELD_BACK$'
+---
+id: tp-held-back-limit-default
+language: Python
+severity: error
+message: "Outside panel/heldback.py and tests, a limit parameter with a default defaults to span.HELD_BACK, and only on the held-back refusals and data stages (refuse, refuse_url, refuse_names, refuse_archive, manifest_files, refuse_held_back, guarded, fetch, run, ratios, labels_run), so that only heldback.py and tests can raise the held-back limit. An int or float limit is a count and may default to anything."
+files:
+  - "**/*.py"
+ignores:
+  - "python/tipping_point/src/tipping_point/panel/heldback.py"
+  - "python/tipping_point/tests/**"
+  - "harness/tests/**"
+rule:
+  any:
+    - kind: typed_default_parameter
+    - kind: default_parameter
+  has:
+    field: name
+    regex: '^limit$'
+  not:
+    any:
+      - has:
+          field: type
+          regex: '^(?:int|float)(?:\s*\|\s*None)?$'
+      - all:
+          - has:
+              field: value
+              regex: '^(?:span\.)?HELD_BACK$'
+          - inside:
+              kind: parameters
+              inside:
+                kind: function_definition
+                has:
+                  field: name
+                  regex: '^(?:refuse|refuse_url|refuse_names|refuse_archive|manifest_files|refuse_held_back|guarded|fetch|run|ratios|labels_run)$'

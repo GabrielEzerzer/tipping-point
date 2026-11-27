@@ -665,7 +665,8 @@ at hour t may read only bars that start before t and metrics rows stamped at or 
 
 **Inputs.** `panel inputs --labels <run id>` writes one run to `<data dir>/panel-inputs/<run_id>/`
 with the table `inputs`, one row per coin per hour t of the labels run's grid in the grid's order.
-Its manifest names the labels run and the sha256 of its grid and of its `thresholds` table. That
+Its manifest names the labels run and the sha256 of its grid, of its `thresholds` table and of its
+`manifest.json` (`labels_manifest_sha256`; no command checks it, only the prefix check below). That
 table must give one row for each coin and each UTC day of the grid, or the command refuses; an hour
 in day d scales its volatility inputs by that day's `sd_ret` and `b`, set from the 90 days before d
 (see Thresholds), and those inputs are missing on a day whose row has no threshold. The command
@@ -680,13 +681,20 @@ Timing rule: an input at hour t reads only 5-minute bars that start before t, op
 stamped at or before t (that of the bar starting at t is allowed; its close is not), and the
 long/short ratio and funding rate of the bar before t, t - 5 min. A funding settlement falls on the
 hour and Binance stamps it on the hour or a few milliseconds after, so reading the bar at t would
-make the input depend on those milliseconds. The tests change, blank or delete every later bar and
-row, through the command on planted archive files as well as on bars, and check that no input at t
-moves. Windows are counted in 5-minute bars (1 h = 12, 6 h = 72, 24 h = 288, 7 d = 2016,
+make the input depend on those milliseconds. The rule has no exception: every input at hour t reads
+only data before t (with open interest stamped at t as above), and no rule, the end of a coin's
+trading or of its funding series included, looks at a later bar, row or settlement. The tests
+change, blank or delete every later bar and row, through the command on planted archive files as
+well as on bars, and check that no input at t moves. Windows are counted in 5-minute bars (1 h = 12, 6 h = 72, 24 h = 288, 7 d = 2016,
 28 d = 8064) and end just before t, at t for open interest. A rolling value needs at least 5/6 of
 its window present, else it is missing; so does every 28-day mean or median, counting only values
 observed in that bar, not carried into it. r is the 5-minute log return of close. The command
-refuses a span with a funding file missing.
+refuses a span with a funding file missing for a month that starts before the end of the coin's
+last complete bar (see Stopped coins); a month before a late listing counts too.
+
+The rule is about the time the archive stamps on a row, not the time the row could first be read:
+a value stamped at t that Binance published minutes later, or revised afterwards, still enters the
+input at t. Trading on these inputs in real time would need the publication delay added.
 
 - `vol`: `vol_1h`, `vol_6h`, `vol_24h`, `vol_7d`, `vol_28d` = log(mean r^2 over the window /
   (sd_ret^2 / 6)), where sd_ret^2 / 6 turns the day's 30-minute variance into a 5-minute one;
@@ -712,7 +720,11 @@ refuses a span with a funding file missing.
   files, read from the same verified files) at t - 5 min; `ls_rel`, `ls` minus its 28-day mean
   ending at the same bar.
   Open interest and the ratio are carried forward at most 12 bars (1 hour) across gaps, and zero or
-  negative values count as missing. Binance's metrics files leave the ratio empty from 2021-12-30 to
+  negative values count as missing. The funding rate read at a bar is the last settlement at or
+  before it, and is missing when that settlement is more than 16 hours older than the bar
+  (`FUNDING_CAP_BARS`), for every gap alike; settlements are at most 8 hours apart on every panel
+  coin in 2022-2023, so the cap survives one missed settlement and only a gap longer than it changes
+  a value. Binance's metrics files leave the ratio empty from 2021-12-30 to
   2022-01-19 on every panel coin, so `ls` is missing until 2022-01-19 14:00 UTC and `ls_rel` until
   its 28-day window holds 5/6 of its values again, at 2022-02-11 22:00 UTC.
 
@@ -751,9 +763,9 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   are dropped. In `forward`, from the quarter `forward_first` names (2, counting from 0, so six
   quarters are scored), a quarter is scored by a model fitted only on rows more than 31 days before
   it, as the held-back test span will be. The gap must cover the inputs' longest look-back (28 days,
-  one bar and the funding rate's carry of up to 8 hours, longer than the 1-hour carry of the
-  other inputs), the longest horizon, the labels' 30-minute lead and their 24-hour look-back,
-  30.36 days in all; the plan refuses a shorter one. The 90-day thresholds that scale
+  one bar and the funding rate's carry of up to its 16-hour cap, longer than the 1-hour carry of
+  the other inputs), the longest horizon, the labels' 30-minute lead and their 24-hour look-back,
+  30.69 days in all; the plan refuses a shorter one. The 90-day thresholds that scale
   `vol` and `near_24h`, and that set the labels, are not a direct look-back and the gap does not
   cover them; `ladder-gap92.toml` runs the plan with a 92-day gap (below). A scored quarter with rows but no
   training rows, training rows that hold no positives or only positives for a side, or a scored
@@ -991,7 +1003,8 @@ return needs the close before the window, and for `ret_28d`'s starting price; up
 `oi_vs_28d`, whose 8,064 snapshots end at t and each hold the last open interest, carried up to 12
 bars forward; up to 8,076 bars for `ls_rel`, whose 8,064 ratios before t are carried the same way;
 and up to 680 hours for `funding_rel`, whose 28-day reference averages hourly funding rates that
-each hold the last posted rate, carried up to 8 hours forward. Fitted thresholds reach further.
+each hold the last posted rate, carried up to 8 hours forward between regular settlements (up to 688
+hours across a gap in the series, whose carry stops at 16 hours). Fitted thresholds reach further.
 The volatility-scaled columns
 (`vol_1h` to `vol_28d`) divide by `sd_ret` and `near_24h` divides by `b`, the labels run's daily
 thresholds for t's UTC day. Each is fitted on the 30-minute price changes of the 90 days before
@@ -1276,7 +1289,8 @@ sha256 to equal the one the sequence run's `complete.json` records, and its inpu
 grid sha256, like its sequence run's, to equal the comparison's. A `scores` run without these
 records is refused, with or without `--unbound`. The inputs run records the labels grid and
 thresholds by sha256. It takes its dates and symbols from the labels run's manifest, which it names
-by run id and of which it records no sha256; the command checks the grid's bytes against the inputs
+by run id and whose sha256 it records as `labels_manifest_sha256`, which this command does not
+check; the command checks the grid's bytes against the inputs
 run's record and the inputs table's rows against the grid's, and does not read the labels run's
 manifest.
 
@@ -1381,6 +1395,117 @@ held-back day is opened, and the frozen plan pins every arm's configuration. The
 against the classical arm, the `vol` variant, and `classic` as secondary pairs. It is not the frozen
 test. A development comparison between configurations chosen on the development span is not
 evidence.
+
+**Held-back span.** The refusals take the first refused day as a keyword, `limit`, whose default is
+2024-01-01 (`span.HELD_BACK`): `span.refuse`, `refuse_url`, `refuse_names`, `refuse_archive` and
+`manifest_files`, `store.refuse_held_back`, `fetch.guarded`, and the stages that call them,
+`fetch.fetch`, `labels.run`, `inputs.run`, `inputs.ratios` and `inputs.labels_run`. No command line
+flag, environment variable or plan field sets it; every command runs with the default, so it
+refuses every day from 2024-01-01 on as before. `refuse_url` refuses a file name whose period, a
+day, month or year, has its last day on or after the limit, so a monthly file is refused when its
+month reaches the limit; with the default this is the same as testing the first day, since no
+period that begins before 2024-01-01 ends after it. A caller that raises the limit passes the first
+day after the month the test span ends in (the day after its last day when the span ends on a
+month's last day), never a sentinel far in the future; a nearer limit refuses that month's funding
+file. Only a Python caller can raise
+it, and the lint rule `tp-held-back-limit` (`tools/lint/rules/tipping-point-held-back.yml`) fails
+on any file other than `panel/heldback.py` and the tests that passes a `limit` to those functions,
+except a function that forwards its `limit` as `limit=limit` when the nearest enclosing function
+or lambda that binds `limit` is a function whose `limit` parameter defaults to `span.HELD_BACK`.
+`tp-held-back-limit-default` fails on a `limit` parameter that defaults to `span.HELD_BACK` on a
+function not named in that list, and on a `limit` parameter with any other default, typed or not,
+unless it is typed `int` or `float` (a count, as in `inputs.carried`). The rules read names, not
+what they point to, so a call through another name or attribute (`inputs.run(...)` and any other
+`.run(limit=...)` alike, so the list also flags unrelated calls), `functools.partial`, `**kwargs`,
+a reassigned `limit` inside a forwarding function, a function named like a listed stage, an `int`
+annotation on a date, or a change to `span.HELD_BACK` itself passes them.
+
+A data stage whose limit is past 2024-01-01 reads and writes only under a folder named `held-back`,
+and one with the default limit never reads or writes under one. The data stages are the three that
+read the archive: `fetch.fetch`, `labels.run` and `inputs.run` (`inputs.ratios` and
+`inputs.labels_run` are covered when `inputs.run` calls them, not on a direct call). The commands
+after them (`ladder`, `sequence`, `scores`, `merge`, `classical`, `compare`) do not look at folder
+names: they refuse a held-back run by the span its manifest records and the time bounds of its
+tables, so they would read a development run that had been saved under a `held-back` folder. The
+three stages resolve each path they read or write before they read anything, links and `..`
+included, and refuse one whose resolved path has a `held-back` part when the limit is the default,
+or lacks one when it is raised: the archive root, the data folder and the `labels/` or
+`panel-inputs/` folder the run is written under, and for `inputs.run` the labels run. A stage
+writes to the resolved path of its output folder, the one it checked, so it makes no folder on a
+path that only passes through a missing one and back out with `..`. A folder named, say,
+`binance-held-back` has no `held-back` part. Raised-limit runs therefore sit under
+`<data dir>/held-back/` (its `labels/` and `panel-inputs/` beside an archive root). `inputs.run`
+checks the paths it is given before it lists the archive or opens the labels run. An archive root
+holds no links, nor does the labels run `inputs.run` reads: a stage walks each before it reads any
+file in it, and for each entry it reads the entry's own type from the folder listing, without
+following it, and refuses a file link, a directory link and a junction alike, so what a link
+points to is neither listed nor opened. The root itself may be given through a link, since its
+resolved path is what is checked. With the default limit the walk also refuses an entry named
+`held-back` under the root before listing it. A hard link cannot be told from a file, nor a mount
+(a Linux bind mount) from a folder, and neither is caught. A labels run's `complete.json` names
+its grid and its thresholds table each as its folder and a file, `grid/<file>` and
+`thresholds/<file>`: `inputs.run` refuses a name with any other step, `..` included, so with no
+link in the run the table it opens is inside the folder it walked. A coin symbol names a folder
+under the root, so the three stages refuse one that is not capital letters and digits only, and
+no symbol can point outside the root. A
+run whose limit is not the default, raised or lowered, records it as `limit` in the archive's
+`manifest.json` and in the labels and inputs runs' manifest params; a run with the default records
+nothing new apart from `labels_manifest_sha256`. Its labels and archive are bit for bit those the
+code gave before the limit existed, and its inputs table is too unless a funding series has a gap
+longer than the 16-hour cap (see Stopped coins), which now makes `funding` missing where the rate
+was carried before. Every development command still runs with the
+default, so pointed at a held-back archive, labels run or inputs run it refuses it by the checks
+above: the names and manifest of an archive, the span recorded in a labels run, and the time
+bounds in the Parquet metadata of a grid, thresholds or inputs table.
+
+**Stopped coins.** A coin that stops trading inside a span is not an error and does not stop the
+run. Its rows after its last complete bar are censored at every horizon, as for any window that
+does not exist, so they are never scored (labels read the windows after t by design; inputs do
+not). The inputs have no rule for a stopped coin: at hour t nothing tells an end of trading from a
+gap that later closes, so the coin's inputs fade out by the ordinary rules, exactly as they do
+during a gap of the same length up to the hour that gap ends. A rolling input goes missing once
+less than 5/6 of its window is present (`vol_1h` within the hour, a 28-day input after days), open
+interest and the long/short ratio after their 12-bar carry, and `funding` 16 hours after the last
+settlement at or before the bar it is read at, with `funding_rel` from then on. The market means
+count a coin only while it has a value. A kline or metrics file recorded as missing (a 404) is
+skipped as before, wherever it falls. Whether the run is valid is a separate check that changes no
+value: the coin's last complete bar over the whole span the run reads decides which monthly funding
+files it needs, and a funding file recorded as missing stops the run when its month starts before
+the end of that bar, and is ignored when the coin had stopped before the month began. A file that
+is absent and not recorded as missing is refused by the archive check, as before.
+
+**Prefix check.** `panel.prefix.check(labels_run, inputs_run, dev_labels, dev_inputs)` takes a labels
+and inputs run over a span that reaches past 2023 and the development labels and inputs runs, which
+must end on 2023-12-31, share the start, grid start and coins, and be marked clean. Each inputs run
+must record the sha256 of its own labels run's grid and thresholds, and the whole-span inputs run
+the sha256 of its labels run's `manifest.json`; every table is checked against its run's
+`complete.json`, and where `complete.json` records the sha256 of `manifest.json` (inputs runs do),
+that too. The check refuses a comparison that would pass by being empty: the whole-span and
+development runs must be different folders once resolved, each run's `complete.json` must list
+exactly one file for each table it compares, every whole-span table must have rows both before and from
+2024-01-01, and the inputs tables must have as many rows as the grids before 2024-01-01 and in all.
+Each table's Arrow schema must equal the code's (`labels.THRESHOLDS`, `labels.GRID`,
+`inputs.SCHEMA`, metadata aside) and its rows be sorted by `ts_ns`, which has no nulls. Then, bit for
+bit, the rows before 2024-01-01 of the whole-span tables must equal the development tables in every
+column of that schema: every threshold row, every inputs row, and every grid row except in one
+window. Floats are compared by their bits, so -0.0 differs from 0.0 and NaN from a null, and a null
+equals only a null. No tolerance can be passed. For horizon H, `long_H`, `short_H`
+and `censored_H` may differ on the rows with t > 2024-01-01 - H hours - 30 minutes, the last H hours
+of 2023: 23:00 for 1 h, 18:00 to 23:00 for 6 h, the whole of 2023-12-31 for 24 h. A row's `long_H`
+and `short_H` read the instances that begin in [t, t + H), and its `censored_H` the windows closing
+in [t - 24 hours, t + H + 30 minutes). Before t + H + 30 minutes passes 2024-01-01, every one of
+those windows closes inside 2023 and exists in both runs, and an instance that a 2024 window starts
+begins no earlier than 30 minutes before 2024-01-01, so it cannot begin in [t, t + H). On the last
+H hours the development run censors the windows past its end, which the whole-span run has.
+`skip` gets no window: a 2024 firing joins an instance only within 24 hours of its first firing,
+and an hour after that first firing is already skipped for 24 hours. Thresholds and inputs get no
+window, since a day's threshold reads only earlier days and an input at t only data stamped at or before t (open interest at t, everything else before t).
+Any other difference is refused with the column, the first row and the number of rows. The check
+proves that the cells it compares are equal, every row before 2024-01-01 less the label columns in
+their windows above, and nothing more. It says nothing about the rows
+from 2024-01-01 on, which could differ in any way and pass; that they were made by the committed
+code and configuration, and that the development runs compared are the ones the models were
+trained on, is for the test command to bind by commit and sha256.
 
 `panel/heldback.py` is the scoring core of the held-back test; it has no command of its own. It
 builds two plans in code from the development ladder plan and the test span's last day. The cut is
