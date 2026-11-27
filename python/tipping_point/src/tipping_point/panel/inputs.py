@@ -427,17 +427,22 @@ def run(
     *,
     limit: date = span.HELD_BACK,
 ) -> tuple[Path, dict[str, Any]]:
-    span.held_back_root(limit, labels_dir, root, data_dir, Path(data_dir) / "panel-inputs")
+    data_dir = Path(data_dir).resolve()
+    span.held_back_root(limit, labels_dir, root, data_dir, data_dir / "panel-inputs")
     files = span.manifest_files(root, limit=limit)
     source = labels_run(labels_dir, limit=limit)
     if not source["clean"]:
         raise archive.ArchiveError(f"{labels_dir}: complete.json does not mark the run clean")
     symbols = span.symbols_of(source["params"]["symbols"])
+    for kind in ("grid", "thresholds"):
+        parts = Path(source[f"{kind}_file"]).parts
+        if len(parts) != 2 or parts[0] != kind or parts[1] == "..":
+            raise span.HeldBackError(
+                f"{source[f'{kind}_file']} is not inside the labels run {labels_dir}: a table "
+                f"is named by its folder and its file and nothing else"
+            )
     grid_path = labels_dir / source["grid_file"]
     thresholds_path = labels_dir / source["thresholds_file"]
-    for path in (grid_path, thresholds_path):
-        if not path.resolve().is_relative_to(labels_dir.resolve()):
-            raise span.HeldBackError(f"{path} is not inside the labels run {labels_dir}")
     span.held_back_root(limit, grid_path, thresholds_path)
     for path in (grid_path, thresholds_path):
         store.refuse_held_back(path, limit=limit)

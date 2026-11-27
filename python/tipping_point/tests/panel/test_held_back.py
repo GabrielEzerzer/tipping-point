@@ -244,6 +244,28 @@ def test_a_raised_limit_reads_and_writes_only_under_held_back(spans: Spans, tmp_
     assert len(list((held / "labels").iterdir())) == 1
 
 
+def test_a_stage_makes_its_folders_on_the_path_it_checked(
+    spans: Spans, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made: list[Path] = []
+    mkdir = Path.mkdir
+
+    def recorded(self: Path, *args: Any, **kwargs: Any) -> None:
+        made.append(self)
+        mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", recorded)
+    work = tmp_path / "missing" / ".." / "work"
+    fake = vision(SYMBOLS, START, 3, seed=11)
+    fetch.fetch(SYMBOLS, START, START + timedelta(days=2), work / "archive", fake.get)
+    run, _ = labels.run(spans.dev_root, work, SYMBOLS, START, DEV, END, "x")
+    inputs.run(run, spans.dev_root, work, "x")
+    assert (tmp_path / "work" / "archive" / "manifest.json").is_file()
+    assert {p.name for p in (tmp_path / "work").iterdir()} == {"archive", "labels", "panel-inputs"}
+    assert made and not any(".." in path.parts for path in made)
+    assert not (tmp_path / "missing").exists()
+
+
 def test_a_development_run_neither_reads_nor_writes_under_held_back(
     spans: Spans, tmp_path: Path
 ) -> None:
@@ -452,15 +474,16 @@ def test_a_folder_reached_through_a_directory_link_is_checked_where_it_resolves(
     linked(run / "grid", tmp_path / "dev" / "grid")
     with pytest.raises(span.HeldBackError, match="grid is a link"):
         inputs.run(run, spans.held_root, held / "copy", "x", limit=LIMIT)
-    outside = copied(spans.held_labels, held / "other")
+    for i, climb in enumerate(("grid/../../grid.parquet", "grid/../{}", "grid/sub/../{}")):
+        outside = copied(spans.held_labels, held / f"other{i}")
 
-    def escaped(record: dict[str, Any]) -> None:
-        name = next(f for f in record["files"] if f.startswith("grid/"))
-        record["files"]["grid/../../grid.parquet"] = record["files"].pop(name)
+        def escaped(record: dict[str, Any], climb: str = climb) -> None:
+            name = next(f for f in record["files"] if f.startswith("grid/"))
+            record["files"][climb.format(name)] = record["files"].pop(name)
 
-    edit_json(outside / "complete.json", escaped)
-    with pytest.raises(span.HeldBackError, match="is not inside the labels run"):
-        inputs.run(outside, spans.held_root, held / "other", "x", limit=LIMIT)
+        edit_json(outside / "complete.json", escaped)
+        with pytest.raises(span.HeldBackError, match="is not inside the labels run"):
+            inputs.run(outside, spans.held_root, held / f"other{i}", "x", limit=LIMIT)
     dev = tmp_path / "work"
     linked(dev / "labels", spans.base / span.HELD_BACK_DIR / "labels")
     with pytest.raises(span.HeldBackError, match="is under a held-back folder"):

@@ -307,7 +307,8 @@ def run(
 ) -> tuple[Path, dict[str, Any]]:
     span.refuse(start, dev_start, end, limit=limit)
     symbols = span.symbols_of(symbols)
-    span.held_back_root(limit, root, data_dir, Path(data_dir) / "labels")
+    data_dir = Path(data_dir).resolve()
+    span.held_back_root(limit, root, data_dir, data_dir / "labels")
     files = span.manifest_files(root, limit=limit)
     if not start < dev_start <= end:
         raise ValueError(f"the span must run {start} < {dev_start} <= {end}")

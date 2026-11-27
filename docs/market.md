@@ -1429,20 +1429,25 @@ names: they refuse a held-back run by the span its manifest records and the time
 tables, so they would read a development run that had been saved under a `held-back` folder. The
 three stages resolve each path they read or write before they read anything, links and `..`
 included, and refuse one whose resolved path has a `held-back` part when the limit is the default,
-or lacks one when it is raised: the archive root,
-the data folder and the `labels/` or `panel-inputs/` folder the run is written under, and for
-`inputs.run` the labels run, whose grid and thresholds must also resolve inside that run's folder.
-A folder named, say, `binance-held-back` has no `held-back` part. Raised-limit runs therefore sit
-under `<data dir>/held-back/` (its `labels/` and `panel-inputs/` beside an archive root).
-`inputs.run` checks the paths it is given before it lists the archive or opens the labels run. An
-archive root holds no links, nor does the labels run `inputs.run` reads: a stage walks each before it reads any file in it, and for each entry it
-reads the entry's own type from the folder listing, without following it, and refuses a file
-link, a directory link and a junction alike, so what a link points to is neither listed nor
-opened. The root itself may be given through a link, since its resolved path is what is checked.
-With the default limit the walk also refuses an entry named `held-back` under the root before
-listing it. A hard link cannot be told from a file, nor a mount (a Linux bind mount) from a folder, and
-neither is caught. A coin symbol names a folder under the root, so the three stages refuse one that
-is not capital letters and digits only, and no symbol can point outside the root. A
+or lacks one when it is raised: the archive root, the data folder and the `labels/` or
+`panel-inputs/` folder the run is written under, and for `inputs.run` the labels run. A stage
+writes to the resolved path of its output folder, the one it checked, so it makes no folder on a
+path that only passes through a missing one and back out with `..`. A folder named, say,
+`binance-held-back` has no `held-back` part. Raised-limit runs therefore sit under
+`<data dir>/held-back/` (its `labels/` and `panel-inputs/` beside an archive root). `inputs.run`
+checks the paths it is given before it lists the archive or opens the labels run. An archive root
+holds no links, nor does the labels run `inputs.run` reads: a stage walks each before it reads any
+file in it, and for each entry it reads the entry's own type from the folder listing, without
+following it, and refuses a file link, a directory link and a junction alike, so what a link
+points to is neither listed nor opened. The root itself may be given through a link, since its
+resolved path is what is checked. With the default limit the walk also refuses an entry named
+`held-back` under the root before listing it. A hard link cannot be told from a file, nor a mount
+(a Linux bind mount) from a folder, and neither is caught. A labels run's `complete.json` names
+its grid and its thresholds table each as its folder and a file, `grid/<file>` and
+`thresholds/<file>`: `inputs.run` refuses a name with any other step, `..` included, so with no
+link in the run the table it opens is inside the folder it walked. A coin symbol names a folder
+under the root, so the three stages refuse one that is not capital letters and digits only, and
+no symbol can point outside the root. A
 run whose limit is not the default, raised or lowered, records it as `limit` in the archive's
 `manifest.json` and in the labels and inputs runs' manifest params; a run with the default records
 nothing new apart from `labels_manifest_sha256`. Its labels and archive are bit for bit those the
