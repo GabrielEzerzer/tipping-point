@@ -689,7 +689,12 @@ well as on bars, and check that no input at t moves. Windows are counted in 5-mi
 28 d = 8064) and end just before t, at t for open interest. A rolling value needs at least 5/6 of
 its window present, else it is missing; so does every 28-day mean or median, counting only values
 observed in that bar, not carried into it. r is the 5-minute log return of close. The command
-refuses a span with a funding file missing inside a coin's trading life (see Stopped coins).
+refuses a span with a funding file missing for a month that starts before the coin's last complete
+bar (see Stopped coins); a month before a late listing counts too.
+
+The rule is about the time the archive stamps on a row, not the time the row could first be read:
+a value stamped at t that Binance published minutes later, or revised afterwards, still enters the
+input at t. Trading on these inputs in real time would need the publication delay added.
 
 - `vol`: `vol_1h`, `vol_6h`, `vol_24h`, `vol_7d`, `vol_28d` = log(mean r^2 over the window /
   (sd_ret^2 / 6)), where sd_ret^2 / 6 turns the day's 30-minute variance into a 5-minute one;
@@ -1424,7 +1429,8 @@ names: they refuse a held-back run by the span its manifest records and the time
 tables, so they would read a development run that had been saved under a `held-back` folder. The
 three stages resolve each path they read or write before they read anything, links and `..`
 included, and refuse one whose resolved path has a `held-back` part when the limit is the default,
-or lacks one when it is raised: the archive root and each of its kind folders for the run's coins,
+or lacks one when it is raised: the archive root, each of its kind folders for the run's coins and
+every file and folder found under the root, so a file that is itself a link is checked too,
 the data folder and the `labels/` or `panel-inputs/` folder the run is written under, and for
 `inputs.run` the labels run, whose grid and thresholds must also resolve inside that run's folder.
 A folder named, say, `binance-held-back` has no `held-back` part. Raised-limit runs therefore sit
@@ -1482,7 +1488,11 @@ H hours the development run censors the windows past its end, which the whole-sp
 `skip` gets no window: a 2024 firing joins an instance only within 24 hours of its first firing,
 and an hour after that first firing is already skipped for 24 hours. Thresholds and inputs get no
 window, since a day's threshold reads only earlier days and an input at t only data stamped at or before t (open interest at t, everything else before t).
-Any other difference is refused with the column, the first row and the number of rows.
+Any other difference is refused with the column, the first row and the number of rows. The check
+proves that the rows before 2024-01-01 are equal and nothing more. It says nothing about the rows
+from 2024-01-01 on, which could differ in any way and pass; that they were made by the committed
+code and configuration, and that the development runs compared are the ones the models were
+trained on, is for the test command to bind by commit and sha256.
 
 `panel/heldback.py` is the scoring core of the held-back test; it has no command of its own. It
 builds two plans in code from the development ladder plan and the test span's last day. The cut is

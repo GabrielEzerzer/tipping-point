@@ -59,7 +59,8 @@ def refuse_names(root: Path, names: Iterable[str], how: str, *, limit: date = HE
 
 
 def refuse_archive(root: Path, *, limit: date = HELD_BACK) -> None:
-    paths = root.rglob("*") if root.is_dir() else ()
+    paths = list(root.rglob("*")) if root.is_dir() else []
+    held_back_root(limit, *paths)
     names = (path.relative_to(root).as_posix() for path in paths)
     refuse_names(root, names, "holds", limit=limit)
 

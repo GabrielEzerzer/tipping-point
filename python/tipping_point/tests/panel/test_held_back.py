@@ -308,6 +308,24 @@ def linked(link: Path, target: Path) -> None:
             pytest.skip("this platform does not let the test make a directory link")
 
 
+def test_an_archive_file_that_is_a_link_is_checked_where_it_resolves(tmp_path: Path) -> None:
+    held, dev = tmp_path / span.HELD_BACK_DIR / "archive", tmp_path / "dev"
+    name = "klines/BTCUSDT/BTCUSDT-5m-2023-12-{}.zip"
+    for root, day in ((held, 30), (dev, 29)):
+        (root / name.format(day)).parent.mkdir(parents=True)
+        (root / name.format(day)).write_bytes(b"zip")
+    assert span.manifest_files(dev) == {} == span.manifest_files(held, limit=LIMIT)
+    try:
+        (dev / name.format(30)).symlink_to(held / name.format(30))
+        (held / name.format(29)).symlink_to(dev / name.format(29))
+    except OSError:
+        pytest.skip("this platform does not let the test make a file link")
+    with pytest.raises(span.HeldBackError, match="is under a held-back folder"):
+        span.manifest_files(dev)
+    with pytest.raises(span.HeldBackError, match="is not under a held-back folder"):
+        span.manifest_files(held, limit=LIMIT)
+
+
 def test_a_folder_reached_through_a_directory_link_is_checked_where_it_resolves(
     spans: Spans, tmp_path: Path
 ) -> None:
