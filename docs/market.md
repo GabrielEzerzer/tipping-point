@@ -716,9 +716,9 @@ refuses a span with a funding file missing inside a coin's trading life (see Sto
   ending at the same bar.
   Open interest and the ratio are carried forward at most 12 bars (1 hour) across gaps, and zero or
   negative values count as missing. The funding rate read at a bar is the last settlement at or
-  before it, and is missing when that settlement is more than 24 hours older than the bar
-  (`FUNDING_CAP_BARS`), for every gap alike; settlements come every 8 hours, so only a gap longer
-  than the cap changes a value. Binance's metrics files leave the ratio empty from 2021-12-30 to
+  before it, and is missing when that settlement is more than 16 hours older than the bar
+  (`FUNDING_CAP_BARS`), for every gap alike; settlements come every 8 hours, so the cap survives one
+  missed settlement and only a gap longer than it changes a value. Binance's metrics files leave the ratio empty from 2021-12-30 to
   2022-01-19 on every panel coin, so `ls` is missing until 2022-01-19 14:00 UTC and `ls_rel` until
   its 28-day window holds 5/6 of its values again, at 2022-02-11 22:00 UTC.
 
@@ -757,11 +757,9 @@ Everything it does comes from a plan file; `panel/ladder.toml` is the developmen
   are dropped. In `forward`, from the quarter `forward_first` names (2, counting from 0, so six
   quarters are scored), a quarter is scored by a model fitted only on rows more than 31 days before
   it, as the held-back test span will be. The gap must cover the inputs' longest look-back (28 days,
-  one bar and the funding rate's carry of up to 8 hours, longer than the 1-hour carry of the
-  other inputs), the longest horizon, the labels' 30-minute lead and their 24-hour look-back,
-  30.36 days in all; the plan refuses a shorter one. The 8 hours are the carry between regular
-  settlements; across a gap in a funding series the rate is carried up to its 24-hour cap, which
-  would make 31.02 days, and the 31-day gap does not cover those extra 16 hours. The 90-day thresholds that scale
+  one bar and the funding rate's carry of up to its 16-hour cap, longer than the 1-hour carry of
+  the other inputs), the longest horizon, the labels' 30-minute lead and their 24-hour look-back,
+  30.69 days in all; the plan refuses a shorter one. The 90-day thresholds that scale
   `vol` and `near_24h`, and that set the labels, are not a direct look-back and the gap does not
   cover them; `ladder-gap92.toml` runs the plan with a 92-day gap (below). A scored quarter with rows but no
   training rows, training rows that hold no positives or only positives for a side, or a scored
@@ -983,8 +981,8 @@ return needs the close before the window, and for `ret_28d`'s starting price; up
 `oi_vs_28d`, whose 8,064 snapshots end at t and each hold the last open interest, carried up to 12
 bars forward; up to 8,076 bars for `ls_rel`, whose 8,064 ratios before t are carried the same way;
 and up to 680 hours for `funding_rel`, whose 28-day reference averages hourly funding rates that
-each hold the last posted rate, carried up to 8 hours forward between regular settlements (up to 696
-hours across a gap in the series, whose carry stops at 24 hours). Fitted thresholds reach further.
+each hold the last posted rate, carried up to 8 hours forward between regular settlements (up to 688
+hours across a gap in the series, whose carry stops at 16 hours). Fitted thresholds reach further.
 The volatility-scaled columns
 (`vol_1h` to `vol_28d`) divide by `sd_ret` and `near_24h` divides by `b`, the labels run's daily
 thresholds for t's UTC day. Each is fitted on the 30-minute price changes of the 90 days before
@@ -1406,7 +1404,7 @@ run whose limit is not the default, raised or lowered, records it as `limit` in 
 `manifest.json` and in the labels and inputs runs' manifest params; a run with the default records
 nothing new apart from `labels_manifest_sha256`. Its labels and archive are bit for bit those the
 code gave before the limit existed, and its inputs table is too unless a funding series has a gap
-longer than the 24-hour cap (see Stopped coins), which now makes `funding` missing where the rate
+longer than the 16-hour cap (see Stopped coins), which now makes `funding` missing where the rate
 was carried before. Every development command still runs with the
 default, so pointed at a held-back archive, labels run or inputs run it refuses it by the checks
 above: the names and manifest of an archive, the span recorded in a labels run, and the time
@@ -1419,7 +1417,7 @@ not). The inputs have no rule for a stopped coin: at hour t nothing tells an end
 gap that later closes, so the coin's inputs fade out by the ordinary rules, exactly as they do
 during a gap of the same length up to the hour that gap ends. A rolling input goes missing once
 less than 5/6 of its window is present (`vol_1h` within the hour, a 28-day input after days), open
-interest and the long/short ratio after their 12-bar carry, and `funding` 24 hours after the last
+interest and the long/short ratio after their 12-bar carry, and `funding` 16 hours after the last
 settlement at or before the bar it is read at, with `funding_rel` from then on. The market means
 count a coin only while it has a value. A kline or metrics file recorded as missing (a 404) is
 skipped as before, wherever it falls. Whether the run is valid is a separate check that changes no

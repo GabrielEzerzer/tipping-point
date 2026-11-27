@@ -149,7 +149,7 @@ def spans(tmp_path_factory: pytest.TempPathFactory) -> Spans:
     december = archive.Source("fundingRate", "ETHUSDT", "2023-12")
     fake.add(
         december,
-        settlements(date(2023, 12, 1), lambda s: s < datetime(2023, 12, 31, 8, tzinfo=UTC)),
+        settlements(date(2023, 12, 1), lambda s: s < datetime(2023, 12, 31, 16, tzinfo=UTC)),
     )
     dev_root, held_root = base / "archives" / "binance", held / "archives" / "binance"
     fetch.fetch(SYMBOLS, START, END, dev_root, fake.get)
@@ -886,10 +886,10 @@ def test_a_coin_that_stops_fades_out_as_a_gap_of_the_same_length_does(tmp_path: 
     assert np.isnan(tables["stopped"]["vol_1h"].to_numpy()[after]).all()
 
 
-def test_the_funding_cap_keeps_a_settlement_for_24_hours_and_not_one_bar_more() -> None:
+def test_the_funding_cap_keeps_a_settlement_for_16_hours_and_not_one_bar_more() -> None:
     settled = labels.ns(date(2023, 3, 1))
     cap = inputs.FUNDING_CAP_BARS * inputs.BAR_NS
-    assert cap == 24 * labels.HOUR_NS
+    assert cap == 16 * labels.HOUR_NS
     ts = settled + np.array([-inputs.BAR_NS, 0, cap - inputs.BAR_NS, cap, cap + inputs.BAR_NS])
     rate = np.array([np.nan, 1e-4, 1e-4, 1e-4, 1e-4])
     calc = np.array([settled // 1_000_000 + 4])
@@ -914,12 +914,13 @@ def test_a_funding_gap_longer_than_the_cap_is_missing_until_the_series_resumes(
     made, _ = inputs.run(folder, root, tmp_path, "t")
     rows = tables_of(made)["inputs"]
     ts, eth = rows["ts_ns"].to_numpy(), row_mask(rows, "ETHUSDT")
-    lapse = int(before.timestamp()) * 10**9 + 24 * labels.HOUR_NS + inputs.BAR_NS
+    cap = inputs.FUNDING_CAP_BARS * inputs.BAR_NS
+    lapse = int(before.timestamp()) * 10**9 + cap + inputs.BAR_NS
     back = int(after.timestamp()) * 10**9 + inputs.BAR_NS
     funding = rows["funding"].to_numpy()
     assert np.isfinite(funding[eth & (ts <= lapse)]).all()
     assert np.isnan(funding[eth & (ts > lapse) & (ts <= back)]).all()
-    assert eth[(ts > lapse) & (ts <= back)].sum() == 16
+    assert eth[(ts > lapse) & (ts <= back)].sum() == 40 - cap // labels.HOUR_NS
     assert np.isfinite(funding[eth & (ts > back)]).all()
     assert np.isfinite(funding[~eth]).all()
     assert np.isfinite(rows["funding_rel"].to_numpy()[eth & (ts > back + labels.DAY_NS)]).all()
