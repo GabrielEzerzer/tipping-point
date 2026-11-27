@@ -17,8 +17,8 @@ from . import span
 WORKERS = 16
 
 
-def guarded(get: archive.Get) -> archive.Get:
-    return lambda url: get(span.refuse_url(url))
+def guarded(get: archive.Get, *, limit: date = span.HELD_BACK) -> archive.Get:
+    return lambda url: get(span.refuse_url(url, limit=limit))
 
 
 def fetch(
@@ -29,12 +29,15 @@ def fetch(
     get: archive.Get,
     workers: int = WORKERS,
     log: Callable[[str], None] | None = None,
+    *,
+    limit: date = span.HELD_BACK,
 ) -> dict[str, Any]:
-    span.refuse(start, end)
-    files = span.manifest_files(dest)
+    span.refuse(start, end, limit=limit)
+    span.held_back_root(limit, dest)
+    files = span.manifest_files(dest, limit=limit)
     manifest_path = dest / "manifest.json"
     todo = archive.sources(list(dict.fromkeys(symbols)), start, end)
-    safe = guarded(get)
+    safe = guarded(get, limit=limit)
     done: dict[str, Any] = {}
     with ThreadPoolExecutor(workers) as pool:
         jobs = pool.map(lambda s: archive._fetch(s, dest, safe, files.get(s.path)), todo)
@@ -48,6 +51,7 @@ def fetch(
         "format": 1,
         "source": archive.BASE_URL,
         "licence": archive.LICENCE,
+        **({"limit": limit.isoformat()} if limit != span.HELD_BACK else {}),
         "files": dict(sorted(files.items())),
     }
     io.write_json(manifest_path, manifest, replace=True)

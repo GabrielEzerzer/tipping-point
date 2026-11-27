@@ -302,9 +302,12 @@ def run(
     end: date,
     tag: str,
     log: Callable[[str], None] = lambda line: None,
+    *,
+    limit: date = span.HELD_BACK,
 ) -> tuple[Path, dict[str, Any]]:
-    span.refuse(start, dev_start, end)
-    files = span.manifest_files(root)
+    span.refuse(start, dev_start, end, limit=limit)
+    span.held_back_root(limit, root, data_dir)
+    files = span.manifest_files(root, limit=limit)
     if not start < dev_start <= end:
         raise ValueError(f"the span must run {start} < {dev_start} <= {end}")
     symbols = list(dict.fromkeys(symbols))
@@ -373,6 +376,7 @@ def run(
         "constants": constants(),
         "cascade": dataclasses.asdict(cascade.Params(c=FLOW, v=VOLUME)) | {"a": None, "b": None},
         "code": {"head": io.code_version()["git_sha"], "uv_lock_sha256": lock},
+        **({"limit": limit.isoformat()} if limit != span.HELD_BACK else {}),
     }
     rows_thresholds.sort(key=lambda r: (r["ts_ns"], r["symbol"]))
     tables = {

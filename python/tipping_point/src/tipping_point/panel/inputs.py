@@ -345,9 +345,15 @@ def read_ratio(path: Path) -> dict[str, np.ndarray]:
 
 
 def ratios(
-    root: Path, files: Mapping[str, Any], symbol: str, start: date, end: date
+    root: Path,
+    files: Mapping[str, Any],
+    symbol: str,
+    start: date,
+    end: date,
+    *,
+    limit: date = span.HELD_BACK,
 ) -> dict[str, np.ndarray]:
-    span.refuse(start, end)
+    span.refuse(start, end, limit=limit)
     parts = []
     for source in archive.sources([symbol], start, end):
         if source.kind != "metrics":
@@ -369,16 +375,17 @@ def on_grid(found: Mapping[str, np.ndarray], start_ms: int, n: int) -> np.ndarra
     return out
 
 
-def labels_run(path: Path) -> dict[str, Any]:
+def labels_run(path: Path, *, limit: date = span.HELD_BACK) -> dict[str, Any]:
     params = io.read_json(path / "manifest.json")["params"]
     days = [date.fromisoformat(params[k]) for k in ("start", "dev_start", "end")]
-    span.refuse(*days)
+    span.refuse(*days, limit=limit)
     manifest = io.read_json(path / "manifest.json")
     complete = io.read_json(path / "complete.json")
     grid_file = next(f for f in complete["files"] if f.startswith("grid/"))
     thresholds_file = next(f for f in complete["files"] if f.startswith("thresholds/"))
     return {
         "run_id": manifest["run_id"],
+        "manifest_sha256": store.sha256(path / "manifest.json"),
         "params": params,
         "start": days[0],
         "dev_start": days[1],
@@ -391,21 +398,46 @@ def labels_run(path: Path) -> dict[str, Any]:
     }
 
 
+def last_bar(columns: Mapping[str, np.ndarray]) -> int:
+    complete = np.flatnonzero(np.isfinite(columns["close"]))
+    return int(complete[-1]) if complete.size else -1
+
+
+def unfunded(got: archive.Span, symbol: str, start: date, end: date, last_ns: int) -> list[str]:
+    monthly = [s for s in archive.sources([symbol], start, end) if s.kind == "fundingRate"]
+    return [s.url for s in monthly if s.url in got.missing and s.start_ms * 1_000_000 < last_ns]
+
+
+def funding_ended(rate: np.ndarray, ts_ns: np.ndarray, calc_ms: np.ndarray) -> np.ndarray:
+    if not calc_ms.size:
+        return rate
+    settled = int(calc_ms.max()) * 1_000_000
+    return np.where(ts_ns - settled > FUNDING_CARRY_BARS * BAR_NS, np.nan, rate)
+
+
+def stopped(own: Mapping[str, np.ndarray], last: int, stop: np.ndarray) -> dict[str, np.ndarray]:
+    gone = stop - 1 > last
+    return {name: np.where(gone, np.nan, values) for name, values in own.items()}
+
+
 def run(
     labels_dir: Path,
     root: Path,
     data_dir: Path,
     tag: str,
     log: Callable[[str], None] = lambda line: None,
+    *,
+    limit: date = span.HELD_BACK,
 ) -> tuple[Path, dict[str, Any]]:
-    files = span.manifest_files(root)
-    source = labels_run(labels_dir)
+    files = span.manifest_files(root, limit=limit)
+    span.held_back_root(limit, labels_dir, root, data_dir)
+    source = labels_run(labels_dir, limit=limit)
     if not source["clean"]:
         raise archive.ArchiveError(f"{labels_dir}: complete.json does not mark the run clean")
     grid_path = labels_dir / source["grid_file"]
     thresholds_path = labels_dir / source["thresholds_file"]
     for path in (grid_path, thresholds_path):
-        store.refuse_held_back(path)
+        store.refuse_held_back(path, limit=limit)
     for path, key in ((grid_path, "grid_sha256"), (thresholds_path, "thresholds_sha256")):
         if store.sha256(path) != source[key]:
             raise archive.ArchiveError(f"{path}: its sha256 differs from complete.json's")
@@ -414,7 +446,7 @@ def run(
     symbols = list(source["params"]["symbols"])
     start, end = source["start"], source["end"]
     hours = np.unique(grid["ts_ns"].to_numpy())
-    if hours.size and hours[-1] >= labels.ns(span.HELD_BACK):
+    if hours.size and hours[-1] >= labels.ns(limit):
         raise span.HeldBackError("the grid holds an hour in the held-back test span")
     start_ns = labels.ns(start)
     if np.any((hours - start_ns) % BAR_NS) or np.any(hours <= start_ns):
@@ -426,20 +458,23 @@ def run(
     sources: list[dict[str, Any]] = []
     for symbol in symbols:
         got = archive.collect([symbol], start, end, root)
-        unfunded = [url for url in got.missing if "/fundingRate/" in url]
-        if unfunded:
-            raise archive.ArchiveError(f"{symbol}: funding files missing in the span: {unfunded}")
-        sources += got.sources
         columns, _ = bars.bars(
             archive.day_ms(start), days, *(got.columns[(symbol, k)] for k in archive.KINDS)
         )
+        last = last_bar(columns)
+        last_ns = int(columns["ts_ns"][last]) + BAR_NS if last >= 0 else 0
+        absent = unfunded(got, symbol, start, end, last_ns)
+        if absent:
+            raise archive.ArchiveError(f"{symbol}: funding files missing in the span: {absent}")
+        sources += got.sources
+        settled = got.columns[(symbol, "fundingRate")]["calc_time"]
+        columns["funding_rate"] = funding_ended(columns["funding_rate"], columns["ts_ns"], settled)
         if stop.size and stop[-1] >= len(columns["close"]):
             raise ValueError("the grid holds an hour after the span's last bar")
-        ratio = on_grid(
-            ratios(root, files, symbol, start, end), archive.day_ms(start), len(columns["ts_ns"])
-        )
+        found = ratios(root, files, symbol, start, end, limit=limit)
+        ratio = on_grid(found, archive.day_ms(start), len(columns["ts_ns"]))
         sd_ret, b = scales[symbol]
-        own.append(coin(columns, ratio, stop, sd_ret, b))
+        own.append(stopped(coin(columns, ratio, stop, sd_ret, b), last, stop))
         missing = {k: round(float(np.mean(np.isnan(v))), 4) for k, v in own[-1].items()}
         worst = sorted(missing.items(), key=lambda kv: -kv[1])[:3]
         unscaled = int(np.isnan(sd_ret).sum())
@@ -463,6 +498,7 @@ def run(
     }
     run_params = {
         "labels_run": source["run_id"],
+        "labels_manifest_sha256": source["manifest_sha256"],
         "labels_grid": {"file": source["grid_file"], "sha256": source["grid_sha256"]},
         "labels_thresholds": {
             "file": source["thresholds_file"],
@@ -478,6 +514,7 @@ def run(
         "groups": {k: list(v) for k, v in GROUPS.items()},
         "code": {"uv_lock_sha256": labels.uv_lock()},
         "sources": sources,
+        **({"limit": limit.isoformat()} if limit != span.HELD_BACK else {}),
     }
     tables = {"inputs": out}
     return store.write(data_dir, "panel-inputs", tag, tables, run_params, checks), checks

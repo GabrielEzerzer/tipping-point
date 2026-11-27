@@ -1,0 +1,66 @@
+id: tp-held-back-limit
+language: Python
+severity: error
+message: "Only panel/heldback.py and tests may pass a limit to the panel's held-back refusals or data stages (refuse, refuse_url, refuse_names, refuse_archive, manifest_files, refuse_held_back, guarded, fetch, run, ratios, labels_run). Elsewhere a limit may only be forwarded as limit=limit from a function whose own limit parameter defaults to span.HELD_BACK."
+files:
+  - "**/*.py"
+ignores:
+  - "python/tipping_point/src/tipping_point/panel/heldback.py"
+  - "python/tipping_point/tests/**"
+  - "harness/tests/**"
+rule:
+  kind: keyword_argument
+  has:
+    field: name
+    regex: '^limit$'
+  inside:
+    kind: argument_list
+    inside:
+      kind: call
+      has:
+        field: function
+        regex: '(?:^|\.)(?:refuse|refuse_url|refuse_names|refuse_archive|manifest_files|refuse_held_back|guarded|fetch|run|ratios|labels_run)$'
+  not:
+    all:
+      - has:
+          field: value
+          kind: identifier
+          regex: '^limit$'
+      - inside:
+          stopBy: end
+          kind: function_definition
+          has:
+            field: parameters
+            has:
+              kind: typed_default_parameter
+              all:
+                - has:
+                    field: name
+                    regex: '^limit$'
+                - has:
+                    field: value
+                    regex: '^(?:span\.)?HELD_BACK$'
+---
+id: tp-held-back-limit-default
+language: Python
+severity: error
+message: "A limit: date parameter defaults to span.HELD_BACK outside panel/heldback.py and tests, so that only those can raise the held-back limit."
+files:
+  - "**/*.py"
+ignores:
+  - "python/tipping_point/src/tipping_point/panel/heldback.py"
+  - "python/tipping_point/tests/**"
+  - "harness/tests/**"
+rule:
+  kind: typed_default_parameter
+  all:
+    - has:
+        field: name
+        regex: '^limit$'
+    - has:
+        field: type
+        regex: '\bdate\b'
+    - not:
+        has:
+          field: value
+          regex: '^(?:span\.)?HELD_BACK$'
