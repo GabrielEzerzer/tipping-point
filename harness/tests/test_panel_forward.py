@@ -269,7 +269,10 @@ COLUMNS = (
     "funding",
     "ls",
     "oi_vs_28d",
+    "m_vol_1h",
+    "m_ret_1h",
 )
+MARKET = [COLUMNS.index(n) for n in COLUMNS if n.startswith("m_")]
 
 
 def channels(*names: str) -> list[int]:
@@ -287,7 +290,7 @@ BLIND = channels(
 def setup(raw: np.ndarray, plan: sequence.Plan) -> dict:
     nhours = raw.shape[1]
     train = np.arange(nhours) < 2000
-    present = ~np.isnan(raw).all(axis=-1)
+    present = panel_forward.trading(raw, COLUMNS)
     x, z = panel_forward.prepared(raw, train, COLUMNS, plan)
     fit_hours = sequence.eligible(train, plan.pad, panel_forward.AHEAD)
     eval_hours = (np.arange(nhours) >= 2200) & (np.arange(nhours) < 2900)
@@ -307,6 +310,7 @@ def synthetic(tmp_path_factory: pytest.TempPathFactory) -> dict:
     rng = np.random.default_rng(7)
     ncoins, nhours = 2, 3000
     raw = rng.normal(size=(ncoins, nhours, len(COLUMNS)))
+    raw[1:, :, MARKET] = raw[:1, :, MARKET]
 
     def column(name: str) -> np.ndarray:
         return raw[..., COLUMNS.index(name)]
@@ -388,6 +392,7 @@ def test_a_coin_with_a_wholly_missing_stretch_does_not_change_persistence(synthe
     raw, plan = synthetic["raw"], synthetic["plan"]
     gappy = np.full((1, *raw.shape[1:]), np.nan)
     gappy[0, 2300:2324] = raw[0, 2300:2324]
+    gappy[:, :, MARKET] = raw[:1, :, MARKET]
     slow = Pick(channels("vol_7d") * 8)
     two = setup(raw, plan)
     three = setup(np.concatenate([raw, gappy]), plan)

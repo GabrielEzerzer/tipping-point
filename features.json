@@ -314,6 +314,14 @@
       "test": "python/tipping_point/tests/panel/test_compare.py"
     },
     {
+      "name": "Panel forward check",
+      "description": "Says, reading no cascade label, whether a sequence run's trained JEPA embeddings carry next-day information about the inputs that their untrained twins do not, also beyond the input row at the same hour, and whether they keep the inputs, from ridge probes on every forward fold and seed, with two rules on vol_24h and oi_24h.",
+      "command": "uv run python harness/panel_forward.py --sequence <sequence run folder> --inputs <inputs run folder> --out <new folder outside the repo>",
+      "inputs": "a panel sequence run with its saved models, its inputs run and the ts_ns and symbol columns of its labels grid",
+      "outputs": "<out>/ holding forward.parquet, report.md ending with both rules, and manifest.json with the sha256 of every file read",
+      "test": "harness/tests/test_panel_forward.py"
+    },
+    {
       "name": "Book feature range",
       "description": "Imports and reduces the Bybit order-book days of a range into per-day feature files.",
       "command": "uv run python -m tipping_point.market book --range training",

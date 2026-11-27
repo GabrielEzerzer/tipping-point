@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 import torch
 from tipping_point import engine
 from tipping_point.ising import io
-from tipping_point.panel import encoder, ladder, sequence, span, store
+from tipping_point.panel import encoder, inputs, ladder, sequence, span, store
 
 AHEAD = 24
 PRIMARY = ("vol_24h", "oi_24h")
@@ -83,9 +83,9 @@ ts_ns and symbol are read, and the grid's sha256 is checked against the inputs r
 
 Fit rows are coin-hours t whose {AHEAD} following hours and whose window lie in the fold's training
 span; evaluation rows are the left-out quarter's hours t for which t+{AHEAD} is on the grid. Only
-coin-hours whose input row at t is not wholly missing are drawn, at most --rows (default {ROWS}) of
-each per variant, fold and seed, the same rows for both models. Each readout (last, means, spreads)
-at t is regressed by ridge on:
+coin-hours whose own-coin inputs at t are not all missing are drawn, at most --rows (default
+{ROWS}) of each per variant, fold and seed, the same rows for both models. Each readout (last,
+means, spreads) at t is regressed by ridge on:
   forward          the coin's standardised input at t+{AHEAD}: {", ".join(LEVELS)}
                    ({" and ".join(PRIMARY)} primary), and the change from t to t+{AHEAD} of
                    {", ".join(CHANGES)}
@@ -94,7 +94,7 @@ at t is regressed by ridge on:
                    (model "inputs", readout "none")
   retention        the coin's standardised input at t: {", ".join(RETAINED)}
 and persistence is the mean over embedding dimensions of the correlation between the last readout
-at t and at t+{AHEAD} on the evaluation rows whose input row at t+{AHEAD} is not wholly missing
+at t and at t+{AHEAD} on the evaluation rows whose own-coin inputs at t+{AHEAD} are not all missing
 either. A channel the variant lacks is skipped and rows with a missing target are dropped. Ridge:
 features standardised on the fit rows, the penalty (times the row count) chosen from
 {", ".join(f"{a:g}" for a in ALPHAS)} on the last fifth in time of the fit rows, refitted on all
@@ -205,6 +205,11 @@ def sample(
     if len(index) > nrows:
         index = np.sort(np.random.default_rng(seed).choice(index, nrows, replace=False))
     return index // allowed.shape[1], index % allowed.shape[1]
+
+
+def trading(raw: np.ndarray, columns: Sequence[str]) -> np.ndarray:
+    own = [i for i, name in enumerate(columns) if name in inputs.OWN]
+    return ~np.isnan(raw[..., own]).all(axis=-1)
 
 
 def drawn(
@@ -411,7 +416,7 @@ def check(
     for variant in plan.variants:
         columns = plan.rung(variant).columns
         raw = sequence.by_coin(np.column_stack([values[c] for c in columns]), ncoins)
-        present = ~np.isnan(raw).all(axis=-1)
+        present = trading(raw, columns)
         for f in plan.folds:
             if f < plan.ladder.first_fold(SCHEME):
                 continue
