@@ -945,6 +945,22 @@ Seeds are drawn per variant, fold, seed and stream; the twin shares the JEPA's i
 target's segment is the same regime as the window's first tokens, and the probes read the online
 encoder.
 
+A plan's folds are its ladder's quarters counted from 0 (0 to 7 on the shipped ladder); the fold
+one past the last quarter (8 on the shipped ladder) is the fit-only fold. Its training hours are
+those a `forward` fold would take before a quarter starting at the span's end: every hour of the
+span more than the gap (31 days) before that end, 2022-01-01 to 2023-11-30 on the shipped ladder,
+so no hour of the held-back span or of the gap before it. It fits and saves every model of each
+variant and seed exactly as another fold does, with the seeds a fold of that index draws, its
+scales, selection block and supervised step count all taken from those hours. It scores nothing:
+it has no test rows, fits no probe and writes no row to the folds table, which keeps its columns
+when empty. It exists because the one test on the held-back span will score models fitted once on
+the development span's hours more than the gap before its end and never refitted, which none of
+the scored folds is. A plan may hold
+it only alone and only under `forward` (`panel/sequence-final.toml`, the shipped plan with
+`folds = [8]`, which a test keeps otherwise identical to it), so every run either scores all its
+folds or is a fit-only run. `scores` and `classical` refuse a fit-only run or plan, since it has
+nothing to score, and so does the harness's forward check, since it has no hour to judge.
+
 Logistic probes read the JEPA and the twin through the same readouts, which take no label and fit
 nothing: `last` is the last token (32 values); `means` adds the means of the last 6, the last 18 and
 all 84 tokens (128 values); `spreads` adds the population standard deviations over the same spans
@@ -1020,9 +1036,9 @@ A plan's cells (variant, fold and seed, each fitting every model) draw their see
 alone, so a sequence run whose plan keeps only some variants, seeds and folds fits exactly those
 cells of the full run, and the run can be split across machines.
 `python -m tipping_point.panel merge --runs <run> <run> ... --plan <sequence.toml>` joins such
-runs into one sequence run that `scores` reads like any other. `--plan` is the parent plan, the
-plan the runs split (by default the shipped `panel/sequence.toml`), and the merged run's plan is
-that file. The merge refuses runs whose plans differ from the parent's in anything but `variants`,
+runs into one sequence run that `scores` reads like any other scored run. `--plan` is the parent
+plan, the plan the runs split (by default the shipped `panel/sequence.toml`), and the merged run's
+plan is that file. The merge refuses runs whose plans differ from the parent's in anything but `variants`,
 `seeds` and `folds`, or list a variant, seed or fold the parent lacks; that fit a cell twice or
 leave a cell of the parent unfitted; that read different inputs tables, labels grids or ladder
 plans, or a ladder plan other than the parent's; that ran different code (commit and `uv.lock`),
@@ -1065,11 +1081,17 @@ instead, and `scores` checks the inputs and the grid as for any sequence run.
 `uv run python notebooks/kaggle_panel_sequence.py write --commit <hash> --out <dir>` writes the
 shipped plan as twelve Kaggle CPU kernels (one variant, one seed and three folds each, every cell
 once), each running a clean checkout of the pushed commit, and a dry-run kernel that runs two
-pieces, their merge and scores on a synthetic panel. Each piece carries the sha256 of the inputs
+pieces, their merge and scores on a synthetic panel. It also writes the final plan,
+`panel/sequence-final.toml`, as six kernels (`tp-panel-final-<variant>-s<seed>`, one variant and
+one seed of the fit-only fold each) on the same environment, commit check, dataset checks and
+completeness rule; `merge --plan .../panel/sequence-final.toml` joins them into the run whose
+models the held-back test scores. Each piece carries the sha256 of the inputs
 table and the labels grid from the local store's records and refuses a dataset whose files differ,
 after first refusing, from the manifest and the Parquet metadata alone, one that reaches the
 held-back span. A piece is complete only if its saved models are exactly its plan's cells, each
-among its verified files, and it skipped nothing. Its `local-dry` runs the dry kernel's steps on
+among its verified files, and it skipped nothing. `write` makes all nineteen kernel folders at the
+given commit, but pushing a folder starts a new version of that kernel, so only the folders of the
+run being made are pushed. Its `local-dry` runs the dry kernel's steps on
 this machine and needs a clean checkout, since the merge refuses runs made from uncommitted code.
 The script's `--help` is its manual.
 
@@ -1453,3 +1475,71 @@ H hours the development run censors the windows past its end, which the whole-sp
 and an hour after that first firing is already skipped for 24 hours. Thresholds and inputs get no
 window, since a day's threshold reads only earlier days and an input at t only data before t.
 Any other difference is refused with the column, the first row and the number of rows.
+
+`panel/heldback.py` is the scoring core of the held-back test; it has no command of its own. It
+builds two plans in code from the development ladder plan and the test span's last day. The cut is
+the day after the development plan's last day, 2024-01-01 for the shipped plan, and cannot be given:
+the final sequence run saves its models under the fold index that follows the development quarters,
+trained on the hours before that same day, so the fit and the models it loads cannot disagree on the
+cut when the models were saved by a run of this same development plan. The core takes the record of
+saved models as given; binding that record to the plan's sha256 is the command's part. A plan file
+cannot hold either plan: `ladder.load` refuses a file that names `cuts`, a span reaching the
+held-back days and `forward_first = 0`. A development plan whose `gap_days` is shorter than the
+inputs' look-back, the longest horizon and the labels' lead and look-back need is refused by the cut
+too, with the loader's wording.
+
+- The fit plan runs from the development start to the test span's last day, with fold edges cut by
+  code at the development start, 2024-01-01 and the day after the test span (`cuts`), and
+  `forward_first = 1`. Its forward fold 1 trains on hours more than `gap_days` before 2024-01-01
+  and scores the whole test span. Its sequence plan fits `forward` and fold 1 only. A plan cut by
+  code refuses `loqo`, whose fold 0 would train on the test span, and the scoring refuses a
+  sequence plan with any other scheme or fold.
+- The evaluation plan runs from 2024-01-01 to the test span's last day, with calendar quarters as
+  folds and `forward_first = 0`. For a span ending 2026-09-30 that is eleven quarters, each cut
+  into seven 14-day blocks by the bootstrap.
+
+The grid is every coin at every hour, a coin that does not trade at an hour keeping its row with
+missing inputs and censored labels, so the support, the pairing and the scoring each refuse a grid
+that lacks any hour of the span they read, or is not that rectangle, before any row is filtered;
+a run checks the whole fit span before the support.
+
+Each arm's configuration is given, not chosen, and each arm is fitted once on the fit plan's
+training rows and scores only the test span. A sequence arm names its model, variant, readout, c and
+seeds. Its seeds must be given and distinct, its model and variant ones the plan trains, and a JEPA
+or twin arm's readout and c ones from the plan's grid; the supervised model takes neither. An arm
+that breaks one of these is refused before anything is fitted. Its models come from the final
+sequence run, under that run's fold index (the number of development quarters), each checked
+against the run's recorded sha256 before it is used, and are probed through the same code as
+`scores`. A classical arm is a fixed configuration exported through
+the same code as `classical --fixed`. A ladder rung is fitted at the ladder plan's c. Every
+standardisation statistic, probe and logistic fit reads training rows only, so a label or input
+from the test span reaches no fitted quantity; test-span inputs reach only the test rows' own
+windows. A development plan that ends the day before a development quarter, with that quarter's
+last day as the end, reproduces that quarter's `forward` scores bit for bit: the training and test
+rows are the same rows, encoded in the same batches. Over a longer test span the test rows are
+encoded in batches of another make-up, so a score can differ in its last float32 bits from the one a
+shorter span gives. No code that ranks or chooses a configuration is called. The scores are then
+assigned to the evaluation plan's quarters and paired by `panel compare`'s code, with its block
+bootstrap, draws and seed, on the pairs given, one of them primary with its side (`long`, `short` or
+`long+short`) and horizon.
+
+The decision reads a rule record that the written plan fills: which lower bound (`q05` or `q025`),
+whether it is read on all draws or on complete draws, the minimum number of scoreable quarters, the
+minimum share of complete draws, the minimum number of blocks holding a positive for a quarter and
+side to count as supported, and the minimum number of supported quarters. The code holds no values
+for them, and allows a bound read from a single draw that can give it, so the written plan's minimum
+share of complete draws is what keeps the quantile meaningful. The support is computed first, from
+the labels of the rows the comparison keeps and the bootstrap draws alone, without any score. For
+each quarter and side it counts the blocks holding a positive and whether the quarter has both
+classes, and from the draws it takes the share of complete
+draws, defined as in `panel compare` (for `long+short`, both sides on their common quarters). It
+also counts the draws on which the bound the rule reads can be a number: on all draws, those that
+keep both classes in at least one scoreable quarter (for `long+short`, at least one common quarter
+on each side); on complete draws, the complete draws. Any threshold the support misses, or no draw
+that can give the bound, makes the outcome `inconclusive`, with each cause named, and no score is
+computed. Otherwise the
+outcome is `supported` when the primary pair's chosen lower bound is above zero and `not supported`
+when it is not; there is no outcome for the other direction. The decision returns the outcome with
+the support's per-quarter counts and the primary row's estimate, bounds, shares and quarter counts,
+and refuses a primary row whose share of complete draws, quarters scored or scheduled, or counts of
+draws giving each bound differ from the support's.

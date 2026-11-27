@@ -43,15 +43,18 @@ Command line: python -m tipping_point.panel <command> [options]
           336 hours of a ladder rung's inputs, inside each quarter fold, with logistic probes on
           the JEPA's and twin's readouts over a grid of readouts and penalties, as a run in
           <data dir>/panel-sequence/<run_id>/ with the tables diagnostics, curves, folds and rows,
-          report.md and every fitted model under encoders/
+          report.md and every fitted model under encoders/. panel/sequence-final.toml is the
+          fit-only fold: every model fitted once on the span's hours more than the gap before its
+          end, nothing scored
   scores  out-of-fold scores of one model and variant of a sequence run (--sequence, --model,
           --variant) from its saved models, the JEPA's and twin's readout and penalty chosen from
           the run's folds table by the selection rule, the mean over seeds of each row's logit, as
           a run in <data dir>/panel-scores/<run_id>/ with one table per scheme in the columns a
-          ladder plan's [external] section reads
+          ladder plan's [external] section reads; refuses a fit-only run
   merge   one sequence run from several (--runs) whose plans differ only in variants, seeds and
           folds and which together fit every cell of the merged plan once, as a run in
-          <data dir>/panel-sequence/<run_id>/ that scores reads like any sequence run
+          <data dir>/panel-sequence/<run_id>/ that scores reads like any scored sequence run
+          (--plan panel/sequence-final.toml joins the fit-only pieces, which scores refuses)
   classical
           the classical comparators of a sequence plan (--plan, default panel/sequence.toml) on an
           inputs run (--inputs), on the sequence models' folds and rows: the plan's rungs at every
