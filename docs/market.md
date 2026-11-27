@@ -883,8 +883,24 @@ on the same common rows as the ladder, whose plan it reads (`ladder.toml`). Each
 last 336 hourly rows of a rung's inputs plus the share of them missing, cut into 4-hour patches and
 encoded by two causal ConvNeXt-style blocks and two causal attention blocks with rotary relative
 positions, so a lag means the same on the 84-token window and the 6-token target. The JEPA predicts
-the target encoder's tokens of the next 24 hours. Its objective (`objective = "predictor"`) puts
-variance and covariance terms, weighted 0.5 and 0.02, on the predicted tokens, and the target
+the target encoder's tokens of the next 24 hours (`target = "fresh"`). Most inputs are 7-day and
+28-day rolling statistics or levels, so the next day's rows of the input table mostly repeat the
+context; the target encoder therefore sees only what happens after the context ends. In the
+target's 24 hours, an input whose window is 1 hour (`vol_1h`, `ret_1h`, `flow_1h`, `vsurge_1h`) is
+shown from the first hour on, one of 6 hours (`vol_6h`, `ret_6h`) from the sixth, and one of 24
+hours (`vol_24h`, `near_24h`, `volume_24h`, `ret_24h`, `aret_24h`, `flow_24h`, `oi_24h`) only at the
+last, as its ordinary scaled value; before then its window still reaches into the context. Three
+levels (`oi_vs_28d`, `funding`, `ls`) are shown at every hour as their change since the context's
+last hour, divided by the standard deviation of their 24-hour change over the fold's training hours
+and clipped like the inputs; the change is 0 when either end is missing. A market mean follows its
+coin input. Every other input is 0, the scaled value of its training mean, and so is the share of
+inputs missing, which would count the hidden ones. The plan's `[fresh]` table lists these inputs.
+`target = "future"` (the next 24 rows as they are) and `target = "shifted"` (the windows ending a
+few hours later) remain, so earlier runs can be repeated. The training curve records, at each
+recorded step, the median over the target's tokens and dimensions of its standard deviation in the
+batch (`target_sd`), which falls to 0 when the target has gone constant. The JEPA's objective
+(`objective = "predictor"`) puts variance and covariance terms, weighted 0.5 and 0.02, on the
+predicted tokens, and the target
 encoder's moving-average momentum rises from 0.996 to 1.0. On synthetic panels with a planted
 24-hour chirp, the objective that put those terms on z instead left the planted signal unlearned
 (probe AUC 0.52, against 0.995 for this one). The JEPA's untrained twin is its encoder before the
