@@ -522,8 +522,9 @@ Binance USDT perpetuals. Its data and label layer is `python/tipping_point/src/t
 which reuses the archive reader, the bars and the cascade rule above unchanged. Bars start on
 2021-10-01; thresholds and cascades start on each coin's first day with a threshold, and the label
 grid covers the development span 2022-01-01 to 2023-12-31. Every day from 2024-01-01 is held back
-as the test span: every command refuses one, and every request is checked for one before it is
-sent.
+as the test span: every development command refuses one, and every request is checked for one
+before it is sent. Only `panel test`, from a frozen plan, reads that span (see the held-back test
+below).
 
 **Coins.** A symbol enters the ranking when it is a USD-M symbol matching `[A-Z0-9]+USDT`, is not
 one of the index and stablecoin products `BTCDOMUSDT`, `DEFIUSDT` and `USDCUSDT`, publishes a
@@ -1678,7 +1679,8 @@ failed or unreadable, and says what a re-run does for each: a refused or failed 
 written, so a re-run fetches it again; an unreadable file matches its checksum and is kept, so a
 re-run reads it again and fails the same way, and the message names the file and its checksum file
 to remove before the data step fetches it again. If there is no whole-span inputs run, it writes one
-from the labels run. It then checks both runs (checks 11 and 12) and runs the prefix check (13),
+from the labels run. It then checks both runs (checks 11 and 12, so a labels and inputs run
+built from different archive states is refused) and runs the prefix check (13),
 printing the rows it compared. An inputs run with no labels run is refused.
 
 The data step then prints, for each coin, how many archive files the archive does not publish in the
@@ -1744,7 +1746,14 @@ The run step checks, in this order, and stops at the first failure:
     development run's, and each missing archive file it records is a file of one of its coins.
     Reads its `manifest.json` and `complete.json`.
 12. The whole-span inputs run is finished, clean and bound, made by the running commit at the plan's
-    limit, and records the whole-span labels run and its `manifest.json` sha256. Reads its
+    limit, and records the whole-span labels run and its `manifest.json` sha256. Both runs read the
+    same archive files: the files the labels run records as read (its `sources`, by URL and sha256)
+    are exactly the files the inputs run records as read (its `params.sources`), with the same
+    sha256, so no file the labels run records as missing was read by the inputs run, and none it
+    read is absent from the inputs run's list. Both stages read every klines, metrics and funding
+    file for the same coins over the same days, since the inputs run takes its coins, start and end
+    from the labels run, and each file is either read or recorded as not published, so equal lists
+    mean one archive state; the inputs run keeps no missing list of its own. Reads its
     `manifest.json` and `complete.json`.
 13. The prefix check above, on the whole-span and development runs. It reads the four runs'
     `manifest.json` and both inputs tables itself, and returns the sha256 of each. Those must be the

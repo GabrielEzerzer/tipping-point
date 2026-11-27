@@ -498,6 +498,77 @@ def test_the_missing_files_table_reads_each_coins_days_from_2024_on() -> None:
             frozen.missing_files(manifest | {"missing_sources": urls}, LAST, "x")
 
 
+def archive_changed(data: Path, world: World, change: str) -> None:
+    labels_run, inputs_run = whole(data, world, "labels"), whole(data, world, "inputs")
+    read = record(labels_run / "manifest.json")["sources"]
+    url = next(s["url"] for s in read if "/klines/" in s["url"])
+
+    def without(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [s for s in sources if s["url"] != url]
+
+    def missing(m: dict[str, Any]) -> None:
+        m["sources"] = without(m["sources"])
+        m["missing_sources"].append(url)
+
+    if change == "sha256":
+        edit(
+            inputs_run / "manifest.json",
+            lambda m: next(s for s in m["params"]["sources"] if s["url"] == url).__setitem__(
+                "sha256", ZERO
+            ),
+        )
+    elif change == "missing for labels":
+        edit(labels_run / "manifest.json", missing)
+        digest = store.sha256(labels_run / "manifest.json")
+        edit(inputs_run / "manifest.json", set_param("labels_manifest_sha256", digest))
+    elif change == "missing for inputs":
+        edit(
+            inputs_run / "manifest.json",
+            lambda m: m["params"].__setitem__("sources", without(m["params"]["sources"])),
+        )
+    if change:
+        rebind(inputs_run)
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        ("", None),
+        ("sha256", f"klines/.* read by labels as [0-9a-f]{{64}}, by inputs as {ZERO}"),
+        ("missing for labels", "klines/.* missing for labels and read by inputs"),
+        ("missing for inputs", "klines/.* read by labels and not by inputs"),
+    ],
+)
+@pytest.mark.parametrize("step", ["data", "run"])
+def test_both_steps_take_whole_span_runs_only_when_they_read_the_same_archive_files(
+    world: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step: str,
+    change: str,
+    problem: str | None,
+) -> None:
+    data = copy(world, tmp_path)
+    archive_changed(data, world, change)
+    path = put(tmp_path / "test.toml", toml(world.plan))
+    opened: list[str] = []
+    monkeypatch.setattr(prefix, "check", lambda *a: opened.append("prefix") or pytest.fail())
+    go = (
+        (lambda: frozen.data(data, lambda url: pytest.fail(url), path))
+        if step == "data"
+        else (lambda: frozen.run(data, path))
+    )
+    if problem is None:
+        with pytest.raises(pytest.fail.Exception):
+            go()
+        assert opened == ["prefix"]
+        return
+    with pytest.raises(ValueError, match="read different archive files .*" + problem):
+        go()
+    assert opened == []
+    assert not (data / HELD / frozen.DOMAIN).exists()
+
+
 def test_the_data_step_refuses_an_inputs_run_with_no_labels_run(
     world: World, tmp_path: Path
 ) -> None:
@@ -864,7 +935,10 @@ def test_an_inconclusive_support_scores_nothing(
     assert decision["outcome"] == "inconclusive" and decision["causes"]
     assert record(run / "complete.json")["rows"] == {}
     assert not list(run.glob("*.parquet"))
-    assert "no arm was scored" in (run / "report.md").read_text(encoding="utf-8")
+    text = (run / "report.md").read_text(encoding="utf-8")
+    assert "no arm was scored" in text and "no arm was fitted or scored" in text
+    assert "No arm or probe was refitted." in text
+    assert not re.search(r"fitted once|scores the test span|refitted every", text)
 
 
 def write_plan(tmp_path: Path, text: str) -> Path:
@@ -1018,6 +1092,8 @@ def test_the_loader_refuses_a_duplicate_key(base_plan: dict[str, Any], tmp_path:
         ({"model": "supervised"}, "the supervised model takes no readout or c"),
         ({"encoders": {"x": "1"}}, "encoders must map each model file"),
         ({"kind": "boosted"}, "kind 'boosted'"),
+        ({"kind": ["sequence"]}, "kind ['sequence']"),
+        ({"kind": {"sequence": 1}}, "kind {'sequence': 1}"),
         ({"name": "a b"}, "letters, digits"),
         ({"name": 3}, "letters, digits"),
         ({"c": [1]}, "c [1] (a number above 0)"),

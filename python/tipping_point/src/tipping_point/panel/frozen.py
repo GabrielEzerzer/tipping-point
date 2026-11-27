@@ -174,7 +174,7 @@ def _sequence_arm(raw: dict[str, Any], what: str, problems: list[str]) -> heldba
 def _arm(raw: Any, problems: list[str]) -> heldback.Arm | None:
     kind = raw.get("kind") if isinstance(raw, dict) else None
     what = f"arm {raw.get('name') if isinstance(raw, dict) else raw!r}"
-    if kind not in ARM:
+    if not isinstance(kind, str) or kind not in ARM:
         problems.append(f"{what}: kind {kind!r} (one of {list(ARM)})")
         return None
     need, optional = ARM[kind]
@@ -679,7 +679,7 @@ def missing_files(manifest: Mapping[str, Any], end: date, what: str) -> list[dic
 
 def whole_labels(
     run_dir: Path, test: Test, dev: Development, commit: str, seen: compare.Held
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
     what = f"the whole-span labels run {run_dir.name}"
     manifest, _, _, digest = compare.finished(run_dir, what, "labels", True, seen)
     _current(manifest, test, commit, what)
@@ -689,11 +689,56 @@ def whole_labels(
     for key in ("symbols", "start", "dev_start"):
         if params.get(key) != dev.labels_params[key]:
             raise ValueError(f"{what}: its {key} is not the development labels run's")
-    return digest, missing_files(manifest, test.end, what)
+    return manifest, digest, missing_files(manifest, test.end, what)
+
+
+def _files_read(entries: Any, what: str) -> dict[str, str]:
+    if not isinstance(entries, list):
+        raise ValueError(f"{what}: it records no list of archive files read")
+    files: dict[str, str] = {}
+    for entry in entries:
+        url = entry.get("url") if isinstance(entry, dict) else None
+        digest = entry.get("sha256") if isinstance(entry, dict) else None
+        if not (
+            isinstance(url, str)
+            and isinstance(digest, str)
+            and compare.SHA256.fullmatch(digest)
+            and url not in files
+        ):
+            raise ValueError(f"{what}: {entry!r} is not one archive file read with its sha256")
+        files[url] = digest
+    return files
+
+
+def same_archive(labels: Mapping[str, Any], inputs: Mapping[str, Any]) -> None:
+    read = _files_read(labels.get("sources"), "the whole-span labels run")
+    took = _files_read(inputs["params"].get("sources"), "the whole-span inputs run")
+    absent = set(labels["missing_sources"])
+    problems = []
+    for url in sorted(read.keys() | took.keys()):
+        if url in read and url in took:
+            if read[url] != took[url]:
+                problems.append(f"{url} read by labels as {read[url]}, by inputs as {took[url]}")
+        elif url in took:
+            how = "missing for labels" if url in absent else "not read by labels"
+            problems.append(f"{url} {how} and read by inputs")
+        else:
+            problems.append(f"{url} read by labels and not by inputs")
+    if problems:
+        raise ValueError(
+            f"the whole-span labels and inputs runs read different archive files ("
+            f"{'; '.join(problems)}): remove both whole-span runs and run the data step again"
+        )
 
 
 def whole_inputs(
-    run_dir: Path, labels_dir: Path, labels_sha: str, test: Test, commit: str, seen: compare.Held
+    run_dir: Path,
+    labels_dir: Path,
+    labels: Mapping[str, Any],
+    labels_sha: str,
+    test: Test,
+    commit: str,
+    seen: compare.Held,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     what = f"the whole-span inputs run {run_dir.name}"
     manifest, complete, _, digest = compare.finished(run_dir, what, "panel-inputs", False, seen)
@@ -704,6 +749,7 @@ def whole_inputs(
         labels_sha,
     ):
         raise ValueError(f"{what}: it does not record the whole-span labels run's manifest")
+    same_archive(labels, manifest)
     return manifest, complete, digest
 
 
@@ -799,11 +845,13 @@ def data(
         downloads(heldback.fetch_whole(symbols, start, test.end, root, get, log), root)
         labels_dir = heldback.labels_whole(root, held, symbols, start, dev_start, test.end, log)
         made.append(labels_dir)
-    labels_sha, missing = whole_labels(labels_dir, test, dev, commit, seen)
+    labels, labels_sha, missing = whole_labels(labels_dir, test, dev, commit, seen)
     if inputs_dir is None:
         inputs_dir = heldback.inputs_whole(labels_dir, root, held, test.end, log)
         made.append(inputs_dir)
-    _, complete, inputs_sha = whole_inputs(inputs_dir, labels_dir, labels_sha, test, commit, seen)
+    _, complete, inputs_sha = whole_inputs(
+        inputs_dir, labels_dir, labels, labels_sha, test, commit, seen
+    )
     checked = prefix.check(labels_dir, inputs_dir, dev.labels, dev.inputs)
     prefixed(checked, test, dev, {"labels": labels_sha, "inputs": inputs_sha}, complete)
     return {
@@ -883,9 +931,9 @@ def checked(data_dir: Path, path: Path = PLAN) -> Checked:
         raise ValueError(
             f"{held} holds no whole-span labels and inputs runs: run the data step first"
         )
-    labels_sha, missing = whole_labels(labels_dir, test, dev, code["git_sha"], seen)
+    labels, labels_sha, missing = whole_labels(labels_dir, test, dev, code["git_sha"], seen)
     manifest, complete, inputs_sha = whole_inputs(
-        inputs_dir, labels_dir, labels_sha, test, code["git_sha"], seen
+        inputs_dir, labels_dir, labels, labels_sha, test, code["git_sha"], seen
     )
     found = prefix.check(labels_dir, inputs_dir, dev.labels, dev.inputs)
     prefixed(found, test, dev, {"labels": labels_sha, "inputs": inputs_sha}, complete)
@@ -1041,12 +1089,18 @@ def report(out: Mapping[str, Any], c: Checked, run_id: str, seconds: float) -> s
     p = c.params
     first, second = test.primary
     read = f"{rule.bound} on {'complete draws only' if rule.draws == 'complete' else 'all draws'}"
+    scored = "comparisons" in out
+    fitted = (
+        f"every arm was fitted once on the development hours before {span.HELD_BACK} and scores "
+        f"the test span, which is folded by calendar quarter"
+        if scored
+        else "the test span is folded by calendar quarter, and no arm was fitted or scored"
+    )
     lines = [
         "# Held-back test",
         "",
         f"Run `{run_id}` of the test plan `{p['plan_file']}` (sha256 {test.sha256}). Test span "
-        f"{span.HELD_BACK} to {test.end}; every arm was fitted once on the development hours "
-        f"before {span.HELD_BACK} and scores the test span, which is folded by calendar quarter.",
+        f"{span.HELD_BACK} to {test.end}; {fitted}.",
         "",
         "## Outcome",
         "",
@@ -1137,8 +1191,12 @@ def report(out: Mapping[str, Any], c: Checked, run_id: str, seconds: float) -> s
         "## Provenance",
         "",
         f"- Running code: commit {code['git_sha']} (clean), code sha256 {code['code_sha256']} "
-        f"(the plan's), uv.lock {code['uv_lock_sha256']}, torch threads {p['threads']}. This code "
-        f"refitted every classical and rung arm and every probe.",
+        f"(the plan's), uv.lock {code['uv_lock_sha256']}, torch threads {p['threads']}. "
+        + (
+            "This code refitted every classical and rung arm and every probe."
+            if scored
+            else "No arm or probe was refitted."
+        ),
         f"- Installed packages, recorded and not checked against uv.lock: torch {p['torch']}, "
         f"numpy {p['numpy']}, pyarrow {p['pyarrow']}; CPU {p['runtime']['cpu']}, capability "
         f"{p['runtime']['capability']}.",
