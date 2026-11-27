@@ -122,6 +122,8 @@ class Panel:
 def panel(
     values: Mapping[str, np.ndarray], grid: Mapping[str, np.ndarray], plan: sequence.Plan
 ) -> Panel:
+    if sequence.fit_only(plan):
+        raise ValueError("the plan holds only the fit-only fold, which scores nothing")
     hours, coins = sequence.layout(grid)
     edges = ladder.bounds(plan.ladder)
     rows = sequence.common_rows(values, grid, plan)

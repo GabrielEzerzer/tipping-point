@@ -646,6 +646,17 @@ def test_the_check_refuses_changed_runs_held_back_days_and_the_repo(
     with pytest.raises(ValueError, match="not the inputs run"):
         refused("o5", inputs=renamed)
 
+    final = copied("sequence", "final")
+    text = (final / "plan.toml").read_text(encoding="utf-8").replace("folds = [1]", "folds = [4]")
+    (final / "plan.toml").write_text(text, encoding="utf-8")
+    digest = store.sha256(final / "plan.toml")
+    complete = json.loads((final / "complete.json").read_text(encoding="utf-8"))
+    complete["files"]["plan.toml"] = digest
+    (final / "complete.json").write_text(json.dumps(complete), encoding="utf-8")
+    rebound(final, {"plan": {"file": "sequence.toml", "sha256": digest}})
+    with pytest.raises(ValueError, match="only the fit-only fold"):
+        refused("o7", sequence=final)
+
     inside = panel_forward.REPO / "harness" / "out" / "panel-forward-test"
     assert panel_forward.main(forward_args(built, inside)) == 1
     assert not inside.exists()
@@ -653,5 +664,5 @@ def test_the_check_refuses_changed_runs_held_back_days_and_the_repo(
     (tmp_path / "o6" / "x").write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="already holds"):
         refused("o6")
-    for n in range(1, 6):
+    for n in (1, 2, 3, 4, 5, 7):
         assert not (tmp_path / f"o{n}").exists()

@@ -799,3 +799,8 @@ def test_a_plan_replaced_while_it_is_read_configures_and_records_one_text(
     assert (run_dir / "ladder.toml").read_text(encoding="utf-8") == LADDER
     assert params["plan"]["sha256"] == store.sha256(run_dir / "plan.toml")
     assert params["ladder_plan"]["sha256"] == store.sha256(run_dir / "ladder.toml")
+
+
+def test_the_classical_side_refuses_a_plan_of_only_the_fit_only_fold() -> None:
+    with pytest.raises(ValueError, match="only the fit-only fold"):
+        classical.panel({}, {}, sequence.load(sequence.FINAL))

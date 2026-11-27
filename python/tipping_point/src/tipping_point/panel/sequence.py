@@ -34,6 +34,7 @@ from ..jepa.objective import ema, learning_rate, momentum
 from . import encoder, inputs, labels, ladder, span, store
 
 PLAN = Path(__file__).with_name("sequence.toml")
+FINAL = Path(__file__).with_name("sequence-final.toml")
 PINS = (
     "ATEN_CPU_CAPABILITY",
     "ONEDNN_MAX_CPU_ISA",
@@ -60,6 +61,22 @@ CURVES = pa.schema(
         ("auc_long", pa.float64()),
         ("auc_short", pa.float64()),
         ("rows", pa.int64()),
+    ]
+)
+FOLDS = pa.schema(
+    [
+        ("horizon", pa.int64()),
+        ("side", pa.string()),
+        ("model", pa.string()),
+        ("readout", pa.string()),
+        ("c", pa.float64()),
+        ("fold", pa.int64()),
+        ("scheme", pa.string()),
+        ("seed", pa.int64()),
+        ("variant", pa.string()),
+        ("auc", pa.float64()),
+        ("rows", pa.int64()),
+        ("positives", pa.int64()),
     ]
 )
 MODELS = ("jepa", "twin", "supervised")
@@ -188,7 +205,9 @@ def load(
     problems += [f"rung {r}" for r in plan.rungs if r not in rungs]
     problems += [f"model {m}" for m in plan.models if m not in MODELS]
     problems += [f"scheme {s}" for s in plan.schemes if s not in ladder.SCHEMES]
-    problems += [f"fold {f}" for f in plan.folds if not 0 <= f < nfolds]
+    problems += [f"fold {f}" for f in plan.folds if not 0 <= f <= nfolds]
+    if nfolds in plan.folds and (plan.schemes != ("forward",) or len(plan.folds) != 1):
+        problems.append(f'fold {nfolds} is fit-only: it takes schemes = ["forward"] and no other')
     problems += [f"readout {r}" for r in plan.readouts if r not in READOUTS]
     problems += [f"c {c}" for c in plan.cs if not (np.isfinite(c) and c > 0)]
     for name in ("variants", "rungs", "models", "schemes", "folds", "seeds", "readouts", "cs"):
@@ -249,6 +268,10 @@ def _fresh(table: object) -> tuple[dict[str, Any], list[str]]:
     problems += [f"fresh channel {n}" for n in dict.fromkeys(names) if n not in inputs.OWN]
     problems += [f"fresh channel {n} under both rules" for n in changes if n in windowed]
     return {"windowed": windowed, "changes": changes}, problems
+
+
+def fit_only(plan: Plan) -> bool:
+    return plan.folds == (len(ladder.bounds(plan.ladder)) - 1,)
 
 
 def blind(plan: Plan) -> list[str]:
@@ -816,6 +839,7 @@ def sequence(
     common = by_coin(kept, ncoins)
     configs = [(name, c) for name in plan.readouts for c in plan.cs]
     width = plan.shape.width
+    scored = not fit_only(plan)
     diagnostics: list[dict[str, Any]] = []
     curves: list[dict[str, Any]] = []
     fold_rows: list[dict[str, Any]] = []
@@ -837,7 +861,7 @@ def sequence(
                 mu, sd = statistics(raw, train_hours)
                 x = torch.from_numpy(standardised(raw, mu, sd, plan.ladder.clip, plan.pad))
                 rules = fresh(raw, plan.rung(variant).columns, train_hours, plan)
-                need_train, need_test = kept & fit_rows, kept & (row_fold == f)
+                need_train, need_test = kept & fit_rows & scored, kept & (row_fold == f)
                 at_train, at_test = np.cumsum(need_train) - 1, np.cumsum(need_test) - 1
                 test_coin, test_hour = _coin_hour(need_test, ncoins)
                 for seed in plan.seeds:
@@ -943,7 +967,8 @@ def sequence(
     diagnostics.sort(key=cell_order(plan))
     curves.sort(key=cell_order(plan))
     fold_rows.sort(key=cell_order(plan))
-    fold_rows += sorted(rung_folds(values, rows, ts, edges, plan, log), key=rung_order(plan))
+    if scored:
+        fold_rows += sorted(rung_folds(values, rows, ts, edges, plan, log), key=rung_order(plan))
     return {
         "diagnostics": diagnostics,
         "curves": curves,
@@ -1255,11 +1280,19 @@ def runtime() -> dict[str, Any]:
     }
 
 
-def curve_table(rows: Sequence[Mapping[str, Any]]) -> pa.Table:
-    extra = {k for row in rows for k in row} - set(CURVES.names)
+def typed(rows: Sequence[Mapping[str, Any]], schema: pa.Schema, what: str) -> pa.Table:
+    extra = {k for row in rows for k in row} - set(schema.names)
     if extra:
-        raise ValueError(f"curve rows carry columns the curve table lacks: {sorted(extra)}")
-    return pa.Table.from_pylist(list(rows), schema=CURVES)
+        raise ValueError(f"{what} rows carry columns the {what} table lacks: {sorted(extra)}")
+    return pa.Table.from_pylist(list(rows), schema=schema)
+
+
+def curve_table(rows: Sequence[Mapping[str, Any]]) -> pa.Table:
+    return typed(rows, CURVES, "curve")
+
+
+def fold_table(rows: Sequence[Mapping[str, Any]]) -> pa.Table:
+    return typed(rows, FOLDS, "fold")
 
 
 def snapshot(path: Path) -> tuple[Plan, dict[str, Any], tuple[str, str]]:
@@ -1300,7 +1333,7 @@ def run(
     tables = {
         "diagnostics": pa.Table.from_pylist(out["diagnostics"]),
         "curves": curve_table(out["curves"]),
-        "folds": pa.Table.from_pylist(out["folds"]),
+        "folds": fold_table(out["folds"]),
         "rows": pa.Table.from_pylist(
             [{"horizon": h, **row} for h, rs in out["accounting"].items() for row in rs]
         ),
@@ -1346,6 +1379,11 @@ def scores_run(
         if (manifest["params"].get(key) or {}).get("sha256") != files[name]:
             raise ValueError(f"{sequence_dir / name}: not the {name} the run's manifest records")
     plan = load(sequence_dir / "plan.toml", sequence_dir / "ladder.toml")
+    if fit_only(plan):
+        raise ValueError(
+            f"{sequence_dir}: the run holds only the fit-only fold, which scores nothing, so it "
+            f"has no scores to export"
+        )
     torch.set_num_threads(plan.threads)
     if model not in plan.models or variant not in plan.variants:
         raise ValueError(f"the sequence run fitted no {model} on {variant}")
@@ -1620,6 +1658,7 @@ def merge_run(
     }
     tables = {name: pa.Table.from_pylist(rows) for name, rows in merged.items()}
     tables["curves"] = curve_table(merged["curves"])
+    tables["folds"] = fold_table(merged["folds"])
     tables["rows"] = pa.Table.from_pylist(accounting or [])
     seconds = time.perf_counter() - began
     checks = {"seconds": round(seconds, 1), "pieces_seconds": piece_seconds, "skipped": skipped}
@@ -1636,20 +1675,28 @@ def _f(value: float) -> str:
 
 def report(out: Mapping[str, Any], plan: Plan, source: Mapping[str, Any], seconds: float) -> str:
     folds = list(plan.folds)
+    scope = (
+        f"left-out quarters {', '.join(str(f + 1) for f in folds)}. AUC inside each left-out "
+        f"quarter on the ladder's common rows; rung rows are the ladder plan's rungs on the same "
+        f"rows."
+    )
+    if fit_only(plan):
+        scope = (
+            f"the fit-only fold {folds[0] + 1}: every model fitted once on the span's hours more "
+            f"than {plan.ladder.gap_days} days before its end, and nothing scored."
+        )
     lines = [
         "# Panel sequence models",
         "",
         f"Inputs run `{source['inputs_run']}`, labels run `{source['labels_run']}`; JEPA target "
         f"`{plan.target}`, objective `{plan.jepa.objective}`, seeds "
-        f"{', '.join(map(str, plan.seeds))}, schemes {', '.join(plan.schemes)}, left-out quarters "
-        f"{', '.join(str(f + 1) for f in folds)}. AUC inside each left-out quarter on the ladder's "
-        f"common rows; rung rows are the ladder plan's rungs on the same rows.",
+        f"{', '.join(map(str, plan.seeds))}, schemes {', '.join(plan.schemes)}, {scope}",
         "",
         f"Wall time {seconds / 60:.1f} minutes.",
     ]
     if out["skipped"]:
         lines += ["", "Skipped: " + "; ".join(out["skipped"]) + "."]
-    for h in plan.ladder.horizons:
+    for h in () if fit_only(plan) else plan.ladder.horizons:
         lines += ["", f"## {h} h", ""]
         lines += [
             "| model | variant | readout | c | scheme | seed | side | "

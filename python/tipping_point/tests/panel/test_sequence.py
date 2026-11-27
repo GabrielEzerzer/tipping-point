@@ -1,10 +1,12 @@
 # The sequence models on a tiny encoder and synthetic panels, on the CPU: timing, the JEPA target's
 # hours, the folds' rows and seeds, the readouts, the twin, the step selection, fold isolation,
-# saved models, the selection rule, the scores the ladder reads, skipped folds and held-back data.
+# saved models, the selection rule, the scores, skipped folds, the fit-only fold and held-back data.
 
 import json
 import os
+import re
 import shutil
+import tomllib
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import date
@@ -2024,3 +2026,141 @@ def test_the_command_refuses_the_held_back_span(tmp_path: Path) -> None:
         sequence.run(moved, tmp_path / "c", plan, "x")
     for folder in ("a", "b", "c"):
         assert not (tmp_path / folder / "panel-sequence").exists()
+
+
+FINAL = PLAN.replace('schemes = ["loqo", "forward"]', 'schemes = ["forward"]').replace(
+    "folds = [1, 3]", "folds = [4]"
+)
+
+
+def test_the_final_plan_is_the_shipped_plan_with_only_the_fit_only_fold() -> None:
+    def rest(text: str) -> str:
+        return re.sub(r"^(schemes|folds) = .*$", "", text, flags=re.MULTILINE)
+
+    final = sequence.FINAL.read_text(encoding="utf-8")
+    assert rest(final) == rest(sequence.PLAN.read_text(encoding="utf-8"))
+    assert {k: tomllib.loads(final)[k] for k in ("schemes", "folds")} == {
+        "schemes": ["forward"],
+        "folds": [8],
+    }
+    plan = sequence.load(sequence.FINAL)
+    assert sequence.fit_only(plan) and plan.folds == (len(ladder.bounds(plan.ladder)) - 1,)
+    assert not sequence.fit_only(sequence.load())
+
+
+@pytest.mark.parametrize(
+    ("schemes", "folds", "refused"),
+    [
+        ('["loqo"]', "[4]", "fold 4 is fit-only"),
+        ('["loqo", "forward"]', "[4]", "fold 4 is fit-only"),
+        ('["forward"]', "[3, 4]", "fold 4 is fit-only"),
+        ('["forward"]', "[5]", "fold 5"),
+        ('["forward"]', "[-1]", "fold -1"),
+    ],
+)
+def test_the_fit_only_fold_is_refused_outside_a_forward_plan_of_its_own(
+    tmp_path: Path, schemes: str, folds: str, refused: str
+) -> None:
+    text = PLAN.replace('schemes = ["loqo", "forward"]', f"schemes = {schemes}")
+    with pytest.raises(ValueError, match=refused):
+        tiny(tmp_path, text.replace("folds = [1, 3]", f"folds = {folds}"))
+
+
+def test_the_fit_only_fold_trains_every_cell_on_the_span_before_its_end_and_scores_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values, grid = world()
+    run_inputs = write_runs(tmp_path, values, grid)
+    monkeypatch.setattr(sequence.io, "code_version", lambda: {"git_sha": "c" * 40, "dirty": False})
+    whole = plans(tmp_path / "plans" / "whole", FINAL.replace("seeds = [3]", "seeds = [3, 4]"))
+    plan = sequence.load(whole)
+    seen: list[np.ndarray] = []
+    statistics = sequence.statistics
+
+    def spied(raw: np.ndarray, train: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        seen.append(train.copy())
+        return statistics(raw, train)
+
+    monkeypatch.setattr(sequence, "statistics", spied)
+    argv = ["sequence", "--inputs", run_inputs.name, "--plan", str(whole)]
+    assert main([*argv, "--data-dir", str(tmp_path), "--tag", "whole"]) == 0
+    monkeypatch.setattr(sequence, "statistics", statistics)
+    hours = np.unique(grid["ts_ns"])
+    edges = ladder.bounds(plan.ladder)
+    expected = (hours >= edges[0]) & (hours < edges[-1] - plan.ladder.gap_days * 24 * HOUR)
+    assert len(edges) == 5 and expected.any() and not expected.all()
+    assert np.array_equal(sequence.training(hours, plan, 4, "forward"), expected)
+    assert len(seen) == 1 and np.array_equal(seen[0], expected)
+
+    (run,) = (tmp_path / "panel-sequence").glob("*-whole")
+    params = json.loads((run / "manifest.json").read_text(encoding="utf-8"))["params"]
+    complete = json.loads((run / "complete.json").read_text(encoding="utf-8"))
+    cells = {
+        sequence.encoder_name("vol", "forward", 4, s, m) for s in (3, 4) for m in sequence.MODELS
+    }
+    assert sequence.cells(plan) == cells == set(params["encoders"])
+    for name in cells:
+        assert params["encoders"][name] == complete["files"][name] == store.sha256(run / name)
+    assert complete["checks"]["skipped"] == [] and complete["rows"]["folds"] == 0
+    folds = pq.read_table(run / "folds.parquet")
+    assert folds.num_rows == 0 and folds.schema == sequence.FOLDS
+    diagnostics = pq.read_table(run / "diagnostics.parquet").to_pylist()
+    assert sorted((d["fold"], d["seed"], d["model"]) for d in diagnostics) == sorted(
+        (4, s, m) for s in (3, 4) for m in sequence.MODELS
+    )
+    curves = pq.read_table(run / "curves.parquet").to_pylist()
+    assert {r["fold"] for r in curves} == {4}
+    assert {r["model"] for r in curves} == {"jepa", "supervised", "selection"}
+    report = (run / "report.md").read_text(encoding="utf-8")
+    assert "the fit-only fold 5" in report and "## 24 h" not in report
+
+    with pytest.raises(ValueError, match="only the fit-only fold"):
+        sequence.scores_run(run, tmp_path, "jepa", "vol", "x")
+    argv = ["scores", "--sequence", str(run), "--model", "supervised", "--variant", "vol"]
+    assert main([*argv, "--data-dir", str(tmp_path)]) == 1
+    assert not (tmp_path / "panel-scores").exists()
+
+    pieces = []
+    for seed in (3, 4):
+        path = plans(
+            tmp_path / "plans" / f"s{seed}", FINAL.replace("seeds = [3]", f"seeds = [{seed}]")
+        )
+        pieces.append(sequence.run(run_inputs, tmp_path, path, f"s{seed}")[0])
+    argv = ["merge", "--runs", *map(str, pieces), "--plan", str(whole), "--data-dir", str(tmp_path)]
+    assert main(argv) == 0
+    (merged,) = (tmp_path / "panel-sequence").glob("*-merged")
+    merged_params = json.loads((merged / "manifest.json").read_text(encoding="utf-8"))["params"]
+    assert merged_params["encoders"] == params["encoders"]
+    for name in ("folds", "curves", "rows"):
+        one, two = (pq.read_table(d / f"{name}.parquet") for d in (run, merged))
+        assert one.schema == two.schema and one.equals(two), name
+    assert without_seconds(merged / "diagnostics.parquet") == without_seconds(
+        run / "diagnostics.parquet"
+    )
+    with pytest.raises(ValueError, match="only the fit-only fold"):
+        sequence.scores_run(merged, tmp_path, "twin", "vol", "x")
+    scored = plans(tmp_path / "plans" / "scored", FINAL.replace("folds = [4]", "folds = [3]"))
+    with pytest.raises(ValueError, match="fitted folds the parent plan lacks: 4"):
+        sequence.merge_run(pieces, scored, tmp_path, "x")
+
+
+def test_the_fit_only_fold_trains_as_a_scored_fold_on_the_same_hours(tmp_path: Path) -> None:
+    values, grid = world(days=365 + 90)
+    final = tiny(tmp_path / "final", FINAL)
+    longer = ladder_text().replace("end = 2022-12-31", "end = 2023-03-31")
+    scored = tiny(tmp_path / "longer", FINAL, longer)
+    assert sequence.fit_only(final) and not sequence.fit_only(scored)
+    hours = np.unique(grid["ts_ns"])
+    assert np.array_equal(
+        sequence.training(hours, final, 4, "forward"),
+        sequence.training(hours, scored, 4, "forward"),
+    )
+    a, b = (sequence.sequence(values, grid, p) for p in (final, scored))
+    assert a["encoders"] and a["encoders"] == b["encoders"]
+    assert a["folds"] == [] and {r["fold"] for r in b["folds"]} == {4}
+    same = ("model", "fold", "seed", "initial", "weights", "steps", "loss_start", "loss_end")
+    assert sequence._same(
+        [{k: d[k] for k in same} for d in a["diagnostics"]],
+        [{k: d[k] for k in same} for d in b["diagnostics"]],
+    )
+    assert sequence._same(a["curves"], b["curves"])

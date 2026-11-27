@@ -939,6 +939,21 @@ Seeds are drawn per variant, fold, seed and stream; the twin shares the JEPA's i
 target's segment is the same regime as the window's first tokens, and the probes read the online
 encoder.
 
+A plan's folds are its ladder's quarters counted from 0 (0 to 7 on the shipped ladder); the fold
+one past the last quarter (8 on the shipped ladder) is the fit-only fold. Its training hours are
+those a `forward` fold would take before a quarter starting at the span's end: every hour of the
+span more than the gap (31 days) before that end, 2022-01-01 to 2023-11-30 on the shipped ladder,
+so no hour of the held-back span or of the gap before it. It fits and saves every model of each
+variant and seed exactly as another fold does, with the seeds a fold of that index draws, its
+scales, selection block and supervised step count all taken from those hours. It scores nothing:
+it has no test rows, fits no probe and writes no row to the folds table, which keeps its columns
+when empty. It exists because the one test on the held-back span will score models fitted once on
+the whole development span and never refitted, which none of the scored folds is. A plan may hold
+it only alone and only under `forward` (`panel/sequence-final.toml`, the shipped plan with
+`folds = [8]`, which a test keeps otherwise identical to it), so every run either scores all its
+folds or is a fit-only run. `scores` and `classical` refuse a fit-only run or plan, since it has
+nothing to score, and so does the harness's forward check, since it has no hour to judge.
+
 Logistic probes read the JEPA and the twin through the same readouts, which take no label and fit
 nothing: `last` is the last token (32 values); `means` adds the means of the last 6, the last 18 and
 all 84 tokens (128 values); `spreads` adds the population standard deviations over the same spans
@@ -1058,7 +1073,11 @@ instead, and `scores` checks the inputs and the grid as for any sequence run.
 `uv run python notebooks/kaggle_panel_sequence.py write --commit <hash> --out <dir>` writes the
 shipped plan as twelve Kaggle CPU kernels (one variant, one seed and three folds each, every cell
 once), each running a clean checkout of the pushed commit, and a dry-run kernel that runs two
-pieces, their merge and scores on a synthetic panel. Each piece carries the sha256 of the inputs
+pieces, their merge and scores on a synthetic panel. It also writes the final plan,
+`panel/sequence-final.toml`, as six kernels (`tp-panel-final-<variant>-s<seed>`, one variant and
+one seed of the fit-only fold each) on the same environment, commit check, dataset checks and
+completeness rule; `merge --plan .../panel/sequence-final.toml` joins them into the run whose
+models the held-back test scores. Each piece carries the sha256 of the inputs
 table and the labels grid from the local store's records and refuses a dataset whose files differ,
 after first refusing, from the manifest and the Parquet metadata alone, one that reaches the
 held-back span. A piece is complete only if its saved models are exactly its plan's cells, each

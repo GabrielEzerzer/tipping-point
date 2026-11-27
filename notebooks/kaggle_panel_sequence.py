@@ -29,7 +29,13 @@ private, CPU, internet on (to fetch the code and the pinned packages). `kaggle k
 <folder>` starts one. A piece is the shipped plan (panel/sequence.toml) with its variants, seeds
 and folds cut to one variant, one seed and three folds; the twelve pieces are every cell of the
 full plan once, so `python -m tipping_point.panel merge`, whose parent plan is the shipped plan
-by default, joins them into the full run and refuses any set that misses or adds a cell.
+by default, joins them into the full run and refuses any set that misses or adds a cell. `write`
+also makes the six kernels of the final plan (tp-panel-final-<variant>-s<seed>): pieces of
+panel/sequence-final.toml, the shipped plan with only the fit-only fold (folds = [8], one past
+the eight quarters), cut to one variant and one seed. They fit every model once on the
+development span's hours more than the gap before its end and score nothing, so the held-back
+test can score models that were never refitted; `merge --plan .../panel/sequence-final.toml`
+joins them.
 
 Every kernel clones the public repository at the job's commit and refuses to run unless that
 checkout's HEAD is the commit and it is clean. It runs from that checkout, so each run's manifest
@@ -78,6 +84,9 @@ THREADS = "2"
 VARIANTS = ("full", "vol")
 SEEDS = (1, 2, 3)
 FOLD_GROUPS = ((2, 3, 4), (5, 6, 7))
+PLAN = "sequence.toml"
+FINAL_PLAN = "sequence-final.toml"
+FINAL_FOLD = 8
 BENCH = {"coins": 30, "hours": 3000, "jepa_steps": 60, "supervised_steps": 60, "fit_rows": 100_000}
 COMMIT = re.compile(r"[0-9a-f]{40}")
 PINS = {
@@ -258,16 +267,26 @@ def sha256(path: Path) -> str:
 
 def pieces() -> list[dict[str, Any]]:
     return [
-        {"variants": [v], "seeds": [s], "folds": list(g)}
+        {"plan": PLAN, "variants": [v], "seeds": [s], "folds": list(g)}
         for v in VARIANTS
         for s in SEEDS
         for g in FOLD_GROUPS
     ]
 
 
+def final_pieces() -> list[dict[str, Any]]:
+    return [
+        {"plan": FINAL_PLAN, "variants": [v], "seeds": [s], "folds": [FINAL_FOLD]}
+        for v in VARIANTS
+        for s in SEEDS
+    ]
+
+
 def slug(piece: dict[str, Any]) -> str:
-    folds = piece["folds"]
-    return f"tp-panel-seq-{piece['variants'][0]}-s{piece['seeds'][0]}-f{folds[0]}-{folds[-1]}"
+    variant, seed, folds = piece["variants"][0], piece["seeds"][0], piece["folds"]
+    if piece["plan"] == FINAL_PLAN:
+        return f"tp-panel-final-{variant}-s{seed}"
+    return f"tp-panel-seq-{variant}-s{seed}-f{folds[0]}-{folds[-1]}"
 
 
 def cut(text: str, piece: dict[str, Any]) -> str:
@@ -277,6 +296,10 @@ def cut(text: str, piece: dict[str, Any]) -> str:
         if n != 1:
             raise ValueError(f"the plan has no single one-line {key} entry")
     return text
+
+
+def piece_plan(panel: Path, piece: dict[str, Any]) -> str:
+    return cut((panel / piece["plan"]).read_text(encoding="utf-8"), piece)
 
 
 def machine() -> dict[str, Any]:
@@ -430,8 +453,7 @@ def piece_job(job: dict[str, Any], py: str, src: Path, tmp: Path, out: Path) -> 
     panel = src / "python" / "tipping_point" / "src" / "tipping_point" / "panel"
     plan_dir = tmp / "plan"
     plan_dir.mkdir()
-    shipped = (panel / "sequence.toml").read_text(encoding="utf-8")
-    (plan_dir / "sequence.toml").write_text(cut(shipped, job["piece"]), encoding="utf-8")
+    (plan_dir / "sequence.toml").write_text(piece_plan(panel, job["piece"]), encoding="utf-8")
     shutil.copyfile(panel / "ladder.toml", plan_dir / "ladder.toml")
     began = time.time()
     argv = [py, "-m", "tipping_point.panel", "sequence", "--inputs", INPUTS_RUN]
@@ -663,7 +685,7 @@ def write(commit: str, out: Path, store: Path) -> None:
     data = recorded_data(store)
     dry = {"kernel": "tp-panel-seq-dry", "mode": "dry", "commit": commit}
     write_kernel(dry, out / dry["kernel"], [])
-    for piece in pieces():
+    for piece in pieces() + final_pieces():
         job = {"kernel": slug(piece), "mode": "piece", "commit": commit, "piece": piece}
         job["data"] = data
         write_kernel(job, out / job["kernel"], [f"{OWNER}/{DATASET}"])

@@ -151,6 +151,10 @@ def read_sequence(
     plan = sequence.load(sequence_dir / "plan.toml", sequence_dir / "ladder.toml")
     if SCHEME not in plan.schemes:
         raise ValueError(f"{sequence_dir}: the run fitted no forward fold")
+    if sequence.fit_only(plan):
+        raise ValueError(
+            f"{sequence_dir}: the run holds only the fit-only fold, with no hour to judge"
+        )
     if not set(MODELS) & set(plan.models):
         raise ValueError(f"{sequence_dir}: the run fitted neither a jepa nor a twin")
     return plan, manifest, files, read
