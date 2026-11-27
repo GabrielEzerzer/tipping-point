@@ -82,9 +82,10 @@ the fold's training hours, clipped and padded as the sequence step does. Of the 
 ts_ns and symbol are read, and the grid's sha256 is checked against the inputs run.
 
 Fit rows are coin-hours t whose {AHEAD} following hours and whose window lie in the fold's training
-span; evaluation rows are the left-out quarter's hours t for which t+{AHEAD} is on the grid. At
-most --rows (default {ROWS}) of each are drawn per variant, fold and seed, the same rows for both
-models. Each readout (last, means, spreads) at t is regressed by ridge on:
+span; evaluation rows are the left-out quarter's hours t for which t+{AHEAD} is on the grid. Only
+coin-hours whose input row at t is not wholly missing are drawn, at most --rows (default {ROWS}) of
+each per variant, fold and seed, the same rows for both models. Each readout (last, means, spreads)
+at t is regressed by ridge on:
   forward          the coin's standardised input at t+{AHEAD}: {", ".join(LEVELS)}
                    ({" and ".join(PRIMARY)} primary), and the change from t to t+{AHEAD} of
                    {", ".join(CHANGES)}
@@ -93,17 +94,19 @@ models. Each readout (last, means, spreads) at t is regressed by ridge on:
                    (model "inputs", readout "none")
   retention        the coin's standardised input at t: {", ".join(RETAINED)}
 and persistence is the mean over embedding dimensions of the correlation between the last readout
-at t and at t+{AHEAD} on the evaluation rows. A channel the variant lacks is skipped and rows with a
-missing target are dropped. Ridge: features standardised on the fit rows, the penalty (times the
-row count) chosen from {", ".join(f"{a:g}" for a in ALPHAS)} on the last fifth in time of the fit
-rows, refitted on all of them; R2 on the evaluation rows against the fit rows' mean.
+at t and at t+{AHEAD} on the evaluation rows whose input row at t+{AHEAD} is not wholly missing
+either. A channel the variant lacks is skipped and rows with a missing target are dropped. Ridge:
+features standardised on the fit rows, the penalty (times the row count) chosen from
+{", ".join(f"{a:g}" for a in ALPHAS)} on the last fifth in time of the fit rows, refitted on all
+of them; R2 on the evaluation rows against the fit rows' mean.
 
 Writes to --out, which must lie outside the repository and hold no file yet: forward.parquet (one
 row per variant, fold, seed, model, readout, kind and target), report.md, ending with two separate
 rules on variant {RULE_VARIANT}, readout {RULE_READOUT} (raw forward R2, and its gain over the
-inputs), and manifest.json with the commit, the arguments and the sha256 of every file read. The
-data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir; it holds the labels
-run the inputs run names.
+inputs), each NOT JUDGED unless both models are present at every seed of the plan in every forward
+quarter of the ladder plan, and manifest.json with the commit, the arguments and the sha256 of every
+file read. The data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir; it
+holds the labels run the inputs run names.
 """
 
 
@@ -196,12 +199,25 @@ def read_inputs(
 
 
 def sample(
-    hours: np.ndarray, ncoins: int, nrows: int, seed: np.random.SeedSequence
+    allowed: np.ndarray, nrows: int, seed: np.random.SeedSequence
 ) -> tuple[np.ndarray, np.ndarray]:
-    index = sequence.sample_rows(hours, ncoins)
+    index = np.flatnonzero(allowed)
     if len(index) > nrows:
         index = np.sort(np.random.default_rng(seed).choice(index, nrows, replace=False))
-    return index // len(hours), index % len(hours)
+    return index // allowed.shape[1], index % allowed.shape[1]
+
+
+def drawn(
+    present: np.ndarray,
+    fit_hours: np.ndarray,
+    eval_hours: np.ndarray,
+    nrows: int,
+    fit_seed: np.random.SeedSequence,
+    eval_seed: np.random.SeedSequence,
+) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray], np.ndarray]:
+    fit = sample(fit_hours & present, nrows, fit_seed)
+    ev = sample(eval_hours & present, nrows, eval_seed)
+    return fit, ev, present[ev[0], ev[1] + AHEAD]
 
 
 def row_hours(
@@ -349,11 +365,12 @@ def measure(
     fit: Rows,
     ev: Rows,
     alone: Alone,
+    later: np.ndarray,
 ) -> list[dict[str, Any]]:
     width = plan.shape.width
     fit_f = sequence.features(net, x, *fit, plan).astype(np.float64)
     eval_f = sequence.features(net, x, *ev, plan).astype(np.float64)
-    ahead = sequence.features(net, x, ev[0], ev[1] + AHEAD, plan)[:, :width]
+    ahead = sequence.features(net, x, ev[0][later], ev[1][later] + AHEAD, plan)[:, :width]
     forward, retention = forward_targets(z, fit, ev), retention_targets(z, fit, ev)
     out = []
     for name in sequence.READOUTS:
@@ -368,10 +385,16 @@ def measure(
             out.append(_row(name, "retention", target, v))
     out.append(
         {"readout": "last", "kind": "persistence", "target": "last", "metric": "correlation"}
-        | {"value": persistence(eval_f[:, :width], ahead.astype(np.float64))}
-        | {"alpha": None, "fit_rows": 0, "eval_rows": len(ev[0])}
+        | {"value": persistence(eval_f[later, :width], ahead.astype(np.float64))}
+        | {"alpha": None, "fit_rows": 0, "eval_rows": int(later.sum())}
     )
     return out
+
+
+def restored(channels: int, plan: sequence.Plan, data: bytes) -> encoder.Encoder:
+    net = encoder.encoder(channels, plan.shape, 0)
+    sequence.restore(net, data)
+    return net
 
 
 def check(
@@ -388,6 +411,7 @@ def check(
     for variant in plan.variants:
         columns = plan.rung(variant).columns
         raw = sequence.by_coin(np.column_stack([values[c] for c in columns]), ncoins)
+        present = ~np.isnan(raw).all(axis=-1)
         for f in plan.folds:
             if f < plan.ladder.first_fold(SCHEME):
                 continue
@@ -395,21 +419,20 @@ def check(
             if not sequence.eligible(train, plan.pad, plan.reach).any():
                 log(f"  {variant} fold {f + 1}: the sequence run fitted no model")
                 continue
-            if not (fit_hours.any() and eval_hours.any()):
-                raise ValueError(f"{variant} fold {f + 1}: no fit or no evaluation row")
             x, z = prepared(raw, train, columns, plan)
             for seed in plan.seeds:
-                fit = sample(fit_hours, ncoins, nrows, sequence.stream(variant, f, seed, "fit"))
-                ev = sample(eval_hours, ncoins, nrows, sequence.stream(variant, f, seed, "eval"))
+                streams = (sequence.stream(variant, f, seed, n) for n in ("fit", "eval"))
+                fit, ev, later = drawn(present, fit_hours, eval_hours, nrows, *streams)
+                if not (len(fit[0]) and len(ev[0])):
+                    raise ValueError(f"{variant} fold {f + 1}: no fit or no evaluation row")
                 tag = {"variant": variant, "scheme": SCHEME, "fold": f, "seed": seed}
                 alone, rows = inputs_alone(x, z, plan, fit, ev)
                 out += [tag | {"model": "inputs"} | r for r in rows]
                 for model in (m for m in MODELS if m in plan.models):
                     key = sequence.encoder_name(variant, SCHEME, f, seed, model)
                     log(f"  {key}")
-                    net = encoder.encoder(x.shape[-1], plan.shape, 0)
-                    sequence.restore(net, fetch(key))
-                    found = measure(net, x, z, plan, fit, ev, alone)
+                    net = restored(x.shape[-1], plan, fetch(key))
+                    found = measure(net, x, z, plan, fit, ev, alone, later)
                     out += [tag | {"model": model} | r for r in found]
     return out
 
@@ -428,20 +451,47 @@ def differences(
     }
 
 
-def rule(rows: Sequence[Mapping[str, Any]], kind: str) -> tuple[bool, list[str]]:
-    passed, parts = True, []
+def quarters(plan: sequence.Plan) -> range:
+    return range(plan.ladder.first_fold(SCHEME), len(ladder.bounds(plan.ladder)) - 1)
+
+
+def missing(
+    rows: Sequence[Mapping[str, Any]],
+    kind: str,
+    target: str,
+    folds: Sequence[int],
+    seeds: Sequence[int],
+) -> list[int]:
+    found = {
+        (r["fold"], r["seed"], r["model"])
+        for r in rows
+        if (r["variant"], r["readout"], r["kind"], r["target"])
+        == (RULE_VARIANT, RULE_READOUT, kind, target)
+    }
+    return [f for f in folds if any((f, s, m) not in found for s in seeds for m in MODELS)]
+
+
+def rule(
+    rows: Sequence[Mapping[str, Any]], kind: str, folds: Sequence[int], seeds: Sequence[int]
+) -> tuple[str, list[str]]:
+    judged, passed, parts = bool(folds) and bool(seeds), True, []
     for target in PRIMARY:
+        lacking = missing(rows, kind, target, folds, seeds)
+        if lacking or not judged:
+            judged = False
+            named = ", ".join(f"q{f + 1}" for f in lacking) or "the plan names none"
+            parts.append(f"{target}: not judged, quarters lacking a seed or model: {named}")
+            continue
         d = differences(rows, RULE_VARIANT, RULE_READOUT, kind, target)
-        diffs = np.array(list(d.values()), float)
+        diffs = np.array([d[f] for f in folds], float)
         positive = int((diffs > 0).sum())
-        mean = float(diffs.mean()) if diffs.size else float("nan")
-        ok = diffs.size > 0 and mean > 0 and positive >= diffs.size - 1
-        passed &= ok
+        mean = float(diffs.mean())
+        passed &= bool(mean > 0 and positive >= len(folds) - 1)
         parts.append(
             f"{target}: mean difference {_f(mean, True)}, "
-            f"positive in {positive} of {diffs.size} folds"
+            f"positive in {positive} of {len(folds)} quarters"
         )
-    return passed, parts
+    return ("PASS" if passed else "FAIL") if judged else "NOT JUDGED", parts
 
 
 def _f(value: float | None, signed: bool = False) -> str:
@@ -554,22 +604,25 @@ def report(
                         + f" | {_f(_mean(diffs), True)} | "
                         + f"{sum(v > 0 for v in diffs)} of {len(diffs)} |"
                     )
+    judged = quarters(plan)
+    named = ", ".join(f"q{f + 1}" for f in judged)
     lines += [
         "",
         "## Rules",
         "",
         f"Two rules, each judged on its own and never combined. Each reads variant {RULE_VARIANT}, "
         f"readout {RULE_READOUT}, and PASSES when, for both {' and '.join(PRIMARY)}, the mean "
-        "over folds of the seed-averaged difference jepa minus twin is above zero and the "
-        "difference is positive in all folds but at most one (5 of 6). Retention and persistence "
-        "are reported, not judged.",
+        f"over the {len(judged)} forward left-out quarters of the ladder plan ({named}) of the "
+        "seed-averaged difference jepa minus twin is above zero and the difference is positive "
+        f"in at least {max(len(judged) - 1, 0)} of the {len(judged)}. A rule is NOT JUDGED unless "
+        f"both models are present at every seed of the plan ({', '.join(map(str, plan.seeds))}) "
+        "in every one of those quarters. Retention and persistence are reported, not judged.",
     ]
     for number, (kind, what) in enumerate(RULES.items(), start=1):
-        passed, parts = rule(rows, kind)
+        verdict, parts = rule(rows, kind, judged, plan.seeds)
         lines += [
             "",
-            f"Rule {number}, on the {what} (kind `{kind}`): "
-            f"**{'PASS' if passed else 'FAIL'}** ({'; '.join(parts)}).",
+            f"Rule {number}, on the {what} (kind `{kind}`): **{verdict}** ({'; '.join(parts)}).",
         ]
     return "\n".join(lines) + "\n"
 

@@ -1,6 +1,6 @@
 # harness/panel_forward.py on synthetic panels: its rows, each number able to fail (next-day value
 # carried or shuffled, gain over the input row, kept or dropped inputs, slow or fast embeddings,
-# both rules), no label read, determinism and refusals, on a tiny sequence run.
+# both rules), no label read, the rebuilt tensor, determinism and refusals, on a tiny run.
 
 import json
 import shutil
@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import torch
-from tipping_point.panel import encoder, inputs, labels, sequence, span, store
+from tipping_point.panel import encoder, inputs, labels, ladder, sequence, span, store
 from tipping_point.panel.__main__ import main as panel_main
 from torch import nn
 
@@ -227,14 +227,16 @@ def test_fit_rows_stay_in_training_and_evaluation_rows_in_the_left_out_quarter(
     assert np.array_equal(evaluation, quarter)
     _, _, last = panel_forward.row_hours(hours, plan, 3)
     assert last[-panel_forward.AHEAD - 1] and not last[-panel_forward.AHEAD :].any()
-    one = panel_forward.sample(fit, 2, 50, sequence.stream("full", 2, 3, "fit"))
-    again = panel_forward.sample(fit, 2, 50, sequence.stream("full", 2, 3, "fit"))
-    other = panel_forward.sample(fit, 2, 50, sequence.stream("full", 2, 4, "fit"))
-    assert len(one[0]) == 50 and fit[one[1]].all()
+    allowed = np.tile(fit, (2, 1))
+    allowed[1, : len(fit) // 2] = False
+    one = panel_forward.sample(allowed, 50, sequence.stream("full", 2, 3, "fit"))
+    again = panel_forward.sample(allowed, 50, sequence.stream("full", 2, 3, "fit"))
+    other = panel_forward.sample(allowed, 50, sequence.stream("full", 2, 4, "fit"))
+    assert len(one[0]) == 50 and allowed[one].all()
     assert all(np.array_equal(a, b) for a, b in zip(one, again, strict=True))
     assert not np.array_equal(one[1], other[1])
-    everything = panel_forward.sample(fit, 2, 10**9, sequence.stream("full", 2, 3, "fit"))
-    assert len(everything[0]) == 2 * fit.sum()
+    everything = panel_forward.sample(allowed, 10**9, sequence.stream("full", 2, 3, "fit"))
+    assert len(everything[0]) == allowed.sum() and allowed[everything].all()
 
 
 class Pick(encoder.Encoder):
@@ -282,6 +284,23 @@ BLIND = channels(
 )
 
 
+def setup(raw: np.ndarray, plan: sequence.Plan) -> dict:
+    nhours = raw.shape[1]
+    train = np.arange(nhours) < 2000
+    present = ~np.isnan(raw).all(axis=-1)
+    x, z = panel_forward.prepared(raw, train, COLUMNS, plan)
+    fit_hours = sequence.eligible(train, plan.pad, panel_forward.AHEAD)
+    eval_hours = (np.arange(nhours) >= 2200) & (np.arange(nhours) < 2900)
+    seeds = np.random.SeedSequence(1), np.random.SeedSequence(2)
+    fit, ev, later = panel_forward.drawn(present, fit_hours, eval_hours, 1500, *seeds)
+    alone, rows = panel_forward.inputs_alone(x, z, plan, fit, ev)
+
+    def measured(net: encoder.Encoder) -> list[dict]:
+        return panel_forward.measure(net, x, z, plan, fit, ev, alone, later)
+
+    return {"measure": measured, "alone": rows, "fit": fit, "eval": ev}
+
+
 @pytest.fixture(scope="module")
 def synthetic(tmp_path_factory: pytest.TempPathFactory) -> dict:
     plan = tiny_plan(tmp_path_factory.mktemp("plan"))
@@ -303,18 +322,7 @@ def synthetic(tmp_path_factory: pytest.TempPathFactory) -> dict:
     for t in range(24, nhours):
         column("funding")[:, t] = 0.5 * column("funding")[:, t - 24] + step[:, t - 24]
     column("funding")[:, 24:] += noise(nhours - 24)
-    train = np.arange(nhours) < 2000
-    x, z = panel_forward.prepared(raw, train, COLUMNS, plan)
-    fit_hours = sequence.eligible(train, plan.pad, panel_forward.AHEAD)
-    eval_hours = (np.arange(nhours) >= 2200) & (np.arange(nhours) < 2900)
-    fit = panel_forward.sample(fit_hours, ncoins, 1500, np.random.SeedSequence(1))
-    ev = panel_forward.sample(eval_hours, ncoins, 1000, np.random.SeedSequence(2))
-    alone, rows = panel_forward.inputs_alone(x, z, plan, fit, ev)
-
-    def measured(net: encoder.Encoder) -> list[dict]:
-        return panel_forward.measure(net, x, z, plan, fit, ev, alone)
-
-    return {"measure": measured, "alone": rows}
+    return setup(raw, plan) | {"raw": raw, "plan": plan}
 
 
 def last(rows: list[dict], kind: str, target: str, readout: str = "last") -> float:
@@ -376,13 +384,32 @@ def test_persistence_tells_a_slow_embedding_from_a_fast_one(synthetic: dict) -> 
     assert abs(last(fast, "persistence", "last")) < 0.15
 
 
+def test_a_coin_with_a_wholly_missing_stretch_does_not_change_persistence(synthetic: dict) -> None:
+    raw, plan = synthetic["raw"], synthetic["plan"]
+    gappy = np.full((1, *raw.shape[1:]), np.nan)
+    gappy[0, 2300:2324] = raw[0, 2300:2324]
+    slow = Pick(channels("vol_7d") * 8)
+    two = setup(raw, plan)
+    three = setup(np.concatenate([raw, gappy]), plan)
+    assert all(np.array_equal(a, b) for a, b in zip(two["fit"], three["fit"], strict=True))
+    assert (three["eval"][0] == 2).sum() == 24 and (two["eval"][0] < 2).all()
+    expected = [r for r in two["measure"](slow) if r["kind"] == "persistence"]
+    found = [r for r in three["measure"](slow) if r["kind"] == "persistence"]
+    assert found[0]["eval_rows"] == expected[0]["eval_rows"] == 2 * 700
+    assert found[0]["value"] == pytest.approx(expected[0]["value"], abs=1e-12)
+
+
+QUARTERS = range(2, 8)
+SEEDS = (1, 2)
+
+
 def rule_rows(
     vol: list[float], oi: list[float], variant: str = "full", kind: str = "forward"
 ) -> list[dict]:
     rows = []
     for target, diffs in (("vol_24h", vol), ("oi_24h", oi)):
         for f, d in enumerate(diffs, start=2):
-            for seed, wobble in ((1, 0.05), (2, -0.05)):
+            for seed, wobble in zip(SEEDS, (0.05, -0.05), strict=True):
                 for model, value in (("jepa", 0.1 + d + wobble), ("twin", 0.1)):
                     rows.append(
                         {"variant": variant, "readout": "last", "kind": kind}
@@ -392,30 +419,48 @@ def rule_rows(
     return rows
 
 
-def passes(kind: str, vol: list[float], oi: list[float], variant: str = "full") -> bool:
-    return panel_forward.rule(rule_rows(vol, oi, variant, kind), kind)[0]
+def verdict(
+    kind: str,
+    vol: list[float],
+    oi: list[float],
+    variant: str = "full",
+    folds: range = QUARTERS,
+) -> str:
+    return panel_forward.rule(rule_rows(vol, oi, variant, kind), kind, folds, SEEDS)[0]
 
 
-def test_each_rule_passes_and_fails_on_its_stated_conditions() -> None:
+def test_each_rule_passes_fails_or_is_not_judged_on_its_stated_conditions() -> None:
     six = [0.01] * 6
     five = [0.01] * 5 + [-0.005]
     four = [0.01] * 4 + [-0.005] * 2
     sinking = [0.01] * 5 + [-0.2]
     for kind in panel_forward.RULES:
-        assert passes(kind, six, six) and passes(kind, five, five)
-        assert not passes(kind, four, six) and not passes(kind, six, four)
-        assert not passes(kind, six, sinking) and not passes(kind, [-0.01] * 6, [-0.01] * 6)
-        assert not passes(kind, six, six, variant="vol")
-        assert not passes(kind, six, [0.01] * 2 + [-0.005] * 2)
-        assert passes(kind, six, [0.01] * 3 + [-0.005])
-        assert passes(kind, [0.01, -0.005, 0.01], [0.01, 0.01, -0.001])
+        assert verdict(kind, six, six) == verdict(kind, five, five) == "PASS"
+        assert verdict(kind, four, six) == verdict(kind, six, four) == "FAIL"
+        assert verdict(kind, six, sinking) == "FAIL"
+        assert verdict(kind, [-0.01] * 6, [-0.01] * 6) == "FAIL"
+        assert verdict(kind, six, six, variant="vol") == "NOT JUDGED"
+        assert verdict(kind, six, [0.01] * 3 + [-0.005]) == "NOT JUDGED"
+        assert verdict(kind, [0.01, -0.005, 0.01], [0.01, 0.01, -0.001]) == "NOT JUDGED"
+        assert verdict(kind, six, six, folds=range(1, 8)) == "NOT JUDGED"
+        assert verdict(kind, six, six, folds=range(0)) == "NOT JUDGED"
+        assert verdict(kind, six[:4], [0.01] * 3 + [-0.005], folds=range(2, 6)) == "PASS"
+        assert verdict(kind, six[:4], [0.01] * 2 + [-0.005] * 2, folds=range(2, 6)) == "FAIL"
+        lost_seed = [
+            r
+            for r in rule_rows(six, six, kind=kind)
+            if (r["fold"], r["seed"], r["model"], r["target"]) != (4, 2, "twin", "oi_24h")
+        ]
+        found, parts = panel_forward.rule(lost_seed, kind, QUARTERS, SEEDS)
+        assert found == "NOT JUDGED"
+        assert parts[1] == "oi_24h: not judged, quarters lacking a seed or model: q5"
     mixed = rule_rows(six, six, kind="forward") + rule_rows(four, five, kind="forward_gain")
-    assert panel_forward.rule(mixed, "forward")[0]
-    passed, parts = panel_forward.rule(mixed, "forward_gain")
-    assert not passed
+    assert panel_forward.rule(mixed, "forward", QUARTERS, SEEDS)[0] == "PASS"
+    found, parts = panel_forward.rule(mixed, "forward_gain", QUARTERS, SEEDS)
+    assert found == "FAIL"
     assert parts == [
-        "vol_24h: mean difference +0.0050, positive in 4 of 6 folds",
-        "oi_24h: mean difference +0.0075, positive in 5 of 6 folds",
+        "vol_24h: mean difference +0.0050, positive in 4 of 6 quarters",
+        "oi_24h: mean difference +0.0075, positive in 5 of 6 quarters",
     ]
 
 
@@ -470,11 +515,14 @@ def test_the_check_writes_its_table_report_and_manifest_and_repeats(
         assert store.sha256(roots[root] / name) == digest, key
     assert {"sequence/manifest.json", "sequence/plan.toml", "inputs/inputs.parquet"} <= set(files)
     report = (checked / "report.md").read_text(encoding="utf-8").rstrip().splitlines()
+    plan = sequence.load(run / "plan.toml", run / "ladder.toml")
+    assert list(panel_forward.quarters(plan)) == [1, 2, 3]
+    assert any("over the 3 forward left-out quarters" in x for x in report)
     for line, (number, kind) in zip(report[-3::2], enumerate(panel_forward.RULES, 1), strict=True):
-        passed, parts = panel_forward.rule(rows, kind)
-        outcome = f"**{'PASS' if passed else 'FAIL'}** ({'; '.join(parts)})."
+        found, parts = panel_forward.rule(rows, kind, range(1, 4), plan.seeds)
+        assert found == "NOT JUDGED" and parts[0].endswith("q3, q4")
         assert line.startswith(f"Rule {number},") and f"(kind `{kind}`)" in line, line
-        assert line.endswith(outcome)
+        assert line.endswith(f"**{found}** ({'; '.join(parts)}).")
     d = panel_forward.differences(rows, "full", "last", "forward_gain", "oi_24h")
     line = next(x for x in report if x.startswith("| full | last | forward_gain | oi_24h |"))
     assert line.endswith(f"| {sum(v > 0 for v in d.values())} of 1 |")
@@ -489,6 +537,37 @@ def test_the_check_writes_its_table_report_and_manifest_and_repeats(
         assert len(found) == 3
         groups.append(f"{np.mean(found):.4f}")
     assert f"| full | last | jepa | {' | '.join(groups)} |" in report
+
+
+def test_the_rebuilt_tensor_is_the_one_the_run_trained_on(built: dict[str, Path]) -> None:
+    run = built["sequence"]
+    plan = sequence.load(run / "plan.toml", run / "ladder.toml")
+    table = pq.read_table(built["inputs"] / "inputs.parquet")
+    values = {n: table[n].to_numpy() for n in table.column_names if n not in ("ts_ns", "symbol")}
+    labelled = pq.read_table(next((built["data"] / "labels").rglob("0.parquet")))
+    grid = {n: labelled[n].to_numpy(zero_copy_only=False) for n in labelled.column_names}
+    hours, coins = sequence.layout(grid)
+    columns = plan.rung("full").columns
+    raw = sequence.by_coin(np.column_stack([values[c] for c in columns]), len(coins))
+    train, _, _ = panel_forward.row_hours(hours, plan, 1)
+    x, _ = panel_forward.prepared(raw, train, columns, plan)
+    kept = np.any([r.keep for r in sequence.common_rows(values, grid, plan).values()], axis=0)
+    fold, _ = ladder.folds(grid["ts_ns"], ladder.bounds(plan.ladder), plan.ladder.block_days)
+    index = np.flatnonzero(kept & (fold == 1))
+    diagnostics = pq.read_table(run / "diagnostics.parquet").to_pylist()
+    for model in panel_forward.MODELS:
+        (recorded,) = [
+            d
+            for d in diagnostics
+            if (d["variant"], d["scheme"], d["fold"], d["seed"], d["model"])
+            == ("full", "forward", 1, 3, model)
+        ]
+        data = (run / sequence.encoder_name("full", "forward", 1, 3, model)).read_bytes()
+        net = panel_forward.restored(x.shape[-1], plan, data)
+        z = sequence.features(net, x, index % len(coins), index // len(coins), plan)
+        found = sequence.describe(z[:, : plan.shape.width])
+        for key in ("z_sd_min", "z_sd_median", "z_effective_rank"):
+            assert found[key] == pytest.approx(recorded[key], rel=1e-6), (model, key)
 
 
 def test_no_label_is_read(built: dict[str, Path], checked: Path, tmp_path: Path) -> None:
