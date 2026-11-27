@@ -157,13 +157,31 @@ models = ["jepa", "twin", "supervised"]
 schemes = ["forward"]
 seeds = [3]
 folds = FOLDS
-target = "future"
+target = "fresh"
 threads = 2
 
 [window]
 length = 36
 future = 4
 shifts = [2, 4]
+
+[fresh]
+changes = ["oi_vs_28d", "funding", "ls"]
+
+[fresh.windowed]
+vol_1h = 1
+ret_1h = 1
+flow_1h = 1
+vsurge_1h = 1
+vol_6h = 6
+ret_6h = 6
+vol_24h = 24
+near_24h = 24
+volume_24h = 24
+ret_24h = 24
+aret_24h = 24
+flow_24h = 24
+oi_24h = 24
 
 [encoder]
 patch = 2
@@ -486,9 +504,10 @@ def bench() -> None:
     mu, sd = sequence.statistics(raw, train)
     x = torch.from_numpy(sequence.standardised(raw, mu, sd, plan.ladder.clip, plan.pad))
     fit = sequence.eligible(train, plan.pad, plan.reach)
+    rules = sequence.fresh(raw, columns, train, plan)
     jepa = replace(plan, jepa=replace(plan.jepa, steps=BENCH["jepa_steps"]))
     began = time.perf_counter()
-    sequence.pretrain(x, fit, jepa, 0, np.random.SeedSequence(0), lambda line: None)
+    sequence.pretrain(x, fit, jepa, 0, np.random.SeedSequence(0), lambda line: None, rules)
     jepa_s = time.perf_counter() - began
     y = torch.from_numpy((rng.random((ncoins, nhours, len(plan.outputs))) < 0.05).astype("f4"))
     keep = torch.ones_like(y)

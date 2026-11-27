@@ -65,13 +65,21 @@ models = ["jepa", "twin", "supervised"]
 schemes = ["loqo", "forward"]
 seeds = [3]
 folds = []
-target = "future"
+target = "fresh"
 threads = 1
 
 [window]
 length = 36
 future = 4
 shifts = [2, 4]
+
+[fresh]
+changes = ["oi_vs_28d", "funding", "ls"]
+
+[fresh.windowed]
+vol_1h = 1
+vol_6h = 3
+vol_24h = 24
 
 [encoder]
 patch = 2
