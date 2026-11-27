@@ -29,6 +29,7 @@ CARRY_BARS = 12
 NEAR_BARS = 6
 DAY_NS = 24 * labels.HOUR_NS
 FUNDING_CARRY_BARS = 8 * HOUR_BARS
+FUNDING_CAP_BARS = 24 * HOUR_BARS
 LOOKBACK_BARS = WINDOWS["28d"] + 1 + max(CARRY_BARS, FUNDING_CARRY_BARS)
 LOOKBACK_NS = LOOKBACK_BARS * BAR_NS
 MARKET_MIN = 15
@@ -408,16 +409,13 @@ def unfunded(got: archive.Span, symbol: str, start: date, end: date, last_ns: in
     return [s.url for s in monthly if s.url in got.missing and s.start_ms * 1_000_000 < last_ns]
 
 
-def funding_ended(rate: np.ndarray, ts_ns: np.ndarray, calc_ms: np.ndarray) -> np.ndarray:
-    if not calc_ms.size:
+def funding_capped(rate: np.ndarray, ts_ns: np.ndarray, calc_ms: np.ndarray) -> np.ndarray:
+    settled = np.sort(calc_ms.astype(np.int64)) * 1_000_000
+    if not settled.size:
         return rate
-    settled = int(calc_ms.max()) * 1_000_000
-    return np.where(ts_ns - settled > FUNDING_CARRY_BARS * BAR_NS, np.nan, rate)
-
-
-def stopped(own: Mapping[str, np.ndarray], last: int, stop: np.ndarray) -> dict[str, np.ndarray]:
-    gone = stop - 1 > last
-    return {name: np.where(gone, np.nan, values) for name, values in own.items()}
+    at = np.searchsorted(settled, ts_ns, side="right") - 1
+    age = ts_ns - settled[np.maximum(at, 0)]
+    return np.where((at >= 0) & (age <= FUNDING_CAP_BARS * BAR_NS), rate, np.nan)
 
 
 def run(
@@ -429,13 +427,18 @@ def run(
     *,
     limit: date = span.HELD_BACK,
 ) -> tuple[Path, dict[str, Any]]:
+    span.held_back_root(limit, labels_dir, root, data_dir, Path(data_dir) / "panel-inputs")
     files = span.manifest_files(root, limit=limit)
-    span.held_back_root(limit, labels_dir, root, data_dir)
     source = labels_run(labels_dir, limit=limit)
     if not source["clean"]:
         raise archive.ArchiveError(f"{labels_dir}: complete.json does not mark the run clean")
+    symbols = list(source["params"]["symbols"])
     grid_path = labels_dir / source["grid_file"]
     thresholds_path = labels_dir / source["thresholds_file"]
+    for path in (grid_path, thresholds_path):
+        if not path.resolve().is_relative_to(labels_dir.resolve()):
+            raise span.HeldBackError(f"{path} is not inside the labels run {labels_dir}")
+    span.held_back_root(limit, grid_path, thresholds_path, *span.kind_folders(root, symbols))
     for path in (grid_path, thresholds_path):
         store.refuse_held_back(path, limit=limit)
     for path, key in ((grid_path, "grid_sha256"), (thresholds_path, "thresholds_sha256")):
@@ -443,7 +446,6 @@ def run(
             raise archive.ArchiveError(f"{path}: its sha256 differs from complete.json's")
     grid = pq.read_table(grid_path, columns=["ts_ns", "symbol"])
     thresholds = pq.read_table(thresholds_path, columns=["ts_ns", "symbol", "sd_ret", "b"])
-    symbols = list(source["params"]["symbols"])
     start, end = source["start"], source["end"]
     hours = np.unique(grid["ts_ns"].to_numpy())
     if hours.size and hours[-1] >= labels.ns(limit):
@@ -468,13 +470,13 @@ def run(
             raise archive.ArchiveError(f"{symbol}: funding files missing in the span: {absent}")
         sources += got.sources
         settled = got.columns[(symbol, "fundingRate")]["calc_time"]
-        columns["funding_rate"] = funding_ended(columns["funding_rate"], columns["ts_ns"], settled)
+        columns["funding_rate"] = funding_capped(columns["funding_rate"], columns["ts_ns"], settled)
         if stop.size and stop[-1] >= len(columns["close"]):
             raise ValueError("the grid holds an hour after the span's last bar")
         found = ratios(root, files, symbol, start, end, limit=limit)
         ratio = on_grid(found, archive.day_ms(start), len(columns["ts_ns"]))
         sd_ret, b = scales[symbol]
-        own.append(stopped(coin(columns, ratio, stop, sd_ret, b), last, stop))
+        own.append(coin(columns, ratio, stop, sd_ret, b))
         missing = {k: round(float(np.mean(np.isnan(v))), 4) for k, v in own[-1].items()}
         worst = sorted(missing.items(), key=lambda kv: -kv[1])[:3]
         unscaled = int(np.isnan(sd_ret).sum())

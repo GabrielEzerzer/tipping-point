@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ..ising import io
-from . import labels, span, store
+from . import inputs, labels, span, store
 
 HELD_NS = labels.ns(span.HELD_BACK)
 
@@ -38,6 +37,9 @@ def _records(run: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest, complete = io.read_json(run / "manifest.json"), io.read_json(run / "complete.json")
     if complete.get("clean") is not True:
         raise PrefixError(f"{run}: complete.json does not mark the run clean")
+    recorded = complete.get("manifest_sha256")
+    if recorded is not None and recorded != store.sha256(run / "manifest.json"):
+        raise PrefixError(f"{run}: the sha256 of manifest.json differs from complete.json's")
     return manifest, complete
 
 
@@ -53,27 +55,43 @@ def _file(run: Path, complete: dict[str, Any], prefix: str) -> tuple[Path, str]:
 
 def _bits(values: pa.ChunkedArray) -> tuple[np.ndarray, np.ndarray]:
     nulls = values.is_null().to_numpy(zero_copy_only=False)
-    data = values.to_numpy(zero_copy_only=False)
-    if pa.types.is_floating(values.type):
-        data = np.where(nulls, 0.0, data).astype(np.float64).view(np.uint64)
-    return nulls, data
+    kind = values.type
+    if pa.types.is_floating(kind):
+        filled = values.fill_null(pa.scalar(0.0, kind)).to_numpy(zero_copy_only=False)
+        return nulls, filled.astype(np.float64).view(np.uint64)
+    blank = False if pa.types.is_boolean(kind) else 0 if pa.types.is_integer(kind) else ""
+    return nulls, values.fill_null(pa.scalar(blank, kind)).to_numpy(zero_copy_only=False)
+
+
+def _times(file: pq.ParquetFile, path: Path) -> np.ndarray:
+    ts = file.read(columns=["ts_ns"])["ts_ns"]
+    if ts.null_count:
+        raise PrefixError(f"{path}: ts_ns has {ts.null_count} nulls")
+    times = ts.to_numpy()
+    if np.any(np.diff(times) < 0):
+        raise PrefixError(f"{path}: its rows are not sorted by ts_ns")
+    return times
 
 
 def _compare(
-    what: str, whole: Path, dev: Path, columns: Sequence[str], allowed: bool = False
-) -> int:
+    what: str, whole: Path, dev: Path, schema: pa.Schema, allowed: bool = False
+) -> tuple[int, int]:
     left, right = pq.ParquetFile(whole), pq.ParquetFile(dev)
-    if left.schema_arrow != right.schema_arrow:
-        raise PrefixError(f"{what}: the whole-span table's schema is not the development table's")
-    whole_ts = left.read(columns=["ts_ns"])["ts_ns"].to_numpy()
-    dev_ts = right.read(columns=["ts_ns"])["ts_ns"].to_numpy()
+    for path, file in ((whole, left), (dev, right)):
+        if not file.schema_arrow.equals(schema):
+            raise PrefixError(f"{path}: its schema is not the code's {what} schema")
+    whole_ts, dev_ts = _times(left, whole), _times(right, dev)
     n = int(np.searchsorted(whole_ts, HELD_NS))
-    if np.any(np.diff(whole_ts) < 0) or n != len(dev_ts) or (len(dev_ts) and dev_ts[-1] >= HELD_NS):
+    if n == 0:
+        raise PrefixError(f"{what}: the whole-span table has no rows before {span.HELD_BACK}")
+    if n == len(whole_ts):
+        raise PrefixError(f"{what}: the whole-span table has no rows from {span.HELD_BACK} on")
+    if n != len(dev_ts) or dev_ts[-1] >= HELD_NS:
         raise PrefixError(
             f"{what}: {n} whole-span rows lie before {span.HELD_BACK}, the development table has "
             f"{len(dev_ts)}"
         )
-    for column in ["ts_ns", "symbol", *columns]:
+    for column in schema.names:
         a = left.read(columns=[column])[column].slice(0, n)
         b = right.read(columns=[column])[column]
         (a_nulls, a_data), (b_nulls, b_data) = _bits(a), _bits(b)
@@ -86,10 +104,13 @@ def _compare(
                 f"{what}: {column} differs at row {i} (ts_ns {int(dev_ts[i])}), and "
                 f"{int(differ.sum())} rows in all, outside the window only 2024 data can settle"
             )
-    return n
+    return n, len(whole_ts)
 
 
 def check(labels_run: Path, inputs_run: Path, dev_labels: Path, dev_inputs: Path) -> dict[str, Any]:
+    for whole, dev in ((labels_run, dev_labels), (inputs_run, dev_inputs)):
+        if Path(whole).resolve() == Path(dev).resolve():
+            raise PrefixError(f"{whole}: the whole-span and development runs are the same folder")
     (whole_lm, whole_lc), (dev_lm, dev_lc) = _records(labels_run), _records(dev_labels)
     (whole_im, whole_ic), (dev_im, dev_ic) = _records(inputs_run), _records(dev_inputs)
     whole_p, dev_p = whole_lm["params"], dev_lm["params"]
@@ -119,21 +140,17 @@ def check(labels_run: Path, inputs_run: Path, dev_labels: Path, dev_inputs: Path
     recorded = whole_im["params"].get("labels_manifest_sha256")
     if recorded != store.sha256(labels_run / "manifest.json"):
         raise PrefixError(f"{inputs_run}: it does not record the manifest of {labels_run}")
-    thresholds = _compare(
-        "thresholds",
-        whole_thresholds,
-        dev_thresholds,
-        [n for n in labels.THRESHOLDS.names if n not in ("ts_ns", "symbol")],
-    )
-    grid_names = [n for n in labels.GRID.names if n not in ("ts_ns", "symbol")]
-    grid_rows = _compare("grid", whole_grid, dev_grid, grid_names, allowed=True)
+    thresholds, _ = _compare("thresholds", whole_thresholds, dev_thresholds, labels.THRESHOLDS)
+    grid = _compare("grid", whole_grid, dev_grid, labels.GRID, allowed=True)
     whole_inputs = _file(inputs_run, whole_ic, "inputs.parquet")[0]
     dev_table = _file(dev_inputs, dev_ic, "inputs.parquet")[0]
-    names = [
-        n for n in pq.ParquetFile(dev_table).schema_arrow.names if n not in ("ts_ns", "symbol")
-    ]
-    inputs_rows = _compare("inputs", whole_inputs, dev_table, names)
+    rows = _compare("inputs", whole_inputs, dev_table, inputs.SCHEMA)
+    if rows != grid:
+        raise PrefixError(
+            f"the inputs tables have {rows[1]} rows, {rows[0]} before {span.HELD_BACK}; the grids "
+            f"have {grid[1]}, {grid[0]} before it"
+        )
     return {
-        "rows": {"thresholds": thresholds, "grid": grid_rows, "inputs": inputs_rows},
+        "rows": {"thresholds": thresholds, "grid": grid[0], "inputs": rows[0]},
         "window_after_ns": {f"{h}h": window_ns(h) for h in labels.HORIZONS},
     }

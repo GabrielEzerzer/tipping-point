@@ -306,11 +306,12 @@ def run(
     limit: date = span.HELD_BACK,
 ) -> tuple[Path, dict[str, Any]]:
     span.refuse(start, dev_start, end, limit=limit)
-    span.held_back_root(limit, root, data_dir)
+    symbols = list(dict.fromkeys(symbols))
+    folders = span.kind_folders(root, symbols)
+    span.held_back_root(limit, root, data_dir, Path(data_dir) / "labels", *folders)
     files = span.manifest_files(root, limit=limit)
     if not start < dev_start <= end:
         raise ValueError(f"the span must run {start} < {dev_start} <= {end}")
-    symbols = list(dict.fromkeys(symbols))
     lock = uv_lock()
     first_ns, end_ns = ns(dev_start), ns(end + timedelta(days=1))
     days = (end - start).days + 1

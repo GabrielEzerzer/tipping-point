@@ -33,10 +33,11 @@ def fetch(
     limit: date = span.HELD_BACK,
 ) -> dict[str, Any]:
     span.refuse(start, end, limit=limit)
-    span.held_back_root(limit, dest)
+    symbols = list(dict.fromkeys(symbols))
+    span.held_back_root(limit, dest, *span.kind_folders(dest, symbols))
     files = span.manifest_files(dest, limit=limit)
     manifest_path = dest / "manifest.json"
-    todo = archive.sources(list(dict.fromkeys(symbols)), start, end)
+    todo = archive.sources(symbols, start, end)
     safe = guarded(get, limit=limit)
     done: dict[str, Any] = {}
     with ThreadPoolExecutor(workers) as pool:

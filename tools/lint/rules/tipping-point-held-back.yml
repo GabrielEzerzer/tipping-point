@@ -27,7 +27,14 @@ rule:
           kind: identifier
           regex: '^limit$'
       - inside:
-          stopBy: end
+          stopBy:
+            any:
+              - kind: function_definition
+              - kind: lambda
+            has:
+              field: parameters
+              has:
+                regex: '^limit\b'
           kind: function_definition
           has:
             field: parameters
@@ -44,7 +51,7 @@ rule:
 id: tp-held-back-limit-default
 language: Python
 severity: error
-message: "A limit: date parameter defaults to span.HELD_BACK outside panel/heldback.py and tests, so that only those can raise the held-back limit."
+message: "Outside panel/heldback.py and tests, a limit parameter with a default defaults to span.HELD_BACK, and only on the held-back refusals and data stages (refuse, refuse_url, refuse_names, refuse_archive, manifest_files, refuse_held_back, guarded, fetch, run, ratios, labels_run), so that only heldback.py and tests can raise the held-back limit. An int or float limit is a count and may default to anything."
 files:
   - "**/*.py"
 ignores:
@@ -52,15 +59,25 @@ ignores:
   - "python/tipping_point/tests/**"
   - "harness/tests/**"
 rule:
-  kind: typed_default_parameter
-  all:
-    - has:
-        field: name
-        regex: '^limit$'
-    - has:
-        field: type
-        regex: '\bdate\b'
-    - not:
-        has:
-          field: value
-          regex: '^(?:span\.)?HELD_BACK$'
+  any:
+    - kind: typed_default_parameter
+    - kind: default_parameter
+  has:
+    field: name
+    regex: '^limit$'
+  not:
+    any:
+      - has:
+          field: type
+          regex: '^(?:int|float)(?:\s*\|\s*None)?$'
+      - all:
+          - has:
+              field: value
+              regex: '^(?:span\.)?HELD_BACK$'
+          - inside:
+              kind: parameters
+              inside:
+                kind: function_definition
+                has:
+                  field: name
+                  regex: '^(?:refuse|refuse_url|refuse_names|refuse_archive|manifest_files|refuse_held_back|guarded|fetch|run|ratios|labels_run)$'
