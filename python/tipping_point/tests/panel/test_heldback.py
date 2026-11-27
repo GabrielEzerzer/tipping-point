@@ -4,6 +4,7 @@
 
 import hashlib
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, timedelta
@@ -960,6 +961,103 @@ def test_the_refold_takes_only_fit_fold_scores_inside_the_span(
     gaps = pa.array([None, *hours[1:].tolist()], pa.int64())
     with pytest.raises(ValueError, match="no hour"):
         heldback.refold(table.set_column(hour, "hour", gaps), q)
+
+
+def without(values: dict, grid: dict, drop: np.ndarray) -> tuple[dict, dict]:
+    return {k: v[~drop] for k, v in values.items()}, {k: v[~drop] for k, v in grid.items()}
+
+
+RUNGS = [heldback.RungArm("full", "full"), heldback.RungArm("vol", "vol")]
+
+
+def test_a_grid_that_stops_before_the_span_ends_is_refused_before_the_support(
+    plan: sequence.Plan, panel: tuple[dict, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values, grid = panel
+    grid = placed(grid)
+    q = evaluation(plan, CUTS[2])
+    strict = rule(min_quarters=1, min_supported=1, min_complete=1.0)
+    full = heldback.support(values, grid, q, "long", 24, strict)
+    assert [c for c in full["causes"] if "complete draws" in c]
+    values, grid = without(values, grid, grid["ts_ns"] >= labels.ns(CUTS[3]))
+    shorter = evaluation(plan, CUTS[2], date(2022, 9, 30))
+    assert heldback.support(values, grid, shorter, "long", 24, strict)["causes"] == []
+    lacks = re.escape(
+        "the grid lacks 2208 of the 4416 hours from 2022-07-01 to 2022-12-31, the first "
+        "2022-10-01T00:00 and the last 2022-12-31T23:00"
+    )
+    with pytest.raises(ValueError, match=lacks):
+        heldback.support(values, grid, q, "long", 24, strict)
+    tables = fake(*panel, q)
+    with pytest.raises(ValueError, match=lacks):
+        heldback.paired(values, grid, q, tables, [("a", "b")], ("a", "b"), "long", 24)
+
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("an arm was scored")
+
+    before = ending(plan, CUTS[2])
+    with pytest.raises(ValueError, match="lacks 2208 of the 8760 hours from 2022-01-01"):
+        heldback.scored(values, grid, before, END, RUNGS)
+    monkeypatch.setattr(heldback, "scored", refused)
+    pairs = [("full", "vol")]
+    with pytest.raises(ValueError, match="lacks 2208 of the 8760 hours from 2022-01-01"):
+        heldback.run(values, grid, before, END, RUNGS, pairs, pairs[0], "long", 24, strict)
+
+
+def test_a_grid_missing_an_hour_or_a_coin_hour_is_refused(
+    plan: sequence.Plan, panel: tuple[dict, dict]
+) -> None:
+    values, grid = panel
+    q = evaluation(plan, CUTS[2])
+    hour = labels.ns(date(2022, 8, 15)) + 5 * HOUR
+    lacks = "lacks 1 of the 4416 hours from 2022-07-01 to 2022-12-31, the first 2022-08-15T05:00"
+    with pytest.raises(ValueError, match=lacks):
+        heldback.support(*without(values, grid, grid["ts_ns"] == hour), q, "long", 24, rule())
+    coin_hour = (grid["ts_ns"] == hour) & (grid["symbol"] == COINS[0])
+    with pytest.raises(ValueError, match="not every coin at every hour"):
+        heldback.support(*without(values, grid, coin_hour), q, "long", 24, rule())
+
+
+def test_the_run_refuses_a_grid_missing_development_hours_before_the_support(
+    plan: sequence.Plan, panel: tuple[dict, dict], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values, grid = panel
+
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the support was settled")
+
+    monkeypatch.setattr(heldback, "support", refused)
+    late = without(values, grid, grid["ts_ns"] < labels.ns(date(2022, 2, 1)))
+    pairs = [("full", "vol")]
+    with pytest.raises(ValueError, match="lacks 744 of the 8760 hours from 2022-01-01"):
+        heldback.run(*late, ending(plan, CUTS[2]), END, RUNGS, pairs, pairs[0], "long", 24, rule())
+
+
+def test_a_development_plan_whose_gap_the_labels_outreach_is_refused(
+    plan: sequence.Plan, panel: tuple[dict, dict], tmp_path: Path
+) -> None:
+    values, grid = panel
+    base = ending(plan, CUTS[2])
+    horizons = base.ladder.horizons
+    enough = math.ceil(ladder.needed_gap_ns(horizons) / DAY)
+    heldback.fit_plan(replace(base.ladder, gap_days=enough), END)
+    pairs = [("full", "vol")]
+    for gap in (-1, enough - 1):
+        dev = replace(base, ladder=replace(base.ladder, gap_days=gap))
+        problem = ladder.gap_problem(gap, horizons)
+        assert problem is not None
+        wording = re.escape(f"the development plan: {problem}")
+        with pytest.raises(ValueError, match=wording):
+            heldback.fit_plan(dev.ladder, END)
+        with pytest.raises(ValueError, match=wording):
+            heldback.evaluation_plan(dev.ladder, END)
+        with pytest.raises(ValueError, match=wording):
+            heldback.run(values, grid, dev, END, RUNGS, pairs, pairs[0], "long", 24, rule())
+        path = tmp_path / "ladder.toml"
+        path.write_text(LADDER.replace("gap_days = 31", f"gap_days = {gap}"), encoding="utf-8")
+        with pytest.raises(ValueError, match=re.escape(problem)):
+            ladder.load(path)
+    assert "must not be negative" in str(ladder.gap_problem(-1, horizons))
 
 
 def test_the_test_span_has_eleven_quarters_of_the_blocks_the_bootstrap_expects() -> None:

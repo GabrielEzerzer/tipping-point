@@ -104,6 +104,18 @@ def needed_gap_ns(horizons: Sequence[int]) -> int:
     return inputs.LOOKBACK_NS + longest + labels.LEAD_NS + labels.PAST_HOURS * labels.HOUR_NS
 
 
+def gap_problem(gap_days: int, horizons: Sequence[int]) -> str | None:
+    if gap_days < 0:
+        return f"gap_days = {gap_days} (must not be negative)"
+    if gap_days * DAY_NS < needed_gap_ns(horizons):
+        days = needed_gap_ns(horizons) / DAY_NS
+        return (
+            f"gap_days = {gap_days}, shorter than the {days:.2f} days that the inputs' "
+            "look-back, the longest horizon and the labels' lead and look-back need"
+        )
+    return None
+
+
 def load(path: Path = PLAN, text: str | None = None) -> Plan:
     raw = tomllib.loads(path.read_text(encoding="utf-8") if text is None else text)
     if "cuts" in raw or "cuts" in raw.get("folds", {}):
@@ -156,14 +168,9 @@ def load(path: Path = PLAN, text: str | None = None) -> Plan:
     for name, value in (("block_days", plan.block_days), ("draws", plan.draws)):
         if value <= 0:
             problems.append(f"{name} = {value} (must be above 0)")
-    if plan.gap_days < 0:
-        problems.append(f"gap_days = {plan.gap_days} (must not be negative)")
-    elif plan.gap_days * DAY_NS < needed_gap_ns(plan.horizons):
-        days = needed_gap_ns(plan.horizons) / DAY_NS
-        problems.append(
-            f"gap_days = {plan.gap_days}, shorter than the {days:.2f} days that the inputs' "
-            "look-back, the longest horizon and the labels' lead and look-back need"
-        )
+    gap = gap_problem(plan.gap_days, plan.horizons)
+    if gap is not None:
+        problems.append(gap)
     if len(set(plan.names)) != len(plan.names) or not plan.start <= plan.end:
         problems.append("names must be unique and the span must not end before it starts")
     elif not 1 <= plan.forward_first < len(bounds(plan)) - 1:

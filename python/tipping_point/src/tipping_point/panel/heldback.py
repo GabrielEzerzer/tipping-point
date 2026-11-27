@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 
-from . import classical, compare, ladder, sequence
+from . import classical, compare, labels, ladder, sequence
 
 SCHEME = compare.PRIMARY_SCHEME
 FIT_FOLD = 1
@@ -81,6 +81,9 @@ class Rule:
 def cut_of(dev: ladder.Plan, end: date) -> date:
     if dev.cuts is not None:
         raise ValueError("the development plan is already cut")
+    gap = ladder.gap_problem(dev.gap_days, dev.horizons)
+    if gap is not None:
+        raise ValueError(f"the development plan: {gap}")
     cut = dev.end + timedelta(days=1)
     if end < cut:
         raise ValueError(
@@ -128,6 +131,22 @@ def fit_only(plan: sequence.Plan) -> None:
             f"a fit plan is cut once, fits {SCHEME} only and fold {FIT_FOLD} only, not schemes "
             f"{list(plan.schemes)} and folds {list(plan.folds)}"
         )
+
+
+def _hour(ns: int) -> str:
+    return str(np.datetime64(int(ns), "ns"))[:16]
+
+
+def covered(grid: Mapping[str, np.ndarray], start: date, end: date) -> None:
+    stop = labels.ns(end + timedelta(days=1))
+    need = np.arange(labels.ns(start), stop, labels.HOUR_NS, dtype=np.int64)
+    missing = need[~np.isin(need, grid["ts_ns"])]
+    if missing.size:
+        raise ValueError(
+            f"the grid lacks {missing.size} of the {need.size} hours from {start} to {end}, the "
+            f"first {_hour(missing[0])} and the last {_hour(missing[-1])}"
+        )
+    sequence.layout(grid)
 
 
 def final_fold(dev: sequence.Plan) -> int:
@@ -247,6 +266,7 @@ def scored(
     plan = fit_sequence(dev, end)
     fit_only(plan)
     arms_check(arms, plan)
+    covered(grid, plan.ladder.start, plan.ladder.end)
     names = [arm.name for arm in arms]
     rungs = [arm for arm in arms if isinstance(arm, RungArm)]
     tables = rung_tables(values, grid, plan.ladder, rungs, log) if rungs else {}
@@ -321,6 +341,7 @@ def paired(
 ) -> dict[str, Any]:
     evaluation_only(evaluation)
     check(list(tables), pairs, primary, side, horizon, evaluation)
+    covered(grid, evaluation.start, evaluation.end)
     arms = tuple(compare.Arm(name, "scores") for name in tables)
     plan = compare.Plan(evaluation, arms, tuple(pairs), primary, side, horizon)
     held = {name: {SCHEME: refold(table, evaluation)} for name, table in tables.items()}
@@ -347,6 +368,7 @@ def support(
     problems = _aimed(side, horizon, evaluation)
     if problems:
         raise ValueError(f"the support: {', '.join(problems)}")
+    covered(grid, evaluation.start, evaluation.end)
     keep, accounting = ladder.select(values, grid, evaluation, horizon)
     ts = grid["ts_ns"][keep]
     edges = ladder.bounds(evaluation)
@@ -488,6 +510,7 @@ def run(
     evaluation = evaluation_plan(dev.ladder, end)
     arms_check(arms, dev)
     check([arm.name for arm in arms], pairs, primary, side, horizon, evaluation)
+    covered(grid, dev.ladder.start, end)
     found = support(values, grid, evaluation, side, horizon, rule)
     if found["causes"]:
         return {"support": found, "decision": decide(found, (), primary, rule)}

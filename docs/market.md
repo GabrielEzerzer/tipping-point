@@ -1367,8 +1367,10 @@ the final sequence run saves its models under the fold index that follows the de
 trained on the hours before that same day, so the fit and the models it loads cannot disagree on the
 cut when the models were saved by a run of this same development plan. The core takes the record of
 saved models as given; binding that record to the plan's sha256 is the command's part. A plan file
-cannot hold either plan: `ladder.load` refuses a file that names `cuts`, a span
-reaching the held-back days and `forward_first = 0`.
+cannot hold either plan: `ladder.load` refuses a file that names `cuts`, a span reaching the
+held-back days and `forward_first = 0`. A development plan whose `gap_days` is shorter than the
+inputs' look-back, the longest horizon and the labels' lead and look-back need is refused by the cut
+too, with the loader's wording.
 
 - The fit plan runs from the development start to the test span's last day, with fold edges cut by
   code at the development start, 2024-01-01 and the day after the test span (`cuts`), and
@@ -1379,6 +1381,11 @@ reaching the held-back days and `forward_first = 0`.
 - The evaluation plan runs from 2024-01-01 to the test span's last day, with calendar quarters as
   folds and `forward_first = 0`. For a span ending 2026-09-30 that is eleven quarters, each cut
   into seven 14-day blocks by the bootstrap.
+
+The grid is every coin at every hour, a coin that does not trade at an hour keeping its row with
+missing inputs and censored labels, so the support, the pairing and the scoring each refuse a grid
+that lacks any hour of the span they read, or is not that rectangle, before any row is filtered;
+a run checks the whole fit span before the support.
 
 Each arm's configuration is given, not chosen, and each arm is fitted once on the fit plan's
 training rows and scores only the test span. A sequence arm names its model, variant, readout, c and
@@ -1404,9 +1411,11 @@ The decision reads a rule record that the written plan fills: which lower bound 
 whether it is read on all draws or on complete draws, the minimum number of scoreable quarters, the
 minimum share of complete draws, the minimum number of blocks holding a positive for a quarter and
 side to count as supported, and the minimum number of supported quarters. The code holds no values
-for them. The support is computed first, from the labels of the rows the comparison keeps and the
-bootstrap draws alone, without any score. For each quarter and side it counts the blocks holding a
-positive and whether the quarter has both classes, and from the draws it takes the share of complete
+for them, and allows a bound read from a single draw that can give it, so the written plan's minimum
+share of complete draws is what keeps the quantile meaningful. The support is computed first, from
+the labels of the rows the comparison keeps and the bootstrap draws alone, without any score. For
+each quarter and side it counts the blocks holding a positive and whether the quarter has both
+classes, and from the draws it takes the share of complete
 draws, defined as in `panel compare` (for `long+short`, both sides on their common quarters). It
 also counts the draws on which the bound the rule reads can be a number: on all draws, those that
 keep both classes in at least one scoreable quarter (for `long+short`, at least one common quarter
