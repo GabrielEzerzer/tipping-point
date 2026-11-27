@@ -235,7 +235,7 @@ def test_a_raised_limit_reads_and_writes_only_under_held_back(spans: Spans, tmp_
             archive.Source("metrics", "BTCUSDT", str(LIMIT)).url
         )
     with pytest.raises(span.HeldBackError, match="from 2024-02-01 on"):
-        inputs.ratios(spans.held_root, {}, "BTCUSDT", START, LIMIT, limit=LIMIT)
+        inputs.ratios(spans.held_root, {}, "BTCUSDT", START, LIMIT, {}, limit=LIMIT)
     grid = next((spans.held_labels / "grid").glob("*.parquet"))
     with pytest.raises(span.HeldBackError, match="reaches"):
         store.refuse_held_back(grid)
@@ -726,6 +726,17 @@ def test_the_prefix_check_passes_equal_runs_whose_labels_differ_only_in_the_wind
         differ = whole[name].to_numpy() != dev["grid"][name].to_numpy()
         assert differ.any() and (ts[differ] > prefix.window_ns(h)).all(), name
     assert np.isfinite(dev["thresholds"]["b"].to_numpy(zero_copy_only=False)[-2:]).all()
+    runs = {
+        "labels": spans.held_labels,
+        "inputs": spans.held_inputs,
+        "dev_labels": spans.dev_labels,
+        "dev_inputs": spans.dev_inputs,
+    }
+    assert got["manifests"] == {k: store.sha256(r / "manifest.json") for k, r in runs.items()}
+    assert got["tables"] == {
+        k: io.read_json(runs[k] / "complete.json")["files"]["inputs.parquet"]
+        for k in ("inputs", "dev_inputs")
+    }
 
 
 def test_a_coin_with_a_gap_at_the_end_of_2023_that_trades_in_2024_passes_the_prefix_check(

@@ -74,9 +74,20 @@ Command line: python -m tipping_point.panel <command> [options]
           a development comparison marked as not a test. Writes a run in
           <data dir>/panel-compare/<run_id>/ with the tables scores, folds, comparisons and rows,
           and report.md
+  test    the held-back test of the frozen plan panel/test.toml, which pins the development runs,
+          the final sequence run, the approved commits, the running code's sha256, the arms, the
+          pairs and the decision rule; with no such file it refuses. test data checks the plan
+          against everything but the held-back tables, fetches the archive and makes the whole-span
+          labels and inputs runs, from the development labels run's start to the plan's last day,
+          into <data dir>/{span.HELD_BACK_DIR}/, runs the prefix check and prints each coin's
+          missing archive files; a re-run reuses them.
+          test run checks every pinned run, commit, plan and model, settles the support and writes
+          it, then scores the arms and decides, as a run in
+          <data dir>/{span.HELD_BACK_DIR}/panel-test/<run_id>/; it refuses a plan that already
+          has a run there
 
-Every command refuses any day from {span.HELD_BACK} on, which is held back as the test span. The
-data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
+Every command but test refuses any day from {span.HELD_BACK} on, which is held back as the test
+span. The data dir is --data-dir, else $TP_DATA_DIR, else the engine's per-user data dir.
 """
 
 
@@ -189,6 +200,15 @@ def _parser() -> argparse.ArgumentParser:
         help="accept runs whose manifests are not bound: a development comparison, never a test",
     )
     p.set_defaults(command=_compare)
+
+    p = sub.add_parser("test", help="the held-back test of the frozen plan panel/test.toml")
+    steps = p.add_subparsers(required=True)
+    q = steps.add_parser("data", help="the whole-span labels and inputs runs, and the prefix check")
+    q.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    q.set_defaults(command=_test_data)
+    q = steps.add_parser("run", help="check every record, settle the support, score and decide")
+    q.add_argument("--data-dir", type=Path, default=engine.data_dir(), help=DATA_DIR_HELP)
+    q.set_defaults(command=_test_run)
     return parser
 
 
@@ -385,6 +405,34 @@ def _compare(args: argparse.Namespace) -> int:
         unbound=args.unbound,
     )
     print(f"{len(out['comparisons'])} comparison rows, schemes {', '.join(out['schemes'])}")
+    print(run_dir)
+    return 0
+
+
+def _test_data(args: argparse.Namespace) -> int:
+    from . import frozen
+
+    out = frozen.data(args.data_dir, archive.http_get, log=lambda line: print(line, flush=True))
+    rows = out["prefix"]["rows"]
+    print(
+        f"prefix check: {rows['thresholds']} threshold, {rows['grid']} grid and {rows['inputs']} "
+        f"inputs rows equal before {span.HELD_BACK}"
+    )
+    for path in (out["labels"], out["inputs"]):
+        print(f"{'made' if path in out['made'] else 'reused'} {path}")
+    print(f"archive files missing, in all and from {span.HELD_BACK} on (first and last day):")
+    for m in out["missing"]:
+        days = f" ({m['first']} to {m['last']})" if m["first"] else ""
+        print(f"{m['symbol']:<13} {m['missing']} and {m['missing_in_test']}{days}")
+    return 0
+
+
+def _test_run(args: argparse.Namespace) -> int:
+    from . import frozen
+
+    run_dir, out = frozen.run(args.data_dir, log=lambda line: print(line, flush=True))
+    decision = out["decision"]
+    print(decision["outcome"] + "".join(f"; {cause}" for cause in decision["causes"]))
     print(run_dir)
     return 0
 

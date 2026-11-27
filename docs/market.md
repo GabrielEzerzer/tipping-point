@@ -522,8 +522,9 @@ Binance USDT perpetuals. Its data and label layer is `python/tipping_point/src/t
 which reuses the archive reader, the bars and the cascade rule above unchanged. Bars start on
 2021-10-01; thresholds and cascades start on each coin's first day with a threshold, and the label
 grid covers the development span 2022-01-01 to 2023-12-31. Every day from 2024-01-01 is held back
-as the test span: every command refuses one, and every request is checked for one before it is
-sent.
+as the test span: every development command refuses one, and every request is checked for one
+before it is sent. Only `panel test`, from a frozen plan, reads that span (see the held-back test
+below).
 
 **Coins.** A symbol enters the ranking when it is a USD-M symbol matching `[A-Z0-9]+USDT`, is not
 one of the index and stablecoin products `BTCDOMUSDT`, `DEFIUSDT` and `USDCUSDT`, publishes a
@@ -1472,7 +1473,10 @@ skipped as before, wherever it falls. Whether the run is valid is a separate che
 value: the coin's last complete bar over the whole span the run reads decides which monthly funding
 files it needs, and a funding file recorded as missing stops the run when its month starts before
 the end of that bar, and is ignored when the coin had stopped before the month began. A file that
-is absent and not recorded as missing is refused by the archive check, as before.
+is absent and not recorded as missing is refused by the archive check, as before. The long/short
+ratio is read from each metrics file a second time after the archive read has recorded it, and the
+run is refused when that file's sha256 is not the recorded one, or when it reads a metrics file the
+archive read did not record.
 
 **Prefix check.** `panel.prefix.check(labels_run, inputs_run, dev_labels, dev_inputs)` takes a labels
 and inputs run over a span that reaches past 2023 and the development labels and inputs runs, which
@@ -1574,3 +1578,260 @@ when it is not; there is no outcome for the other direction. The decision return
 the support's per-quarter counts and the primary row's estimate, bounds, shares and quarter counts,
 and refuses a primary row whose share of complete draws, quarters scored or scheduled, or counts of
 draws giving each bound differ from the support's.
+
+`panel test` runs the held-back test from a frozen plan, `panel/test.toml` beside the code
+(`python/tipping_point/src/tipping_point/panel/test.toml`). The path is fixed: no argument names
+another plan, and nothing is read from the environment. No plan ships, so both steps refuse until
+one is written and committed. The test has two steps, run from the same clean commit:
+
+```
+uv run python -m tipping_point.panel test data [--data-dir <dir>]
+uv run python -m tipping_point.panel test run [--data-dir <dir>]
+```
+
+The plan is strict TOML. An unknown, missing or mistyped key, or one given twice, is refused. An
+unknown or missing top-level key is reported first and alone; once the top-level keys are right,
+every problem found is named together. Every key is required except an arm's `readout` and `c`,
+which only some arms take:
+
+```toml
+end = 2026-09-30
+code_sha256 = "<sha256 of the running code>"
+approved = ["<40-hex commit>", "<40-hex commit>"]
+pairs = [["jepa", "window"], ["jepa", "vol"]]
+primary = ["jepa", "window"]
+side = "long"
+horizon = 6
+
+[runs.labels]
+run = "<development labels run id>"
+manifest_sha256 = "<sha256 of its manifest.json>"
+
+[runs.inputs]
+run = "<development inputs run id>"
+manifest_sha256 = "<sha256>"
+
+[runs.final]
+run = "<final sequence run id>"
+manifest_sha256 = "<sha256>"
+plan_sha256 = "<sha256 of its plan.toml>"
+ladder_sha256 = "<sha256 of its ladder.toml>"
+
+[[arms]]
+name = "jepa"
+kind = "sequence"
+model = "jepa"
+variant = "vol"
+readout = "means"
+c = 1.0
+seeds = [0, 1]
+encoders = { "encoders/vol-forward-fold<n>-seed0-jepa.pt" = "<sha256>", "encoders/vol-forward-fold<n>-seed1-jepa.pt" = "<sha256>" }
+
+[[arms]]
+name = "window"
+kind = "classical"
+model = "window"
+variant = "vol"
+readout = "means"
+c = 1.0
+
+[[arms]]
+name = "vol"
+kind = "rung"
+rung = "vol"
+
+[rule]
+bound = "q05"
+draws = "complete"
+min_quarters = 8
+min_complete = 0.9
+min_blocks = 3
+min_supported = 6
+```
+
+`end` is the test span's last day, from 2024-01-01 on. `code_sha256` names the code that runs the
+test. `approved` lists the commits whose runs the test may rely on. A sequence arm names its model,
+variant, seeds, a JEPA or twin arm also its readout and c, and `encoders` maps each saved model it
+reads to that file's sha256, one per seed, under the final run's fold `<n>`, the number of
+development quarters. A classical arm is `rung` with no readout or `window` with one, at c. A rung
+arm names a ladder rung. The six `rule` fields are the decision rule above.
+
+The code sha256 is the sha256 of the sorted lines `git ls-tree -r HEAD` prints for the tracked files
+under `python/tipping_point/src`, `python/tipping_point/pyproject.toml`, the root `pyproject.toml`
+and `uv.lock`, leaving out `panel/test.toml` itself. Each line holds a file's path and the git
+hash of its committed bytes. These files are the package the test imports and runs, its build and
+dependency settings, and the locked versions of every dependency. The package loads no compiled
+module built from this repository, so the Rust crates are not in the set. A change to the plan, the
+tests, the docs or the notebooks keeps the sha256; a change to the package's source or its locks
+changes it. The plan is therefore written last, at the commit that will run it, and committing it
+does not change the sha256 it pins. `frozen.code_sha256()` prints it for the checked-out commit:
+
+```
+uv run python -c "from tipping_point.panel import frozen; print(frozen.code_sha256())"
+```
+
+The data step is the only code that raises the held-back limit, to the first day of the month after
+`end`; the calls that raise it are in `panel/heldback.py`. It first makes every check below that
+reads no held-back table except 4: checks 1, 2, 3 and 5 to 8, so a plan the run step would refuse on
+its pins, arms, pairs or models is refused before anything is fetched. It then makes check 9, which
+accepts zero or one finished run of each kind under `<data dir>/held-back/`, and works there. If
+there is no whole-span labels run, it fetches the archive for the development labels run's coins
+from its start to `end` into `held-back/archives/binance` and writes a labels run with the
+development run's coins, start and development start. It refuses to go on if any file was refused,
+failed or unreadable, and says what a re-run does for each: a refused or failed file was not
+written, so a re-run fetches it again; an unreadable file matches its checksum and is kept, so a
+re-run reads it again and fails the same way, and the message names the file and its checksum file
+to remove before the data step fetches it again. If there is no whole-span inputs run, it writes one
+from the labels run. When that labels run was already there, it first checks the archive on disk
+against the labels run's record, hashing each raw file: every file the labels run read must be on
+disk with the sha256 it recorded, and every file of its coins and span on disk must be one it read.
+Otherwise it refuses, naming each file, before the inputs run is built. It then checks both runs (checks 11 and 12, so a labels and inputs run
+built from different archive states is refused) and runs the prefix check (13),
+printing the rows it compared. An inputs run with no labels run is refused.
+
+The data step then prints, for each coin, how many archive files the archive does not publish in the
+whole span and how many of them fall from 2024-01-01 on, with the first and last missing day in the
+test span (a missing monthly funding file spans its month, up to `end`). The run step's
+report carries the same table, read from the whole-span labels run's record. The operator reads this
+list before the run step. Without a day's klines or metrics, the cascade windows over that day are
+not evaluated, so the labels censor each hour whose look-back or horizon reaches them (a klines gap
+also censors the hours whose trailing history holds it), and inputs read from those bars can be
+missing. A missing funding file changes no label, and the inputs run refuses one whose month starts
+before the coin's last bar, so one listed here falls after it. A file that should be there is fixed
+by removing both whole-span runs (`held-back/labels/<run>` and `held-back/panel-inputs/<run>`) and
+running the data step again, which asks the archive again for every file not on disk.
+
+The data step is safe to run again. A finished run (one with `complete.json`) is reused, not
+rebuilt. An archive file already present that matches its checksum is kept. A run folder without
+`complete.json` was interrupted. The step refuses it by name and asks for it to be removed, as it
+does two runs of one kind.
+
+The run step checks, in this order, and stops at the first failure:
+
+1. The plan loads (the rules above). Reads `panel/test.toml`.
+2. The running code is a commit with no uncommitted changes, and its code sha256 is the plan's
+   `code_sha256`. The imported package is the source tree of this checkout, not an installed copy,
+   and the checkout's `HEAD` is the commit the running code reports. Git is asked for untracked
+   files whatever `status.showUntrackedFiles` says, and an ignored `.py`, `.pyd` or `.so` file under
+   `python/tipping_point/src` is refused, since Python could import it although the code sha256
+   leaves it out. `panel/test.toml` is tracked at `HEAD`. Reads the git state, the list of tracked
+   files at `HEAD` and the ignored files under the source tree, and `uv.lock`.
+3. The data dir is not inside a `held-back` folder.
+4. No earlier test run ran this plan. Reads each `held-back/panel-test/*/manifest.json` and
+   `complete.json`, and refuses one whose `manifest.json` or `complete.json` cannot be read, and a
+   `held-back/panel-test` that is not a folder. A run of this plan's sha256 is refused whether it
+   finished or not.
+5. The development labels and inputs runs are finished, clean, of their own kind, and their
+   `manifest.json` sha256 is the plan's. The inputs run is bound, but the labels run need not be,
+   since its sha256 is pinned twice: by the plan and in the inputs run's manifest. Each was made by
+   a clean, approved commit, neither records a raised limit, the labels run records its coins and
+   its start and development start as dates, and the inputs run records the pinned labels run and
+   its sha256, and a sha256 for its labels grid and its inputs table. Reads both runs'
+   `manifest.json` and `complete.json`.
+6. The final sequence run is finished, clean and bound, its `manifest.json` sha256 is the plan's,
+   and its commit is approved. For a merged run: the run records its merged runs as bound, their
+   producer commit is approved, it names at least one merged run and none twice, and each merged run
+   is finished and bound, has the sha256 recorded for it, was made by an approved commit and is not
+   itself a merged run. The models the merged runs record, by name and sha256, are exactly the ones
+   the final run records. `plan.toml` and `ladder.toml` match the run's records, `plan.toml` matches
+   the plan's `plan_sha256` and `ladder.toml` its `ladder_sha256`. The plan is fit-only, its ladder
+   ends on 2023-12-31, and the final run and every merged run record the pinned development inputs
+   run (by its inputs table sha256) and labels grid (by its sha256). Reads those runs'
+   `manifest.json`, `complete.json`, `plan.toml` and `ladder.toml`.
+7. The evaluation plan, the arms, the pairs, the primary pair, the side and the horizon pass the
+   scoring core's own checks against the final run's plan.
+8. Each sequence arm's `encoders` are exactly the final run's model files for its seeds, each
+   sha256 is the one the final run's manifest records and the one its `complete.json` records, and
+   each file's bytes hash to it. The arm keeps those checked bytes, and the scoring core loads its
+   models from them, not from the files again. Reads the model files.
+9. `held-back/labels` and `held-back/panel-inputs` each hold at most one run, finished. Lists those
+   folders.
+10. Both are present, otherwise the data step has not run.
+11. The whole-span labels run is finished and clean. It was made by the running commit at the
+    plan's limit, its grid ends on `end`, its coins, start and development start are the
+    development run's, and each missing archive file it records is a file of one of its coins.
+    Reads its `manifest.json` and `complete.json`.
+12. The whole-span inputs run is finished, clean and bound, made by the running commit at the plan's
+    limit, and records the whole-span labels run and its `manifest.json` sha256. Both runs read the
+    same archive files: the files the labels run records as read (its `sources`, by URL and sha256)
+    are exactly the files the inputs run records as read (its `params.sources`), with the same
+    sha256, so no file the labels run records as missing was read by the inputs run, and none it
+    read is absent from the inputs run's list. Both stages read every klines, metrics and funding
+    file for the same coins over the same days, since the inputs run takes its coins, start and end
+    from the labels run, and each file is either read or recorded as not published, so equal lists
+    mean one archive state; the inputs run keeps no missing list of its own. Reads its
+    `manifest.json` and `complete.json`.
+13. The prefix check above, on the whole-span and development runs. It reads the four runs'
+    `manifest.json` and both inputs tables itself, and returns the sha256 of each. Those must be the
+    sha256 checks 5, 11 and 12 accepted, so the prefix check compared the runs the plan and the
+    records name. This is the first read of a held-back table.
+14. The whole-span grid and inputs table are then read again, once each, into memory. Their sha256
+    must be the recorded one, and their rows the same rows. The scores use these same bytes, so a
+    table changed on disk after the prefix check is refused here.
+15. The grid covers every coin at every hour of the fit span.
+
+Every check is made before any file is written. Only then does the run step write one run under
+`<data dir>/held-back/panel-test/<run id>/`, in this order:
+
+1. `manifest.json`, which records the plan's sha256; the running commit, its code sha256 and
+   `uv.lock`; the torch thread count, the final run's plan's `threads`; every run with its sha256
+   and the commit that made it (each merged run too); the tables the run will write, listed even
+   when the outcome turns out `inconclusive` and none is written; the tables read; the prefix
+   check's counts and sha256s; the missing archive files by coin; the installed torch, numpy and
+   pyarrow versions and the runtime; earlier test runs; the arms, pairs and rule;
+2. `test.toml`, the plan's text;
+3. `support.json`, computed from the labels and which rows have every input, with no model output,
+   before any score;
+4. if the support meets the rule, the score, pair and decide steps at the plan's thread count, then
+   `comparisons.parquet`, `scores.parquet`, `folds.parquet`, `rows.parquet` and one
+   `arm-<name>.parquet` for each arm; if it does not, the outcome is `inconclusive`, nothing is
+   scored, and none of these tables is written;
+5. `decision.json` and `report.md`, the report in plain words: the outcome, the rule as read, the
+   support by quarter, the primary and other pairs, the missing archive files by coin, the earlier
+   test runs and the provenance of every input, with the code sha256 and the thread count;
+6. `complete.json` last, with every file's sha256, the outcome and the models read.
+
+The sequence arms score the saved models of the final run. Every classical and rung arm, and every
+sequence arm's probe, is fitted again on the development hours by the running code. The code
+sha256 binds the source they run and `uv.lock`; the installed packages are not checked against the
+lock. The manifest and the report record the torch, numpy and pyarrow versions and the runtime a
+sequence run records (the CPU, its capability and the thread pins). A number that is not finite,
+such as the share of complete draws when no quarter is scoreable, is written as `null` in the JSON
+files and as `-` in the report.
+
+A run is finished only once `complete.json` exists. Each plan gets one test: a second run of the same
+plan is refused, finished or not, so an interrupted run cannot be re-run either; it stays on disk
+and is listed. A new plan has a new sha256, and every earlier test run under `held-back/panel-test`,
+with its plan's sha256 and outcome, goes into the new run's manifest and report.
+
+What the checks don't prove:
+
+- The store is not signed. A sha256 binds a file to a record, and a record to the plan, but anyone
+  who can write to the data dir can rewrite a run and its records together. The plan's pins catch
+  that only for the runs it pins, and only while the plan itself is trusted.
+- A clean, approved commit is not a reviewed commit. The checks show that a run was made by code in
+  the plan's list with no uncommitted changes, not that the code is right.
+- The plan names the commits of the runs it relies on, and the running code by its code sha256. The
+  commit that runs the test is recorded, not pinned: it must be clean, its code sha256 must be the
+  plan's, and the data step and the run step must share it, but it need not be in `approved`.
+- Deliberate local changes can still run code the sha256 does not cover, and none is caught: an
+  edited file marked `git update-index --skip-worktree` or `--assume-unchanged`, which git status
+  then reports clean; bytecode, which the check expects beside the sources and does not read: a
+  `.pyc` in `__pycache__` that no longer matches its source but that Python still loads (an
+  unchecked hash-based one, or one whose recorded size and time match), or a sourceless `.pyc` in
+  place of a module; a `git replace` ref, which changes what `HEAD`'s tree reads as; and
+  `PYTHONPATH`, a `.pth` file, `sitecustomize` or the folder the command is started from when it
+  lies outside the checkout, each of which can put other code ahead of the source tree.
+- The archive is assumed to have no writer while a step runs. The archive reader hashes a file and
+  parses it in separate opens, so a file swapped inside that window, or swapped and put back between
+  two reads, is not caught.
+- One test per plan is kept by the runs in one data dir only. A copy of the data dir, or another
+  data dir, does not see them.
+- A plan is identified by the sha256 of its bytes, so a plan with a changed comment or spacing is a
+  new plan.
+- Two run steps started at once on one data dir can both pass check 4 before either writes, and both
+  run.
+- Removing a test run's folder removes its record: a later run no longer lists it, and its plan can
+  run again.
+- The record of the tests made is the repository history of `panel/test.toml` together with the
+  earlier runs each test run's manifest lists, not the data dir alone.

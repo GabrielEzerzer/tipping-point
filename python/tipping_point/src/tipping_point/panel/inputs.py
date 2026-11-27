@@ -350,6 +350,7 @@ def ratios(
     symbol: str,
     start: date,
     end: date,
+    read: Mapping[str, str],
     *,
     limit: date = span.HELD_BACK,
 ) -> dict[str, np.ndarray]:
@@ -359,9 +360,19 @@ def ratios(
         if source.kind != "metrics":
             continue
         path = root / source.path
-        if not path.exists() and files.get(source.path, {}).get("status") == "missing":
-            continue
-        archive.verify(path)
+        if source.url not in read:
+            if not path.exists() and files.get(source.path, {}).get("status") == "missing":
+                continue
+            raise archive.ArchiveError(
+                f"{path}: the span's read did not record this metrics file, so the archive "
+                f"changed while the inputs were built"
+            )
+        digest = archive.verify(path)
+        if digest != read[source.url]:
+            raise archive.ArchiveError(
+                f"{path}: its sha256 is {digest}, not the {read[source.url]} recorded when the "
+                f"span was read, so the archive changed while the inputs were built"
+            )
         parts.append(read_ratio(path))
     if not parts:
         return {"create_time": np.empty(0, np.int64), "count_long_short_ratio": np.empty(0)}
@@ -478,7 +489,8 @@ def run(
         columns["funding_rate"] = funding_capped(columns["funding_rate"], columns["ts_ns"], settled)
         if stop.size and stop[-1] >= len(columns["close"]):
             raise ValueError("the grid holds an hour after the span's last bar")
-        found = ratios(root, files, symbol, start, end, limit=limit)
+        read = {s["url"]: s["sha256"] for s in got.sources}
+        found = ratios(root, files, symbol, start, end, read, limit=limit)
         ratio = on_grid(found, archive.day_ms(start), len(columns["ts_ns"]))
         sd_ret, b = scales[symbol]
         own.append(coin(columns, ratio, stop, sd_ret, b))
