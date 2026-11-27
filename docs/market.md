@@ -1685,10 +1685,13 @@ The data step then prints, for each coin, how many archive files the archive doe
 whole span and how many of them fall from 2024-01-01 on, with the first and last missing day in the
 test span (a missing monthly funding file spans its month, up to `end`). The run step's
 report carries the same table, read from the whole-span labels run's record. The operator reads this
-list before the run step: a missing file leaves its coin's hours on that day, or in that month for
-a funding file, without the inputs it feeds. A file that should be there is fixed by removing both
-whole-span runs (`held-back/labels/<run>` and `held-back/panel-inputs/<run>`) and running the data
-step again, which asks the archive again for every file not on disk.
+list before the run step. Without a day's klines or metrics, the cascade windows over that day are
+not evaluated, so the labels censor each hour whose look-back or horizon reaches them (a klines gap
+also censors the hours whose trailing history holds it), and inputs read from those bars can be
+missing. A missing funding file changes no label, and the inputs run refuses one whose month starts
+before the coin's last bar, so one listed here falls after it. A file that should be there is fixed
+by removing both whole-span runs (`held-back/labels/<run>` and `held-back/panel-inputs/<run>`) and
+running the data step again, which asks the archive again for every file not on disk.
 
 The data step is safe to run again. A finished run (one with `complete.json`) is reused, not
 rebuilt. An archive file already present that matches its checksum is kept. A run folder without
@@ -1699,7 +1702,12 @@ The run step checks, in this order, and stops at the first failure:
 
 1. The plan loads (the rules above). Reads `panel/test.toml`.
 2. The running code is a commit with no uncommitted changes, and its code sha256 is the plan's
-   `code_sha256`. Reads the git state, the list of tracked files at `HEAD` and `uv.lock`.
+   `code_sha256`. The imported package is the source tree of this checkout, not an installed copy,
+   and the checkout's `HEAD` is the commit the running code reports. Git is asked for untracked
+   files whatever `status.showUntrackedFiles` says, and an ignored `.py`, `.pyd` or `.so` file under
+   `python/tipping_point/src` is refused, since Python could import it although the code sha256
+   leaves it out. `panel/test.toml` is tracked at `HEAD`. Reads the git state, the list of tracked
+   files at `HEAD` and the ignored files under the source tree, and `uv.lock`.
 3. The data dir is not inside a `held-back` folder.
 4. No earlier test run ran this plan. Reads each `held-back/panel-test/*/manifest.json` and
    `complete.json`, and refuses one whose `manifest.json` or `complete.json` cannot be read, and a
@@ -1754,8 +1762,8 @@ Every check is made before any file is written. Only then does the run step writ
    `uv.lock`; the torch thread count, the final run's plan's `threads`; every run with its sha256
    and the commit that made it (each merged run too); the tables the run will write, listed even
    when the outcome turns out `inconclusive` and none is written; the tables read; the prefix
-   check's counts and sha256s; the missing archive files by coin; earlier test runs; the arms, pairs
-   and rule;
+   check's counts and sha256s; the missing archive files by coin; the installed torch, numpy and
+   pyarrow versions and the runtime; earlier test runs; the arms, pairs and rule;
 2. `test.toml`, the plan's text;
 3. `support.json`, computed from the labels and which rows have every input, with no model output,
    before any score;
@@ -1769,9 +1777,12 @@ Every check is made before any file is written. Only then does the run step writ
 6. `complete.json` last, with every file's sha256, the outcome and the models read.
 
 The sequence arms score the saved models of the final run. Every classical and rung arm, and every
-sequence arm's probe, is fitted again on the development hours by the running code, so the code
-sha256 binds what they compute. A number that is not finite, such as the share of complete draws
-when no quarter is scoreable, is written as `null` in the JSON files and as `-` in the report.
+sequence arm's probe, is fitted again on the development hours by the running code. The code
+sha256 binds the source they run and `uv.lock`; the installed packages are not checked against the
+lock. The manifest and the report record the torch, numpy and pyarrow versions and the runtime a
+sequence run records (the CPU, its capability and the thread pins). A number that is not finite,
+such as the share of complete draws when no quarter is scoreable, is written as `null` in the JSON
+files and as `-` in the report.
 
 A run is finished only once `complete.json` exists. Each plan gets one test: a second run of the same
 plan is refused, finished or not, so an interrupted run cannot be re-run either; it stays on disk
@@ -1788,6 +1799,13 @@ What the checks don't prove:
 - The plan names the commits of the runs it relies on, and the running code by its code sha256. The
   commit that runs the test is recorded, not pinned: it must be clean, its code sha256 must be the
   plan's, and the data step and the run step must share it, but it need not be in `approved`.
+- Deliberate local changes can still run code the sha256 does not cover, and none is caught: an
+  edited file marked `git update-index --skip-worktree` or `--assume-unchanged`, which git status
+  then reports clean; bytecode, which the check expects beside the sources and does not read: a
+  `.pyc` in `__pycache__` that no longer matches its source but that Python still loads (an
+  unchecked hash-based one, or one whose recorded size and time match), or a sourceless `.pyc` in
+  place of a module; a `git replace` ref, which changes what `HEAD`'s tree reads as; and
+  `PYTHONPATH`, a `.pth` file or `sitecustomize`, which can put other code ahead of the source tree.
 - One test per plan is kept by the runs in one data dir only. A copy of the data dir, or another
   data dir, does not see them.
 - A plan is identified by the sha256 of its bytes, so a plan with a changed comment or spacing is a

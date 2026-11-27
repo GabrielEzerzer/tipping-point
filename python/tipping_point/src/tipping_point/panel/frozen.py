@@ -296,23 +296,20 @@ def load(path: Path = PLAN) -> Test:
     )
 
 
-def code_sha256(root: Path = REPO) -> str:
+def _git_at(root: Path, *args: str) -> str:
     env = {key: value for key, value in os.environ.items() if key not in _git._REDIRECTS}
     try:
-        out = subprocess.run(
-            ["git", "ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", *CODE_PATHS],
-            cwd=root,
-            env=env,
-            capture_output=True,
-            check=True,
-        ).stdout
+        out = subprocess.run(["git", *args], cwd=root, env=env, capture_output=True, check=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ValueError(
-            f"the running code's sha256 needs git and the repository at {root}: {exc}"
+            f"the running code's check needs git and the repository at {root}: {exc}"
         ) from None
-    lines = sorted(
-        line for line in out.decode("utf-8").split("\0") if line and _path(line) != PLAN_FILE
-    )
+    return out.stdout.decode("utf-8")
+
+
+def code_sha256(root: Path = REPO) -> str:
+    out = _git_at(root, "ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", *CODE_PATHS)
+    lines = sorted(line for line in out.split("\0") if line and _path(line) != PLAN_FILE)
     for path in CODE_PATHS:
         if not any(_path(line) == path or _path(line).startswith(path + "/") for line in lines):
             raise ValueError(
@@ -325,6 +322,30 @@ def _path(line: str) -> str:
     return line.split("\t", 1)[1]
 
 
+def checkout(commit: str, root: Path = REPO) -> None:
+    head = _git_at(root, "rev-parse", "HEAD").strip()
+    if head != commit:
+        raise ValueError(f"{root}: HEAD is {head}, not the running code's commit {commit}")
+    if _git_at(root, "status", "--porcelain", "--untracked-files=all"):
+        raise ValueError(
+            f"{root}: the checkout has uncommitted changes or untracked files; the test runs "
+            f"only from a clean commit"
+        )
+    ignored = _git_at(
+        root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", CODE_PATHS[0]
+    )
+    loadable = sorted(p for p in ignored.split("\0") if p.endswith((".py", ".pyd", ".so")))
+    if loadable:
+        raise ValueError(
+            f"{root}: ignored files Python could import sit in the source tree, outside the code "
+            f"sha256: {', '.join(loadable)}"
+        )
+    if not _git_at(root, "ls-tree", "--full-tree", "--name-only", "HEAD", "--", PLAN_FILE):
+        raise ValueError(
+            f"{root}: HEAD does not track {PLAN_FILE}; the test runs only from a committed plan"
+        )
+
+
 def running(test: Test) -> dict[str, Any]:
     found = io.code_version()
     if not found.get("git_sha") or found.get("dirty") is not False:
@@ -332,6 +353,14 @@ def running(test: Test) -> dict[str, Any]:
             f"the test runs only from a clean commit: the running code is commit "
             f"{found.get('git_sha')} with dirty {found.get('dirty')}"
         )
+    package = Path(__file__).resolve().parents[1]
+    source = io._source_tree(package)
+    if source is None or source.resolve() != REPO / "python" / "tipping_point" / "pyproject.toml":
+        raise ValueError(
+            f"the test runs only from the source tree of the checkout at {REPO}, and the "
+            f"imported package {package} is not it"
+        )
+    checkout(found["git_sha"])
     digest = code_sha256()
     if digest != test.code_sha256:
         raise ValueError(
@@ -871,6 +900,10 @@ def checked(data_dir: Path, path: Path = PLAN) -> Checked:
         "limit": test.limit.isoformat(),
         "code": code,
         "threads": plan.threads,
+        "torch": torch.__version__,
+        "numpy": np.__version__,
+        "pyarrow": pa.__version__,
+        "runtime": sequence.runtime(),
         "approved": list(test.approved),
         "runs": {
             "labels": {**asdict(test.labels), "commit": dev.commits["labels"]},
@@ -1074,7 +1107,10 @@ def report(out: Mapping[str, Any], c: Checked, run_id: str, seconds: float) -> s
         "## Missing archive files",
         "",
         "Files the archive did not publish when the data step fetched it, from the whole-span "
-        "labels run's record; the labels censor the hours they would have covered.",
+        "labels run's record. Without a day's klines or metrics the cascade windows over that "
+        "day are not evaluated, so the labels censor each hour whose look-back or horizon "
+        "reaches them, and inputs read from those bars can be missing. A funding file changes "
+        "no label, and the inputs run refuses one missing before the coin's last bar.",
         "",
         f"| coin | missing in all | missing from {span.HELD_BACK} | first | last |",
         "|---|---|---|---|---|",
@@ -1103,6 +1139,9 @@ def report(out: Mapping[str, Any], c: Checked, run_id: str, seconds: float) -> s
         f"- Running code: commit {code['git_sha']} (clean), code sha256 {code['code_sha256']} "
         f"(the plan's), uv.lock {code['uv_lock_sha256']}, torch threads {p['threads']}. This code "
         f"refitted every classical and rung arm and every probe.",
+        f"- Installed packages, recorded and not checked against uv.lock: torch {p['torch']}, "
+        f"numpy {p['numpy']}, pyarrow {p['pyarrow']}; CPU {p['runtime']['cpu']}, capability "
+        f"{p['runtime']['capability']}.",
     ]
     for key, label in (("labels", "labels"), ("inputs", "inputs")):
         r = runs[key]

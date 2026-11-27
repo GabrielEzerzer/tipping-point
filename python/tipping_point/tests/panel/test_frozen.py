@@ -4,6 +4,7 @@
 
 import json
 import math
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
@@ -37,6 +38,7 @@ OTHER = "f" * 40
 ZERO = "0" * 64
 CODE = "c0de" * 16
 REAL_CODE = frozen.code_sha256
+REAL_CHECKOUT = frozen.checkout
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 START, DEV, END, LAST = date(2023, 8, 10), date(2023, 9, 30), date(2023, 12, 31), date(2024, 1, 5)
 LIMIT = date(2024, 2, 1)
@@ -192,6 +194,7 @@ def committed() -> Iterator[None]:
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(io, "code_version", lambda: {"git_sha": SHA, "dirty": False})
         patch.setattr(frozen, "code_sha256", lambda *args: CODE)
+        patch.setattr(frozen, "checkout", lambda *args: None)
         patch.setattr(labels, "grid", planted)
         yield
 
@@ -587,6 +590,57 @@ def test_the_code_sha256_covers_the_package_and_its_locks_and_not_the_plan(
         REAL_CODE(tmp_path)
 
 
+def git_out(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, check=True, text=True
+    ).stdout.strip()
+
+
+def test_the_checkout_is_the_running_commit_with_nothing_untracked_or_loadable_hidden(
+    tmp_path: Path,
+) -> None:
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.name", "Test")
+    git(tmp_path, "config", "user.email", "test@example.com")
+    git(tmp_path, "config", "core.autocrlf", "false")
+    git(tmp_path, "config", "status.showUntrackedFiles", "no")
+    package = "python/tipping_point/src/tipping_point"
+    put(tmp_path / ".gitignore", "__pycache__/\nshadow/\n")
+    for name in (f"{package}/panel/compare.py", frozen.PLAN_FILE):
+        put(tmp_path / name, "one\n")
+    git(tmp_path, "add", ".gitignore", f"{package}/panel/compare.py", frozen.PLAN_FILE)
+    git(tmp_path, "commit", "-q", "-m", "first")
+    head = git_out(tmp_path, "rev-parse", "HEAD")
+    put(tmp_path / f"{package}/panel/__pycache__/compare.cpython-314.pyc", "bytes")
+    REAL_CHECKOUT(head, tmp_path)
+    with pytest.raises(ValueError, match=f"HEAD is {head}, not the running code's commit {SHA}"):
+        REAL_CHECKOUT(SHA, tmp_path)
+    shadow = put(tmp_path / f"{package}/panel/compare/__init__.py", "")
+    assert git_out(tmp_path, "status", "--porcelain") == ""
+    with pytest.raises(ValueError, match="uncommitted changes or untracked files"):
+        REAL_CHECKOUT(head, tmp_path)
+    shadow.unlink()
+    put(tmp_path / f"{package}/shadow/__init__.py", "")
+    with pytest.raises(ValueError, match=f"Python could import .*{package}/shadow/__init__.py"):
+        REAL_CHECKOUT(head, tmp_path)
+    shutil.rmtree(tmp_path / f"{package}/shadow")
+    git(tmp_path, "rm", "-q", "--cached", frozen.PLAN_FILE)
+    put(tmp_path / ".gitignore", f"__pycache__/\nshadow/\n{frozen.PLAN_FILE}\n")
+    git(tmp_path, "add", ".gitignore")
+    git(tmp_path, "commit", "-q", "-m", "plan ignored")
+    head = git_out(tmp_path, "rev-parse", "HEAD")
+    assert (tmp_path / frozen.PLAN_FILE).is_file()
+    with pytest.raises(ValueError, match=r"HEAD does not track .*test\.toml"):
+        REAL_CHECKOUT(head, tmp_path)
+
+
+def test_the_plan_path_and_the_code_sha256_are_this_checkouts() -> None:
+    assert frozen.PLAN == frozen.REPO / frozen.PLAN_FILE
+    source = io._source_tree(Path(frozen.__file__).resolve().parents[1])
+    assert source == frozen.REPO / "python" / "tipping_point" / "pyproject.toml"
+    assert re.fullmatch(r"[0-9a-f]{64}", REAL_CODE())
+
+
 @pytest.mark.parametrize("damage", ["manifest", "complete", "file"])
 def test_an_unreadable_earlier_run_is_refused_before_any_held_back_read(
     world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
@@ -733,6 +787,9 @@ def test_the_run_step_writes_the_cores_decision_and_tables(world: World, tested:
     assert params["plan_sha256"] == frozen.load(tested.path).sha256
     assert params["code"]["git_sha"] == SHA and params["earlier"] == []
     assert params["code"]["code_sha256"] == CODE and params["threads"] == 1
+    installed = {"torch": torch.__version__, "numpy": np.__version__, "pyarrow": pa.__version__}
+    assert {k: params[k] for k in installed} == installed
+    assert params["runtime"] == json.loads(json.dumps(sequence.runtime()))
     assert params["runs"]["final"]["pieces"] == [pin(p) | {"commit": SHA} for p in world.pieces]
     assert params["runs"]["whole_labels"]["commit"] == params["runs"]["whole_inputs"]["commit"]
     assert params["runs"]["whole_inputs"]["commit"] == SHA
@@ -740,6 +797,7 @@ def test_the_run_step_writes_the_cores_decision_and_tables(world: World, tested:
     report = (tested.run / "report.md").read_text(encoding="utf-8")
     assert f"**{decision['outcome']}**" in report and "## Primary" in report
     assert f"code sha256 {CODE}" in report and "| BTCUSDT | 0 | 0 | - | - |" in report
+    assert f"not checked against uv.lock: torch {torch.__version__}" in report
     assert (tested.run / "test.toml").read_bytes() == tested.path.read_bytes()
 
 
@@ -1210,6 +1268,14 @@ def guards(world: World) -> dict[str, tuple[Break, str]]:
             ),
             "the test runs only from a clean commit: the running code is commit None",
         ),
+        "installed copy": (
+            lambda data, plan, patch: patch.setattr(io, "_source_tree", lambda package: None),
+            "the test runs only from the source tree of the checkout at",
+        ),
+        "head not the commit": (
+            lambda data, plan, patch: patch.setattr(frozen, "checkout", REAL_CHECKOUT),
+            f"HEAD is [0-9a-f]{{40}}, not the running code's commit {SHA}",
+        ),
         "code sha": (
             plain(lambda d, p: p.__setitem__("code_sha256", ZERO)),
             f"not the plan's code_sha256 {ZERO}",
@@ -1445,6 +1511,8 @@ NAMES = [
     "dirty code",
     "unknown code state",
     "no commit",
+    "installed copy",
+    "head not the commit",
     "code sha",
     "dev labels coins",
     "dev labels start",
