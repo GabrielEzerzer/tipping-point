@@ -1381,3 +1381,71 @@ held-back day is opened, and the frozen plan pins every arm's configuration. The
 against the classical arm, the `vol` variant, and `classic` as secondary pairs. It is not the frozen
 test. A development comparison between configurations chosen on the development span is not
 evidence.
+
+`panel/heldback.py` is the scoring core of the held-back test; it has no command of its own. It
+builds two plans in code from the development ladder plan and the test span's last day. The cut is
+the day after the development plan's last day, 2024-01-01 for the shipped plan, and cannot be given:
+the final sequence run saves its models under the fold index that follows the development quarters,
+trained on the hours before that same day, so the fit and the models it loads cannot disagree on the
+cut when the models were saved by a run of this same development plan. The core takes the record of
+saved models as given; binding that record to the plan's sha256 is the command's part. A plan file
+cannot hold either plan: `ladder.load` refuses a file that names `cuts`, a span reaching the
+held-back days and `forward_first = 0`. A development plan whose `gap_days` is shorter than the
+inputs' look-back, the longest horizon and the labels' lead and look-back need is refused by the cut
+too, with the loader's wording.
+
+- The fit plan runs from the development start to the test span's last day, with fold edges cut by
+  code at the development start, 2024-01-01 and the day after the test span (`cuts`), and
+  `forward_first = 1`. Its forward fold 1 trains on hours more than `gap_days` before 2024-01-01
+  and scores the whole test span. Its sequence plan fits `forward` and fold 1 only. A plan cut by
+  code refuses `loqo`, whose fold 0 would train on the test span, and the scoring refuses a
+  sequence plan with any other scheme or fold.
+- The evaluation plan runs from 2024-01-01 to the test span's last day, with calendar quarters as
+  folds and `forward_first = 0`. For a span ending 2026-09-30 that is eleven quarters, each cut
+  into seven 14-day blocks by the bootstrap.
+
+The grid is every coin at every hour, a coin that does not trade at an hour keeping its row with
+missing inputs and censored labels, so the support, the pairing and the scoring each refuse a grid
+that lacks any hour of the span they read, or is not that rectangle, before any row is filtered;
+a run checks the whole fit span before the support.
+
+Each arm's configuration is given, not chosen, and each arm is fitted once on the fit plan's
+training rows and scores only the test span. A sequence arm names its model, variant, readout, c and
+seeds. Its seeds must be given and distinct, its model and variant ones the plan trains, and a JEPA
+or twin arm's readout and c ones from the plan's grid; the supervised model takes neither. An arm
+that breaks one of these is refused before anything is fitted. Its models come from the final
+sequence run, under that run's fold index (the number of development quarters), each checked
+against the run's recorded sha256 before it is used, and are probed through the same code as
+`scores`. A classical arm is a fixed configuration exported through
+the same code as `classical --fixed`. A ladder rung is fitted at the ladder plan's c. Every
+standardisation statistic, probe and logistic fit reads training rows only, so a label or input
+from the test span reaches no fitted quantity; test-span inputs reach only the test rows' own
+windows. A development plan that ends the day before a development quarter, with that quarter's
+last day as the end, reproduces that quarter's `forward` scores bit for bit: the training and test
+rows are the same rows, encoded in the same batches. Over a longer test span the test rows are
+encoded in batches of another make-up, so a score can differ in its last float32 bits from the one a
+shorter span gives. No code that ranks or chooses a configuration is called. The scores are then
+assigned to the evaluation plan's quarters and paired by `panel compare`'s code, with its block
+bootstrap, draws and seed, on the pairs given, one of them primary with its side (`long`, `short` or
+`long+short`) and horizon.
+
+The decision reads a rule record that the written plan fills: which lower bound (`q05` or `q025`),
+whether it is read on all draws or on complete draws, the minimum number of scoreable quarters, the
+minimum share of complete draws, the minimum number of blocks holding a positive for a quarter and
+side to count as supported, and the minimum number of supported quarters. The code holds no values
+for them, and allows a bound read from a single draw that can give it, so the written plan's minimum
+share of complete draws is what keeps the quantile meaningful. The support is computed first, from
+the labels of the rows the comparison keeps and the bootstrap draws alone, without any score. For
+each quarter and side it counts the blocks holding a positive and whether the quarter has both
+classes, and from the draws it takes the share of complete
+draws, defined as in `panel compare` (for `long+short`, both sides on their common quarters). It
+also counts the draws on which the bound the rule reads can be a number: on all draws, those that
+keep both classes in at least one scoreable quarter (for `long+short`, at least one common quarter
+on each side); on complete draws, the complete draws. Any threshold the support misses, or no draw
+that can give the bound, makes the outcome `inconclusive`, with each cause named, and no score is
+computed. Otherwise the
+outcome is `supported` when the primary pair's chosen lower bound is above zero and `not supported`
+when it is not; there is no outcome for the other direction. The decision returns the outcome with
+the support's per-quarter counts and the primary row's estimate, bounds, shares and quarter counts,
+and refuses a primary row whose share of complete draws, quarters scored or scheduled, or counts of
+draws giving each bound differ from the support's.

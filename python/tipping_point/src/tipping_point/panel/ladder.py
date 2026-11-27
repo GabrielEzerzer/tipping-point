@@ -9,6 +9,7 @@ import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,22 @@ class Plan:
     rungs: tuple[Rung, ...]
     comparisons: tuple[tuple[str, str], ...]
     external: tuple[str, Path, str] | None = None
+    cuts: tuple[date, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.cuts is None:
+            return
+        ordered = all(a < b for a, b in pairwise(self.cuts))
+        if not (
+            len(self.cuts) >= 3
+            and ordered
+            and self.cuts[0] == self.start
+            and self.cuts[-1] == self.end + timedelta(days=1)
+        ):
+            raise ValueError(
+                f"cuts {list(self.cuts)} must rise from the span's first day to the day after its "
+                f"last"
+            )
 
     @property
     def columns(self) -> tuple[str, ...]:
@@ -77,6 +94,8 @@ class Plan:
         return (*(rung.name for rung in self.rungs), *extra)
 
     def first_fold(self, scheme: str) -> int:
+        if self.cuts is not None and scheme != "forward":
+            raise ValueError(f"a plan cut by code fits only forward, not {scheme}")
         return self.forward_first if scheme == "forward" else 0
 
 
@@ -85,8 +104,22 @@ def needed_gap_ns(horizons: Sequence[int]) -> int:
     return inputs.LOOKBACK_NS + longest + labels.LEAD_NS + labels.PAST_HOURS * labels.HOUR_NS
 
 
+def gap_problem(gap_days: int, horizons: Sequence[int]) -> str | None:
+    if gap_days < 0:
+        return f"gap_days = {gap_days} (must not be negative)"
+    if gap_days * DAY_NS < needed_gap_ns(horizons):
+        days = needed_gap_ns(horizons) / DAY_NS
+        return (
+            f"gap_days = {gap_days}, shorter than the {days:.2f} days that the inputs' "
+            "look-back, the longest horizon and the labels' lead and look-back need"
+        )
+    return None
+
+
 def load(path: Path = PLAN, text: str | None = None) -> Plan:
     raw = tomllib.loads(path.read_text(encoding="utf-8") if text is None else text)
+    if "cuts" in raw or "cuts" in raw.get("folds", {}):
+        raise ValueError(f"{path}: unknown or invalid: cuts (only code cuts a plan)")
     external = raw.get("external")
     plan = Plan(
         start=raw["start"],
@@ -135,14 +168,9 @@ def load(path: Path = PLAN, text: str | None = None) -> Plan:
     for name, value in (("block_days", plan.block_days), ("draws", plan.draws)):
         if value <= 0:
             problems.append(f"{name} = {value} (must be above 0)")
-    if plan.gap_days < 0:
-        problems.append(f"gap_days = {plan.gap_days} (must not be negative)")
-    elif plan.gap_days * DAY_NS < needed_gap_ns(plan.horizons):
-        days = needed_gap_ns(plan.horizons) / DAY_NS
-        problems.append(
-            f"gap_days = {plan.gap_days}, shorter than the {days:.2f} days that the inputs' "
-            "look-back, the longest horizon and the labels' lead and look-back need"
-        )
+    gap = gap_problem(plan.gap_days, plan.horizons)
+    if gap is not None:
+        problems.append(gap)
     if len(set(plan.names)) != len(plan.names) or not plan.start <= plan.end:
         problems.append("names must be unique and the span must not end before it starts")
     elif not 1 <= plan.forward_first < len(bounds(plan)) - 1:
@@ -155,6 +183,8 @@ def load(path: Path = PLAN, text: str | None = None) -> Plan:
 
 
 def bounds(plan: Plan) -> np.ndarray:
+    if plan.cuts is not None:
+        return np.array([labels.ns(d) for d in plan.cuts], np.int64)
     edges = [plan.start]
     q = date(plan.start.year, 3 * ((plan.start.month - 1) // 3) + 1, 1)
     while True:
@@ -235,12 +265,19 @@ def standardise(train: np.ndarray, test: np.ndarray, clip: float) -> tuple[np.nd
     return np.clip((train - mu) / sd, -clip, clip), np.clip((test - mu) / sd, -clip, clip)
 
 
+def block_counts(
+    label: np.ndarray, block: np.ndarray, nblocks: int
+) -> tuple[np.ndarray, np.ndarray]:
+    p = np.bincount(block[label], minlength=nblocks).astype(np.float64)
+    n = np.bincount(block[~label], minlength=nblocks).astype(np.float64)
+    return p, n
+
+
 def pair_counts(
     score: np.ndarray, label: np.ndarray, block: np.ndarray, nblocks: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     positive, negative = label, ~label
-    p = np.bincount(block[positive], minlength=nblocks).astype(np.float64)
-    n = np.bincount(block[negative], minlength=nblocks).astype(np.float64)
+    p, n = block_counts(label, block, nblocks)
     counts = np.zeros((nblocks, nblocks))
     sp, bp = score[positive], block[positive]
     for b in range(nblocks):
