@@ -3,7 +3,9 @@
 # broken record, one test per plan, and every development command refusing the test's runs.
 
 import json
+import math
 import shutil
+import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import date
@@ -14,7 +16,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from market_planted import Vision, vision
+import torch
+from market_planted import Vision, checksum, vision
 from tipping_point.ising import io
 from tipping_point.panel import (
     fetch,
@@ -32,6 +35,8 @@ from tipping_point.panel.__main__ import main
 SHA = "0123456789abcdef0123456789abcdef01234567"
 OTHER = "f" * 40
 ZERO = "0" * 64
+CODE = "c0de" * 16
+REAL_CODE = frozen.code_sha256
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 START, DEV, END, LAST = date(2023, 8, 10), date(2023, 9, 30), date(2023, 12, 31), date(2024, 1, 5)
 LIMIT = date(2024, 2, 1)
@@ -186,6 +191,7 @@ def committed() -> Iterator[None]:
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(io, "code_version", lambda: {"git_sha": SHA, "dirty": False})
+        patch.setattr(frozen, "code_sha256", lambda *args: CODE)
         patch.setattr(labels, "grid", planted)
         yield
 
@@ -226,6 +232,7 @@ def world(tmp_path_factory: pytest.TempPathFactory) -> World:
     encoders = record(final / "manifest.json")["params"]["encoders"]
     plan = {
         "end": LAST,
+        "code_sha256": CODE,
         "approved": [SHA],
         "pairs": [["jepa", "window"], ["jepa", "full"], ["full", "vol"]],
         "primary": ["jepa", "full"],
@@ -315,10 +322,12 @@ def tested(world: World, tmp_path_factory: pytest.TempPathFactory) -> Done:
     return Done(data, path, run, out, expected)
 
 
-def test_with_no_frozen_plan_both_steps_refuse(
+def test_a_frozen_plan_loads_and_with_none_both_steps_refuse(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert not frozen.PLAN.exists()
+    if frozen.PLAN.exists():
+        assert frozen.load().path == frozen.PLAN
+        return
     for step in ("data", "run"):
         assert main(["test", step, "--data-dir", str(tmp_path / "out")]) == 1
         assert "the test plan is not frozen" in capsys.readouterr().err
@@ -334,6 +343,10 @@ def test_the_data_step_makes_the_whole_span_runs_under_the_held_back_root(world:
         params = record(run / "manifest.json")["params"]
         assert params["limit"] == str(LIMIT) and params["end"] == str(LAST)
     assert world.made["prefix"]["rows"]["grid"] > 0
+    assert world.made["missing"] == [
+        {"symbol": s, "missing": 0, "missing_in_test": 0, "first": None, "last": None}
+        for s in SYMBOLS
+    ]
     assert [p.name for p in (world.base / "labels").iterdir()] == [world.dev_labels.name]
 
 
@@ -386,6 +399,308 @@ def test_the_tables_read_for_scoring_are_the_recorded_bytes(world: World) -> Non
             frozen.read_tables(labels_dir, inputs_dir, m, c, ["vol_1h"])
 
 
+def held_free(world: World, folder: Path) -> Path:
+    data = copy(world, folder)
+    shutil.rmtree(data / HELD)
+    return data
+
+
+def served(world: World, answers: dict[str, Any]) -> Callable[[str], bytes | None]:
+    def get(url: str) -> bytes | None:
+        for end, answer in answers.items():
+            if url.endswith(end):
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        return world.fake.files.get(url)
+
+    return get
+
+
+def test_the_data_step_says_what_a_re_run_does_for_each_bad_download(
+    world: World, tmp_path: Path
+) -> None:
+    data = held_free(world, tmp_path)
+    path = put(tmp_path / "test.toml", toml(world.plan))
+    junk = b"not a zip"
+    late = {"ETHUSDT-metrics-2024-01-05.zip.CHECKSUM": None}
+    get = served(
+        world,
+        late
+        | {
+            "BTCUSDT-1m-2024-01-02.zip": OSError("connection reset"),
+            "ETHUSDT-1m-2024-01-03.zip": b"changed",
+            "BTCUSDT-metrics-2024-01-04.zip.CHECKSUM": checksum(
+                "BTCUSDT-metrics-2024-01-04.zip", junk
+            ),
+            "BTCUSDT-metrics-2024-01-04.zip": junk,
+        },
+    )
+    kept = data / HELD / "archives" / "binance" / "metrics" / "BTCUSDT"
+    kept = kept / "BTCUSDT-metrics-2024-01-04.zip"
+    with pytest.raises(ValueError) as caught:
+        frozen.data(data, get, path)
+    message = str(caught.value)
+    assert message.startswith("no labels run was made: ")
+    assert "1 refused (the first klines/ETHUSDT/ETHUSDT-1m-2024-01-03.zip)" in message
+    assert "1 failed (the first klines/BTCUSDT/BTCUSDT-1m-2024-01-02.zip)" in message
+    assert "a re-run fetches it again" in message
+    assert "1 unreadable" in message and f"{kept} and {kept}.CHECKSUM" in message
+    assert kept.is_file() and not (data / HELD / "labels").exists()
+    with pytest.raises(ValueError) as caught:
+        frozen.data(data, served(world, late), path)
+    assert "refused" not in str(caught.value) and "failed" not in str(caught.value)
+    assert f"{kept} and {kept}.CHECKSUM" in str(caught.value)
+    kept.unlink()
+    kept.with_name(kept.name + ".CHECKSUM").unlink()
+    out = frozen.data(data, served(world, late), path)
+    assert out["missing"] == [
+        {"symbol": "BTCUSDT", "missing": 0, "missing_in_test": 0, "first": None, "last": None},
+        {
+            "symbol": "ETHUSDT",
+            "missing": 1,
+            "missing_in_test": 1,
+            "first": "2024-01-05",
+            "last": "2024-01-05",
+        },
+    ]
+
+
+def test_the_missing_files_table_reads_each_coins_days_from_2024_on() -> None:
+    base = "https://data.binance.vision/data/futures/um"
+    manifest = {
+        "params": {"symbols": SYMBOLS},
+        "missing_sources": [
+            f"{base}/daily/klines/BTCUSDT/1m/BTCUSDT-1m-2023-12-31.zip",
+            f"{base}/daily/metrics/BTCUSDT/BTCUSDT-metrics-2024-01-03.zip",
+            f"{base}/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2024-01.zip",
+        ],
+    }
+    assert frozen.missing_files(manifest, LAST, "x") == [
+        {
+            "symbol": "BTCUSDT",
+            "missing": 3,
+            "missing_in_test": 2,
+            "first": "2024-01-01",
+            "last": "2024-01-05",
+        },
+        {"symbol": "ETHUSDT", "missing": 0, "missing_in_test": 0, "first": None, "last": None},
+    ]
+    for urls, problem in (
+        ([f"{base}/daily/klines/XRPUSDT/1m/XRPUSDT-1m-2024-01-02.zip"], "'.*XRPUSDT.*' is not"),
+        ([3], "3 is not an archive file"),
+        ("x", "it records no list of missing archive files"),
+    ):
+        with pytest.raises(ValueError, match=f"x: {problem}"):
+            frozen.missing_files(manifest | {"missing_sources": urls}, LAST, "x")
+
+
+def test_the_data_step_refuses_an_inputs_run_with_no_labels_run(
+    world: World, tmp_path: Path
+) -> None:
+    data = copy(world, tmp_path)
+    shutil.rmtree(data / HELD / "labels")
+    path = put(tmp_path / "test.toml", toml(world.plan))
+    with pytest.raises(ValueError, match="is a whole-span inputs run with no whole-span labels"):
+        frozen.data(data, lambda url: pytest.fail(url), path)
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda p: p["pairs"].append(["jepa", "nope"]), "pair jepa - nope names an unknown arm"),
+        (lambda p: p.__setitem__("primary", ["window", "vol"]), "is not one of the pairs"),
+        (lambda p: p.__setitem__("horizon", 6), "horizon 6 "),
+        (lambda p: p["arms"][1].__setitem__("readout", "median"), "the arms: arm window"),
+        (lambda p: p["arms"][0].__setitem__("seeds", [3]), "not the final run's models"),
+    ],
+)
+def test_the_data_step_refuses_what_the_run_step_would_before_it_fetches(
+    world: World, tmp_path: Path, change: Callable[[dict[str, Any]], Any], problem: str
+) -> None:
+    data = held_free(world, tmp_path)
+    plan = changed(world.plan)
+    change(plan)
+    path = put(tmp_path / "test.toml", toml(plan))
+    with pytest.raises(ValueError, match=problem):
+        frozen.data(data, lambda url: pytest.fail(url), path)
+    assert not (data / HELD).exists()
+
+
+def test_the_test_runs_only_the_code_the_plan_names(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = put(tmp_path / "test.toml", toml(changed(world.plan, code_sha256=ZERO)))
+    monkeypatch.setattr(frozen, "development", lambda *args: pytest.fail("read a run"))
+    data = tmp_path / "absent"
+    for step in (
+        lambda: frozen.data(data, lambda url: pytest.fail(url), path),
+        lambda: frozen.run(data, path),
+    ):
+        with pytest.raises(ValueError, match=f"is {CODE}, not the plan's code_sha256 {ZERO}"):
+            step()
+    assert not data.exists()
+
+
+def git(root: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True)
+
+
+def test_the_code_sha256_covers_the_package_and_its_locks_and_not_the_plan(
+    tmp_path: Path,
+) -> None:
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.name", "Test")
+    git(tmp_path, "config", "user.email", "test@example.com")
+    git(tmp_path, "config", "core.autocrlf", "false")
+    source = "python/tipping_point/src/tipping_point/panel/frozen.py"
+    kept = [
+        frozen.PLAN_FILE,
+        "docs/market.md",
+        "python/tipping_point/tests/panel/test_frozen.py",
+        "notebooks/run.py",
+    ]
+    changing = [source, "python/tipping_point/pyproject.toml", "pyproject.toml", "uv.lock"]
+
+    def commit(name: str, text: str) -> str:
+        put(tmp_path / name, text)
+        git(tmp_path, "add", name)
+        git(tmp_path, "commit", "-q", "-m", name)
+        return REAL_CODE(tmp_path)
+
+    for name in [*changing, *kept]:
+        put(tmp_path / name, "one\n")
+        git(tmp_path, "add", name)
+    git(tmp_path, "commit", "-q", "-m", "first")
+    digest = REAL_CODE(tmp_path)
+    for name in kept:
+        assert commit(name, "two\n") == digest, name
+    for name in changing:
+        new = commit(name, "two\n")
+        assert new != digest, name
+        digest = new
+    put(tmp_path / source, "uncommitted\n")
+    assert REAL_CODE(tmp_path) == digest
+    git(tmp_path, "rm", "-q", "uv.lock")
+    git(tmp_path, "commit", "-q", "-m", "no lock")
+    with pytest.raises(ValueError, match=r"HEAD tracks no uv.lock"):
+        REAL_CODE(tmp_path)
+
+
+@pytest.mark.parametrize("damage", ["manifest", "complete", "file"])
+def test_an_unreadable_earlier_run_is_refused_before_any_held_back_read(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    data, path = copy(world, tmp_path), put(tmp_path / "test.toml", toml(world.plan))
+    folder = data / HELD / frozen.DOMAIN
+    if damage == "file":
+        put(folder, "x")
+    else:
+        run = folder / "20240101T000000Z-test"
+        manifest = json.dumps({"params": {"plan_sha256": ZERO}})
+        put(run / "manifest.json", "{" if damage == "manifest" else manifest)
+        if damage == "complete":
+            put(run / "complete.json", "{")
+    monkeypatch.setattr(prefix, "check", lambda *args: pytest.fail("prefix"))
+    monkeypatch.setattr(frozen, "read_tables", lambda *args: pytest.fail("tables"))
+    with pytest.raises(
+        ValueError, match="is not a folder" if damage == "file" else "cannot be read"
+    ):
+        frozen.run(data, path)
+    assert folder.is_file() if damage == "file" else len(list(folder.iterdir())) == 1
+
+
+def test_the_tables_read_for_scoring_are_one_grid_and_its_rows(world: World) -> None:
+    labels_dir, inputs_dir = world.made["labels"], world.made["inputs"]
+    manifest = record(inputs_dir / "manifest.json")
+    complete = record(inputs_dir / "complete.json")
+    name = Path(manifest["params"]["labels_grid"]["file"]).name
+    for file in (f"other/{name}", f"grid/x/{name}", name):
+        moved = json.loads(json.dumps(manifest))
+        moved["params"]["labels_grid"]["file"] = file
+        with pytest.raises(ValueError, match="is not a grid table"):
+            frozen.read_tables(labels_dir, inputs_dir, moved, complete, ["vol_1h"])
+    other = json.loads(json.dumps(manifest))
+    other["params"]["labels_grid"] = record(world.dev_inputs / "manifest.json")["params"][
+        "labels_grid"
+    ]
+    with pytest.raises(ValueError, match="rows are not its grid's rows"):
+        frozen.read_tables(world.dev_labels, inputs_dir, other, complete, ["vol_1h"])
+
+
+def test_a_table_changed_after_the_prefix_check_is_refused_before_the_run_writes(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data, path = copy(world, tmp_path), put(tmp_path / "test.toml", toml(world.plan))
+    table = whole(data, world, "inputs") / "inputs.parquet"
+    real = prefix.check
+
+    def then_changed(*args: Any) -> Any:
+        found = real(*args)
+        before = table.read_bytes()
+        pq.write_table(pq.read_table(table), table, compression="gzip")
+        assert table.read_bytes() != before
+        return found
+
+    monkeypatch.setattr(prefix, "check", then_changed)
+    with pytest.raises(ValueError, match="the whole-span inputs table: its sha256 differs"):
+        frozen.run(data, path)
+    assert not (data / HELD / frozen.DOMAIN).exists()
+
+
+def test_the_core_scores_the_checked_model_bytes_at_the_plans_threads(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data, path = copy(world, tmp_path), put(tmp_path / "test.toml", toml(world.plan))
+    pinned = world.plan["arms"][0]["encoders"]
+    real_support, real_threads = heldback.support, torch.set_num_threads
+    threads: list[int] = []
+
+    def removed(*args: Any, **kwargs: Any) -> Any:
+        for name in pinned:
+            (final_of(data, world) / name).unlink()
+        return real_support(*args, **kwargs)
+
+    def counted(n: int) -> None:
+        threads.append(n)
+        real_threads(n)
+
+    monkeypatch.setattr(heldback, "support", removed)
+    monkeypatch.setattr(torch, "set_num_threads", counted)
+    run, _ = frozen.run(data, path)
+    assert threads == [1] and record(run / "manifest.json")["params"]["threads"] == 1
+    assert record(run / "complete.json")["checks"]["encoders_used"] == {"jepa": pinned}
+
+
+def test_a_share_with_no_scoreable_quarter_is_written_as_null(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data, path = copy(world, tmp_path), put(tmp_path / "test.toml", toml(world.plan))
+    real = heldback.support
+
+    def empty(*args: Any, **kwargs: Any) -> Any:
+        return real(*args, **kwargs) | {"complete_draws": math.nan, "causes": ["none scoreable"]}
+
+    monkeypatch.setattr(heldback, "support", empty)
+    run, out = frozen.run(data, path)
+
+    def strict(name: str) -> Any:
+        text = (run / name).read_text(encoding="utf-8")
+        return json.loads(text, parse_constant=lambda c: pytest.fail(f"{name}: {c}"))
+
+    assert out["support"]["complete_draws"] is None
+    assert out["decision"]["support"]["complete_draws"] is None
+    assert json.loads(frozen._json({"a": [math.inf, np.float64("nan")], "b": 1.5})) == {
+        "a": [None, None],
+        "b": 1.5,
+    }
+    assert strict("support.json")["complete_draws"] is None
+    assert strict("decision.json")["support"]["complete_draws"] is None
+    assert "share of complete draws - of" in (run / "report.md").read_text(encoding="utf-8")
+    other = put(tmp_path / "other.toml", toml(changed(world.plan, horizon=1)))
+    assert frozen.checked(data, other).earlier[0]["outcome"] == "inconclusive"
+
+
 def test_the_run_step_writes_the_cores_decision_and_tables(world: World, tested: Done) -> None:
     decision = record(tested.run / "decision.json")
     want = json.loads(frozen._json(tested.expected["decision"]))
@@ -406,12 +721,25 @@ def test_the_run_step_writes_the_cores_decision_and_tables(world: World, tested:
     assert json.loads(frozen._json(rows)) == json.loads(
         frozen._json(tested.expected["comparisons"])
     )
+    accounting = tested.expected["accounting"]
+    for name, want in (
+        ("scores", tested.expected["scores"]),
+        ("folds", tested.expected["folds"]),
+        ("rows", [{"horizon": h, **row} for h, part in accounting.items() for row in part]),
+    ):
+        got = pq.read_table(tested.run / f"{name}.parquet").to_pylist()
+        assert got and json.loads(frozen._json(got)) == json.loads(frozen._json(want)), name
     params = record(tested.run / "manifest.json")["params"]
     assert params["plan_sha256"] == frozen.load(tested.path).sha256
     assert params["code"]["git_sha"] == SHA and params["earlier"] == []
-    assert params["runs"]["final"]["pieces"] == [pin(p) for p in world.pieces]
+    assert params["code"]["code_sha256"] == CODE and params["threads"] == 1
+    assert params["runs"]["final"]["pieces"] == [pin(p) | {"commit": SHA} for p in world.pieces]
+    assert params["runs"]["whole_labels"]["commit"] == params["runs"]["whole_inputs"]["commit"]
+    assert params["runs"]["whole_inputs"]["commit"] == SHA
+    assert params["missing"] == world.made["missing"]
     report = (tested.run / "report.md").read_text(encoding="utf-8")
     assert f"**{decision['outcome']}**" in report and "## Primary" in report
+    assert f"code sha256 {CODE}" in report and "| BTCUSDT | 0 | 0 | - | - |" in report
     assert (tested.run / "test.toml").read_bytes() == tested.path.read_bytes()
 
 
@@ -505,6 +833,7 @@ def base_plan() -> dict[str, Any]:
     }
     return {
         "end": LAST,
+        "code_sha256": CODE,
         "approved": [SHA],
         "pairs": [["jepa", "full"]],
         "primary": ["jepa", "full"],
@@ -572,6 +901,45 @@ def test_the_loader_refuses_unknown_missing_and_mistyped_keys(
     assert problem in str(caught.value)
 
 
+def runs_of(p: dict[str, Any]) -> dict[str, Any]:
+    return p["runs"]
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (
+            lambda p: runs_of(p)["labels"].__setitem__("run", "a/b"),
+            "runs.labels: run 'a/b' is not a run id",
+        ),
+        (
+            lambda p: runs_of(p)["inputs"].__setitem__("manifest_sha256", "x"),
+            "runs.inputs: manifest_sha256 'x' is not a sha256",
+        ),
+        (
+            lambda p: runs_of(p)["final"].__setitem__("ladder_sha256", 1),
+            "runs.final: ladder_sha256 1 is not a sha256",
+        ),
+        (lambda p: runs_of(p).__setitem__("final", 1), "runs.final is not a table"),
+        (lambda p: p.__setitem__("runs", 1), "runs is not a table"),
+        (lambda p: p.__setitem__("rule", 1), "rule is not a table"),
+        (lambda p: p.__setitem__("arms", []), "arms must list at least one arm"),
+        (lambda p: p.__setitem__("arms", "jepa"), "arms must list at least one arm"),
+        (lambda p: p.__setitem__("primary", ["jepa"]), "primary must be a pair of arm names"),
+        (lambda p: p.__setitem__("primary", "jepa"), "primary must be a pair of arm names"),
+        (lambda p: p.__setitem__("code_sha256", "x"), "code_sha256 'x' is not a sha256"),
+        (lambda p: p.pop("code_sha256"), "the plan: missing key code_sha256"),
+    ],
+)
+def test_the_loader_refuses_bad_pins_tables_and_pairs(
+    base_plan: dict[str, Any], tmp_path: Path, change: Callable[[dict[str, Any]], Any], problem: str
+) -> None:
+    change(base_plan)
+    with pytest.raises(ValueError) as caught:
+        frozen.load(write_plan(tmp_path, toml(base_plan)))
+    assert problem in str(caught.value)
+
+
 def test_the_loader_refuses_a_duplicate_key(base_plan: dict[str, Any], tmp_path: Path) -> None:
     text = toml(base_plan) + "horizon = 1\n"
     with pytest.raises(ValueError, match=r"test\.toml: Cannot overwrite a value"):
@@ -593,6 +961,9 @@ def test_the_loader_refuses_a_duplicate_key(base_plan: dict[str, Any], tmp_path:
         ({"encoders": {"x": "1"}}, "encoders must map each model file"),
         ({"kind": "boosted"}, "kind 'boosted'"),
         ({"name": "a b"}, "letters, digits"),
+        ({"name": 3}, "letters, digits"),
+        ({"c": [1]}, "c [1] (a number above 0)"),
+        ({"c": "x"}, "c 'x' (a number above 0)"),
         ({"rung": "full"}, "unknown key rung"),
         ({"variant": 3}, "variant must be text"),
     ],
@@ -625,6 +996,21 @@ def test_the_loader_refuses_an_arm_the_core_would_refuse(
             "a classical arm",
         ),
         ({"name": "JEPA", "kind": "rung", "rung": "vol"}, "arm names must differ, ignoring case"),
+        ({"name": 3, "kind": "rung", "rung": "vol"}, "a name is letters, digits"),
+        *(
+            (
+                {
+                    "name": "w",
+                    "kind": "classical",
+                    "model": "window",
+                    "variant": "vol",
+                    "readout": "means",
+                    "c": c,
+                },
+                "a classical arm",
+            )
+            for c in (0.0, -1.0, True, "x", [1.0])
+        ),
         ({"name": "x", "kind": "rung"}, "missing key rung"),
     ],
 )
@@ -783,6 +1169,33 @@ def guards(world: World) -> dict[str, tuple[Break, str]]:
     def no_whole(data: Path, plan: dict[str, Any]) -> None:
         shutil.rmtree(data / HELD)
 
+    first_name, second_name = sorted(world.plan["arms"][0]["encoders"])
+
+    def saved_changed(data: Path, plan: dict[str, Any]) -> None:
+        piece = data / "panel-sequence" / world.pieces[0].name
+        edit(
+            piece / "manifest.json", lambda m: m["params"]["encoders"].__setitem__(first_name, ZERO)
+        )
+        digest = rebind(piece)
+
+        def both(m: dict[str, Any]) -> None:
+            m["params"]["sources"][0]["manifest_sha256"] = digest
+            m["params"]["encoders"][first_name] = ZERO
+
+        edited(data, world, plan, both)
+
+    def prefix_changed(part: str, key: str) -> Break:
+        def go(data: Path, plan: dict[str, Any], patch: pytest.MonkeyPatch) -> None:
+            real = prefix.check
+
+            def check(*args: Any) -> Any:
+                found = real(*args)
+                return {**found, part: {**found[part], key: ZERO}}
+
+            patch.setattr(prefix, "check", check)
+
+        return go
+
     def held_data_dir(data: Path, plan: dict[str, Any], patch: pytest.MonkeyPatch) -> Path:
         moved = data.parent / HELD / "data"
         shutil.copytree(data, moved)
@@ -791,6 +1204,75 @@ def guards(world: World) -> dict[str, tuple[Break, str]]:
     return {
         "dirty code": (coded(True), "the test runs only from a clean commit"),
         "unknown code state": (coded(None), "the test runs only from a clean commit"),
+        "no commit": (
+            lambda data, plan, patch: patch.setattr(
+                io, "code_version", lambda: {"git_sha": None, "dirty": False}
+            ),
+            "the test runs only from a clean commit: the running code is commit None",
+        ),
+        "code sha": (
+            plain(lambda d, p: p.__setitem__("code_sha256", ZERO)),
+            f"not the plan's code_sha256 {ZERO}",
+        ),
+        "dev labels coins": (
+            dev("labels", set_param("symbols", []), "labels"),
+            "development labels run .*: it records no list of coins",
+        ),
+        "dev labels start": (
+            dev("labels", set_param("start", "2023-8-10"), "labels"),
+            "development labels run .*: its start '2023-8-10' is not a date",
+        ),
+        "dev inputs grid": (
+            dev("inputs", lambda m: m["params"].pop("labels_grid"), "inputs"),
+            "development inputs run .*: it records no sha256 for its labels grid",
+        ),
+        "no merged runs": (final(set_param("sources", [])), "records no runs merged into it"),
+        "merged run twice": (
+            final(lambda m: m["params"]["sources"].append(m["params"]["sources"][0])),
+            "records a merged run twice",
+        ),
+        "merged run merged": (piece(set_param("sources", [])), "is itself a merged run"),
+        "merged run no models": (
+            piece(lambda m: m["params"].pop("encoders")),
+            f"the merged run {world.pieces[0].name}: it records no models",
+        ),
+        "merged model twice": (
+            piece(lambda m: m["params"]["encoders"].__setitem__(second_name, ZERO)),
+            f"the merged run {world.pieces[1].name}: {second_name} is recorded by another",
+        ),
+        "merged models": (
+            piece(lambda m: m["params"]["encoders"].clear()),
+            "the models its merged runs record, by name and sha256, are not the ones it records",
+        ),
+        "arm saved sha": (
+            plain(saved_changed),
+            "is not the model the final run's manifest records",
+        ),
+        "arm files sha": (
+            plain(
+                lambda d, p: edit(
+                    final_of(d, world) / "complete.json",
+                    lambda c: c["files"].__setitem__(first_name, ZERO),
+                )
+            ),
+            "is not the model the final run's complete.json records",
+        ),
+        "prefix labels manifest": (
+            prefix_changed("manifests", "labels"),
+            "the prefix check read the labels manifest with sha256 0+, not",
+        ),
+        "prefix dev inputs manifest": (
+            prefix_changed("manifests", "dev_inputs"),
+            "the prefix check read the dev_inputs manifest",
+        ),
+        "prefix inputs table": (
+            prefix_changed("tables", "inputs"),
+            "the prefix check read the inputs table",
+        ),
+        "prefix dev inputs table": (
+            prefix_changed("tables", "dev_inputs"),
+            "the prefix check read the dev_inputs table",
+        ),
         "data dir under held-back": (held_data_dir, "is under a held-back folder"),
         "labels sha": (
             plain(lambda d, p: p["runs"]["labels"].__setitem__("manifest_sha256", ZERO)),
@@ -914,7 +1396,7 @@ def guards(world: World) -> dict[str, tuple[Break, str]]:
         ),
         "arm model sha": (
             arm(lambda a: a["encoders"].__setitem__(sorted(a["encoders"])[0], ZERO)),
-            "is not the model the final run records",
+            "is not the model the final run's manifest records",
         ),
         "model file": (
             plain(lambda d, p: first_model(d).write_bytes(b"changed")),
@@ -962,6 +1444,23 @@ def guards(world: World) -> dict[str, tuple[Break, str]]:
 NAMES = [
     "dirty code",
     "unknown code state",
+    "no commit",
+    "code sha",
+    "dev labels coins",
+    "dev labels start",
+    "dev inputs grid",
+    "no merged runs",
+    "merged run twice",
+    "merged run merged",
+    "merged run no models",
+    "merged model twice",
+    "merged models",
+    "arm saved sha",
+    "arm files sha",
+    "prefix labels manifest",
+    "prefix dev inputs manifest",
+    "prefix inputs table",
+    "prefix dev inputs table",
     "data dir under held-back",
     "labels sha",
     "inputs sha",
@@ -1038,7 +1537,7 @@ def test_each_provenance_check_refuses_its_broken_record(
     monkeypatch.setattr(frozen, "read_tables", reading)
     with pytest.raises(ValueError, match=problem):
         frozen.run(data, path)
-    assert opened == (["prefix"] if name == "prefix" else [])
+    assert opened == (["prefix"] if name.startswith("prefix") else [])
     assert not (data / HELD / frozen.DOMAIN).exists()
 
 

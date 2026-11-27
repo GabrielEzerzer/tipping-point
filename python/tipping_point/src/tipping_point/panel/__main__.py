@@ -75,10 +75,12 @@ Command line: python -m tipping_point.panel <command> [options]
           <data dir>/panel-compare/<run_id>/ with the tables scores, folds, comparisons and rows,
           and report.md
   test    the held-back test of the frozen plan panel/test.toml, which pins the development runs,
-          the final sequence run, the approved commits, the arms, the pairs and the decision rule;
-          with no such file it refuses. test data fetches the archive and makes the whole-span
+          the final sequence run, the approved commits, the running code's sha256, the arms, the
+          pairs and the decision rule; with no such file it refuses. test data checks the plan
+          against everything but the held-back tables, fetches the archive and makes the whole-span
           labels and inputs runs, from the development labels run's start to the plan's last day,
-          into <data dir>/{span.HELD_BACK_DIR}/, and runs the prefix check; a re-run reuses them.
+          into <data dir>/{span.HELD_BACK_DIR}/, runs the prefix check and prints each coin's
+          missing archive files; a re-run reuses them.
           test run checks every pinned run, commit, plan and model, settles the support and writes
           it, then scores the arms and decides, as a run in
           <data dir>/{span.HELD_BACK_DIR}/panel-test/<run_id>/; it refuses a plan that already
@@ -418,6 +420,10 @@ def _test_data(args: argparse.Namespace) -> int:
     )
     for path in (out["labels"], out["inputs"]):
         print(f"{'made' if path in out['made'] else 'reused'} {path}")
+    print(f"archive files missing, in all and from {span.HELD_BACK} on (first and last day):")
+    for m in out["missing"]:
+        days = f" ({m['first']} to {m['last']})" if m["first"] else ""
+        print(f"{m['symbol']:<13} {m['missing']} and {m['missing_in_test']}{days}")
     return 0
 
 

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -33,14 +35,16 @@ def settled_late(ts: np.ndarray, column: str) -> np.ndarray:
     return np.zeros(len(ts), bool)
 
 
-def _records(run: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    manifest, complete = io.read_json(run / "manifest.json"), io.read_json(run / "complete.json")
+def _records(run: Path) -> tuple[dict[str, Any], dict[str, Any], str]:
+    data = (run / "manifest.json").read_bytes()
+    manifest, complete = json.loads(data), io.read_json(run / "complete.json")
     if complete.get("clean") is not True:
         raise PrefixError(f"{run}: complete.json does not mark the run clean")
+    digest = hashlib.sha256(data).hexdigest()
     recorded = complete.get("manifest_sha256")
-    if recorded is not None and recorded != store.sha256(run / "manifest.json"):
+    if recorded is not None and recorded != digest:
         raise PrefixError(f"{run}: the sha256 of manifest.json differs from complete.json's")
-    return manifest, complete
+    return manifest, complete, digest
 
 
 def _file(run: Path, complete: dict[str, Any], prefix: str) -> tuple[Path, str]:
@@ -111,8 +115,14 @@ def check(labels_run: Path, inputs_run: Path, dev_labels: Path, dev_inputs: Path
     for whole, dev in ((labels_run, dev_labels), (inputs_run, dev_inputs)):
         if Path(whole).resolve() == Path(dev).resolve():
             raise PrefixError(f"{whole}: the whole-span and development runs are the same folder")
-    (whole_lm, whole_lc), (dev_lm, dev_lc) = _records(labels_run), _records(dev_labels)
-    (whole_im, whole_ic), (dev_im, dev_ic) = _records(inputs_run), _records(dev_inputs)
+    (whole_lm, whole_lc, whole_ld), (dev_lm, dev_lc, dev_ld) = (
+        _records(labels_run),
+        _records(dev_labels),
+    )
+    (whole_im, whole_ic, whole_id), (dev_im, dev_ic, dev_id) = (
+        _records(inputs_run),
+        _records(dev_inputs),
+    )
     whole_p, dev_p = whole_lm["params"], dev_lm["params"]
     for key in ("start", "dev_start", "symbols"):
         if whole_p[key] != dev_p[key]:
@@ -138,12 +148,12 @@ def check(labels_run: Path, inputs_run: Path, dev_labels: Path, dev_inputs: Path
         if manifest["params"]["labels_thresholds"]["sha256"] != digest:
             raise PrefixError(f"{run}: it was not made from the thresholds of {source}")
     recorded = whole_im["params"].get("labels_manifest_sha256")
-    if recorded != store.sha256(labels_run / "manifest.json"):
+    if recorded != whole_ld:
         raise PrefixError(f"{inputs_run}: it does not record the manifest of {labels_run}")
     thresholds, _ = _compare("thresholds", whole_thresholds, dev_thresholds, labels.THRESHOLDS)
     grid = _compare("grid", whole_grid, dev_grid, labels.GRID, allowed=True)
-    whole_inputs = _file(inputs_run, whole_ic, "inputs.parquet")[0]
-    dev_table = _file(dev_inputs, dev_ic, "inputs.parquet")[0]
+    whole_inputs, whole_table_sha = _file(inputs_run, whole_ic, "inputs.parquet")
+    dev_table, dev_table_sha = _file(dev_inputs, dev_ic, "inputs.parquet")
     rows = _compare("inputs", whole_inputs, dev_table, inputs.SCHEMA)
     if rows != grid:
         raise PrefixError(
@@ -153,4 +163,11 @@ def check(labels_run: Path, inputs_run: Path, dev_labels: Path, dev_inputs: Path
     return {
         "rows": {"thresholds": thresholds, "grid": grid[0], "inputs": rows[0]},
         "window_after_ns": {f"{h}h": window_ns(h) for h in labels.HORIZONS},
+        "manifests": {
+            "labels": whole_ld,
+            "inputs": whole_id,
+            "dev_labels": dev_ld,
+            "dev_inputs": dev_id,
+        },
+        "tables": {"inputs": whole_table_sha, "dev_inputs": dev_table_sha},
     }
